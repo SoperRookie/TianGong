@@ -44,7 +44,8 @@ GENERATOR_SYSTEM = """你是一名拥有十年经验的资深测试专家，精�
    「需与产品确认」「需求未明确」等待定表述——待定信息只允许出现在 remark。
 
 只输出**紧凑单行 JSON**（不要缩进换行，节省输出长度），格式：
-{{"cases": [{{"case_id": "...", "module": "...", "title": "...", "priority": "P1", "precondition": "...", "steps": [{{"action": "...", "expected": "..."}}], "remark": ""}}]}}"""
+{{"cases": [{{"case_id": "...", "module": "...", "title": "...", "priority": "P1", "precondition": "...", "steps": [{{"action": "...", "expected": "..."}}], "remark": "", "extras": {{}}}}]}}
+模板中标注「自定义字段」的列，其值写入 extras 对象（键为列名）；无自定义字段时 extras 为空对象。"""
 
 FIX_INSTRUCTION = """以下用例经评审发现问题，请定点修正。
 

@@ -17,6 +17,7 @@ from app.llm.registry import UnknownModelError
 from app.llm.schemas import MissingAPIKeyError
 from app.parsers import ScannedPDFError, UnsupportedFormatError, parse_file, parse_text
 from app.tasks import TaskRecord
+from app.templates import CustomTemplate, TemplateParseError, recognize_template
 
 router = APIRouter()
 
@@ -47,6 +48,72 @@ async def _read_upload(upload: UploadFile, task_dir: Path, max_bytes: int) -> Pa
     return dest
 
 
+@router.post("/api/v1/templates")
+async def upload_template(
+    request: Request,
+    file: UploadFile = File(...),
+    name: str | None = Form(default=None),
+) -> dict:
+    """上传模板并自动识别字段结构（F-4-1）；返回识别草稿供确认调整（F-4-3）。"""
+    settings = get_settings()
+    content = await file.read()
+    if len(content) > settings.max_upload_size_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="模板文件超过大小上限")
+    tmp = request.app.state.tasks.output_dir / "_template_uploads" / Path(file.filename or "t").name
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_bytes(content)
+    try:
+        template = recognize_template(tmp, name=name)
+    except TemplateParseError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    request.app.state.templates.save(template)
+    return template.model_dump()
+
+
+@router.get("/api/v1/templates")
+async def list_templates(request: Request) -> dict:
+    store = request.app.state.templates
+    return {"default_id": store.default_id, "templates": store.list()}
+
+
+@router.get("/api/v1/templates/{template_id}")
+async def get_template(request: Request, template_id: str) -> dict:
+    template = request.app.state.templates.get(template_id)
+    if template is None:
+        raise HTTPException(status_code=404, detail=f"模板不存在: {template_id}")
+    return template.model_dump()
+
+
+@router.put("/api/v1/templates/{template_id}")
+async def update_template(request: Request, template_id: str, body: CustomTemplate) -> dict:
+    """字段映射确认与调整（F-4-3）：整体覆盖模板定义。"""
+    store = request.app.state.templates
+    if store.get(template_id) is None:
+        raise HTTPException(status_code=404, detail=f"模板不存在: {template_id}")
+    body.template_id = template_id
+    return store.save(body).model_dump()
+
+
+@router.delete("/api/v1/templates/{template_id}")
+async def delete_template(request: Request, template_id: str) -> dict:
+    try:
+        existed = request.app.state.templates.delete(template_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not existed:
+        raise HTTPException(status_code=404, detail=f"模板不存在: {template_id}")
+    return {"deleted": template_id}
+
+
+@router.post("/api/v1/templates/{template_id}/default")
+async def set_default_template(request: Request, template_id: str) -> dict:
+    try:
+        request.app.state.templates.set_default(template_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e.args[0]))
+    return {"default_id": template_id}
+
+
 @router.post("/api/v1/tasks")
 async def create_task(
     request: Request,
@@ -54,9 +121,13 @@ async def create_task(
     text: str = Form(default=""),
     model: str | None = Form(default=None),
     reviewer_model: str | None = Form(default=None),
+    template_id: str | None = Form(default=None),
 ) -> dict:
     settings = get_settings()
     store = request.app.state.tasks
+    template = request.app.state.templates.get(template_id)
+    if template is None:
+        raise HTTPException(status_code=404, detail=f"模板不存在: {template_id}")
     task_id, task_dir = store.new_task_dir()
 
     # 1. 解析输入（文件 + 粘贴文本可混合）
@@ -84,6 +155,7 @@ async def create_task(
             llm=request.app.state.llm,
             model=model,
             reviewer_model=reviewer_model,
+            template=template,
         )
     except UnknownModelError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -97,8 +169,8 @@ async def create_task(
     # 3. 导出（F-5-1/2/3），多格式内容一致（F-5-4）
     files_map: dict[str, str] = {}
     if result.cases:
-        files_map["xlsx"] = str(export_excel(result.cases, task_dir / "测试用例.xlsx"))
-        files_map["csv"] = str(export_csv(result.cases, task_dir / "测试用例.csv"))
+        files_map["xlsx"] = str(export_excel(result.cases, task_dir / "测试用例.xlsx", template))
+        files_map["csv"] = str(export_csv(result.cases, task_dir / "测试用例.csv", template))
         root_title = Path(sources[0]).stem if sources and sources[0] != "text" else "测试用例"
         files_map["xmind"] = str(
             export_xmind(result.cases, task_dir / "测试用例.xmind", root_title=root_title)

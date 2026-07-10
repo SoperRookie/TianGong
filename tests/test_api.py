@@ -85,6 +85,65 @@ async def test_空输入返回400(client):
     assert resp.status_code == 400
 
 
+async def test_模板API_上传识别调整并按模板生成(client):
+    from io import BytesIO
+
+    from openpyxl import Workbook, load_workbook
+
+    # 1. 上传模板 → 自动识别（F-4-1）
+    wb = Workbook()
+    wb.active.append(["用例ID", "所属模块", "用例名称", "优先级", "操作步骤", "预期结果", "测试类型"])
+    buf = BytesIO()
+    wb.save(buf)
+    resp = await client.post(
+        "/api/v1/templates",
+        files={"file": ("团队模板.xlsx", buf.getvalue())},
+        data={"name": "团队模板"},
+    )
+    assert resp.status_code == 200
+    template = resp.json()
+    assert {c["name"]: c["maps_to"] for c in template["columns"]}["测试类型"] == "custom"
+
+    # 2. 字段映射调整（F-4-3）：给自定义列补充说明与枚举
+    for col in template["columns"]:
+        if col["name"] == "测试类型":
+            col["description"] = "用例的测试类型"
+            col["enum_values"] = ["功能", "边界"]
+    resp = await client.put(f"/api/v1/templates/{template['template_id']}", json=template)
+    assert resp.status_code == 200
+
+    # 3. 模板库列表与设默认（F-4-4）
+    resp = await client.post(f"/api/v1/templates/{template['template_id']}/default")
+    assert resp.status_code == 200
+    resp = await client.get("/api/v1/templates")
+    assert resp.json()["default_id"] == template["template_id"]
+
+    # 4. 按模板生成：导出 Excel 表头与模板 100% 一致（验收 3）
+    app.state.llm = StubLLM(
+        [
+            ANALYST_REPLY,
+            generator_reply(make_case(extras={"测试类型": "功能"})),
+            review_reply(True),
+        ]
+    )
+    resp = await client.post(
+        "/api/v1/tasks",
+        data={"text": "登录需求", "template_id": template["template_id"]},
+    )
+    assert resp.status_code == 200
+    xlsx = await client.get(resp.json()["downloads"]["xlsx"])
+    ws = load_workbook(BytesIO(xlsx.content)).active
+    assert [c.value for c in ws[1]] == ["用例ID", "所属模块", "用例名称", "优先级", "操作步骤", "预期结果", "测试类型"]
+
+    # 清理：恢复内置默认，避免影响其他用例
+    await client.post("/api/v1/templates/builtin-default/default")
+
+
+async def test_指定不存在的模板返回404(client):
+    resp = await client.post("/api/v1/tasks", data={"text": "需求", "template_id": "ghost"})
+    assert resp.status_code == 404
+
+
 async def test_指定未注册模型返回400(client):
     # 使用真实 LLMClient：注册表在发起网络调用前即校验模型名
     resp = await client.post(

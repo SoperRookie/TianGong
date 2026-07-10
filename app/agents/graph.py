@@ -14,7 +14,7 @@ from app.agents.json_utils import LLMOutputError, extract_json
 from app.agents.prompts import ANALYST_SYSTEM, FIX_INSTRUCTION, GENERATOR_SYSTEM, REVIEWER_SYSTEM
 from app.agents.state import MAX_REVIEW_ROUNDS, OrchestrationState
 from app.llm.client import LLMClient
-from app.templates import DEFAULT_TEMPLATE, TestCase
+from app.templates import CustomTemplate, TestCase, builtin_default_template
 
 
 def _dump(data) -> str:
@@ -40,8 +40,8 @@ async def _chat_json(llm: LLMClient, messages: list[dict], model: str | None) ->
 _CASE_SEQ_RE = re.compile(r"(\d+)\s*$")
 
 
-def rule_check(cases: list[dict]) -> list[dict]:
-    """规则校验（评审 Agent 的确定性部分）：模板合规 + 编号唯一 + 模块内编号连续。"""
+def rule_check(cases: list[dict], template: CustomTemplate | None = None) -> list[dict]:
+    """规则校验（评审 Agent 的确定性部分）：模板合规（F-4-5）+ 编号唯一 + 模块内编号连续。"""
     issues: list[dict] = []
     seen_ids: set[str] = set()
     module_seqs: dict[str, list[int]] = {}
@@ -52,6 +52,8 @@ def rule_check(cases: list[dict]) -> list[dict]:
         except ValidationError as e:
             problems = "; ".join(err["msg"] for err in e.errors())
             issues.append({"case_id": case_id, "problem": f"模板校验不通过: {problems}"})
+        if template is not None:
+            issues.extend({"case_id": case_id, "problem": p} for p in _template_check(raw, template))
         if case_id in seen_ids:
             issues.append({"case_id": case_id, "problem": "用例编号重复"})
         seen_ids.add(case_id)
@@ -70,7 +72,25 @@ def rule_check(cases: list[dict]) -> list[dict]:
     return issues
 
 
-def build_graph(llm: LLMClient):
+def _template_check(raw: dict, template: CustomTemplate) -> list[str]:
+    """自定义模板约束（F-4-5）：优先级枚举、必填自定义列、自定义列取值枚举。"""
+    problems: list[str] = []
+    priority = str(raw.get("priority", "")).upper()
+    allowed = template.priority_enum()
+    if priority and priority not in allowed:
+        problems.append(f"优先级 {priority} 不在模板允许范围 {allowed}")
+    extras = raw.get("extras") or {}
+    for col in template.custom_columns():
+        value = str(extras.get(col.name, "") or "").strip()
+        if col.required and not value:
+            problems.append(f"模板必填字段「{col.name}」缺失，请写入 extras[\"{col.name}\"]")
+        if value and col.enum_values and value not in col.enum_values:
+            problems.append(f"字段「{col.name}」取值 {value} 不在枚举 {col.enum_values} 中")
+    return problems
+
+
+def build_graph(llm: LLMClient, template: CustomTemplate | None = None):
+    template = template or builtin_default_template()
     async def analyze(state: OrchestrationState) -> dict:
         data, result = await _chat_json(
             llm,
@@ -88,7 +108,7 @@ def build_graph(llm: LLMClient):
         }
 
     async def generate(state: OrchestrationState) -> dict:
-        system = GENERATOR_SYSTEM.format(template_spec=DEFAULT_TEMPLATE.prompt_spec())
+        system = GENERATOR_SYSTEM.format(template_spec=template.prompt_spec())
         if state.get("issues"):
             # 定点修正：携带评审问题与当前用例全集
             user = FIX_INSTRUCTION.format(
@@ -111,7 +131,7 @@ def build_graph(llm: LLMClient):
         return {"cases": data.get("cases", []), "trace": trace}
 
     async def review(state: OrchestrationState) -> dict:
-        issues = rule_check(state["cases"])
+        issues = rule_check(state["cases"], template)
         current_round = state.get("review_rounds", 0) + 1
         prior = ""
         if state.get("issues"):
