@@ -3,9 +3,13 @@
 from functools import lru_cache
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# 将 .env 中的密钥（如 DEEPSEEK_API_KEY）载入环境变量，供模型配置的 api_key_env 解析
+load_dotenv(BASE_DIR / ".env")
 
 
 class Settings(BaseSettings):
