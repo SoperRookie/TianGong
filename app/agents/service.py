@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from app.agents.graph import build_graph
 from app.agents.state import MAX_REVIEW_ROUNDS
 from app.llm.client import LLMClient
-from app.templates import TestCase
+from app.templates import CustomTemplate, TestCase
 
 
 class GenerationResult(BaseModel):
@@ -25,12 +25,14 @@ async def run_generation(
     llm: LLMClient,
     model: str | None = None,
     reviewer_model: str | None = None,
+    template: CustomTemplate | None = None,
 ) -> GenerationResult:
     """执行「拆解 → 生成 → 评审（≤3 轮回环）」全流程。
 
     model / reviewer_model 为任务级模型选择；reviewer_model 不传时评审与生成同模型。
+    template 为自定义用例模板，缺省用内置默认模板（F-4-2）。
     """
-    graph = build_graph(llm)
+    graph = build_graph(llm, template)
     final = await graph.ainvoke(
         {
             "requirement": requirement,

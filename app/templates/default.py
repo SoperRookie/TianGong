@@ -5,7 +5,7 @@ P0=冒烟/核心链路，P1=主功能正常流与重要异常流，P2=次要功�
 测试步骤与预期结果为一一对应的父子结构（与团队 XMind 模板一致）。
 """
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -25,6 +25,8 @@ class TestStep(BaseModel):
 
 
 class TestCase(BaseModel):
+    __test__: ClassVar[bool] = False  # 避免 pytest 将其误收集为测试类
+
     case_id: str = Field(description="用例编号，如 TC-登录-001")
     module: str = Field(description="所属模块")
     title: str = Field(description="用例标题")
@@ -32,6 +34,7 @@ class TestCase(BaseModel):
     precondition: str = Field(default="", description="前置条件")
     steps: list[TestStep] = Field(min_length=1, description="步骤与预期结果一一对应")
     remark: str = Field(default="", description="备注")
+    extras: dict[str, str] = Field(default_factory=dict, description="自定义模板扩展字段：列名 -> 值")
 
     @field_validator("case_id", "module", "title")
     @classmethod

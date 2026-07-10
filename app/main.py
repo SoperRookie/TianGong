@@ -9,6 +9,7 @@ from app.config import BASE_DIR, get_settings
 from app.llm.client import LLMClient
 from app.llm.registry import ModelRegistry
 from app.tasks import TaskStore
+from app.templates import TemplateStore
 
 
 @asynccontextmanager
@@ -18,6 +19,7 @@ async def lifespan(app: FastAPI):
     app.state.registry = registry
     app.state.llm = LLMClient(registry)
     app.state.tasks = TaskStore(output_dir=BASE_DIR / "outputs")
+    app.state.templates = TemplateStore(storage_path=BASE_DIR / "data" / "templates.json")
     yield
 
 
