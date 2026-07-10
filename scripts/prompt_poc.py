@@ -1,10 +1,12 @@
 """Prompt 实测脚本（POC-R9）：用真实模型跑完整三角色链路并输出质量观测数据。
 
 用法：
-    .venv/bin/python scripts/prompt_poc.py                 # 使用内置样例需求
-    .venv/bin/python scripts/prompt_poc.py path/to/需求.md  # 指定需求文件
+    .venv/bin/python scripts/prompt_poc.py                              # 内置样例需求
+    .venv/bin/python scripts/prompt_poc.py --file path/to/需求.md        # 指定需求文件
+    .venv/bin/python scripts/prompt_poc.py --reviewer deepseek-reasoner  # 指定评审模型
 """
 
+import argparse
 import asyncio
 import json
 import sys
@@ -16,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.agents import run_generation
 from app.config import get_settings
-from app.exporters import export_csv, export_excel
+from app.exporters import export_csv, export_excel, export_xmind
 from app.llm.client import LLMClient
 from app.llm.registry import ModelRegistry
 from app.parsers import parse_file, parse_text
@@ -41,22 +43,31 @@ SAMPLE_REQUIREMENT = """# 限时充值活动需求
 
 
 async def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--file", default=None, help="需求文件路径，缺省用内置样例")
+    parser.add_argument("--model", default=None, help="生成/拆解模型")
+    parser.add_argument("--reviewer", default=None, help="评审模型（缺省与生成同模型）")
+    args = parser.parse_args()
+
     settings = get_settings()
     registry = ModelRegistry.from_yaml(settings.models_config_path)
     llm = LLMClient(registry)
 
-    if len(sys.argv) > 1:
-        doc = parse_file(sys.argv[1])
+    if args.file:
+        doc = parse_file(args.file)
         requirement, source = doc.full_text, doc.source
     else:
         requirement, source = parse_text(SAMPLE_REQUIREMENT).full_text, "内置样例（充值活动）"
 
+    gen_model = args.model or registry.default_model
     print(f"需求来源: {source}")
-    print(f"模型: {registry.default_model}（评审同模型）")
+    print(f"生成模型: {gen_model} | 评审模型: {args.reviewer or gen_model + '（同模型）'}")
     print("开始生成 ...\n")
 
     start = time.monotonic()
-    result = await run_generation(requirement, llm=llm)
+    result = await run_generation(
+        requirement, llm=llm, model=args.model, reviewer_model=args.reviewer
+    )
     elapsed = time.monotonic() - start
 
     # ---- 质量观测数据 ----
@@ -87,7 +98,8 @@ async def main() -> None:
     if result.cases:
         export_excel(result.cases, out_dir / "poc用例.xlsx")
         export_csv(result.cases, out_dir / "poc用例.csv")
-        print(f"\n已导出: {out_dir}/poc用例.xlsx / poc用例.csv")
+        export_xmind(result.cases, out_dir / "poc用例.xmind", root_title=source)
+        print(f"\n已导出: {out_dir}/poc用例.xlsx / .csv / .xmind")
 
     print("\n---- 全部用例预览 ----")
     for c in result.cases:

@@ -48,13 +48,16 @@ async def test_任务端到端_上传文本生成并下载(client):
     assert resp.status_code == 200
     assert resp.json()["sources"] == ["需求.txt", "text"]
 
-    # 双格式下载（F-5-2/3）
+    # 多格式同步导出下载（F-5-1/2/3/4）
     xlsx = await client.get(data["downloads"]["xlsx"])
     assert xlsx.status_code == 200
     assert xlsx.headers["content-type"].startswith("application/vnd.openxmlformats")
     csv_resp = await client.get(data["downloads"]["csv"])
     assert csv_resp.status_code == 200
     assert csv_resp.content.startswith(b"\xef\xbb\xbf")
+    xmind = await client.get(data["downloads"]["xmind"])
+    assert xmind.status_code == 200
+    assert xmind.content.startswith(b"PK")  # zip 魔数
 
 
 async def test_不支持的文件格式返回400(client):
