@@ -1,0 +1,85 @@
+@startuml core-task-sequence
+title 核心任务时序 — 从需求上传到用例交付与学习闭环
+
+skinparam shadowing false
+skinparam defaultFontSize 13
+skinparam sequenceMessageAlign center
+
+actor "测试工程师" as user
+participant "主控 Agent\n(Orchestrator)" as orch
+participant "需求分析 Agent" as req
+participant "知识管家 Agent" as steward
+collections "用例生成 Agent ×N" as gen
+participant "评审 Agent\n(Critic)" as critic
+participant "LLM 适配层" as llm
+database "知识库(三库)\n+ 向量库" as kb
+database "记忆系统" as mem
+participant "输出模块" as out
+participant "学习 Agent\n(离线异步)" as learn
+
+user -> orch : 上传需求文件 + 选模板/模型/知识空间
+activate orch
+orch -> req : 调度：解析与拆解
+activate req
+req -> llm : 图片多模态理解 / 长文档分片摘要
+req -> steward : 请求测试用例库比对
+activate steward
+steward -> kb : 混合检索（向量 + 关键词）
+steward --> req : 同类模块历史用例\n（覆盖度查漏基线）
+deactivate steward
+req --> orch : 测试点拆解结构（模块→测试点）
+deactivate req
+orch --> user : (可选) 拆解结果预览
+user -> orch : 确认 / 修正测试点
+
+orch -> steward : 调度：生成前知识编排
+activate steward
+steward -> kb : 检索 玩法/业务规则库 + 需求文档库
+steward -> mem : 检索用户偏好 + 项目记忆\n(独立配额 ≤5%-10%)
+steward -> steward : 冲突仲裁 / 5:3:2 配额与让渡\n记录知识快照
+steward --> orch : 注入上下文包（引用可见）
+deactivate steward
+
+orch -> gen : 按功能模块并行分发
+activate gen
+gen -> llm : 按模板 + 知识 + 记忆生成详细用例
+gen --> orch : 各模块用例集
+deactivate gen
+
+loop 修正回环（最多 3 轮）
+  orch -> critic : 强制评审
+  activate critic
+  critic -> llm : 独立 Prompt 评审\n(可配置不同模型)
+  critic -> kb : 覆盖度比对复核
+  critic --> orch : 通过 / 不合格项+具体问题
+  deactivate critic
+  orch -> gen : 不合格项定点打回修正
+  gen --> orch : 修正后的用例
+end
+note over orch, critic : 3 轮后仍不合格：强制出稿并标注\n「评审未通过项」→ 归因队列
+
+orch -> out : 汇总（编号连续 / 模块无遗漏）
+out --> user : XMind + Excel/CSV 下载
+
+opt 多轮对话修订
+  user -> orch : "补充XX模块异常用例" 等指令
+  orch -> gen : 路由增量修订
+  orch -> critic : 增量评审
+  orch -> out : 增量更新重导出
+  out --> user : 新版文件
+end
+
+alt 路径 A：在线评审
+  user -> orch : 逐条采纳/修改/删除（留痕）
+else 路径 B：离线评审
+  user -> orch : 回传评审终稿 → 系统自动 diff 留痕
+end
+deactivate orch
+
+group 任务结束后（离线异步）
+  learn -> learn : 留痕 → 标准化学习语料\n坏案例归因分析
+  learn -> mem : 提炼偏好/项目事实写入长期记忆
+  learn -> kb : 优质用例回存测试用例库\n(来源标记防同质化)
+end
+
+@enduml

@@ -1,0 +1,73 @@
+@startuml deployment-architecture
+title 部署架构 — Docker + Kubernetes（数据不出内网 / 商用 API 受控出网）
+
+skinparam shadowing false
+skinparam defaultFontSize 13
+
+actor "用户 (浏览器)" as user
+rectangle "Jenkins / DevOps" as cicd
+
+node "内网 Kubernetes 集群" {
+  node "接入层" {
+    component "Nginx 网关\nTLS / 限流 / 静态资源" as nginx
+  }
+
+  node "应用层 (无状态，可水平扩展)" {
+    component "Web 前端\nVue3 对话式交互" as fe
+    component "API 服务 ×N\nFastAPI (REST + SSE 流式)" as apisvc
+    component "Agent Worker ×N\nCelery + LangGraph\n六类 Agent 编排执行" as worker
+    component "学习任务 Worker\n离线异步：语料/归因/提炼\n(定时 + 任务结束触发)" as learnworker
+  }
+
+  node "中间件与存储层" {
+    database "PostgreSQL / MySQL\n任务·模板·权限·留痕\n记忆条目·知识快照" as pg
+    database "Redis\n会话记忆 / 任务队列 / 缓存" as redis
+    database "Milvus / Qdrant\n向量检索" as milvus
+    database "Elasticsearch\n关键词检索 + 日志(ELK)" as es
+    database "对象存储 (MinIO)\n上传文件 / 导出文件\n(历史保留 30 天可配)" as minio
+  }
+
+  node "模型层 (GPU 节点)" {
+    component "私有化 LLM\nvLLM / Ollama (多模态)" as privllm
+    component "私有化 Embedding\nbge / m3e" as privemb
+  }
+
+  node "可观测性" {
+    component "Prometheus + Grafana\n任务量/成功率/耗时/token" as prom
+    component "告警 (失败率/耗时)" as alert
+  }
+}
+
+cloud "外部 (受控出网)" {
+  component "商用模型官方 API\nOpenAI / Claude / DeepSeek / Qwen / GLM" as pubapi
+}
+
+user --> nginx
+cicd --> nginx : OpenAPI 集成
+nginx --> fe
+nginx --> apisvc
+apisvc --> redis : 任务入队
+redis --> worker : 消费
+worker --> privllm
+worker --> privemb
+worker ..> pubapi : 仅非涉密项目\n(管理员可限制仅内部模型)
+worker --> milvus
+worker --> es
+worker --> pg
+worker --> minio
+worker --> redis : 会话记忆读写
+learnworker --> pg
+learnworker --> milvus
+apisvc --> pg
+apisvc --> minio : 文件上传/下载
+prom ..> apisvc
+prom ..> worker
+prom --> alert
+
+note bottom of pubapi
+  涉密项目由管理员限制
+  仅使用内网私有化模型，
+  API Key 加密存储
+end note
+
+@enduml

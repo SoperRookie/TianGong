@@ -1,0 +1,52 @@
+# LLM 模型配置（F-1-1 ~ F-1-5）
+# 说明：
+# - 所有模型统一走 OpenAI 兼容协议（chat/completions）。
+# - api_key_env 为密钥所在的环境变量名，密钥本身不写入本文件。
+# - supports_vision 标记多模态能力，图片类需求自动路由至 Vision 模型（F-1-5）。
+# - 新增厂商/模型只需追加条目，无需改代码；私有化 Ollama/vLLM 同样以条目形式接入。
+
+default_model: deepseek-chat
+
+models:
+  - name: deepseek-chat
+    provider: deepseek
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-chat
+    supports_vision: false
+    temperature: 0.3
+    max_tokens: 8192
+    timeout: 120
+
+  - name: deepseek-reasoner
+    provider: deepseek
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-reasoner
+    supports_vision: false
+    temperature: 0.3
+    max_tokens: 16384
+    timeout: 300
+
+  # ---- 以下为示例条目，接入时取消注释并配置对应环境变量 ----
+
+  # - name: qwen-vl-max            # 多模态示例（图片需求路由目标）
+  #   provider: dashscope
+  #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  #   api_key_env: DASHSCOPE_API_KEY
+  #   model: qwen-vl-max
+  #   supports_vision: true
+
+  # - name: gpt-4o
+  #   provider: openai
+  #   base_url: https://api.openai.com/v1
+  #   api_key_env: OPENAI_API_KEY
+  #   model: gpt-4o
+  #   supports_vision: true
+
+  # - name: qwen3-local            # 后期私有化部署示例（Ollama / vLLM）
+  #   provider: ollama
+  #   base_url: http://内网推理服务:11434/v1
+  #   api_key_env: null            # 内网服务可无鉴权
+  #   model: qwen3:32b
+  #   supports_vision: false

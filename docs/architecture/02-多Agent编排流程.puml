@@ -1,0 +1,108 @@
+@startuml agent-orchestration
+title 多 Agent 有向图编排 — 拆解 → 生成 → 评审 → 修正回环 → 输出（非自由对话）
+
+skinparam shadowing false
+skinparam defaultFontSize 13
+skinparam ActivityBackgroundColor #FDFDFD
+
+start
+:用户创建任务
+上传需求 (PDF/Word/图片/文本，多文件混合)
+选择用例模板 + 模型 + 知识空间;
+:主控 Agent 建单调度;
+
+partition "需求分析 Agent" {
+  :格式识别 → 文本/结构提取
+  (图片走多模态理解，OCR 兜底
+  超长文档自动分片);
+  :测试点拆解
+  功能模块 → 测试点 两级结构;
+  note right
+    知识管家 Agent 联动：
+    检索 **测试用例库** 比对
+    覆盖度查漏（拆解阶段介入，
+    避免生成完才返工）
+  end note
+}
+
+if (需人工确认拆解结果?) then (是)
+  :用户预览确认 / 修正测试点;
+else (否，可配置跳过)
+endif
+
+partition "知识管家 Agent" {
+  :检索 玩法/业务规则库 + 需求文档库;
+  :冲突仲裁：知识与需求矛盾时以需求为准
+  标注疑似规则变更为重点测试对象;
+  :token 配额 5:3:2 分配
+  (用例库:PRD库:规则库，低命中自动让渡);
+  :检索记忆系统 (用户偏好 + 项目记忆
+  独立配额 ≤ 上下文 5%-10%);
+  :记录本次任务知识快照;
+}
+
+fork
+  :用例生成 Agent 实例 1
+  (功能模块 A);
+fork again
+  :用例生成 Agent 实例 2
+  (功能模块 B);
+fork again
+  :用例生成 Agent 实例 N
+  (功能模块 ...);
+end fork
+note right
+  大需求按模块切分并行生成；
+  部分实例失败单独重试，
+  不阻塞整体交付
+end note
+
+repeat
+  partition "评审 Agent (Critic)" {
+    :强制评审：字段完整性 / 步骤-预期对应
+    编号连续 / 模块无重叠遗漏
+    覆盖度比对 / LLM-as-Judge 打分;
+  }
+  backward :带具体问题打回
+  生成 Agent **定点修正**
+  (非全量重生成);
+repeat while (评审不合格 且 回环 < 3 轮?) is (是) not (否)
+
+if (3 轮后仍有不合格项?) then (是)
+  :强制出稿，显式标注「评审未通过项」
+  记录坏案例 → 归因队列 (F-9-4);
+else (否)
+endif
+
+:输出模块：XMind + Excel/CSV 同步导出
+用户下载（引用的知识片段与记忆可见）;
+
+while (用户发起多轮修订?) is (是)
+  :主控 Agent 解析修订指令
+  路由至 生成/评审 Agent
+  增量更新 → 重新导出;
+endwhile (否)
+
+partition "评审闭环（度量与学习数据源，不可缺省）" {
+  split
+    :路径 A：在线评审
+    逐条采纳/修改/删除留痕;
+  split again
+    :路径 B：离线评审
+    下载 → 外部评审 → 回传终稿
+    系统自动 diff 生成等效留痕;
+  end split
+}
+
+partition "学习 Agent（离线异步，不占用户等待）" {
+  :评审留痕 → 标准化学习语料 (F-9-1);
+  :会话提炼 → 偏好/项目事实写入长期记忆 (F-8-5);
+  :优质用例回存测试用例库
+  (带来源标记，防同质化) (F-7-9);
+}
+
+:任务结束
+调用链路全程留痕（谁在哪步产出/修改了什么）;
+stop
+
+@enduml
