@@ -24,6 +24,7 @@ class OrchestrationState(TypedDict, total=False):
     cases: list[dict]           # TestCase 字典列表
     issues: list[ReviewIssue]   # 当前轮评审问题（含规则校验）
     missing: list[str]          # 评审发现的遗漏场景
+    suggestions: list[str]      # 非阻断优化建议（不打回，随结果透出）
     passed: bool
     review_rounds: int          # 已完成评审轮数
     unresolved: list[ReviewIssue]  # 回环超限仍未解决的问题（强制出稿标注）
