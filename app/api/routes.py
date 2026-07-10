@@ -48,6 +48,64 @@ async def _read_upload(upload: UploadFile, task_dir: Path, max_bytes: int) -> Pa
     return dest
 
 
+async def _parse_inputs(
+    files: list[UploadFile], text: str, save_dir: Path, max_bytes: int
+) -> list:
+    """解析多文件 + 粘贴文本（F-2-5 混合上传），返回 ParsedDocument 列表。"""
+    docs = []
+    try:
+        for upload in files:
+            saved = await _read_upload(upload, save_dir, max_bytes)
+            docs.append(parse_file(saved))
+        if text.strip():
+            docs.append(parse_text(text))
+    except (UnsupportedFormatError, ScannedPDFError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not docs:
+        raise HTTPException(status_code=400, detail="请上传需求文件或粘贴需求文本")
+    return docs
+
+
+def _merge_docs(docs: list) -> str:
+    parts = []
+    for doc in docs:
+        if doc.source == "text":
+            parts.append(doc.full_text)
+        else:
+            parts.append(f"【文件：{doc.source}】\n{doc.full_text}")
+    return "\n\n".join(parts)
+
+
+@router.post("/api/v1/parse")
+async def preview_parse(
+    request: Request,
+    files: list[UploadFile] = File(default=[]),
+    text: str = Form(default=""),
+) -> dict:
+    """解析结果预览（F-2-7）：返回结构化解析结果供确认修正，修正后以 text 提交创建任务。"""
+    from app.parsers.chunking import split_text
+
+    settings = get_settings()
+    preview_dir = request.app.state.tasks.output_dir / "_previews"
+    docs = await _parse_inputs(files, text, preview_dir, settings.max_upload_size_mb * 1024 * 1024)
+    merged = _merge_docs(docs)
+    return {
+        "documents": [
+            {
+                "source": doc.source,
+                "doc_type": doc.doc_type,
+                "sections": [s.model_dump() for s in doc.sections],
+                "tables": doc.tables,
+                "full_text": doc.full_text,
+            }
+            for doc in docs
+        ],
+        "merged_text": merged,
+        "total_chars": len(merged),
+        "estimated_chunks": len(split_text(merged, settings.chunk_max_chars)),
+    }
+
+
 @router.post("/api/v1/templates")
 async def upload_template(
     request: Request,
@@ -130,28 +188,14 @@ async def create_task(
         raise HTTPException(status_code=404, detail=f"模板不存在: {template_id}")
     task_id, task_dir = store.new_task_dir()
 
-    # 1. 解析输入（文件 + 粘贴文本可混合）
-    parts: list[str] = []
-    sources: list[str] = []
-    max_bytes = settings.max_upload_size_mb * 1024 * 1024
-    try:
-        for upload in files:
-            saved = await _read_upload(upload, task_dir, max_bytes)
-            doc = parse_file(saved)
-            parts.append(f"【文件：{doc.source}】\n{doc.full_text}")
-            sources.append(doc.source)
-        if text.strip():
-            parts.append(parse_text(text).full_text)
-            sources.append("text")
-    except (UnsupportedFormatError, ScannedPDFError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    if not parts:
-        raise HTTPException(status_code=400, detail="请上传需求文件或粘贴需求文本")
+    # 1. 解析输入（文件 + 粘贴文本可混合，F-2-5）
+    docs = await _parse_inputs(files, text, task_dir, settings.max_upload_size_mb * 1024 * 1024)
+    sources = [doc.source for doc in docs]
 
-    # 2. 编排生成
+    # 2. 编排生成（超长需求自动分片并行，F-2-6）
     try:
         result = await run_generation(
-            "\n\n".join(parts),
+            _merge_docs(docs),
             llm=request.app.state.llm,
             model=model,
             reviewer_model=reviewer_model,
@@ -190,6 +234,7 @@ async def create_task(
         "case_count": len(result.cases),
         "passed": result.passed,
         "review_rounds": result.review_rounds,
+        "chunks": result.chunks,
         "unresolved": result.unresolved,
         "blind_spots": result.blind_spots,
         "downloads": {fmt: f"/api/v1/tasks/{task_id}/files/{fmt}" for fmt in files_map},
