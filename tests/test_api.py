@@ -60,6 +60,21 @@ async def test_任务端到端_上传文本生成并下载(client):
     assert xmind.content.startswith(b"PK")  # zip 魔数
 
 
+async def test_解析预览接口(client):
+    resp = await client.post(
+        "/api/v1/parse",
+        files={"files": ("需求.txt", "# 登录模块\n支持账号密码登录".encode(), "text/plain")},
+        data={"text": "补充说明"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["documents"]) == 2
+    assert data["documents"][0]["source"] == "需求.txt"
+    assert data["documents"][0]["sections"][0]["title"] == "登录模块"
+    assert "登录模块" in data["merged_text"]
+    assert data["estimated_chunks"] == 1
+
+
 async def test_不支持的文件格式返回400(client):
     resp = await client.post(
         "/api/v1/tasks",
