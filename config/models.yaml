@@ -7,6 +7,9 @@
 
 default_model: deepseek-chat
 
+# 单模型调用失败的自动重试次数（F-1-6）；重试耗尽后按各模型的 fallbacks 依序降级
+max_retries: 1
+
 models:
   - name: deepseek-chat
     provider: deepseek
@@ -17,6 +20,7 @@ models:
     temperature: 0.3
     max_tokens: 8192
     timeout: 120
+    fallbacks: [deepseek-reasoner]
 
   - name: deepseek-reasoner
     provider: deepseek

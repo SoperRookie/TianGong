@@ -5,9 +5,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.routes import router
-from app.config import get_settings
+from app.config import BASE_DIR, get_settings
 from app.llm.client import LLMClient
 from app.llm.registry import ModelRegistry
+from app.tasks import TaskStore
 
 
 @asynccontextmanager
@@ -16,6 +17,7 @@ async def lifespan(app: FastAPI):
     registry = ModelRegistry.from_yaml(settings.models_config_path)
     app.state.registry = registry
     app.state.llm = LLMClient(registry)
+    app.state.tasks = TaskStore(output_dir=BASE_DIR / "outputs")
     yield
 
 

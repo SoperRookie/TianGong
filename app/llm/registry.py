@@ -16,7 +16,7 @@ class NoVisionModelError(RuntimeError):
 
 
 class ModelRegistry:
-    def __init__(self, default_model: str, models: list[ModelConfig]):
+    def __init__(self, default_model: str, models: list[ModelConfig], max_retries: int = 1):
         names = [m.name for m in models]
         if len(names) != len(set(names)):
             dup = sorted({n for n in names if names.count(n) > 1})
@@ -24,7 +24,12 @@ class ModelRegistry:
         self._models = {m.name: m for m in models}
         if default_model not in self._models:
             raise ValueError(f"default_model={default_model} 不在模型清单中")
+        for m in models:
+            unknown = [f for f in m.fallbacks if f not in self._models]
+            if unknown:
+                raise ValueError(f"模型 {m.name} 的 fallbacks 引用了未注册模型: {unknown}")
         self.default_model = default_model
+        self.max_retries = max_retries
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ModelRegistry":
@@ -35,7 +40,11 @@ class ModelRegistry:
         models = [ModelConfig.model_validate(item) for item in data.get("models", [])]
         if not models:
             raise ValueError(f"模型配置文件 {path} 中未定义任何模型")
-        return cls(default_model=data.get("default_model", models[0].name), models=models)
+        return cls(
+            default_model=data.get("default_model", models[0].name),
+            models=models,
+            max_retries=int(data.get("max_retries", 1)),
+        )
 
     def get(self, name: str | None = None) -> ModelConfig:
         """任务级模型切换：name 为空时返回默认模型（F-1-4）。"""
@@ -56,6 +65,16 @@ class ModelRegistry:
                 "请在 config/models.yaml 中添加 supports_vision: true 的模型"
             )
         return candidates[0]
+
+    def call_chain(self, name: str | None = None, require_vision: bool = False) -> list[ModelConfig]:
+        """降级链路（F-1-6）：主模型 + 依序追加的备用模型；Vision 请求只在 Vision 模型间降级。"""
+        primary = self.resolve_vision(name) if require_vision else self.get(name)
+        chain = [primary] + [self.get(f) for f in primary.fallbacks]
+        if require_vision:
+            chain = [c for c in chain if c.supports_vision]
+        # 去重，保持顺序
+        seen: set[str] = set()
+        return [c for c in chain if not (c.name in seen or seen.add(c.name))]
 
     def list_public(self) -> list[dict]:
         return [m.public_view(is_default=(m.name == self.default_model)) for m in self._models.values()]

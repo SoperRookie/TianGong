@@ -17,6 +17,7 @@ class ModelConfig(BaseModel):
     temperature: float = 0.3
     max_tokens: int = 8192
     timeout: float = 120.0
+    fallbacks: list[str] = Field(default_factory=list, description="备用模型降级链路（F-1-6），按顺序尝试")
 
     def resolve_api_key(self) -> str:
         if not self.api_key_env:
