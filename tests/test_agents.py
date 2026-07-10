@@ -78,3 +78,9 @@ def test_规则校验_优先级非法与编号重复():
 
 def test_规则校验_通过():
     assert rule_check([_case(), _case(case_id="TC-登录-002")]) == []
+
+
+def test_规则校验_编号跳号():
+    # 001 之后直接 003，缺 002
+    issues = rule_check([_case(), _case(case_id="TC-登录-003")])
+    assert any("不连续" in i["problem"] for i in issues)

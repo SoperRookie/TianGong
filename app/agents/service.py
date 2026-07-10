@@ -15,6 +15,7 @@ class GenerationResult(BaseModel):
     unresolved: list[dict] = Field(default_factory=list, description="超限强制出稿时的未解决问题")
     blind_spots: list[str] = Field(default_factory=list, description="疑似需求盲区")
     missing: list[str] = Field(default_factory=list, description="评审提示的遗漏场景")
+    suggestions: list[str] = Field(default_factory=list, description="评审的非阻断优化建议")
     test_points: list[dict] = Field(default_factory=list)
     trace: list[dict] = Field(default_factory=list, description="Agent 调用链路")
 
@@ -47,6 +48,7 @@ async def run_generation(
         unresolved=final.get("unresolved", []),
         blind_spots=final.get("blind_spots", []),
         missing=final.get("missing", []),
+        suggestions=final.get("suggestions", []),
         test_points=final.get("test_points", []),
         trace=final.get("trace", []),
     )

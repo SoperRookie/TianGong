@@ -74,6 +74,8 @@ async def main() -> None:
         print(f"\n疑似需求盲区:\n" + "\n".join(f"  - {b}" for b in result.blind_spots))
     if result.missing:
         print(f"\n评审提示遗漏场景:\n" + "\n".join(f"  - {m}" for m in result.missing))
+    if result.suggestions:
+        print(f"\n评审优化建议（非阻断）:\n" + "\n".join(f"  - {s}" for s in result.suggestions))
     if result.unresolved:
         print(f"\n⚠ 未解决评审问题:\n" + "\n".join(f"  - [{i['case_id']}] {i['problem']}" for i in result.unresolved))
 
