@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 
 from app.agents import run_generation
 from app.config import get_settings
-from app.exporters import export_csv, export_excel
+from app.exporters import export_csv, export_excel, export_xmind
 from app.llm.client import AllModelsFailedError
 from app.llm.registry import UnknownModelError
 from app.llm.schemas import MissingAPIKeyError
@@ -94,11 +94,15 @@ async def create_task(
         store.save(record)
         raise HTTPException(status_code=502, detail=str(e))
 
-    # 3. 导出（F-5-2/3），双格式内容一致
+    # 3. 导出（F-5-1/2/3），多格式内容一致（F-5-4）
     files_map: dict[str, str] = {}
     if result.cases:
         files_map["xlsx"] = str(export_excel(result.cases, task_dir / "测试用例.xlsx"))
         files_map["csv"] = str(export_csv(result.cases, task_dir / "测试用例.csv"))
+        root_title = Path(sources[0]).stem if sources and sources[0] != "text" else "测试用例"
+        files_map["xmind"] = str(
+            export_xmind(result.cases, task_dir / "测试用例.xmind", root_title=root_title)
+        )
 
     record = TaskRecord(
         task_id=task_id,
@@ -131,6 +135,7 @@ async def get_task(request: Request, task_id: str) -> dict:
 _MEDIA_TYPES = {
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "csv": "text/csv",
+    "xmind": "application/vnd.xmind.workbook",
 }
 
 
