@@ -47,10 +47,11 @@ class UnsupportedFormatError(ValueError):
 
 def _registry() -> dict[str, Parser]:
     from app.parsers.docx import DocxParser
+    from app.parsers.pdf import PdfParser
     from app.parsers.text import TextParser
 
     mapping: dict[str, Parser] = {}
-    for parser in (TextParser(), DocxParser()):
+    for parser in (TextParser(), DocxParser(), PdfParser()):
         for suffix in parser.suffixes:
             mapping[suffix] = parser
     return mapping
