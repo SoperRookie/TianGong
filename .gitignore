@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+
+# IDE
+.idea/
+.vscode/
+
+# 环境与密钥
+.env
+*.local.yaml
+
+# 运行产物
+uploads/
+outputs/
+*.log
+
+# macOS
+.DS_Store

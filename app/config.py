@@ -1,0 +1,29 @@
+"""全局配置：环境变量优先，配置与代码分离。"""
+
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="TIANGONG_", extra="ignore")
+
+    app_name: str = "tiangong"
+    debug: bool = False
+
+    # LLM 适配层
+    models_config_path: Path = BASE_DIR / "config" / "models.yaml"
+
+    # 任务队列
+    redis_url: str = "redis://localhost:6379/0"
+
+    # 文件上传限制（F-2-8），单位 MB
+    max_upload_size_mb: int = 50
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

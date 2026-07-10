@@ -1,0 +1,108 @@
+@startuml system-architecture
+title AI 测试用例生成 Agent — 系统总体架构（PRD V2.1 多 Agent 协作版）
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontSize 13
+skinparam ArrowColor #666666
+skinparam packageStyle rectangle
+
+actor "测试工程师 / 测试负责人" as user
+actor "平台管理员" as admin
+rectangle "Jenkins / DevOps 流水线" as cicd
+
+package "用户交互层" {
+  component "Web 界面\n对话式多轮交互 / 在线评审留痕\n离线终稿回传 diff" as web
+  component "OpenAPI (RESTful)\n创建任务 / 查询状态 / 下载结果" as openapi
+}
+
+package "多 Agent 协作层（LangGraph 有向图编排）" {
+  component "主控 Agent (Orchestrator)\n任务编排 / 多轮修订路由 / 结果汇总" as orch
+  component "需求分析 Agent\n文档理解 / 测试点拆解 / 盲区识别" as reqagent
+  component "用例生成 Agent ×N (可并行)\n测试专家角色 / 方法论内置\n模板 + 知识 + 记忆生成" as genagent
+  component "评审 Agent (Critic)\n独立 Prompt·可异构模型\n合规校验 / 覆盖度比对 / Judge 打分" as critic
+  component "知识管家 Agent\n三库检索编排 / 5:3:2 配额与让渡\n冲突仲裁 / 知识快照" as steward
+  component "学习 Agent (离线异步)\n坏案例归因 / Prompt 优化候选\n逃逸缺陷学习 / 记忆提炼" as learner
+}
+
+package "能力支撑层" {
+  component "需求解析模块\nPDF / Word / 图片 / 纯文本\n多模态优先·OCR 兜底\n分片 / 合并 / 预览" as parser
+  component "LLM 适配层\nOpenAI 兼容协议 / 模型路由\n重试降级 / 流式 / 用量统计" as llm
+  component "输出生成模块\nXMind / Excel / CSV\n双格式内容一致" as output
+}
+
+package "知识与记忆层" {
+  database "业务知识库 (RAG)\n① 测试用例库\n② 需求文档库 (历史 PRD)\n③ 玩法/业务规则库" as kb
+  database "记忆系统\n会话记忆 / 用户偏好\n项目记忆 / 修改习惯" as memory
+  database "向量库 + 关键词索引\nMilvus·Qdrant + Elasticsearch\n混合检索 (Hybrid Search)" as vdb
+}
+
+package "自我学习与进化（数据飞轮）" {
+  component "学习语料库\n评审留痕 → 标准化语料" as corpus
+  component "自动评估\nLLM-as-Judge / 黄金评估集" as judge
+  component "进化引擎\nPrompt 优化 / A/B 实验 / SFT·LoRA 微调\n版本化 · 审批 · 可回滚" as evolve
+}
+
+package "平台基础服务" {
+  component "模板管理\n字段识别 / 映射 / 团队共享" as tpl
+  component "任务管理 / 异步队列\nCelery + Redis" as taskmgr
+  component "权限与配置中心\n两角色 + 项目成员制 / 密钥加密" as auth
+  component "日志监控\nELK + Prometheus + 告警" as monitor
+}
+
+cloud "模型服务" {
+  component "私有化模型\nvLLM / Ollama (多模态)" as privmodel
+  component "商用模型 API\nOpenAI / Claude / DeepSeek / Qwen / GLM" as pubmodel
+  component "Embedding 模型\nbge / m3e / text-embedding-3" as embmodel
+}
+
+' ---- 交互层 ----
+user --> web
+admin --> web : 模型/模板/配额/审批
+cicd --> openapi
+web --> orch
+openapi --> orch
+
+' ---- Agent 编排（有向图）----
+orch --> reqagent : ① 解析与拆解
+orch --> genagent : ② 生成（模块级并行）
+orch --> critic : ③ 评审（不合格定点打回 ≤3 轮）
+steward ..> reqagent : 用例库覆盖度比对\n(提前到拆解阶段)
+steward ..> genagent : 规则库+PRD库+记忆注入\n(引用对用户可见)
+steward ..> critic : 覆盖度基线复核
+
+' ---- 能力调用 ----
+reqagent --> parser
+reqagent --> llm
+genagent --> llm
+critic --> llm
+tpl ..> genagent : 严格模板约束
+orch --> output : 汇总出稿
+
+' ---- 知识与记忆 ----
+steward --> kb
+steward --> memory
+kb .. vdb : 切片向量化存储
+llm --> embmodel
+
+' ---- 模型服务 ----
+llm --> privmodel
+llm --> pubmodel
+
+' ---- 数据飞轮 ----
+web ..> corpus : 评审留痕 / 回传 diff
+learner --> corpus : 语料加工 / 归因
+learner ..> memory : 记忆提炼
+corpus --> evolve
+judge ..> critic : 评分标准
+judge ..> evolve : 黄金集回归门禁
+evolve ..> genagent : 更优 Prompt / 微调模型
+web ..> kb : 优质用例回存\n(来源标记防同质化)
+
+' ---- 基础服务 ----
+orch --> taskmgr
+auth ..> kb : 知识空间隔离
+auth ..> memory : 记忆隔离
+monitor ..> llm : token/耗时采集
+
+@enduml
