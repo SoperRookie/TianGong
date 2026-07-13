@@ -22,20 +22,19 @@ _MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".web
 MAX_IMAGE_SIDE = 2000
 
 
-def _load_and_downscale(path: Path) -> tuple[bytes, str]:
+def _downscale(raw: bytes, mime: str) -> tuple[bytes, str]:
     """超过上限的图片等比缩小后重编码；小图原样返回。"""
-    raw = path.read_bytes()
     try:
         with Image.open(io.BytesIO(raw)) as img:
             if max(img.size) <= MAX_IMAGE_SIDE:
-                return raw, _MIME.get(path.suffix.lower(), "image/png")
+                return raw, mime
             img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE), Image.LANCZOS)
             buf = io.BytesIO()
             img.convert("RGB").save(buf, format="PNG", optimize=True)
             return buf.getvalue(), "image/png"
     except Exception:
         # 无法用 Pillow 解码（少见格式等）：原样上送，交由模型侧处理
-        return raw, _MIME.get(path.suffix.lower(), "image/png")
+        return raw, mime
 
 VISION_PROMPT = """你是一名资深测试分析师，请仔细观察这张需求相关的图片（可能是界面原型图、页面截图、流程图或架构图），按以下框架提取信息，供后续测试用例设计使用：
 
@@ -57,26 +56,34 @@ VISION_PROMPT = """你是一名资深测试分析师，请仔细观察这张需�
 要求：只描述图中实际存在的内容，不推测图中没有的功能；无法辨认的部分明确标注「无法辨认」。"""
 
 
-async def parse_image(path: str | Path, llm: LLMClient) -> ParsedDocument:
-    """调用 Vision 模型理解图片（自动路由至 supports_vision 的模型，F-1-5）。"""
-    path = Path(path)
-    payload, mime = _load_and_downscale(path)
+async def understand_image_bytes(
+    data: bytes, mime: str, llm: LLMClient, prompt: str = VISION_PROMPT
+) -> str:
+    """Vision 模型理解图片字节，返回 Markdown 文本（自动路由 Vision 模型，F-1-5）。"""
+    payload, mime = _downscale(data, mime)
     data_url = f"data:{mime};base64,{base64.b64encode(payload).decode()}"
-
     result = await llm.chat(
         [
             {
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": data_url}},
-                    {"type": "text", "text": VISION_PROMPT},
+                    {"type": "text", "text": prompt},
                 ],
             }
         ],
         require_vision=True,
     )
+    return result.content
+
+
+async def parse_image(path: str | Path, llm: LLMClient) -> ParsedDocument:
+    """独立图片文件的解析入口。"""
+    path = Path(path)
+    mime = _MIME.get(path.suffix.lower(), "image/png")
+    content = await understand_image_bytes(path.read_bytes(), mime, llm)
     # 模型输出为 Markdown 结构，复用文本解析器还原章节层级
-    doc = TextParser().parse_string(result.content)
+    doc = TextParser().parse_string(content)
     doc.source = path.name
     doc.doc_type = "image"
     return doc

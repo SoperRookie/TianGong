@@ -14,11 +14,22 @@ class Section(BaseModel):
     content: str = ""
 
 
+class EmbeddedImage(BaseModel):
+    """混排文档中的内嵌图片：placeholder 对应正文中的占位 Section，理解后原位回填。"""
+
+    placeholder: str
+    data: bytes = Field(exclude=True, repr=False)
+    mime: str = "image/png"
+
+
 class ParsedDocument(BaseModel):
     source: str = Field(description="来源文件名或 'text'")
     doc_type: str = Field(description="txt / docx / pdf / image ...")
     sections: list[Section] = Field(default_factory=list)
     tables: list[list[list[str]]] = Field(default_factory=list, description="表格：表 -> 行 -> 单元格")
+    embedded_images: list[EmbeddedImage] = Field(
+        default_factory=list, exclude=True, description="待 Vision 理解的内嵌图片（不序列化）"
+    )
 
     @property
     def full_text(self) -> str:
