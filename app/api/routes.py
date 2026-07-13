@@ -21,6 +21,7 @@ from app.parsers import (
     IMAGE_SUFFIXES,
     ScannedPDFError,
     UnsupportedFormatError,
+    enrich_images,
     parse_file,
     parse_image,
     parse_text,
@@ -71,7 +72,8 @@ async def _parse_inputs(
             if saved.suffix.lower() in IMAGE_SUFFIXES:
                 docs.append(await parse_image(saved, llm))
             else:
-                docs.append(parse_file(saved))
+                # 图文混排：文档内嵌图片经 Vision 理解后回填原位置
+                docs.append(await enrich_images(parse_file(saved), llm))
         if text.strip():
             docs.append(parse_text(text))
     except (UnsupportedFormatError, ScannedPDFError, NoVisionModelError) as e:
