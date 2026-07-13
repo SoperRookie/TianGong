@@ -37,10 +37,12 @@ models:
     provider: ollama
     base_url: http://192.168.0.152:11434/v1
     api_key_env: null
-    model: qwen3-vl:30b
+    # 派生别名：qwen3-vl:30b + PARAMETER num_ctx 16384（经 /api/create 固化，不依赖环境变量）
+    model: qwen3-vl-16k
     supports_vision: true
     temperature: 0.2
-    max_tokens: 4096
+    # 思考型模型：思考与正文共享输出额度，需给足
+    max_tokens: 10240
     timeout: 300
 
   # ---- 以下为示例条目，接入时取消注释并配置对应环境变量 ----
