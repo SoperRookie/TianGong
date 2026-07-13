@@ -32,9 +32,20 @@ models:
     max_tokens: 16384
     timeout: 300
 
+  # 私有化 Vision 模型（F-2-3 图片需求解析）：Windows + RTX 4090 16G，Ollama 部署
+  - name: qwen-vl-local
+    provider: ollama
+    base_url: http://192.168.0.152:11434/v1
+    api_key_env: null
+    model: qwen3-vl:8b
+    supports_vision: true
+    temperature: 0.2
+    max_tokens: 4096
+    timeout: 300
+
   # ---- 以下为示例条目，接入时取消注释并配置对应环境变量 ----
 
-  # - name: qwen-vl-max            # 多模态示例（图片需求路由目标）
+  # - name: qwen-vl-max            # 商用多模态示例（复杂图升级备选）
   #   provider: dashscope
   #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
   #   api_key_env: DASHSCOPE_API_KEY

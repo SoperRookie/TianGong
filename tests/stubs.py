@@ -14,7 +14,7 @@ class StubLLM:
         self.calls: list[dict] = []
 
     async def chat(self, messages, model=None, require_vision=False, **overrides):
-        self.calls.append({"messages": messages, "model": model})
+        self.calls.append({"messages": messages, "model": model, "require_vision": require_vision})
         return ChatResult(
             content=self.replies.pop(0),
             model_name=model or "stub",
