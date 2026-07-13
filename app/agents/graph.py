@@ -89,21 +89,31 @@ def _template_check(raw: dict, template: CustomTemplate) -> list[str]:
     return problems
 
 
+async def analyze_requirement(llm: LLMClient, requirement: str, model: str | None) -> dict:
+    """需求分析 Agent：测试点拆解 + 盲区识别（拆解确认流程 F-3-3 亦单独调用）。"""
+    data, result = await _chat_json(
+        llm,
+        [
+            {"role": "system", "content": ANALYST_SYSTEM},
+            {"role": "user", "content": requirement},
+        ],
+        model,
+    )
+    return {
+        "test_points": data.get("modules", []),
+        "blind_spots": data.get("blind_spots", []),
+        "model_name": result.model_name,
+    }
+
+
 def build_graph(llm: LLMClient, template: CustomTemplate | None = None):
     template = template or builtin_default_template()
     async def analyze(state: OrchestrationState) -> dict:
-        data, result = await _chat_json(
-            llm,
-            [
-                {"role": "system", "content": ANALYST_SYSTEM},
-                {"role": "user", "content": state["requirement"]},
-            ],
-            state.get("model"),
-        )
-        trace = state.get("trace", []) + [{"agent": "需求分析", "model": result.model_name}]
+        analysis = await analyze_requirement(llm, state["requirement"], state.get("model"))
+        trace = state.get("trace", []) + [{"agent": "需求分析", "model": analysis["model_name"]}]
         return {
-            "test_points": data.get("modules", []),
-            "blind_spots": data.get("blind_spots", []),
+            "test_points": analysis["test_points"],
+            "blind_spots": analysis["blind_spots"],
             "trace": trace,
         }
 
@@ -183,7 +193,11 @@ def build_graph(llm: LLMClient, template: CustomTemplate | None = None):
     graph.add_node("analyze", analyze)
     graph.add_node("generate", generate)
     graph.add_node("review", review)
-    graph.set_entry_point("analyze")
+    # 已确认测试点的任务（拆解确认流程 F-3-3）直接从生成开始，不重复拆解
+    graph.set_conditional_entry_point(
+        lambda s: "generate" if s.get("test_points") else "analyze",
+        {"analyze": "analyze", "generate": "generate"},
+    )
     graph.add_edge("analyze", "generate")
     graph.add_edge("generate", "review")
     graph.add_conditional_edges("review", decide, {"fix": "generate", "done": END})

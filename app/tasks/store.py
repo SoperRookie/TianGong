@@ -12,11 +12,13 @@ from pydantic import BaseModel, Field
 
 class TaskRecord(BaseModel):
     task_id: str
-    status: str = "completed"  # M1 同步执行：completed / failed
+    status: str = "completed"  # completed / failed / awaiting_confirmation（F-3-3）
     sources: list[str] = Field(default_factory=list)
     result: dict | None = None
     error: str | None = None
     files: dict[str, str] = Field(default_factory=dict)  # 格式 -> 文件路径
+    analysis: dict | None = Field(default=None, description="拆解确认阶段的分析结果（F-3-3）")
+    context: dict | None = Field(default=None, description="待确认任务的生成上下文（需求文本/模型/模板）")
 
 
 class TaskStore:
