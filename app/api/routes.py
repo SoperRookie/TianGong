@@ -13,9 +13,16 @@ from app.agents import run_generation
 from app.config import get_settings
 from app.exporters import export_csv, export_excel, export_xmind
 from app.llm.client import AllModelsFailedError
-from app.llm.registry import UnknownModelError
+from app.llm.registry import NoVisionModelError, UnknownModelError
 from app.llm.schemas import MissingAPIKeyError
-from app.parsers import ScannedPDFError, UnsupportedFormatError, parse_file, parse_text
+from app.parsers import (
+    IMAGE_SUFFIXES,
+    ScannedPDFError,
+    UnsupportedFormatError,
+    parse_file,
+    parse_image,
+    parse_text,
+)
 from app.tasks import TaskRecord
 from app.templates import CustomTemplate, TemplateParseError, recognize_template
 
@@ -49,17 +56,23 @@ async def _read_upload(upload: UploadFile, task_dir: Path, max_bytes: int) -> Pa
 
 
 async def _parse_inputs(
-    files: list[UploadFile], text: str, save_dir: Path, max_bytes: int
+    files: list[UploadFile], text: str, save_dir: Path, max_bytes: int, llm
 ) -> list:
-    """解析多文件 + 粘贴文本（F-2-5 混合上传），返回 ParsedDocument 列表。"""
+    """解析多文件 + 粘贴文本（F-2-5 混合上传），返回 ParsedDocument 列表。
+
+    图片文件走 Vision 模型多模态理解（F-2-3），其余格式走本地解析器。
+    """
     docs = []
     try:
         for upload in files:
             saved = await _read_upload(upload, save_dir, max_bytes)
-            docs.append(parse_file(saved))
+            if saved.suffix.lower() in IMAGE_SUFFIXES:
+                docs.append(await parse_image(saved, llm))
+            else:
+                docs.append(parse_file(saved))
         if text.strip():
             docs.append(parse_text(text))
-    except (UnsupportedFormatError, ScannedPDFError) as e:
+    except (UnsupportedFormatError, ScannedPDFError, NoVisionModelError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not docs:
         raise HTTPException(status_code=400, detail="请上传需求文件或粘贴需求文本")
@@ -87,7 +100,9 @@ async def preview_parse(
 
     settings = get_settings()
     preview_dir = request.app.state.tasks.output_dir / "_previews"
-    docs = await _parse_inputs(files, text, preview_dir, settings.max_upload_size_mb * 1024 * 1024)
+    docs = await _parse_inputs(
+        files, text, preview_dir, settings.max_upload_size_mb * 1024 * 1024, request.app.state.llm
+    )
     merged = _merge_docs(docs)
     return {
         "documents": [
@@ -188,8 +203,10 @@ async def create_task(
         raise HTTPException(status_code=404, detail=f"模板不存在: {template_id}")
     task_id, task_dir = store.new_task_dir()
 
-    # 1. 解析输入（文件 + 粘贴文本可混合，F-2-5）
-    docs = await _parse_inputs(files, text, task_dir, settings.max_upload_size_mb * 1024 * 1024)
+    # 1. 解析输入（文件 + 粘贴文本可混合 F-2-5；图片走 Vision F-2-3）
+    docs = await _parse_inputs(
+        files, text, task_dir, settings.max_upload_size_mb * 1024 * 1024, request.app.state.llm
+    )
     sources = [doc.source for doc in docs]
 
     # 2. 编排生成（超长需求自动分片并行，F-2-6）
