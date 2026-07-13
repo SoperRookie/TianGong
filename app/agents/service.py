@@ -9,7 +9,7 @@ import re
 
 from pydantic import BaseModel, Field
 
-from app.agents.graph import build_graph
+from app.agents.graph import analyze_requirement, build_graph
 from app.agents.state import MAX_REVIEW_ROUNDS
 from app.config import get_settings
 from app.llm.client import LLMClient
@@ -30,6 +30,39 @@ class GenerationResult(BaseModel):
     chunks: int = Field(default=1, description="分片数（F-2-6），1 表示未分片")
 
 
+class AnalysisResult(BaseModel):
+    test_points: list[dict]
+    blind_spots: list[str] = Field(default_factory=list)
+    trace: list[dict] = Field(default_factory=list)
+
+
+async def run_analysis(
+    requirement: str,
+    llm: LLMClient,
+    model: str | None = None,
+    chunk_max_chars: int | None = None,
+) -> AnalysisResult:
+    """仅执行需求分析（拆解确认流程 F-3-3 第一阶段）；超长需求分片并行拆解后合并。"""
+    chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
+    chunks = split_text(requirement, chunk_max_chars)
+    analyses = await asyncio.gather(
+        *[analyze_requirement(llm, chunk, model) for chunk in chunks]
+    )
+    module_points: dict[str, list[str]] = {}
+    blind_spots: list[str] = []
+    trace: list[dict] = []
+    for i, a in enumerate(analyses, 1):
+        for tp in a["test_points"]:
+            module_points.setdefault(str(tp.get("module", "")), []).extend(tp.get("points", []))
+        blind_spots.extend(b for b in a["blind_spots"] if b not in blind_spots)
+        trace.append({"chunk": i, "agent": "需求分析", "model": a["model_name"]})
+    return AnalysisResult(
+        test_points=[{"module": m, "points": pts} for m, pts in module_points.items()],
+        blind_spots=blind_spots,
+        trace=trace,
+    )
+
+
 async def run_generation(
     requirement: str,
     llm: LLMClient,
@@ -37,13 +70,18 @@ async def run_generation(
     reviewer_model: str | None = None,
     template: CustomTemplate | None = None,
     chunk_max_chars: int | None = None,
+    test_points: list[dict] | None = None,
 ) -> GenerationResult:
     """执行「拆解 → 生成 → 评审（≤3 轮回环）」全流程。
 
     model / reviewer_model 为任务级模型选择；reviewer_model 不传时评审与生成同模型。
     template 为自定义用例模板，缺省用内置默认模板（F-4-2）。
     超长需求自动分片并行处理（F-2-6）。
+    test_points 传入已确认的拆解结果（F-3-3）：跳过需求分析，多模块时按模块并行生成。
     """
+    if test_points:
+        return await _run_from_points(requirement, llm, model, reviewer_model, template, test_points)
+
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     chunks = split_text(requirement, chunk_max_chars)
     if len(chunks) == 1:
@@ -56,24 +94,50 @@ async def run_generation(
     return _merge(outcomes)
 
 
+async def _run_from_points(
+    requirement: str,
+    llm: LLMClient,
+    model: str | None,
+    reviewer_model: str | None,
+    template: CustomTemplate | None,
+    test_points: list[dict],
+) -> GenerationResult:
+    """从已确认测试点继续：单模块直接生成；多模块按模块并行多实例（PRD 4.1a 并行加速）。"""
+    if len(test_points) <= 1:
+        return await _run_single(
+            requirement, llm, model, reviewer_model, template, test_points=test_points
+        )
+    outcomes = await asyncio.gather(
+        *[
+            _run_single(requirement, llm, model, reviewer_model, template, test_points=[tp])
+            for tp in test_points
+        ],
+        return_exceptions=True,
+    )
+    merged = _merge(outcomes)
+    merged.chunks = 1  # 并行维度是模块而非文档分片
+    return merged
+
+
 async def _run_single(
     requirement: str,
     llm: LLMClient,
     model: str | None,
     reviewer_model: str | None,
     template: CustomTemplate | None,
+    test_points: list[dict] | None = None,
 ) -> GenerationResult:
     graph = build_graph(llm, template)
-    final = await graph.ainvoke(
-        {
-            "requirement": requirement,
-            "model": model,
-            "reviewer_model": reviewer_model,
-            "review_rounds": 0,
-            "trace": [],
-        },
-        {"recursion_limit": 10 + MAX_REVIEW_ROUNDS * 10},
-    )
+    initial: dict = {
+        "requirement": requirement,
+        "model": model,
+        "reviewer_model": reviewer_model,
+        "review_rounds": 0,
+        "trace": [],
+    }
+    if test_points:
+        initial["test_points"] = test_points  # 已确认拆解：图从生成节点开始
+    final = await graph.ainvoke(initial, {"recursion_limit": 10 + MAX_REVIEW_ROUNDS * 10})
     return GenerationResult(
         cases=[TestCase.model_validate(c) for c in final["cases"]] if final.get("passed") else _lenient_cases(final),
         passed=final.get("passed", False),

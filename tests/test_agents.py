@@ -84,3 +84,41 @@ def test_规则校验_编号跳号():
     # 001 之后直接 003，缺 002
     issues = rule_check([_case(), _case(case_id="TC-登录-003")])
     assert any("不连续" in i["problem"] for i in issues)
+
+
+async def test_已确认测试点跳过拆解直接生成():
+    # 只准备生成+评审两个响应：若图仍从拆解开始会因响应不足失败
+    llm = StubLLM([generator_reply(_case()), review_reply(True)])
+    points = [{"module": "登录", "points": ["用户修改后的测试点"]}]
+    result = await run_generation("登录需求", llm=llm, test_points=points)
+
+    assert result.passed is True
+    agents = [t["agent"] for t in result.trace]
+    assert "需求分析" not in agents  # 拆解已被跳过
+    # 生成 Prompt 中携带的是用户确认后的测试点
+    assert "用户修改后的测试点" in llm.calls[0]["messages"][1]["content"]
+
+
+async def test_多模块确认后按模块并行生成():
+    from tests.test_chunking import RoutingStubLLM
+
+    points = [
+        {"module": "功能A", "points": ["A点"]},
+        {"module": "功能B", "points": ["B点"]},
+    ]
+    result = await run_generation("需求全文", llm=RoutingStubLLM(), test_points=points)
+
+    assert result.passed is True
+    assert {c.module for c in result.cases} == {"功能A", "功能B"}
+    assert result.chunks == 1  # 并行维度是模块，不是文档分片
+
+
+async def test_run_analysis_仅拆解():
+    from app.agents import run_analysis
+
+    llm = StubLLM([ANALYST_REPLY])
+    analysis = await run_analysis("登录需求", llm=llm)
+
+    assert analysis.test_points == [{"module": "登录", "points": ["正常登录", "密码错误"]}]
+    assert analysis.blind_spots == ["未说明锁定策略"]
+    assert len(llm.calls) == 1  # 只有拆解调用，无生成/评审

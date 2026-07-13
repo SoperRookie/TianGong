@@ -9,7 +9,9 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from app.agents import run_generation
+from pydantic import BaseModel
+
+from app.agents import run_analysis, run_generation
 from app.config import get_settings
 from app.exporters import export_csv, export_excel, export_xmind
 from app.llm.client import AllModelsFailedError
@@ -195,6 +197,7 @@ async def create_task(
     model: str | None = Form(default=None),
     reviewer_model: str | None = Form(default=None),
     template_id: str | None = Form(default=None),
+    confirm_points: bool = Form(default=False),
 ) -> dict:
     settings = get_settings()
     store = request.app.state.tasks
@@ -208,11 +211,41 @@ async def create_task(
         files, text, task_dir, settings.max_upload_size_mb * 1024 * 1024, request.app.state.llm
     )
     sources = [doc.source for doc in docs]
+    requirement = _merge_docs(docs)
+
+    # 1.5 拆解确认流程（F-3-3）：只做需求分析，等待用户确认测试点
+    if confirm_points:
+        try:
+            analysis = await run_analysis(requirement, llm=request.app.state.llm, model=model)
+        except (UnknownModelError,) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except (MissingAPIKeyError, AllModelsFailedError) as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        record = TaskRecord(
+            task_id=task_id,
+            status="awaiting_confirmation",
+            sources=sources,
+            analysis=analysis.model_dump(),
+            context={
+                "requirement": requirement,
+                "model": model,
+                "reviewer_model": reviewer_model,
+                "template_id": template.template_id,
+            },
+        )
+        store.save(record)
+        return {
+            "task_id": task_id,
+            "status": record.status,
+            "test_points": analysis.test_points,
+            "blind_spots": analysis.blind_spots,
+            "confirm_url": f"/api/v1/tasks/{task_id}/confirm",
+        }
 
     # 2. 编排生成（超长需求自动分片并行，F-2-6）
     try:
         result = await run_generation(
-            _merge_docs(docs),
+            requirement,
             llm=request.app.state.llm,
             model=model,
             reviewer_model=reviewer_model,
@@ -227,7 +260,11 @@ async def create_task(
         store.save(record)
         raise HTTPException(status_code=502, detail=str(e))
 
-    # 3. 导出（F-5-1/2/3），多格式内容一致（F-5-4）
+    return _finalize_task(store, task_id, task_dir, sources, result, template)
+
+
+def _finalize_task(store, task_id: str, task_dir: Path, sources: list[str], result, template) -> dict:
+    """导出多格式产物（F-5-1/2/3/4）并落库，返回任务响应。"""
     files_map: dict[str, str] = {}
     if result.cases:
         files_map["xlsx"] = str(export_excel(result.cases, task_dir / "测试用例.xlsx", template))
@@ -256,6 +293,54 @@ async def create_task(
         "blind_spots": result.blind_spots,
         "downloads": {fmt: f"/api/v1/tasks/{task_id}/files/{fmt}" for fmt in files_map},
     }
+
+
+class ConfirmBody(BaseModel):
+    test_points: list[dict] | None = None  # 缺省沿用拆解草稿；传入则以用户修改后的为准
+
+
+@router.post("/api/v1/tasks/{task_id}/confirm")
+async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None = None) -> dict:
+    """确认（或修改后确认）测试点，继续生成（F-3-3 第二阶段）。多模块按模块并行生成。"""
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if record.status != "awaiting_confirmation":
+        raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无待确认的拆解结果")
+
+    ctx = record.context or {}
+    test_points = (body.test_points if body and body.test_points else None) or (
+        record.analysis or {}
+    ).get("test_points", [])
+    if not test_points:
+        raise HTTPException(status_code=400, detail="测试点为空，无法生成")
+    template = request.app.state.templates.get(ctx.get("template_id"))
+
+    try:
+        result = await run_generation(
+            ctx.get("requirement", ""),
+            llm=request.app.state.llm,
+            model=ctx.get("model"),
+            reviewer_model=ctx.get("reviewer_model"),
+            template=template,
+            test_points=test_points,
+        )
+    except MissingAPIKeyError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except AllModelsFailedError as e:
+        record.status = "failed"
+        record.error = str(e)
+        store.save(record)
+        raise HTTPException(status_code=502, detail=str(e))
+
+    task_dir = store.output_dir / task_id
+    response = _finalize_task(store, task_id, task_dir, record.sources, result, template)
+    # 保留拆解阶段留痕
+    saved = store.get(task_id)
+    saved.analysis = record.analysis
+    store.save(saved)
+    return response
 
 
 @router.get("/api/v1/tasks/{task_id}")

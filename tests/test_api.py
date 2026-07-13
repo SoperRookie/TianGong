@@ -154,6 +154,38 @@ async def test_模板API_上传识别调整并按模板生成(client):
     await client.post("/api/v1/templates/builtin-default/default")
 
 
+async def test_拆解确认两阶段流程(client):
+    # 阶段一：confirm_points=true 只做拆解
+    app.state.llm = StubLLM([ANALYST_REPLY])
+    resp = await client.post(
+        "/api/v1/tasks",
+        data={"text": "登录需求", "confirm_points": "true"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "awaiting_confirmation"
+    assert data["test_points"][0]["module"] == "登录"
+    task_id = data["task_id"]
+
+    # 阶段二：用户修改测试点后确认，继续生成并导出
+    app.state.llm = StubLLM([generator_reply(make_case()), review_reply(True)])
+    resp = await client.post(
+        data["confirm_url"],
+        json={"test_points": [{"module": "登录", "points": ["修改后的点"]}]},
+    )
+    assert resp.status_code == 200
+    done = resp.json()
+    assert done["status"] == "completed"
+    assert done["case_count"] == 1
+    assert "xlsx" in done["downloads"]
+    # 生成收到的是修改后的测试点
+    assert "修改后的点" in app.state.llm.calls[0]["messages"][1]["content"]
+
+    # 重复确认返回 409
+    resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={})
+    assert resp.status_code == 409
+
+
 async def test_指定不存在的模板返回404(client):
     resp = await client.post("/api/v1/tasks", data={"text": "需求", "template_id": "ghost"})
     assert resp.status_code == 404
