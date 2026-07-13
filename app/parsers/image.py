@@ -5,7 +5,10 @@ OCR 兜底（PaddleOCR）待 POC-R5 结论后按需接入。
 """
 
 import base64
+import io
 from pathlib import Path
+
+from PIL import Image
 
 from app.llm.client import LLMClient
 from app.parsers.base import ParsedDocument
@@ -14,6 +17,25 @@ from app.parsers.text import TextParser
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 _MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+
+# 超大截图降采样上限（最长边像素）：控制视觉 token 数，避免撑爆私有化模型上下文
+MAX_IMAGE_SIDE = 2000
+
+
+def _load_and_downscale(path: Path) -> tuple[bytes, str]:
+    """超过上限的图片等比缩小后重编码；小图原样返回。"""
+    raw = path.read_bytes()
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            if max(img.size) <= MAX_IMAGE_SIDE:
+                return raw, _MIME.get(path.suffix.lower(), "image/png")
+            img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, format="PNG", optimize=True)
+            return buf.getvalue(), "image/png"
+    except Exception:
+        # 无法用 Pillow 解码（少见格式等）：原样上送，交由模型侧处理
+        return raw, _MIME.get(path.suffix.lower(), "image/png")
 
 VISION_PROMPT = """你是一名资深测试分析师，请仔细观察这张需求相关的图片（可能是界面原型图、页面截图、流程图或架构图），按以下框架提取信息，供后续测试用例设计使用：
 
@@ -38,8 +60,8 @@ VISION_PROMPT = """你是一名资深测试分析师，请仔细观察这张需�
 async def parse_image(path: str | Path, llm: LLMClient) -> ParsedDocument:
     """调用 Vision 模型理解图片（自动路由至 supports_vision 的模型，F-1-5）。"""
     path = Path(path)
-    b64 = base64.b64encode(path.read_bytes()).decode()
-    data_url = f"data:{_MIME.get(path.suffix.lower(), 'image/png')};base64,{b64}"
+    payload, mime = _load_and_downscale(path)
+    data_url = f"data:{mime};base64,{base64.b64encode(payload).decode()}"
 
     result = await llm.chat(
         [
