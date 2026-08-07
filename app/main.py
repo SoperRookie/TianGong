@@ -1,8 +1,9 @@
-"""FastAPI 应用入口。启动：uvicorn app.main:app --reload"""
+"""FastAPI 应用入口。启动：uvicorn app.main:app --reload；Web 界面访问 http://localhost:8000/"""
 
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 
 from app.api.routes import router
 from app.config import BASE_DIR, get_settings
@@ -25,3 +26,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TestCase Agent", version="0.1.0", lifespan=lifespan)
 app.include_router(router)
+
+
+@app.get("/", include_in_schema=False)
+async def web_index() -> FileResponse:
+    """Web 界面（M4-W2）：单页静态实现，后续可平移 Vue3 工程化前端。"""
+    return FileResponse(BASE_DIR / "app" / "web" / "index.html")

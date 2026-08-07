@@ -30,6 +30,8 @@ class TaskRecord(BaseModel):
     context: dict | None = Field(default=None, description="待确认任务的生成上下文（需求文本/模型/模板）")
     knowledge: list[dict] = Field(default_factory=list, description="知识快照（F-7-13）：本次任务注入的知识切片留痕")
     revisions: list[dict] = Field(default_factory=list, description="多轮修订历史（F-3-5）：指令与结果留痕")
+    review_log: list[dict] = Field(default_factory=list, description="在线评审留痕（F-6-6）：逐条采纳/修改/删除与反馈")
+    offline_review: dict | None = Field(default=None, description="离线评审终稿回传 diff（F-6-8）")
 
 
 class TaskStore:
