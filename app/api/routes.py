@@ -286,6 +286,32 @@ async def ingest_knowledge(
     return {"ingested": [d.model_dump() for d in docs]}
 
 
+@router.post("/api/v1/knowledge/cases")
+async def ingest_history_cases(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    space: str = Form(default="default"),
+) -> dict:
+    """历史用例入库（F-7-2）：Excel/CSV/XMind 存量用例导入测试用例库。"""
+    import openai as _openai
+
+    from app.knowledge.importers import CaseImportError
+
+    settings = get_settings()
+    service = _knowledge_service(request)
+    save_dir = request.app.state.tasks.output_dir / "_knowledge_uploads"
+    docs = []
+    try:
+        for upload in files:
+            saved = await _read_upload(upload, save_dir, settings.max_upload_size_mb * 1024 * 1024)
+            docs.append(await service.ingest_cases(saved, space=space))
+    except CaseImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, _openai.APIConnectionError, _openai.APIStatusError) as e:
+        raise HTTPException(status_code=502, detail=f"Embedding 服务调用失败: {e}")
+    return {"ingested": [d.model_dump() for d in docs]}
+
+
 @router.get("/api/v1/knowledge/docs")
 async def list_knowledge_docs(
     request: Request, space: str | None = None, category: str | None = None
