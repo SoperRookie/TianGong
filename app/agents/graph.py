@@ -17,6 +17,7 @@ from app.agents.prompts import (
     GENERATOR_SYSTEM,
     KNOWLEDGE_CASES_BLOCK,
     KNOWLEDGE_REFS_BLOCK,
+    MEMORY_BLOCK,
     REVIEWER_SYSTEM,
 )
 from app.agents.state import MAX_REVIEW_ROUNDS, OrchestrationState
@@ -126,9 +127,11 @@ def build_graph(
     template: CustomTemplate | None = None,
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
+    memory_notes: str | None = None,
 ):
     """knowledge_refs：需求文档/规则库知识，生成前注入生成 Agent；
-    knowledge_cases：历史用例，只注入拆解与评审 Agent（PRD 上下文隔离约束）。"""
+    knowledge_cases：历史用例，只注入拆解与评审 Agent（PRD 上下文隔离约束）；
+    memory_notes：用户偏好与项目记忆（F-8-7），独立预算注入生成 Agent。"""
     template = template or builtin_default_template()
     async def analyze(state: OrchestrationState) -> dict:
         analysis = await analyze_requirement(
@@ -158,6 +161,8 @@ def build_graph(
             if knowledge_refs:
                 user += KNOWLEDGE_REFS_BLOCK.format(knowledge=knowledge_refs)
             action = "全量生成"
+        if memory_notes:
+            user += MEMORY_BLOCK.format(memories=memory_notes)
         data, result = await _chat_json(
             llm,
             [{"role": "system", "content": system}, {"role": "user", "content": user}],

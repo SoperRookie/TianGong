@@ -48,6 +48,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Python 3.12 + `.venv`，依赖清单在 `pyproject.toml`（FastAPI、LangGraph、Celery、PyMuPDF、openpyxl 等；dev 组含 pytest）。
 - 启动服务：`uvicorn app.main:app --reload`；运行测试：`pytest`（tests/ 下按模块分文件，LLM 调用用 stubs 隔离）。
-- 代码结构（`app/`）：`llm/`（多厂商适配层：registry + client，重试与降级）、`parsers/`（text/docx/pdf/image、分片 chunking、图文混排 enrich）、`agents/`（LangGraph 三角色编排 graph/state/prompts/service）、`templates/`（内置默认模板 + 自定义模板识别与模板库）、`exporters/`（xmind ZEN 格式 + Excel/CSV tabular）、`tasks/`（任务存储）、`api/`（FastAPI 路由）。
+- 代码结构（`app/`）：`llm/`（多厂商适配层：registry + client，重试与降级）、`parsers/`（text/docx/pdf/image、分片 chunking、图文混排 enrich）、`agents/`（LangGraph 三角色编排 graph/state/prompts/service）、`templates/`（内置默认模板 + 自定义模板识别与模板库）、`exporters/`（xmind ZEN 格式 + Excel/CSV tabular）、`tasks/`（任务存储与终稿 diff）、`knowledge/`（三大知识库：入库/混合检索/知识管家 steward）、`memory/`（长期记忆：用户偏好/项目记忆、使用习惯沉淀、检索注入）、`api/`（FastAPI 路由）、`web/`（单页 Web 界面）。
 - 模型配置：`config/models.yaml`；密钥经 `.env` 加载，不入库。POC 脚本在 `scripts/`（prompt_poc、vision_poc）。
 - 分支：日常开发在 `dev`，PR 目标分支为 `main`。

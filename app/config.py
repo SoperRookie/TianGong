@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # 知识注入任务级总预算（字符，按 5:3:2 配额分配，F-7-6）
     knowledge_budget_chars: int = 6000
 
+    # 记忆注入独立预算（F-8-7）：不占知识库配额，约为知识预算的 10%（PRD 建议 ≤5%-10%）
+    memory_budget_chars: int = 600
+
 
 @lru_cache
 def get_settings() -> Settings:

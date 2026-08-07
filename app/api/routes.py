@@ -243,6 +243,78 @@ async def _gather_knowledge(
     return out, snapshot
 
 
+def _gather_memories(app, requirement: str, project: str | None) -> tuple[str | None, list[dict]]:
+    """记忆检索注入（F-8-7）：用户偏好 + 当前项目记忆，独立预算，故障降级不阻塞主链路。"""
+    try:
+        return app.state.memory.retrieve(
+            requirement[:1500], project=project, budget_chars=get_settings().memory_budget_chars
+        )
+    except Exception:
+        return None, []
+
+
+# ---- 长期记忆（F-8-2/3/6）----
+
+
+class MemoryBody(BaseModel):
+    content: str
+    scope: str = "user"
+    project: str | None = None
+
+
+class MemoryUpdateBody(BaseModel):
+    content: str
+
+
+@router.get("/api/v1/memories")
+async def list_memories(
+    request: Request, scope: str | None = None, project: str | None = None
+) -> dict:
+    """记忆可见（F-8-6）：列出全部记忆；defaults 为使用习惯沉淀的默认模板/模型（F-8-2）。"""
+    store = request.app.state.memory
+    return {
+        "memories": [e.model_dump() for e in store.list(scope, project)],
+        "defaults": store.defaults(),
+    }
+
+
+@router.post("/api/v1/memories")
+async def create_memory(request: Request, body: MemoryBody) -> dict:
+    """手工维护记忆：用户偏好（scope=user）或项目记忆（scope=project + 项目名）。"""
+    try:
+        entry = request.app.state.memory.add(body.content, scope=body.scope, project=body.project)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return entry.model_dump()
+
+
+@router.put("/api/v1/memories/{memory_id}")
+async def update_memory(request: Request, memory_id: str, body: MemoryUpdateBody) -> dict:
+    """记忆纠错（F-8-6）：直接改写记忆内容。"""
+    try:
+        entry = request.app.state.memory.update(memory_id, body.content)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"记忆不存在: {memory_id}")
+    return entry.model_dump()
+
+
+@router.delete("/api/v1/memories/{memory_id}")
+async def delete_memory(request: Request, memory_id: str) -> dict:
+    if not request.app.state.memory.delete(memory_id):
+        raise HTTPException(status_code=404, detail=f"记忆不存在: {memory_id}")
+    return {"deleted": memory_id}
+
+
+@router.delete("/api/v1/memories")
+async def clear_memories(
+    request: Request, scope: str | None = None, project: str | None = None
+) -> dict:
+    """一键清空（F-8-6），可按维度/项目过滤。"""
+    return {"cleared": request.app.state.memory.clear(scope, project)}
+
+
 # ---- 知识库（F-7-1/3/4）----
 
 
@@ -365,6 +437,7 @@ async def create_task(
     template_id: str | None = Form(default=None),
     confirm_points: bool = Form(default=False),
     knowledge_space: str | None = Form(default=None),
+    project: str | None = Form(default=None),
     async_mode: bool = Form(default=False),
 ) -> dict:
     settings = get_settings()
@@ -410,6 +483,7 @@ async def create_task(
                 "reviewer_model": reviewer_model,
                 "template_id": template.template_id,
                 "knowledge_space": knowledge_space,
+                "project": project,
             },
         )
         store.save(record)
@@ -428,12 +502,20 @@ async def create_task(
         "reviewer_model": reviewer_model,
         "template_id": template.template_id,
         "knowledge_space": knowledge_space,
+        "project": project,
     }
+    # 使用习惯沉淀（F-8-2）：常用模板/模型达到阈值后固化为默认偏好
+    memory_store = request.app.state.memory
+    memory_store.record_usage("template", template.template_id)
+    if model:
+        memory_store.record_usage("model", model)
 
     async def _generate() -> dict:
         knowledge, snapshot = await _gather_knowledge(
             request.app, requirement, ("analysis", "generation"), knowledge_space
         )
+        # 记忆检索注入（F-8-7）：独立预算，不占知识库配额
+        memory_notes, memory_snapshot = _gather_memories(request.app, requirement, project)
         store.set_progress(task_id, progress="generating_reviewing")
         result = await run_generation(
             requirement,
@@ -443,11 +525,12 @@ async def create_task(
             template=template,
             knowledge_refs=knowledge["refs"],
             knowledge_cases=knowledge["cases"],
+            memory_notes=memory_notes,
         )
         store.set_progress(task_id, progress="exporting")
         return _finalize_task(
             store, task_id, task_dir, sources, result, template,
-            knowledge=snapshot, context=task_context,
+            knowledge=snapshot, context=task_context, memories=memory_snapshot,
         )
 
     # 异步模式（F-6-1/2）：立即返回 task_id，后台执行，GET /tasks/{id} 轮询进度
@@ -471,6 +554,7 @@ async def create_task(
 def _finalize_task(
     store, task_id: str, task_dir: Path, sources: list[str], result, template,
     knowledge: list[dict] | None = None, context: dict | None = None,
+    memories: list[dict] | None = None,
 ) -> dict:
     """导出多格式产物（F-5-1/2/3/4）并落库，返回任务响应。
 
@@ -496,6 +580,8 @@ def _finalize_task(
         record.knowledge = knowledge
     if context is not None:
         record.context = context
+    if memories is not None:
+        record.memories = memories
     store.save(record)
     return {
         "task_id": task_id,
@@ -536,6 +622,9 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     knowledge, snapshot = await _gather_knowledge(
         request.app, ctx.get("requirement", ""), ("analysis", "generation"), ctx.get("knowledge_space")
     )
+    memory_notes, memory_snapshot = _gather_memories(
+        request.app, ctx.get("requirement", ""), ctx.get("project")
+    )
     try:
         result = await run_generation(
             ctx.get("requirement", ""),
@@ -546,6 +635,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
             test_points=test_points,
             knowledge_refs=knowledge["refs"],
             knowledge_cases=knowledge["cases"],
+            memory_notes=memory_notes,
         )
     except MissingAPIKeyError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -559,6 +649,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     response = _finalize_task(
         store, task_id, task_dir, record.sources, result, template,
         knowledge=record.knowledge + snapshot,  # 拆解阶段 + 生成阶段的知识快照合并留痕
+        memories=memory_snapshot,
     )
     # 保留拆解阶段留痕
     saved = store.get(task_id)
@@ -598,6 +689,11 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
     knowledge, snapshot = await _gather_knowledge(
         request.app, ctx.get("requirement", ""), ("analysis",), ctx.get("knowledge_space")
     )
+    memory_notes, memory_snapshot = _gather_memories(
+        request.app, ctx.get("requirement", ""), ctx.get("project")
+    )
+    # 使用习惯沉淀（F-8-2）：跨任务重复的修订指令固化为偏好，后续生成主动满足
+    request.app.state.memory.record_usage("revision", body.instruction)
     try:
         result = await run_revision(
             ctx.get("requirement", ""),
@@ -610,6 +706,7 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
             test_points=(record.result or {}).get("test_points") or None,
             history=[r["instruction"] for r in record.revisions],
             knowledge_cases=knowledge["cases"],
+            memory_notes=memory_notes,
         )
     except UnknownModelError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -619,7 +716,7 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
     task_dir = store.output_dir / task_id
     response = _finalize_task(
         store, task_id, task_dir, record.sources, result, template,
-        knowledge=record.knowledge + snapshot,
+        knowledge=record.knowledge + snapshot, memories=memory_snapshot,
     )
     saved = store.get(task_id)
     saved.analysis = record.analysis
