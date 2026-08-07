@@ -4,6 +4,7 @@ POST /api/v1/tasks：上传需求（文件/文本）→ 解析 → 三角色编�
 M1 为同步执行；M4 接入 Celery 异步队列与任务进度。
 """
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -32,9 +33,9 @@ from app.templates import CustomTemplate, TemplateParseError, recognize_template
 router = APIRouter()
 
 
-def _knowledge_service(request: Request):
+def _knowledge_service(app):
     """知识库服务惰性初始化：首次访问时构建并缓存到 app.state（避免无关链路加载向量库）。"""
-    if getattr(request.app.state, "knowledge", None) is None:
+    if getattr(app.state, "knowledge", None) is None:
         from app.knowledge import KnowledgeService, KnowledgeStore
         from app.llm.embeddings import EmbeddingClient, EmbeddingRegistry
 
@@ -44,10 +45,10 @@ def _knowledge_service(request: Request):
         store = KnowledgeStore(
             settings.knowledge_dir, dimensions=registry.get().dimensions
         )
-        request.app.state.knowledge = KnowledgeService(
+        app.state.knowledge = KnowledgeService(
             store, embedder, chunk_max_chars=settings.knowledge_chunk_chars
         )
-    return request.app.state.knowledge
+    return app.state.knowledge
 
 
 @router.get("/health")
@@ -210,7 +211,7 @@ async def set_default_template(request: Request, template_id: str) -> dict:
 
 
 async def _gather_knowledge(
-    request: Request, requirement: str, stages: tuple[str, ...], space: str | None
+    app, requirement: str, stages: tuple[str, ...], space: str | None
 ) -> tuple[dict, list[dict]]:
     """知识管家编排（F-7-6）：按阶段检索三大知识库并按 5:3:2 配额装填。
 
@@ -222,7 +223,7 @@ async def _gather_knowledge(
     out: dict = {"cases": None, "refs": None}
     snapshot: list[dict] = []
     try:
-        service = _knowledge_service(request)
+        service = _knowledge_service(app)
         if not service.store.list_docs():
             return out, snapshot
         steward = KnowledgeSteward(service, budget_chars=get_settings().knowledge_budget_chars)
@@ -268,7 +269,7 @@ async def ingest_knowledge(
     from app.knowledge import InvalidCategoryError
 
     settings = get_settings()
-    service = _knowledge_service(request)
+    service = _knowledge_service(request.app)
     save_dir = request.app.state.tasks.output_dir / "_knowledge_uploads"
     docs = []
     try:
@@ -298,7 +299,7 @@ async def ingest_history_cases(
     from app.knowledge.importers import CaseImportError
 
     settings = get_settings()
-    service = _knowledge_service(request)
+    service = _knowledge_service(request.app)
     save_dir = request.app.state.tasks.output_dir / "_knowledge_uploads"
     docs = []
     try:
@@ -316,13 +317,13 @@ async def ingest_history_cases(
 async def list_knowledge_docs(
     request: Request, space: str | None = None, category: str | None = None
 ) -> dict:
-    service = _knowledge_service(request)
+    service = _knowledge_service(request.app)
     return {"documents": [d.model_dump() for d in service.store.list_docs(space, category)]}
 
 
 @router.delete("/api/v1/knowledge/docs/{doc_id}")
 async def delete_knowledge_doc(request: Request, doc_id: str) -> dict:
-    service = _knowledge_service(request)
+    service = _knowledge_service(request.app)
     if not service.store.delete_doc(doc_id):
         raise HTTPException(status_code=404, detail=f"知识文档不存在: {doc_id}")
     return {"deleted": doc_id}
@@ -342,7 +343,7 @@ async def search_knowledge(request: Request, body: KnowledgeSearchBody) -> dict:
 
     from app.knowledge import InvalidCategoryError
 
-    service = _knowledge_service(request)
+    service = _knowledge_service(request.app)
     try:
         hits = await service.search(
             body.query, top_k=body.top_k, category=body.category, space=body.space
@@ -364,6 +365,7 @@ async def create_task(
     template_id: str | None = Form(default=None),
     confirm_points: bool = Form(default=False),
     knowledge_space: str | None = Form(default=None),
+    async_mode: bool = Form(default=False),
 ) -> dict:
     settings = get_settings()
     store = request.app.state.tasks
@@ -383,7 +385,7 @@ async def create_task(
     if confirm_points:
         # 拆解阶段注入历史用例做覆盖度查漏（知识管家 F-7-6，检索时机约束）
         knowledge, snapshot = await _gather_knowledge(
-            request, requirement, ("analysis",), knowledge_space
+            request.app, requirement, ("analysis",), knowledge_space
         )
         try:
             analysis = await run_analysis(
@@ -420,10 +422,19 @@ async def create_task(
         }
 
     # 2. 编排生成（超长需求自动分片并行，F-2-6）；知识管家按时机注入（F-7-6）
-    knowledge, snapshot = await _gather_knowledge(
-        request, requirement, ("analysis", "generation"), knowledge_space
-    )
-    try:
+    task_context = {
+        "requirement": requirement,
+        "model": model,
+        "reviewer_model": reviewer_model,
+        "template_id": template.template_id,
+        "knowledge_space": knowledge_space,
+    }
+
+    async def _generate() -> dict:
+        knowledge, snapshot = await _gather_knowledge(
+            request.app, requirement, ("analysis", "generation"), knowledge_space
+        )
+        store.set_progress(task_id, progress="generating_reviewing")
         result = await run_generation(
             requirement,
             llm=request.app.state.llm,
@@ -433,6 +444,20 @@ async def create_task(
             knowledge_refs=knowledge["refs"],
             knowledge_cases=knowledge["cases"],
         )
+        store.set_progress(task_id, progress="exporting")
+        return _finalize_task(
+            store, task_id, task_dir, sources, result, template,
+            knowledge=snapshot, context=task_context,
+        )
+
+    # 异步模式（F-6-1/2）：立即返回 task_id，后台执行，GET /tasks/{id} 轮询进度
+    if async_mode:
+        store.save(TaskRecord(task_id=task_id, status="queued", sources=sources, context=task_context))
+        store.submit(task_id, _generate)
+        return {"task_id": task_id, "status": "queued", "poll_url": f"/api/v1/tasks/{task_id}"}
+
+    try:
+        return await _generate()
     except UnknownModelError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except MissingAPIKeyError as e:
@@ -442,14 +467,15 @@ async def create_task(
         store.save(record)
         raise HTTPException(status_code=502, detail=str(e))
 
-    return _finalize_task(store, task_id, task_dir, sources, result, template, knowledge=snapshot)
-
 
 def _finalize_task(
     store, task_id: str, task_dir: Path, sources: list[str], result, template,
-    knowledge: list[dict] | None = None,
+    knowledge: list[dict] | None = None, context: dict | None = None,
 ) -> dict:
-    """导出多格式产物（F-5-1/2/3/4）并落库，返回任务响应。"""
+    """导出多格式产物（F-5-1/2/3/4）并落库，返回任务响应。
+
+    复用既有记录（异步任务/修订任务），保留 created_at 与修订历史等留痕。
+    """
     files_map: dict[str, str] = {}
     if result.cases:
         files_map["xlsx"] = str(export_excel(result.cases, task_dir / "测试用例.xlsx", template))
@@ -459,14 +485,17 @@ def _finalize_task(
             export_xmind(result.cases, task_dir / "测试用例.xmind", root_title=root_title)
         )
 
-    record = TaskRecord(
-        task_id=task_id,
-        status="completed",
-        sources=sources,
-        result=result.model_dump(),
-        files=files_map,
-        knowledge=knowledge or [],
-    )
+    record = store.get(task_id) or TaskRecord(task_id=task_id)
+    record.status = "completed"
+    record.progress = None
+    record.error = None
+    record.sources = sources
+    record.result = result.model_dump()
+    record.files = files_map
+    if knowledge is not None:
+        record.knowledge = knowledge
+    if context is not None:
+        record.context = context
     store.save(record)
     return {
         "task_id": task_id,
@@ -505,7 +534,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
 
     # 生成前注入需求/规则库；历史用例注入评审 Agent（知识管家 F-7-6）
     knowledge, snapshot = await _gather_knowledge(
-        request, ctx.get("requirement", ""), ("analysis", "generation"), ctx.get("knowledge_space")
+        request.app, ctx.get("requirement", ""), ("analysis", "generation"), ctx.get("knowledge_space")
     )
     try:
         result = await run_generation(
@@ -536,6 +565,97 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     saved.analysis = record.analysis
     store.save(saved)
     return response
+
+
+class ReviseBody(BaseModel):
+    instruction: str
+    model: str | None = None           # 缺省沿用任务创建时的模型
+    reviewer_model: str | None = None
+
+
+@router.post("/api/v1/tasks/{task_id}/revise")
+async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
+    """多轮对话修订（F-3-5）：修订要求走「定点修正→评审」回环，增量更新并重导出。
+
+    短期会话记忆（F-8-1）：本任务此前的修订指令随 Prompt 注入，保持多轮一致性。
+    """
+    from app.agents import run_revision
+
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if record.status != "completed" or not (record.result or {}).get("cases"):
+        raise HTTPException(
+            status_code=409, detail=f"任务状态为 {record.status}，无可修订的用例结果"
+        )
+    if not body.instruction.strip():
+        raise HTTPException(status_code=400, detail="修订要求不能为空")
+
+    ctx = record.context or {}
+    template = request.app.state.templates.get(ctx.get("template_id"))
+    # 评审 Agent 仍可参考历史用例（知识管家时机约束）；知识故障降级不阻塞修订
+    knowledge, snapshot = await _gather_knowledge(
+        request.app, ctx.get("requirement", ""), ("analysis",), ctx.get("knowledge_space")
+    )
+    try:
+        result = await run_revision(
+            ctx.get("requirement", ""),
+            cases=record.result["cases"],
+            instruction=body.instruction,
+            llm=request.app.state.llm,
+            model=body.model or ctx.get("model"),
+            reviewer_model=body.reviewer_model or ctx.get("reviewer_model"),
+            template=template,
+            test_points=(record.result or {}).get("test_points") or None,
+            history=[r["instruction"] for r in record.revisions],
+            knowledge_cases=knowledge["cases"],
+        )
+    except UnknownModelError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, AllModelsFailedError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    task_dir = store.output_dir / task_id
+    response = _finalize_task(
+        store, task_id, task_dir, record.sources, result, template,
+        knowledge=record.knowledge + snapshot,
+    )
+    saved = store.get(task_id)
+    saved.analysis = record.analysis
+    saved.revisions = record.revisions + [
+        {
+            "instruction": body.instruction,
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "passed": result.passed,
+            "review_rounds": result.review_rounds,
+            "case_count": len(result.cases),
+        }
+    ]
+    store.save(saved)
+    response["revision_no"] = len(saved.revisions)
+    return response
+
+
+@router.get("/api/v1/tasks")
+async def list_tasks(request: Request, status: str | None = None, limit: int = 50) -> dict:
+    """任务列表（F-6-1）：倒序返回任务概要，供任务管理界面轮询。"""
+    records = request.app.state.tasks.list(status=status, limit=limit)
+    return {
+        "tasks": [
+            {
+                "task_id": r.task_id,
+                "status": r.status,
+                "progress": r.progress,
+                "created_at": r.created_at,
+                "sources": r.sources,
+                "case_count": len((r.result or {}).get("cases", [])),
+                "revision_count": len(r.revisions),
+                "error": r.error,
+            }
+            for r in records
+        ]
+    }
 
 
 @router.get("/api/v1/tasks/{task_id}")

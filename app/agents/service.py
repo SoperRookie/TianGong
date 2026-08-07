@@ -166,6 +166,53 @@ async def _run_single(
     )
 
 
+async def run_revision(
+    requirement: str,
+    cases: list[dict],
+    instruction: str,
+    llm: LLMClient,
+    model: str | None = None,
+    reviewer_model: str | None = None,
+    template: CustomTemplate | None = None,
+    test_points: list[dict] | None = None,
+    history: list[str] | None = None,
+    knowledge_cases: str | None = None,
+) -> GenerationResult:
+    """多轮修订（F-3-5）：用户修订要求作为定点修正问题进入「生成→评审」回环。
+
+    增量更新：生成 Agent 走定点修正路径，只改受影响用例，其余原样保留。
+    history：本任务此前已应用的修订指令（短期会话记忆 F-8-1），注入保持多轮一致性。
+    """
+    problem = f"用户修订要求：{instruction}"
+    if history:
+        applied = "；".join(history)
+        problem += f"\n（此前已应用的修订，保持其效果不被本次修订破坏：{applied}）"
+    graph = build_graph(llm, template, knowledge_cases=knowledge_cases)
+    initial: dict = {
+        "requirement": requirement,
+        "model": model,
+        "reviewer_model": reviewer_model,
+        "review_rounds": 0,
+        "trace": [{"agent": "主控", "action": "修订路由", "instruction": instruction}],
+        # 提供 test_points 使图从生成节点进入；issues 使生成节点走定点修正路径
+        "test_points": test_points or [{"module": "(修订)", "points": [instruction]}],
+        "cases": cases,
+        "issues": [{"case_id": "(用户修订)", "problem": problem}],
+    }
+    final = await graph.ainvoke(initial, {"recursion_limit": 10 + MAX_REVIEW_ROUNDS * 10})
+    return GenerationResult(
+        cases=[TestCase.model_validate(c) for c in final["cases"]] if final.get("passed") else _lenient_cases(final),
+        passed=final.get("passed", False),
+        review_rounds=final.get("review_rounds", 0),
+        unresolved=final.get("unresolved", []),
+        blind_spots=final.get("blind_spots", []),
+        missing=final.get("missing", []),
+        suggestions=final.get("suggestions", []),
+        test_points=final.get("test_points", []),
+        trace=final.get("trace", []),
+    )
+
+
 def _lenient_cases(final: dict) -> list[TestCase]:
     """强制出稿路径：跳过校验不通过的用例，保留可用部分（未解决问题已另行标注）。"""
     cases: list[TestCase] = []
