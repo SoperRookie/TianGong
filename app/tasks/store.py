@@ -32,6 +32,7 @@ class TaskRecord(BaseModel):
     revisions: list[dict] = Field(default_factory=list, description="多轮修订历史（F-3-5）：指令与结果留痕")
     review_log: list[dict] = Field(default_factory=list, description="在线评审留痕（F-6-6）：逐条采纳/修改/删除与反馈")
     offline_review: dict | None = Field(default=None, description="离线评审终稿回传 diff（F-6-8）")
+    memories: list[dict] = Field(default_factory=list, description="记忆快照（F-8-6 引用可见）：本次生成注入的记忆")
 
 
 class TaskStore:

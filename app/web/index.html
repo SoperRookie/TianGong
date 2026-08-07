@@ -65,6 +65,9 @@ dialog h3 { margin-top:0; }
       </div>
       <label>用例模板</label>
       <select id="templateSel"></select>
+      <label>项目名（可选，同项目任务共享项目记忆）</label>
+      <input type="text" id="projectInput" placeholder="如：斗地主赛季玩法">
+
       <div class="toolbar">
         <label style="margin:0"><input type="checkbox" id="confirmPoints"> 先确认测试点</label>
         <label style="margin:0"><input type="checkbox" id="asyncMode" checked> 后台执行</label>
@@ -78,11 +81,35 @@ dialog h3 { margin-top:0; }
       <h3>任务列表 <span id="listSpin"></span></h3>
       <div id="taskList"></div>
     </div>
+    <div class="panel">
+      <h3>记忆（用户偏好 / 项目记忆）</h3>
+      <div id="memList" class="hint">加载中…</div>
+      <div class="toolbar">
+        <button class="secondary" onclick="openMemDlg()">新增记忆</button>
+        <button class="danger" onclick="clearMemories()">一键清空</button>
+      </div>
+      <div class="hint">生成任务时自动注入（独立配额），任务详情可见本次引用了哪些记忆</div>
+    </div>
   </div>
   <div class="right" id="detail">
     <div class="panel hint">选择或创建一个任务查看详情</div>
   </div>
 </div>
+
+<dialog id="memDlg">
+  <h3>记忆</h3>
+  <label>维度</label>
+  <select id="mScope" onchange="document.getElementById('mProject').style.display=this.value==='project'?'':'none'">
+    <option value="user">用户偏好</option><option value="project">项目记忆</option>
+  </select>
+  <input type="text" id="mProject" placeholder="项目名" style="display:none;margin-top:6px">
+  <label>内容</label>
+  <textarea id="mContent" rows="4" placeholder="如：用例步骤保持精简，每条不超过 5 步"></textarea>
+  <div class="toolbar">
+    <button onclick="saveMemory()">保存</button>
+    <button class="secondary" onclick="document.getElementById('memDlg').close()">取消</button>
+  </div>
+</dialog>
 
 <dialog id="editDlg">
   <h3>修改用例 <span id="editCaseId" class="hint"></span></h3>
@@ -126,8 +153,56 @@ async function init() {
   t.templates.forEach(x => $('templateSel').add(
     new Option(x.name + (x.template_id === t.default_id ? '（默认）' : ''), x.template_id)));
   $('templateSel').value = t.default_id;
+  await refreshMemories(true);
   refreshList();
   setInterval(refreshList, 3000);
+}
+
+/* ---- 记忆管理（F-8-6 可见可控）---- */
+async function refreshMemories(applyDefaults) {
+  const data = await api('/api/v1/memories');
+  if (applyDefaults) {  // 使用习惯沉淀的默认偏好（F-8-2）：预选常用模板/模型
+    const d = data.defaults || {};
+    if (d.template_id && [...$('templateSel').options].some(o=>o.value===d.template_id)) $('templateSel').value = d.template_id;
+    if (d.model && [...$('modelSel').options].some(o=>o.value===d.model)) $('modelSel').value = d.model;
+  }
+  $('memList').innerHTML = data.memories.map(m => `
+    <div class="task-item" style="cursor:default">
+      <div><b>${m.scope==='project'?'[项目] '+esc(m.project||''):'[偏好]'}</b>
+        ${m.source==='usage'?'<span class="hint">（自动沉淀）</span>':''}
+        <span style="float:right;white-space:nowrap">
+          <a href="#" onclick="editMemory('${m.memory_id}');return false">改</a>
+          <a href="#" onclick="deleteMemory('${m.memory_id}');return false" style="color:var(--danger)">删</a></span></div>
+      <div style="font-size:12px;color:#444">${esc(m.content)}</div>
+    </div>`).join('') || '<div class="hint">暂无记忆。可手工添加，或随使用自动沉淀（常用模板/模型、重复的修订要求）</div>';
+  window._memories = data.memories;
+}
+function openMemDlg() { $('mContent').value=''; $('mScope').value='user'; $('mProject').style.display='none'; $('memDlg').showModal(); }
+async function saveMemory() {
+  try {
+    await api('/api/v1/memories', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({content:$('mContent').value, scope:$('mScope').value, project:$('mProject').value||null})});
+    $('memDlg').close(); refreshMemories();
+  } catch (e) { alert('保存失败: '+e.message); }
+}
+async function editMemory(id) {
+  const m = (window._memories||[]).find(x=>x.memory_id===id);
+  const content = window.prompt('修改记忆内容（纠错）：', m ? m.content : '');
+  if (content === null || !content.trim()) return;
+  try {
+    await api('/api/v1/memories/'+id, {method:'PUT', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({content})});
+    refreshMemories();
+  } catch (e) { alert('修改失败: '+e.message); }
+}
+async function deleteMemory(id) {
+  try { await api('/api/v1/memories/'+id, {method:'DELETE'}); refreshMemories(); }
+  catch (e) { alert('删除失败: '+e.message); }
+}
+async function clearMemories() {
+  if (!window.confirm('确认清空全部记忆？（含自动沉淀的偏好与使用计数）')) return;
+  await api('/api/v1/memories', {method:'DELETE'});
+  refreshMemories();
 }
 
 /* ---- 任务列表轮询 ---- */
@@ -156,6 +231,7 @@ async function createTask() {
   for (const f of $('reqFiles').files) fd.append('files', f);
   if ($('modelSel').value) fd.append('model', $('modelSel').value);
   if ($('reviewerSel').value) fd.append('reviewer_model', $('reviewerSel').value);
+  if ($('projectInput').value.trim()) fd.append('project', $('projectInput').value.trim());
   fd.append('template_id', $('templateSel').value);
   fd.append('confirm_points', $('confirmPoints').checked);
   fd.append('async_mode', $('asyncMode').checked && !$('confirmPoints').checked);
@@ -164,6 +240,7 @@ async function createTask() {
   try {
     const data = await api('/api/v1/tasks', {method:'POST', body:fd});
     $('reqText').value = ''; $('reqFiles').value = '';
+    refreshMemories();  // 使用习惯可能新沉淀偏好
     await refreshList(); openTask(data.task_id);
     $('createMsg').textContent = '';
   } catch (e) { $('createMsg').textContent = '失败: ' + e.message; }
@@ -235,6 +312,7 @@ function renderResult(t) {
   return `<div class="panel"><h3>生成结果
       <span class="hint">${r.cases.length} 条 · 评审 ${r.review_rounds} 轮 · ${r.passed?'评审通过':'含未通过项'}${t.revisions.length?' · 已修订 '+t.revisions.length+' 轮':''}</span></h3>
     ${r.blind_spots && r.blind_spots.length ? '<div class="chips">'+r.blind_spots.map(b=>'<span>'+esc(b)+'</span>').join('')+'</div>' : ''}
+    ${t.memories && t.memories.length ? '<div class="chips">'+t.memories.map(m=>'<span>记忆: '+esc(m.content)+'</span>').join('')+'<span class="hint" style="border:none;background:none">（本次生成引用的记忆 F-8-6）</span></div>' : ''}
     <div class="dl" style="margin-top:6px">下载：
       ${Object.keys(t.files||{}).map(f=>`<a href="/api/v1/tasks/${t.task_id}/files/${f}">${f}</a>`).join('')}
     </div>
@@ -322,6 +400,7 @@ async function reviseGo() {
   try {
     await api(`/api/v1/tasks/${currentTask.task_id}/revise`,
       {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({instruction})});
+    refreshMemories();  // 重复修订指令可能沉淀为偏好
     await openTask(currentTask.task_id);
   } catch (e) { alert('修订失败: ' + e.message); }
   $('reviseBtn').disabled = false; $('reviseBtn').textContent = '发送';

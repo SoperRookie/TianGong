@@ -77,6 +77,7 @@ async def run_generation(
     test_points: list[dict] | None = None,
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
+    memory_notes: str | None = None,
 ) -> GenerationResult:
     """执行「拆解 → 生成 → 评审（≤3 轮回环）」全流程。
 
@@ -85,8 +86,10 @@ async def run_generation(
     超长需求自动分片并行处理（F-2-6）。
     test_points 传入已确认的拆解结果（F-3-3）：跳过需求分析，多模块时按模块并行生成。
     knowledge_refs / knowledge_cases：知识管家产出的分类知识（F-7-6 差异化注入时机）。
+    memory_notes：用户偏好与项目记忆（F-8-7），独立预算注入生成 Agent。
     """
-    kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases}
+    kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases,
+          "memory_notes": memory_notes}
     if test_points:
         return await _run_from_points(
             requirement, llm, model, reviewer_model, template, test_points, **kw
@@ -113,9 +116,11 @@ async def _run_from_points(
     test_points: list[dict],
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
+    memory_notes: str | None = None,
 ) -> GenerationResult:
     """从已确认测试点继续：单模块直接生成；多模块按模块并行多实例（PRD 4.1a 并行加速）。"""
-    kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases}
+    kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases,
+          "memory_notes": memory_notes}
     if len(test_points) <= 1:
         return await _run_single(
             requirement, llm, model, reviewer_model, template, test_points=test_points, **kw
@@ -141,8 +146,10 @@ async def _run_single(
     test_points: list[dict] | None = None,
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
+    memory_notes: str | None = None,
 ) -> GenerationResult:
-    graph = build_graph(llm, template, knowledge_refs=knowledge_refs, knowledge_cases=knowledge_cases)
+    graph = build_graph(llm, template, knowledge_refs=knowledge_refs,
+                        knowledge_cases=knowledge_cases, memory_notes=memory_notes)
     initial: dict = {
         "requirement": requirement,
         "model": model,
@@ -177,17 +184,19 @@ async def run_revision(
     test_points: list[dict] | None = None,
     history: list[str] | None = None,
     knowledge_cases: str | None = None,
+    memory_notes: str | None = None,
 ) -> GenerationResult:
     """多轮修订（F-3-5）：用户修订要求作为定点修正问题进入「生成→评审」回环。
 
     增量更新：生成 Agent 走定点修正路径，只改受影响用例，其余原样保留。
     history：本任务此前已应用的修订指令（短期会话记忆 F-8-1），注入保持多轮一致性。
+    memory_notes：用户偏好与项目记忆（F-8-7）。
     """
     problem = f"用户修订要求：{instruction}"
     if history:
         applied = "；".join(history)
         problem += f"\n（此前已应用的修订，保持其效果不被本次修订破坏：{applied}）"
-    graph = build_graph(llm, template, knowledge_cases=knowledge_cases)
+    graph = build_graph(llm, template, knowledge_cases=knowledge_cases, memory_notes=memory_notes)
     initial: dict = {
         "requirement": requirement,
         "model": model,
