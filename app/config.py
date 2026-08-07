@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # 任务队列
     redis_url: str = "redis://localhost:6379/0"
 
+    # 持久化目录：任务产物与应用数据（模板/记忆）；测试经环境变量指向临时目录隔离
+    outputs_dir: Path = BASE_DIR / "outputs"
+    data_dir: Path = BASE_DIR / "data"
+
     # 文件上传限制（F-2-8），单位 MB
     max_upload_size_mb: int = 50
 

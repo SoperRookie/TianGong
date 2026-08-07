@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.agents import run_analysis, run_generation
+from app.agents.json_utils import LLMOutputError
 from app.config import get_settings
 from app.exporters import export_csv, export_excel, export_xmind
 from app.llm.client import AllModelsFailedError
@@ -543,7 +544,7 @@ async def create_task(
         return await _generate()
     except UnknownModelError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except MissingAPIKeyError as e:
+    except (MissingAPIKeyError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     except AllModelsFailedError as e:
         record = TaskRecord(task_id=task_id, status="failed", sources=sources, error=str(e))
@@ -637,7 +638,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
             knowledge_cases=knowledge["cases"],
             memory_notes=memory_notes,
         )
-    except MissingAPIKeyError as e:
+    except (MissingAPIKeyError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     except AllModelsFailedError as e:
         record.status = "failed"
@@ -710,7 +711,7 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
         )
     except UnknownModelError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except (MissingAPIKeyError, AllModelsFailedError) as e:
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     task_dir = store.output_dir / task_id

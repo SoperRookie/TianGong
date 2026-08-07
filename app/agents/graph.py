@@ -29,6 +29,42 @@ def _dump(data) -> str:
     return json.dumps(data, ensure_ascii=False, indent=1)
 
 
+def _compact(data) -> str:
+    """紧凑序列化：用于定点修正时的用例全集（省输入 token，也避免模型模仿缩进格式输出）。"""
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+_CASE_ID_SEQ_RE = re.compile(r"^(.*?)(\d+)\s*$")
+
+
+def renumber_case_ids(cases: list[dict]) -> None:
+    """模块内重编号：保证各模块 case_id 从 001 连续（沿用原编号前缀风格）。"""
+    counters: dict[str, int] = {}
+    for case in cases:
+        module = str(case.get("module", ""))
+        counters[module] = counters.get(module, 0) + 1
+        m = _CASE_ID_SEQ_RE.match(str(case.get("case_id", "")))
+        prefix = m.group(1) if m else f"TC-{module}-"
+        case["case_id"] = f"{prefix}{counters[module]:03d}"
+
+
+def merge_fix(current: list[dict], data: dict) -> list[dict]:
+    """增量合并定点修正结果（PRD 增量更新）：改动用例按 case_id 覆盖原用例，
+    其余原样保留（不依赖模型复述——大用例集下全量回传必然超输出上限）；
+    新增用例追加，deleted 列表删除，最后统一重排编号。"""
+    changed = {str(c.get("case_id")): c for c in data.get("cases", [])}
+    deleted = {str(x) for x in data.get("deleted", [])}
+    merged: list[dict] = []
+    for case in current:
+        case_id = str(case.get("case_id"))
+        if case_id in deleted:
+            continue
+        merged.append(changed.pop(case_id, case))
+    merged.extend(changed.values())  # 剩余为新增用例
+    renumber_case_ids(merged)
+    return merged
+
+
 # 输出被 max_tokens 截断或格式异常时的节点级重试次数
 _JSON_RETRIES = 1
 
@@ -147,9 +183,9 @@ def build_graph(
     async def generate(state: OrchestrationState) -> dict:
         system = GENERATOR_SYSTEM.format(template_spec=template.prompt_spec())
         if state.get("issues"):
-            # 定点修正：携带评审问题与当前用例全集
+            # 定点修正：携带评审问题与当前用例全集（紧凑格式），只回传改动部分
             user = FIX_INSTRUCTION.format(
-                issues=_dump(state["issues"]), cases=_dump(state["cases"])
+                issues=_dump(state["issues"]), cases=_compact(state["cases"])
             )
             action = "定点修正"
         else:
@@ -169,7 +205,8 @@ def build_graph(
             state.get("model"),
         )
         trace = state.get("trace", []) + [{"agent": "用例生成", "action": action, "model": result.model_name}]
-        return {"cases": data.get("cases", []), "trace": trace}
+        cases = merge_fix(state["cases"], data) if action == "定点修正" else data.get("cases", [])
+        return {"cases": cases, "trace": trace}
 
     async def review(state: OrchestrationState) -> dict:
         issues = rule_check(state["cases"], template)
