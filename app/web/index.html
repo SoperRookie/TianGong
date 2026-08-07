@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TestCase Agent</title>
+<style>
+:root { --primary:#2f5aa8; --bg:#f5f6f8; --border:#dde1e6; --danger:#c0392b; --ok:#1e8449; }
+* { box-sizing:border-box; }
+body { margin:0; font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:#222; }
+header { background:var(--primary); color:#fff; padding:10px 20px; font-size:17px; font-weight:600; }
+header small { font-weight:400; opacity:.8; margin-left:10px; }
+.layout { display:flex; gap:14px; padding:14px; align-items:flex-start; }
+.panel { background:#fff; border:1px solid var(--border); border-radius:8px; padding:14px; }
+.left { width:360px; flex-shrink:0; display:flex; flex-direction:column; gap:14px; }
+.right { flex:1; min-width:0; display:flex; flex-direction:column; gap:14px; }
+h3 { margin:0 0 10px; font-size:15px; }
+label { display:block; margin:8px 0 2px; color:#555; }
+textarea,input[type=text],select { width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:5px; font:inherit; }
+textarea { resize:vertical; }
+button { padding:6px 14px; border:none; border-radius:5px; background:var(--primary); color:#fff; cursor:pointer; font:inherit; }
+button.secondary { background:#eef1f5; color:#333; }
+button.danger { background:var(--danger); }
+button:disabled { opacity:.5; cursor:not-allowed; }
+.task-item { padding:8px 10px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; }
+.task-item:hover { border-color:var(--primary); }
+.task-item.active { border-color:var(--primary); background:#eef3fb; }
+.task-item .tid { font-family:monospace; font-size:12px; color:#666; }
+.status { display:inline-block; padding:0 8px; border-radius:9px; font-size:12px; color:#fff; }
+.status.completed { background:var(--ok); } .status.failed { background:var(--danger); }
+.status.running,.status.queued { background:#c98a1b; } .status.awaiting_confirmation { background:#7d3c98; }
+table { width:100%; border-collapse:collapse; margin-top:8px; }
+th,td { border:1px solid var(--border); padding:5px 8px; text-align:left; vertical-align:top; font-size:13px; }
+th { background:#f0f2f5; }
+td.steps { white-space:pre-wrap; font-size:12px; color:#444; }
+.prio { font-weight:600; }
+.prio.P0 { color:#c0392b; } .prio.P1 { color:#ca6f1e; } .prio.P2 { color:#b7950b; } .prio.P3 { color:#7f8c8d; }
+.row-deleted { opacity:.45; text-decoration:line-through; }
+.row-modified { background:#fdf6e3; }
+.hint { color:#777; font-size:12px; }
+.chips span { display:inline-block; background:#fbeee6; border:1px solid #eccb9d; border-radius:4px; padding:1px 8px; margin:2px; font-size:12px; }
+.chat { max-height:220px; overflow:auto; border:1px solid var(--border); border-radius:6px; padding:8px; background:#fafbfc; }
+.chat .msg { margin:4px 0; } .chat .me { color:var(--primary); }
+.dl a { margin-right:12px; }
+.toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+dialog { border:1px solid var(--border); border-radius:8px; width:520px; max-width:90vw; }
+dialog h3 { margin-top:0; }
+.spin { display:inline-block; width:12px; height:12px; border:2px solid #ccc; border-top-color:var(--primary); border-radius:50%; animation:sp 1s linear infinite; vertical-align:-2px; }
+@keyframes sp { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>TestCase Agent<small>AI 测试用例生成平台（M4 试点版）</small></header>
+<div class="layout">
+  <div class="left">
+    <div class="panel">
+      <h3>新建任务</h3>
+      <label>需求文本（可与文件混合提交）</label>
+      <textarea id="reqText" rows="5" placeholder="粘贴需求内容…"></textarea>
+      <label>需求文件（PDF / Word / 图片 / 文本，可多选）</label>
+      <input type="file" id="reqFiles" multiple>
+      <label>生成模型 / 评审模型</label>
+      <div style="display:flex;gap:6px">
+        <select id="modelSel"></select><select id="reviewerSel"></select>
+      </div>
+      <label>用例模板</label>
+      <select id="templateSel"></select>
+      <div class="toolbar">
+        <label style="margin:0"><input type="checkbox" id="confirmPoints"> 先确认测试点</label>
+        <label style="margin:0"><input type="checkbox" id="asyncMode" checked> 后台执行</label>
+      </div>
+      <div class="toolbar">
+        <button id="createBtn" onclick="createTask()">生成测试用例</button>
+        <span id="createMsg" class="hint"></span>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>任务列表 <span id="listSpin"></span></h3>
+      <div id="taskList"></div>
+    </div>
+  </div>
+  <div class="right" id="detail">
+    <div class="panel hint">选择或创建一个任务查看详情</div>
+  </div>
+</div>
+
+<dialog id="editDlg">
+  <h3>修改用例 <span id="editCaseId" class="hint"></span></h3>
+  <label>标题</label><input type="text" id="eTitle">
+  <label>优先级</label>
+  <select id="ePrio"><option>P0</option><option>P1</option><option>P2</option><option>P3</option></select>
+  <label>前置条件</label><input type="text" id="ePre">
+  <label>测试步骤（每行一步：动作 =&gt; 预期）</label>
+  <textarea id="eSteps" rows="5"></textarea>
+  <label>备注</label><input type="text" id="eRemark">
+  <label>反馈（可选，说明修改原因）</label><input type="text" id="eFeedback">
+  <div class="toolbar">
+    <button onclick="saveEdit()">确定</button>
+    <button class="secondary" onclick="document.getElementById('editDlg').close()">取消</button>
+  </div>
+</dialog>
+
+<script>
+const $ = id => document.getElementById(id);
+let currentTask = null;        // 当前选中任务详情
+let pendingReview = {};        // case_id -> {action, case?, feedback}
+let editingCase = null;
+
+async function api(path, opts) {
+  const resp = await fetch(path, opts);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.detail || resp.statusText);
+  return data;
+}
+
+/* ---- 初始化：模型与模板下拉 ---- */
+async function init() {
+  const m = await api('/api/v1/models');
+  for (const sel of [$('modelSel'), $('reviewerSel')]) {
+    sel.innerHTML = '';
+    sel.add(new Option(sel === $('modelSel') ? '生成:默认' : '评审:同生成', ''));
+    m.models.forEach(x => sel.add(new Option(x.name, x.name)));
+  }
+  const t = await api('/api/v1/templates');
+  $('templateSel').innerHTML = '';
+  t.templates.forEach(x => $('templateSel').add(
+    new Option(x.name + (x.template_id === t.default_id ? '（默认）' : ''), x.template_id)));
+  $('templateSel').value = t.default_id;
+  refreshList();
+  setInterval(refreshList, 3000);
+}
+
+/* ---- 任务列表轮询 ---- */
+async function refreshList() {
+  const data = await api('/api/v1/tasks');
+  $('listSpin').innerHTML = data.tasks.some(t => ['queued','running'].includes(t.status)) ? '<span class="spin"></span>' : '';
+  $('taskList').innerHTML = data.tasks.map(t => `
+    <div class="task-item ${currentTask && currentTask.task_id===t.task_id?'active':''}" onclick="openTask('${t.task_id}')">
+      <div><span class="status ${t.status}">${statusText(t.status)}</span>
+        ${t.progress?'<span class="hint">'+progressText(t.progress)+'</span>':''}
+        <span style="float:right" class="hint">${t.case_count?t.case_count+' 条用例':''}</span></div>
+      <div class="tid">${t.task_id} · ${(t.sources||[]).map(shortName).join(', ')||'-'}</div>
+    </div>`).join('') || '<div class="hint">暂无任务</div>';
+  // 进行中任务自动刷新详情
+  if (currentTask && ['queued','running'].includes(currentTask.status)) openTask(currentTask.task_id, true);
+}
+const statusText = s => ({completed:'完成', failed:'失败', running:'执行中', queued:'排队中', awaiting_confirmation:'待确认'}[s]||s);
+const progressText = p => ({analyzing:'需求分析', generating_reviewing:'生成与评审', exporting:'导出'}[p]||p);
+const shortName = s => s.length>18 ? s.slice(0,15)+'…' : s;
+const esc = s => String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ---- 创建任务 ---- */
+async function createTask() {
+  const fd = new FormData();
+  fd.append('text', $('reqText').value);
+  for (const f of $('reqFiles').files) fd.append('files', f);
+  if ($('modelSel').value) fd.append('model', $('modelSel').value);
+  if ($('reviewerSel').value) fd.append('reviewer_model', $('reviewerSel').value);
+  fd.append('template_id', $('templateSel').value);
+  fd.append('confirm_points', $('confirmPoints').checked);
+  fd.append('async_mode', $('asyncMode').checked && !$('confirmPoints').checked);
+  $('createBtn').disabled = true;
+  $('createMsg').innerHTML = '<span class="spin"></span> 提交中（含文档解析，图片较多时耗时更长）…';
+  try {
+    const data = await api('/api/v1/tasks', {method:'POST', body:fd});
+    $('reqText').value = ''; $('reqFiles').value = '';
+    await refreshList(); openTask(data.task_id);
+    $('createMsg').textContent = '';
+  } catch (e) { $('createMsg').textContent = '失败: ' + e.message; }
+  $('createBtn').disabled = false;
+}
+
+/* ---- 任务详情 ---- */
+async function openTask(id, keepReview) {
+  currentTask = await api('/api/v1/tasks/' + id);
+  if (!keepReview) pendingReview = {};
+  renderDetail();
+  refreshList();
+}
+
+function renderDetail() {
+  const t = currentTask;
+  let html = `<div class="panel"><h3>任务 <code>${t.task_id}</code>
+    <span class="status ${t.status}">${statusText(t.status)}</span>
+    ${t.progress?'<span class="hint"> '+progressText(t.progress)+' <span class="spin"></span></span>':''}</h3>
+    <div class="hint">来源：${(t.sources||[]).map(esc).join('、')||'-'} · 创建于 ${t.created_at||''}</div>
+    ${t.error?'<p style="color:var(--danger)">'+esc(t.error)+'</p>':''}</div>`;
+
+  if (t.status === 'awaiting_confirmation') html += renderConfirm(t);
+  if (t.result && t.result.cases && t.result.cases.length) html += renderResult(t);
+  $('detail').innerHTML = html;
+}
+
+/* 拆解确认视图（F-3-3） */
+function renderConfirm(t) {
+  const a = t.analysis || {};
+  return `<div class="panel"><h3>测试点拆解（确认后开始生成）</h3>
+    <textarea id="pointsEdit" rows="10">${esc(JSON.stringify(a.test_points, null, 1))}</textarea>
+    ${a.blind_spots && a.blind_spots.length ? '<label>疑似需求盲区</label><div class="chips">' +
+      a.blind_spots.map(b=>'<span>'+esc(b)+'</span>').join('')+'</div>' : ''}
+    <div class="toolbar"><button onclick="confirmPointsGo()">确认并生成用例</button>
+      <span class="hint">可直接编辑上方 JSON 调整测试点</span></div></div>`;
+}
+async function confirmPointsGo() {
+  let points;
+  try { points = JSON.parse($('pointsEdit').value); } catch { return alert('测试点 JSON 格式有误'); }
+  const btns = document.querySelectorAll('#detail button'); btns.forEach(b=>b.disabled=true);
+  try {
+    await api(`/api/v1/tasks/${currentTask.task_id}/confirm`,
+      {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({test_points:points})});
+    openTask(currentTask.task_id);
+  } catch (e) { alert('生成失败: '+e.message); btns.forEach(b=>b.disabled=false); }
+}
+
+/* 结果视图：用例表 + 评审操作 + 修订对话 + 下载 + 终稿上传 */
+function renderResult(t) {
+  const r = t.result;
+  const rows = r.cases.map(c => {
+    const p = pendingReview[c.case_id];
+    const cls = p ? (p.action==='delete'?'row-deleted':p.action==='modify'?'row-modified':'') : '';
+    const view = p && p.action==='modify' ? p.case : c;
+    return `<tr class="${cls}">
+      <td>${esc(view.case_id)}</td><td>${esc(view.module)}</td>
+      <td>${esc(view.title)}${p?'<div class="hint">['+({accept:'已采纳',modify:'已修改',delete:'待删除'}[p.action])+']</div>':''}</td>
+      <td class="prio ${esc(view.priority)}">${esc(view.priority)}</td>
+      <td class="steps">${(view.steps||[]).map((s,i)=>`${i+1}. ${esc(s.action)}\n   → ${esc(s.expected)}`).join('\n')}</td>
+      <td style="white-space:nowrap">
+        <button class="secondary" onclick="mark('${esc(c.case_id)}','accept')">采纳</button>
+        <button class="secondary" onclick="openEdit('${esc(c.case_id)}')">修改</button>
+        <button class="secondary" onclick="mark('${esc(c.case_id)}','delete')">删除</button>
+      </td></tr>`;
+  }).join('');
+
+  const pendingCount = Object.keys(pendingReview).length;
+  return `<div class="panel"><h3>生成结果
+      <span class="hint">${r.cases.length} 条 · 评审 ${r.review_rounds} 轮 · ${r.passed?'评审通过':'含未通过项'}${t.revisions.length?' · 已修订 '+t.revisions.length+' 轮':''}</span></h3>
+    ${r.blind_spots && r.blind_spots.length ? '<div class="chips">'+r.blind_spots.map(b=>'<span>'+esc(b)+'</span>').join('')+'</div>' : ''}
+    <div class="dl" style="margin-top:6px">下载：
+      ${Object.keys(t.files||{}).map(f=>`<a href="/api/v1/tasks/${t.task_id}/files/${f}">${f}</a>`).join('')}
+    </div>
+    <table><tr><th>编号</th><th>模块</th><th>标题</th><th>优先级</th><th>步骤 → 预期</th><th>评审</th></tr>${rows}</table>
+    <div class="toolbar">
+      <button ${pendingCount?'':'disabled'} onclick="submitReview()">提交评审（${pendingCount} 条留痕）</button>
+      <span class="hint">逐条采纳/修改/删除将留痕并按终稿重导出（F-6-6）</span>
+    </div></div>
+
+    <div class="panel"><h3>对话修订</h3>
+    <div class="chat">${
+      t.revisions.map(r=>`<div class="msg"><span class="me">我：</span>${esc(r.instruction)}</div>
+        <div class="msg">已应用（${r.case_count} 条用例，评审 ${r.review_rounds} 轮）</div>`).join('')
+      || '<div class="hint">输入修订要求，例如：把限红相关用例优先级调整为 P0</div>'}</div>
+    <div class="toolbar">
+      <input type="text" id="reviseInput" placeholder="输入修订要求…" style="flex:1"
+        onkeydown="if(event.key==='Enter')reviseGo()">
+      <button onclick="reviseGo()" id="reviseBtn">发送</button>
+    </div></div>
+
+    <div class="panel"><h3>离线终稿回传（F-6-8）</h3>
+    <div class="toolbar">
+      <input type="file" id="finalFile" accept=".xlsx,.csv,.xmind">
+      <button class="secondary" onclick="uploadFinal()">上传并对比</button>
+    </div>
+    ${t.offline_review ? renderDiff(t.offline_review) : '<div class="hint">下载导出文件离线评审后，回传定稿自动计算差异，作为学习语料</div>'}
+    </div>`;
+}
+
+function renderDiff(o) {
+  const s = o.stats;
+  return `<div style="margin-top:8px">
+    <b>${esc(o.filename)}</b> 对比结果：完全采纳率 <b>${(s.adoption_rate*100).toFixed(1)}%</b>
+    （新增 ${s.added} / 删除 ${s.deleted} / 修改 ${s.modified} / 未改动 ${s.unchanged}）
+    <div class="chips">
+      ${o.added.map(x=>'<span>新增: '+esc(x.title)+'</span>').join('')}
+      ${o.deleted.map(x=>'<span>删除: '+esc(x.title)+'</span>').join('')}
+      ${o.modified.map(x=>'<span>修改: '+esc(x.title)+'（'+x.changes.map(c=>esc(c.field)).join('/')+'）</span>').join('')}
+    </div></div>`;
+}
+
+/* ---- 在线评审操作 ---- */
+function mark(caseId, action) {
+  pendingReview[caseId] = {action, feedback: ''};
+  renderDetail();
+}
+function openEdit(caseId) {
+  editingCase = currentTask.result.cases.find(c => c.case_id === caseId);
+  const p = pendingReview[caseId];
+  const c = p && p.action==='modify' ? p.case : editingCase;
+  $('editCaseId').textContent = caseId;
+  $('eTitle').value = c.title; $('ePrio').value = c.priority;
+  $('ePre').value = c.precondition; $('eRemark').value = c.remark || '';
+  $('eSteps').value = (c.steps||[]).map(s=>`${s.action} => ${s.expected}`).join('\n');
+  $('eFeedback').value = p ? p.feedback : '';
+  $('editDlg').showModal();
+}
+function saveEdit() {
+  const steps = $('eSteps').value.split('\n').filter(l=>l.trim()).map(l=>{
+    const [action, expected=''] = l.split('=>');
+    return {action: action.trim(), expected: expected.trim()};
+  });
+  pendingReview[editingCase.case_id] = {action:'modify', feedback:$('eFeedback').value, case:{
+    ...editingCase, title:$('eTitle').value, priority:$('ePrio').value,
+    precondition:$('ePre').value, remark:$('eRemark').value, steps
+  }};
+  $('editDlg').close(); renderDetail();
+}
+async function submitReview() {
+  const items = Object.entries(pendingReview).map(([case_id, v]) => ({case_id, ...v}));
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/review`,
+      {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({items})});
+    pendingReview = {};
+    await openTask(currentTask.task_id);
+    alert(`评审已留痕：采纳 ${data.review.accept} / 修改 ${data.review.modify} / 删除 ${data.review.delete}`);
+  } catch (e) { alert('提交失败: ' + e.message); }
+}
+
+/* ---- 对话修订 ---- */
+async function reviseGo() {
+  const instruction = $('reviseInput').value.trim();
+  if (!instruction) return;
+  $('reviseBtn').disabled = true; $('reviseBtn').innerHTML = '<span class="spin"></span>';
+  try {
+    await api(`/api/v1/tasks/${currentTask.task_id}/revise`,
+      {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({instruction})});
+    await openTask(currentTask.task_id);
+  } catch (e) { alert('修订失败: ' + e.message); }
+  $('reviseBtn').disabled = false; $('reviseBtn').textContent = '发送';
+}
+
+/* ---- 终稿上传 ---- */
+async function uploadFinal() {
+  const f = $('finalFile').files[0];
+  if (!f) return alert('请选择终稿文件');
+  const fd = new FormData(); fd.append('file', f);
+  try {
+    await api(`/api/v1/tasks/${currentTask.task_id}/final`, {method:'POST', body:fd});
+    openTask(currentTask.task_id);
+  } catch (e) { alert('上传失败: ' + e.message); }
+}
+
+init();
+</script>
+</body>
+</html>

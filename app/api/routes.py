@@ -637,6 +637,111 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
     return response
 
 
+class ReviewItem(BaseModel):
+    case_id: str
+    action: str  # accept / modify / delete
+    case: dict | None = None  # modify 时提交修改后的完整用例
+    feedback: str = ""  # 一键反馈：问题类型或意见（学习语料）
+
+
+class ReviewBody(BaseModel):
+    items: list[ReviewItem]
+
+
+@router.post("/api/v1/tasks/{task_id}/review")
+async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
+    """在线评审留痕（F-6-6）：逐条采纳/修改/删除 + 一键反馈，按终稿重导出。
+
+    留痕（含修改前后对照与反馈）是学习 Agent 归因与 Prompt 优化的核心语料。
+    """
+    from app.agents import GenerationResult
+    from app.agents.service import _renumber
+    from app.templates import TestCase
+
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if record.status != "completed" or not (record.result or {}).get("cases"):
+        raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可评审的用例结果")
+
+    cases: list[dict] = list(record.result["cases"])
+    by_id = {str(c.get("case_id")): c for c in cases}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    counts = {"accept": 0, "modify": 0, "delete": 0}
+    for item in body.items:
+        origin = by_id.get(item.case_id)
+        if origin is None:
+            raise HTTPException(status_code=400, detail=f"用例不存在: {item.case_id}")
+        entry: dict = {"case_id": item.case_id, "action": item.action, "feedback": item.feedback, "at": now}
+        if item.action == "accept":
+            pass
+        elif item.action == "delete":
+            entry["before"] = origin
+            cases.remove(origin)
+        elif item.action == "modify":
+            if not item.case:
+                raise HTTPException(status_code=400, detail=f"修改操作需提交 case 字段: {item.case_id}")
+            try:
+                updated = TestCase.model_validate(item.case).model_dump()
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"修改后的用例不合法: {e}")
+            entry["before"], entry["after"] = origin, updated
+            cases[cases.index(origin)] = updated
+            by_id[item.case_id] = updated
+        else:
+            raise HTTPException(status_code=400, detail=f"未知评审操作: {item.action}（可用 accept/modify/delete）")
+        counts[item.action] += 1
+        record.review_log.append(entry)
+
+    # 删除后重排各模块编号，按终稿重导出
+    result = GenerationResult.model_validate({**record.result, "cases": cases})
+    _renumber(result.cases)
+    task_dir = store.output_dir / task_id
+    response = _finalize_task(store, task_id, task_dir, record.sources, result,
+                              request.app.state.templates.get((record.context or {}).get("template_id")))
+    response["review"] = {**counts, "log_entries": len(record.review_log)}
+    return response
+
+
+@router.post("/api/v1/tasks/{task_id}/final")
+async def upload_final_cases(
+    request: Request, task_id: str, file: UploadFile = File(...)
+) -> dict:
+    """离线评审终稿回传（F-6-8）：上传人工定稿文件，与生成结果做字段级 diff 留痕。
+
+    与在线评审（F-6-6）构成评审闭环双通道，diff 是离线通道的学习语料入口。
+    """
+    from app.knowledge.importers import CaseImportError, parse_cases_file
+    from app.tasks.diff import diff_cases
+
+    settings = get_settings()
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if not (record.result or {}).get("cases"):
+        raise HTTPException(status_code=409, detail="任务无生成结果，无法对比终稿")
+
+    saved = await _read_upload(
+        file, store.output_dir / task_id / "final", settings.max_upload_size_mb * 1024 * 1024
+    )
+    try:
+        final_cases = parse_cases_file(saved)
+    except CaseImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    diff = diff_cases(record.result["cases"], final_cases)
+    record.offline_review = {
+        "filename": file.filename,
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        **diff,
+    }
+    store.save(record)
+    return {"task_id": task_id, "stats": diff["stats"], "added": diff["added"],
+            "deleted": diff["deleted"], "modified": diff["modified"]}
+
+
 @router.get("/api/v1/tasks")
 async def list_tasks(request: Request, status: str | None = None, limit: int = 50) -> dict:
     """任务列表（F-6-1）：倒序返回任务概要，供任务管理界面轮询。"""
