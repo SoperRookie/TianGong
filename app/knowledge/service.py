@@ -40,6 +40,17 @@ class KnowledgeService:
         parsed = parse_text(text)
         return await self._ingest(parsed.full_text, source=source, category=category, space=space)
 
+    async def ingest_cases(self, path: str | Path, space: str = DEFAULT_SPACE) -> KnowledgeDoc:
+        """历史用例入库（F-7-2）：Excel/CSV/XMind → 测试用例库，每条用例一个切片。"""
+        from app.knowledge.importers import parse_cases_file, render_case_chunk
+
+        path = Path(path)
+        chunks = [render_case_chunk(c) for c in parse_cases_file(path)]
+        vectors = await self.embedder.embed(chunks)
+        record = self._new_doc(source=path.name, category="test_cases", space=space, chunk_count=len(chunks))
+        self.store.upsert_chunks(record, chunks, vectors)
+        return record
+
     async def _ingest(self, text: str, source: str, category: str, space: str) -> KnowledgeDoc:
         if category not in CATEGORIES:
             raise InvalidCategoryError(category)
@@ -47,17 +58,20 @@ class KnowledgeService:
         if not chunks:
             raise ValueError(f"文档 {source} 无有效内容，未入库")
         vectors = await self.embedder.embed(chunks)
-        record = KnowledgeDoc(
+        record = self._new_doc(source=source, category=category, space=space, chunk_count=len(chunks))
+        self.store.upsert_chunks(record, chunks, vectors)
+        return record
+
+    def _new_doc(self, source: str, category: str, space: str, chunk_count: int) -> KnowledgeDoc:
+        return KnowledgeDoc(
             doc_id=uuid.uuid4().hex[:12],
             space=space,
             category=category,
             source=source,
-            chunk_count=len(chunks),
+            chunk_count=chunk_count,
             embedding_model=self.embedder.registry.default_embedding,
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
-        self.store.upsert_chunks(record, chunks, vectors)
-        return record
 
     async def search(
         self,
