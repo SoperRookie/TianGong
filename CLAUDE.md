@@ -8,13 +8,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目状态
 
-**尚未开始编码。** 本仓库（tiangong）目前只包含"AI 测试用例生成 Agent（TestCase Agent）"项目的需求与设计文档，全部为中文。开工日为 2026-07-13，代码实现将按 M1–M6 里程碑逐步落地。所有文档与后续开发沟通均使用中文。
+本仓库（tiangong）是"AI 测试用例生成 Agent（TestCase Agent）"项目，2026-07-13 开工，按 M1–M6 里程碑推进。**截至 2026-08-07：M1（多 Agent 最小集 + 基础链路）与 M2（XMind 导出、自定义模板、图片多模态、大文档分片、测试点拆解确认）功能已完成，进度领先排期约 2 周。** 下一里程碑为 M3（业务知识库 RAG + 知识管家 Agent，排期 08-24 起），其硬前置 **POC-R8 Embedding 选型（截止 08-21）尚未启动**，首批知识语料也待需求方提供。所有文档与开发沟通均使用中文。
 
 核心文档：
 
 - `docs/AI测试用例生成Agent需求文档.md` — PRD V2.1（多 Agent 架构版），是本项目的唯一需求来源。功能需求编号形如 F-x-y（如 F-7-3b），风险项编号形如 Rx，实现任何功能前先查对应条目。
 - `docs/项目排期计划.md` — M1–M6 周级排期、POC 并行线、前置阻塞项。
 - `docs/architecture/` — 4 张 PlantUML 架构图（.puml 源文件 + 预渲染 .svg/.png）：系统总体架构、多 Agent 编排流程、核心任务时序图、部署架构图。修改 .puml 后需重新渲染：`plantuml -tsvg *.puml`（或粘贴到 plantuml.com 校验）。
+- `docs/xq/` — 本地内部需求 PDF（实测语料），**已在 .gitignore 中排除，不入库**。
 - `docs/architecture/测试用例模版.xmind` — 团队实际用例模板样例（R1 已交付），XMind 2020+ ZEN 格式（zip 内含 content.json）。实现 F-5-1 XMind 输出时以此为准，其结构与 PRD 默认设定有差异：层级为「项目名称 → 一级功能模块 → 二级功能模块 → 测试点/用例标题 → 测试步骤 → 预期结果（步骤的子节点）」；优先级用节点 labels 承载；前置条件放在用例标题节点的 notes（备注）中，不是独立节点。**优先级已确认统一为 4 级 P0–P3**（2026-07-10 决策）：模板样例中出现的 p4 合并入 P3，内置默认模板与覆盖度统计均按 4 级设计；用户自定义模板若使用其他枚举，按 F-4-1/F-4-3 的自定义枚举处理。
 
 ## 系统架构（PRD 已锁定的设计决策）
@@ -39,11 +40,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 自我学习三重防护不可裁剪（R11）：黄金评估集强制回归、重大变更管理员审批、Prompt 版本化可回滚。
 - 评审闭环双通道（在线评审留痕 F-6-6 + 离线终稿回传 diff F-6-8）是度量与学习数据飞轮的前提，不可只做其一。
 
-**模型接入（2026-07-10 决策）**：**首期不使用 GPU/私有化部署，所有模型（LLM 与 Embedding）均为外部采购 API；后期计划用 Ollama/vLLM 部署私有化大模型接入**（两者均提供 OpenAI 兼容接口，届时在模型配置文件中新增条目即可，架构上不得写死"仅外部 API"的假设）。首期影响：Embedding 走商用 API（DeepSeek 无 Embedding API，需另选如阿里云/智谱/OpenAI，POC-R8 首轮改为商用 API 间对比）；模型微调 F-9-6 推迟至私有化模型落地后再评估；部署架构首期无 GPU 层但保留扩展位；首期全部数据经外部 API 传输，涉密兜底（限用内部模型）待私有化落地后才可用，合规口径需与安全方确认。首期使用**采购的 DeepSeek 商用 token** 作为默认模型；LLM 适配层从第一版起就按多厂商设计——模型清单放在配置文件中（每个模型条目含 provider、base_url、api_key、model 名称、temperature、max_tokens、超时、是否支持 Vision 等，OpenAI 兼容协议，密钥不落明文），新增厂商只改配置不改代码。注意 DeepSeek 当前不具备 Vision 能力，图片类需求解析（F-2-3）需等接入多模态模型后启用，或先走 OCR 兜底链路。
+**模型接入（2026-07-10 决策，2026-08 已部分演进）**：LLM 适配层按多厂商设计——模型清单在 `config/models.yaml`（每条目含 provider、base_url、api_key_env、model、temperature、max_tokens、超时、supports_vision、fallbacks，OpenAI 兼容协议，密钥走环境变量/.env 不落明文），新增厂商只改配置不改代码。当前实际接入：**默认文本模型为采购的 DeepSeek 商用 token**（deepseek-chat，降级 deepseek-reasoner）；**Vision 已提前接入私有化模型**——内网 Ollama 部署的 qwen3-vl:30b（Windows + RTX 4090，派生别名 `qwen3-vl-16k` 固化 16K 上下文），图片类需求解析（F-2-3）已启用，图片自动路由至 Vision 模型（F-1-5）。原"首期全外部 API"的决策仅剩 Embedding 未定：DeepSeek 无 Embedding API，需另选商用 API 或私有化 bge/m3e，以 POC-R8 结论为准。模型微调 F-9-6 仍推迟；涉密兜底（限用内部模型）合规口径需与安全方确认；架构上不得写死"仅外部 API"或"仅私有化"的假设。
 
 **技术栈（PRD 第 7 章建议选型）**：Python 3.12 + FastAPI、LangGraph 编排、LiteLLM/自研 LLM 适配层（统一 OpenAI 兼容协议，需支持私有化 vLLM/Ollama 与商用 token 两类来源、Vision 能力标识）、Milvus/Qdrant + Elasticsearch 混合检索、bge/m3e Embedding、Celery + Redis 任务队列、openpyxl 生成 Excel、XMind ZEN 格式（zip + content.json）生成脑图、Vue3/React 前端、Docker + K8s 部署。
 
-## 环境
+## 工程与环境
 
-- 仓库根目录已有 `.venv`（CPython 3.12），尚无 `pyproject.toml`/依赖清单——开始编码时需先建立工程脚手架（M1-W1：FastAPI + LangGraph + Celery）。
+- Python 3.12 + `.venv`，依赖清单在 `pyproject.toml`（FastAPI、LangGraph、Celery、PyMuPDF、openpyxl 等；dev 组含 pytest）。
+- 启动服务：`uvicorn app.main:app --reload`；运行测试：`pytest`（tests/ 下按模块分文件，LLM 调用用 stubs 隔离）。
+- 代码结构（`app/`）：`llm/`（多厂商适配层：registry + client，重试与降级）、`parsers/`（text/docx/pdf/image、分片 chunking、图文混排 enrich）、`agents/`（LangGraph 三角色编排 graph/state/prompts/service）、`templates/`（内置默认模板 + 自定义模板识别与模板库）、`exporters/`（xmind ZEN 格式 + Excel/CSV tabular）、`tasks/`（任务存储）、`api/`（FastAPI 路由）。
+- 模型配置：`config/models.yaml`；密钥经 `.env` 加载，不入库。POC 脚本在 `scripts/`（prompt_poc、vision_poc）。
 - 分支：日常开发在 `dev`，PR 目标分支为 `main`。
