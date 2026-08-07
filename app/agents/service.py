@@ -41,12 +41,16 @@ async def run_analysis(
     llm: LLMClient,
     model: str | None = None,
     chunk_max_chars: int | None = None,
+    knowledge_cases: str | None = None,
 ) -> AnalysisResult:
-    """仅执行需求分析（拆解确认流程 F-3-3 第一阶段）；超长需求分片并行拆解后合并。"""
+    """仅执行需求分析（拆解确认流程 F-3-3 第一阶段）；超长需求分片并行拆解后合并。
+
+    knowledge_cases：历史用例知识（知识管家在拆解阶段注入，覆盖度查漏）。
+    """
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     chunks = split_text(requirement, chunk_max_chars)
     analyses = await asyncio.gather(
-        *[analyze_requirement(llm, chunk, model) for chunk in chunks]
+        *[analyze_requirement(llm, chunk, model, knowledge_cases=knowledge_cases) for chunk in chunks]
     )
     module_points: dict[str, list[str]] = {}
     blind_spots: list[str] = []
@@ -71,6 +75,8 @@ async def run_generation(
     template: CustomTemplate | None = None,
     chunk_max_chars: int | None = None,
     test_points: list[dict] | None = None,
+    knowledge_refs: str | None = None,
+    knowledge_cases: str | None = None,
 ) -> GenerationResult:
     """执行「拆解 → 生成 → 评审（≤3 轮回环）」全流程。
 
@@ -78,17 +84,21 @@ async def run_generation(
     template 为自定义用例模板，缺省用内置默认模板（F-4-2）。
     超长需求自动分片并行处理（F-2-6）。
     test_points 传入已确认的拆解结果（F-3-3）：跳过需求分析，多模块时按模块并行生成。
+    knowledge_refs / knowledge_cases：知识管家产出的分类知识（F-7-6 差异化注入时机）。
     """
+    kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases}
     if test_points:
-        return await _run_from_points(requirement, llm, model, reviewer_model, template, test_points)
+        return await _run_from_points(
+            requirement, llm, model, reviewer_model, template, test_points, **kw
+        )
 
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     chunks = split_text(requirement, chunk_max_chars)
     if len(chunks) == 1:
-        return await _run_single(requirement, llm, model, reviewer_model, template)
+        return await _run_single(requirement, llm, model, reviewer_model, template, **kw)
 
     outcomes = await asyncio.gather(
-        *[_run_single(chunk, llm, model, reviewer_model, template) for chunk in chunks],
+        *[_run_single(chunk, llm, model, reviewer_model, template, **kw) for chunk in chunks],
         return_exceptions=True,
     )
     return _merge(outcomes)
@@ -101,15 +111,18 @@ async def _run_from_points(
     reviewer_model: str | None,
     template: CustomTemplate | None,
     test_points: list[dict],
+    knowledge_refs: str | None = None,
+    knowledge_cases: str | None = None,
 ) -> GenerationResult:
     """从已确认测试点继续：单模块直接生成；多模块按模块并行多实例（PRD 4.1a 并行加速）。"""
+    kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases}
     if len(test_points) <= 1:
         return await _run_single(
-            requirement, llm, model, reviewer_model, template, test_points=test_points
+            requirement, llm, model, reviewer_model, template, test_points=test_points, **kw
         )
     outcomes = await asyncio.gather(
         *[
-            _run_single(requirement, llm, model, reviewer_model, template, test_points=[tp])
+            _run_single(requirement, llm, model, reviewer_model, template, test_points=[tp], **kw)
             for tp in test_points
         ],
         return_exceptions=True,
@@ -126,8 +139,10 @@ async def _run_single(
     reviewer_model: str | None,
     template: CustomTemplate | None,
     test_points: list[dict] | None = None,
+    knowledge_refs: str | None = None,
+    knowledge_cases: str | None = None,
 ) -> GenerationResult:
-    graph = build_graph(llm, template)
+    graph = build_graph(llm, template, knowledge_refs=knowledge_refs, knowledge_cases=knowledge_cases)
     initial: dict = {
         "requirement": requirement,
         "model": model,

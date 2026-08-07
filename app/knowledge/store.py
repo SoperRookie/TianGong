@@ -138,6 +138,42 @@ class KnowledgeStore:
             for p in result.points
         ]
 
+    def iter_chunks(
+        self, category: str | None = None, space: str | None = None
+    ) -> list[SearchHit]:
+        """遍历范围内全部切片（关键词侧检索用）。当前规模全量扫描可行；
+        语料到万级后关键词侧迁移 Elasticsearch（PRD 选型），此接口即废弃。"""
+        conditions = []
+        if category:
+            conditions.append(FieldCondition(key="category", match=MatchValue(value=category)))
+        if space:
+            conditions.append(FieldCondition(key="space", match=MatchValue(value=space)))
+        hits: list[SearchHit] = []
+        offset = None
+        while True:
+            points, offset = self._client.scroll(
+                collection_name=_COLLECTION,
+                scroll_filter=Filter(must=conditions) if conditions else None,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            hits.extend(
+                SearchHit(
+                    text=p.payload["text"],
+                    score=0.0,
+                    doc_id=p.payload["doc_id"],
+                    source=p.payload["source"],
+                    category=p.payload["category"],
+                    space=p.payload["space"],
+                    chunk_index=p.payload["chunk_index"],
+                )
+                for p in points
+            )
+            if offset is None:
+                return hits
+
     def delete_doc(self, doc_id: str) -> bool:
         if doc_id not in self._docs:
             return False

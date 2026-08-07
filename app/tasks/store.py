@@ -19,6 +19,7 @@ class TaskRecord(BaseModel):
     files: dict[str, str] = Field(default_factory=dict)  # 格式 -> 文件路径
     analysis: dict | None = Field(default=None, description="拆解确认阶段的分析结果（F-3-3）")
     context: dict | None = Field(default=None, description="待确认任务的生成上下文（需求文本/模型/模板）")
+    knowledge: list[dict] = Field(default_factory=list, description="知识快照（F-7-13）：本次任务注入的知识切片留痕")
 
 
 class TaskStore:

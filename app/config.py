@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     knowledge_dir: Path = BASE_DIR / "data" / "knowledge"
     knowledge_chunk_chars: int = 600
 
+    # 知识注入任务级总预算（字符，按 5:3:2 配额分配，F-7-6）
+    knowledge_budget_chars: int = 6000
+
 
 @lru_cache
 def get_settings() -> Settings:
