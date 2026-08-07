@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # 大文档分片阈值（F-2-6），单位字符：超过则按章节切分并行分段生成
     chunk_max_chars: int = 10000
 
+    # 知识库（F-7-x）：本地向量库目录与检索切片大小（字符）
+    knowledge_dir: Path = BASE_DIR / "data" / "knowledge"
+    knowledge_chunk_chars: int = 600
+
 
 @lru_cache
 def get_settings() -> Settings:

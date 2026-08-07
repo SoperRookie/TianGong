@@ -32,6 +32,24 @@ from app.templates import CustomTemplate, TemplateParseError, recognize_template
 router = APIRouter()
 
 
+def _knowledge_service(request: Request):
+    """知识库服务惰性初始化：首次访问时构建并缓存到 app.state（避免无关链路加载向量库）。"""
+    if getattr(request.app.state, "knowledge", None) is None:
+        from app.knowledge import KnowledgeService, KnowledgeStore
+        from app.llm.embeddings import EmbeddingClient, EmbeddingRegistry
+
+        settings = get_settings()
+        registry = EmbeddingRegistry.from_yaml(settings.models_config_path)
+        embedder = EmbeddingClient(registry)
+        store = KnowledgeStore(
+            settings.knowledge_dir, dimensions=registry.get().dimensions
+        )
+        request.app.state.knowledge = KnowledgeService(
+            store, embedder, chunk_max_chars=settings.knowledge_chunk_chars
+        )
+    return request.app.state.knowledge
+
+
 @router.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -189,6 +207,92 @@ async def set_default_template(request: Request, template_id: str) -> dict:
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e.args[0]))
     return {"default_id": template_id}
+
+
+# ---- 知识库（F-7-1/3/4）----
+
+
+@router.get("/api/v1/knowledge/categories")
+async def list_categories() -> dict:
+    """三大知识分类枚举，供上传时选择。"""
+    from app.knowledge import CATEGORIES
+
+    return {"categories": CATEGORIES}
+
+
+@router.post("/api/v1/knowledge/docs")
+async def ingest_knowledge(
+    request: Request,
+    category: str = Form(...),
+    space: str = Form(default="default"),
+    files: list[UploadFile] = File(default=[]),
+    text: str = Form(default=""),
+    source: str = Form(default="text"),
+) -> dict:
+    """知识文档入库：解析 → 切片 → 向量化 → 入库；支持文件与粘贴文本。"""
+    import openai as _openai
+
+    from app.knowledge import InvalidCategoryError
+
+    settings = get_settings()
+    service = _knowledge_service(request)
+    save_dir = request.app.state.tasks.output_dir / "_knowledge_uploads"
+    docs = []
+    try:
+        for upload in files:
+            saved = await _read_upload(upload, save_dir, settings.max_upload_size_mb * 1024 * 1024)
+            docs.append(await service.ingest_file(saved, category=category, space=space))
+        if text.strip():
+            docs.append(await service.ingest_text(text, source=source, category=category, space=space))
+    except (InvalidCategoryError, UnsupportedFormatError, ScannedPDFError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, _openai.APIConnectionError, _openai.APIStatusError) as e:
+        raise HTTPException(status_code=502, detail=f"Embedding 服务调用失败: {e}")
+    if not docs:
+        raise HTTPException(status_code=400, detail="请上传知识文件或提供文本内容")
+    return {"ingested": [d.model_dump() for d in docs]}
+
+
+@router.get("/api/v1/knowledge/docs")
+async def list_knowledge_docs(
+    request: Request, space: str | None = None, category: str | None = None
+) -> dict:
+    service = _knowledge_service(request)
+    return {"documents": [d.model_dump() for d in service.store.list_docs(space, category)]}
+
+
+@router.delete("/api/v1/knowledge/docs/{doc_id}")
+async def delete_knowledge_doc(request: Request, doc_id: str) -> dict:
+    service = _knowledge_service(request)
+    if not service.store.delete_doc(doc_id):
+        raise HTTPException(status_code=404, detail=f"知识文档不存在: {doc_id}")
+    return {"deleted": doc_id}
+
+
+class KnowledgeSearchBody(BaseModel):
+    query: str
+    top_k: int = 5
+    category: str | None = None
+    space: str | None = None
+
+
+@router.post("/api/v1/knowledge/search")
+async def search_knowledge(request: Request, body: KnowledgeSearchBody) -> dict:
+    """语义检索：按分类/知识空间过滤，返回相似度排序的切片。"""
+    import openai as _openai
+
+    from app.knowledge import InvalidCategoryError
+
+    service = _knowledge_service(request)
+    try:
+        hits = await service.search(
+            body.query, top_k=body.top_k, category=body.category, space=body.space
+        )
+    except InvalidCategoryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, _openai.APIConnectionError, _openai.APIStatusError) as e:
+        raise HTTPException(status_code=502, detail=f"Embedding 服务调用失败: {e}")
+    return {"hits": [h.model_dump() for h in hits]}
 
 
 @router.post("/api/v1/tasks")

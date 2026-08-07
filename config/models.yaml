@@ -67,3 +67,32 @@ models:
   #   api_key_env: null            # 内网服务可无鉴权
   #   model: qwen3:32b
   #   supports_vision: false
+
+# ---- Embedding 模型（F-7-10）：知识库切片向量化，与 LLM 同构的多厂商设计 ----
+# 选型以 POC-R8 结论为准；当前默认内网 Ollama 部署的 bge-m3（1024 维）。
+default_embedding: bge-m3-local
+
+embeddings:
+  - name: bge-m3-local
+    provider: ollama
+    base_url: http://192.168.0.152:11434/v1
+    api_key_env: null
+    model: bge-m3:latest
+    dimensions: 1024
+    timeout: 60
+
+  # ---- 商用 Embedding 示例条目，POC-R8 对比时取消注释 ----
+
+  # - name: text-embedding-v3      # 阿里云百炼
+  #   provider: dashscope
+  #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  #   api_key_env: DASHSCOPE_API_KEY
+  #   model: text-embedding-v3
+  #   dimensions: 1024
+
+  # - name: embedding-3            # 智谱
+  #   provider: zhipu
+  #   base_url: https://open.bigmodel.cn/api/paas/v4
+  #   api_key_env: ZHIPU_API_KEY
+  #   model: embedding-3
+  #   dimensions: 2048
