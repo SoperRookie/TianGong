@@ -11,7 +11,14 @@ from langgraph.graph import END, StateGraph
 from pydantic import ValidationError
 
 from app.agents.json_utils import LLMOutputError, extract_json
-from app.agents.prompts import ANALYST_SYSTEM, FIX_INSTRUCTION, GENERATOR_SYSTEM, REVIEWER_SYSTEM
+from app.agents.prompts import (
+    ANALYST_SYSTEM,
+    FIX_INSTRUCTION,
+    GENERATOR_SYSTEM,
+    KNOWLEDGE_CASES_BLOCK,
+    KNOWLEDGE_REFS_BLOCK,
+    REVIEWER_SYSTEM,
+)
 from app.agents.state import MAX_REVIEW_ROUNDS, OrchestrationState
 from app.llm.client import LLMClient
 from app.templates import CustomTemplate, TestCase, builtin_default_template
@@ -89,13 +96,21 @@ def _template_check(raw: dict, template: CustomTemplate) -> list[str]:
     return problems
 
 
-async def analyze_requirement(llm: LLMClient, requirement: str, model: str | None) -> dict:
-    """需求分析 Agent：测试点拆解 + 盲区识别（拆解确认流程 F-3-3 亦单独调用）。"""
+async def analyze_requirement(
+    llm: LLMClient, requirement: str, model: str | None, knowledge_cases: str | None = None
+) -> dict:
+    """需求分析 Agent：测试点拆解 + 盲区识别（拆解确认流程 F-3-3 亦单独调用）。
+
+    knowledge_cases：测试用例库检索结果，拆解阶段注入做覆盖度查漏（PRD 检索时机约束）。
+    """
+    user = requirement
+    if knowledge_cases:
+        user += KNOWLEDGE_CASES_BLOCK.format(knowledge=knowledge_cases)
     data, result = await _chat_json(
         llm,
         [
             {"role": "system", "content": ANALYST_SYSTEM},
-            {"role": "user", "content": requirement},
+            {"role": "user", "content": user},
         ],
         model,
     )
@@ -106,10 +121,19 @@ async def analyze_requirement(llm: LLMClient, requirement: str, model: str | Non
     }
 
 
-def build_graph(llm: LLMClient, template: CustomTemplate | None = None):
+def build_graph(
+    llm: LLMClient,
+    template: CustomTemplate | None = None,
+    knowledge_refs: str | None = None,
+    knowledge_cases: str | None = None,
+):
+    """knowledge_refs：需求文档/规则库知识，生成前注入生成 Agent；
+    knowledge_cases：历史用例，只注入拆解与评审 Agent（PRD 上下文隔离约束）。"""
     template = template or builtin_default_template()
     async def analyze(state: OrchestrationState) -> dict:
-        analysis = await analyze_requirement(llm, state["requirement"], state.get("model"))
+        analysis = await analyze_requirement(
+            llm, state["requirement"], state.get("model"), knowledge_cases=knowledge_cases
+        )
         trace = state.get("trace", []) + [{"agent": "需求分析", "model": analysis["model_name"]}]
         return {
             "test_points": analysis["test_points"],
@@ -131,6 +155,8 @@ def build_graph(llm: LLMClient, template: CustomTemplate | None = None):
                 f"测试点拆解结果：\n{_dump(state['test_points'])}\n\n"
                 "请为上述全部测试点生成详细测试用例。"
             )
+            if knowledge_refs:
+                user += KNOWLEDGE_REFS_BLOCK.format(knowledge=knowledge_refs)
             action = "全量生成"
         data, result = await _chat_json(
             llm,
@@ -146,6 +172,9 @@ def build_graph(llm: LLMClient, template: CustomTemplate | None = None):
         prior = ""
         if state.get("issues"):
             prior = f"\n\n上一轮评审问题（本轮重点核对是否已修复）：\n{_dump(state['issues'])}"
+        if knowledge_cases:
+            # 历史用例注入评审 Agent 辅助覆盖度把关（PRD：用例库进评审与拆解，不进生成）
+            prior += KNOWLEDGE_CASES_BLOCK.format(knowledge=knowledge_cases)
         data, result = await _chat_json(
             llm,
             [

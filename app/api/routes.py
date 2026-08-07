@@ -209,6 +209,39 @@ async def set_default_template(request: Request, template_id: str) -> dict:
     return {"default_id": template_id}
 
 
+async def _gather_knowledge(
+    request: Request, requirement: str, stages: tuple[str, ...], space: str | None
+) -> tuple[dict, list[dict]]:
+    """知识管家编排（F-7-6）：按阶段检索三大知识库并按 5:3:2 配额装填。
+
+    知识链路任何故障均降级为无知识注入，不阻塞生成主链路（容错优先）。
+    返回 ({"cases": 历史用例文本, "refs": 需求/规则文本}, 知识快照)。
+    """
+    from app.knowledge.steward import KnowledgeSteward
+
+    out: dict = {"cases": None, "refs": None}
+    snapshot: list[dict] = []
+    try:
+        service = _knowledge_service(request)
+        if not service.store.list_docs():
+            return out, snapshot
+        steward = KnowledgeSteward(service, budget_chars=get_settings().knowledge_budget_chars)
+        query = requirement[:1500]
+        if "analysis" in stages:
+            bundle = await steward.for_analysis(query, space=space)
+            if not bundle.empty:
+                out["cases"] = bundle.render()
+                snapshot.extend(bundle.snapshot)
+        if "generation" in stages:
+            bundle = await steward.for_generation(query, space=space)
+            if not bundle.empty:
+                out["refs"] = bundle.render()
+                snapshot.extend(bundle.snapshot)
+    except Exception:
+        return {"cases": None, "refs": None}, snapshot
+    return out, snapshot
+
+
 # ---- 知识库（F-7-1/3/4）----
 
 
@@ -304,6 +337,7 @@ async def create_task(
     reviewer_model: str | None = Form(default=None),
     template_id: str | None = Form(default=None),
     confirm_points: bool = Form(default=False),
+    knowledge_space: str | None = Form(default=None),
 ) -> dict:
     settings = get_settings()
     store = request.app.state.tasks
@@ -321,8 +355,17 @@ async def create_task(
 
     # 1.5 拆解确认流程（F-3-3）：只做需求分析，等待用户确认测试点
     if confirm_points:
+        # 拆解阶段注入历史用例做覆盖度查漏（知识管家 F-7-6，检索时机约束）
+        knowledge, snapshot = await _gather_knowledge(
+            request, requirement, ("analysis",), knowledge_space
+        )
         try:
-            analysis = await run_analysis(requirement, llm=request.app.state.llm, model=model)
+            analysis = await run_analysis(
+                requirement,
+                llm=request.app.state.llm,
+                model=model,
+                knowledge_cases=knowledge["cases"],
+            )
         except (UnknownModelError,) as e:
             raise HTTPException(status_code=400, detail=str(e))
         except (MissingAPIKeyError, AllModelsFailedError) as e:
@@ -332,11 +375,13 @@ async def create_task(
             status="awaiting_confirmation",
             sources=sources,
             analysis=analysis.model_dump(),
+            knowledge=snapshot,
             context={
                 "requirement": requirement,
                 "model": model,
                 "reviewer_model": reviewer_model,
                 "template_id": template.template_id,
+                "knowledge_space": knowledge_space,
             },
         )
         store.save(record)
@@ -348,7 +393,10 @@ async def create_task(
             "confirm_url": f"/api/v1/tasks/{task_id}/confirm",
         }
 
-    # 2. 编排生成（超长需求自动分片并行，F-2-6）
+    # 2. 编排生成（超长需求自动分片并行，F-2-6）；知识管家按时机注入（F-7-6）
+    knowledge, snapshot = await _gather_knowledge(
+        request, requirement, ("analysis", "generation"), knowledge_space
+    )
     try:
         result = await run_generation(
             requirement,
@@ -356,6 +404,8 @@ async def create_task(
             model=model,
             reviewer_model=reviewer_model,
             template=template,
+            knowledge_refs=knowledge["refs"],
+            knowledge_cases=knowledge["cases"],
         )
     except UnknownModelError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -366,10 +416,13 @@ async def create_task(
         store.save(record)
         raise HTTPException(status_code=502, detail=str(e))
 
-    return _finalize_task(store, task_id, task_dir, sources, result, template)
+    return _finalize_task(store, task_id, task_dir, sources, result, template, knowledge=snapshot)
 
 
-def _finalize_task(store, task_id: str, task_dir: Path, sources: list[str], result, template) -> dict:
+def _finalize_task(
+    store, task_id: str, task_dir: Path, sources: list[str], result, template,
+    knowledge: list[dict] | None = None,
+) -> dict:
     """导出多格式产物（F-5-1/2/3/4）并落库，返回任务响应。"""
     files_map: dict[str, str] = {}
     if result.cases:
@@ -386,6 +439,7 @@ def _finalize_task(store, task_id: str, task_dir: Path, sources: list[str], resu
         sources=sources,
         result=result.model_dump(),
         files=files_map,
+        knowledge=knowledge or [],
     )
     store.save(record)
     return {
@@ -423,6 +477,10 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
         raise HTTPException(status_code=400, detail="测试点为空，无法生成")
     template = request.app.state.templates.get(ctx.get("template_id"))
 
+    # 生成前注入需求/规则库；历史用例注入评审 Agent（知识管家 F-7-6）
+    knowledge, snapshot = await _gather_knowledge(
+        request, ctx.get("requirement", ""), ("analysis", "generation"), ctx.get("knowledge_space")
+    )
     try:
         result = await run_generation(
             ctx.get("requirement", ""),
@@ -431,6 +489,8 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
             reviewer_model=ctx.get("reviewer_model"),
             template=template,
             test_points=test_points,
+            knowledge_refs=knowledge["refs"],
+            knowledge_cases=knowledge["cases"],
         )
     except MissingAPIKeyError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -441,7 +501,10 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
         raise HTTPException(status_code=502, detail=str(e))
 
     task_dir = store.output_dir / task_id
-    response = _finalize_task(store, task_id, task_dir, record.sources, result, template)
+    response = _finalize_task(
+        store, task_id, task_dir, record.sources, result, template,
+        knowledge=record.knowledge + snapshot,  # 拆解阶段 + 生成阶段的知识快照合并留痕
+    )
     # 保留拆解阶段留痕
     saved = store.get(task_id)
     saved.analysis = record.analysis

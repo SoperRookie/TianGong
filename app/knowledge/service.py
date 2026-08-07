@@ -65,8 +65,47 @@ class KnowledgeService:
         top_k: int = 5,
         category: str | None = None,
         space: str | None = None,
+        mode: str = "hybrid",
     ) -> list[SearchHit]:
+        """检索知识切片。mode: hybrid（向量+关键词 RRF 融合，F-7-3b，默认）/ vector。"""
         if category is not None and category not in CATEGORIES:
             raise InvalidCategoryError(category)
         [vector] = await self.embedder.embed([query])
-        return self.store.search(vector, top_k=top_k, category=category, space=space)
+        vector_hits = self.store.search(
+            vector, top_k=top_k if mode == "vector" else top_k * 3, category=category, space=space
+        )
+        if mode == "vector":
+            return vector_hits
+        return self._fuse(query, vector_hits, top_k, category, space)
+
+    def _fuse(
+        self,
+        query: str,
+        vector_hits: list[SearchHit],
+        top_k: int,
+        category: str | None,
+        space: str | None,
+    ) -> list[SearchHit]:
+        from app.knowledge.hybrid import bm25_scores, rrf_merge
+
+        corpus = self.store.iter_chunks(category=category, space=space)
+        if not corpus:
+            return vector_hits[:top_k]
+        by_key = {(h.doc_id, h.chunk_index): i for i, h in enumerate(corpus)}
+
+        keyword_scores = bm25_scores(query, [h.text for h in corpus])
+        keyword_ranking = [
+            i for i in sorted(range(len(corpus)), key=lambda i: -keyword_scores[i])
+            if keyword_scores[i] > 0
+        ][: top_k * 3]
+        vector_ranking = [
+            by_key[(h.doc_id, h.chunk_index)]
+            for h in vector_hits
+            if (h.doc_id, h.chunk_index) in by_key
+        ]
+        fused = rrf_merge([vector_ranking, keyword_ranking])
+        results = []
+        for idx, score in fused[:top_k]:
+            hit = corpus[idx].model_copy(update={"score": round(score, 4)})
+            results.append(hit)
+        return results

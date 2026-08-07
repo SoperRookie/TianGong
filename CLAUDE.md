@@ -40,7 +40,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 自我学习三重防护不可裁剪（R11）：黄金评估集强制回归、重大变更管理员审批、Prompt 版本化可回滚。
 - 评审闭环双通道（在线评审留痕 F-6-6 + 离线终稿回传 diff F-6-8）是度量与学习数据飞轮的前提，不可只做其一。
 
-**模型接入（2026-07-10 决策，2026-08 已部分演进）**：LLM 适配层按多厂商设计——模型清单在 `config/models.yaml`（每条目含 provider、base_url、api_key_env、model、temperature、max_tokens、超时、supports_vision、fallbacks，OpenAI 兼容协议，密钥走环境变量/.env 不落明文），新增厂商只改配置不改代码。当前实际接入：**默认文本模型为采购的 DeepSeek 商用 token**（deepseek-chat，降级 deepseek-reasoner）；**Vision 已提前接入私有化模型**——内网 Ollama 部署的 qwen3-vl:30b（Windows + RTX 4090，派生别名 `qwen3-vl-16k` 固化 16K 上下文），图片类需求解析（F-2-3）已启用，图片自动路由至 Vision 模型（F-1-5）。原"首期全外部 API"的决策仅剩 Embedding 未定：DeepSeek 无 Embedding API，需另选商用 API 或私有化 bge/m3e，以 POC-R8 结论为准。模型微调 F-9-6 仍推迟；涉密兜底（限用内部模型）合规口径需与安全方确认；架构上不得写死"仅外部 API"或"仅私有化"的假设。
+**模型接入（2026-07-10 决策，2026-08 已部分演进）**：LLM 适配层按多厂商设计——模型清单在 `config/models.yaml`（每条目含 provider、base_url、api_key_env、model、temperature、max_tokens、超时、supports_vision、fallbacks，OpenAI 兼容协议，密钥走环境变量/.env 不落明文），新增厂商只改配置不改代码。当前实际接入：**默认文本模型为采购的 DeepSeek 商用 token**（deepseek-chat，降级 deepseek-reasoner）；**Vision 已提前接入私有化模型**——内网 Ollama 部署的 qwen3-vl:30b（Windows + RTX 4090，派生别名 `qwen3-vl-16k` 固化 16K 上下文），图片类需求解析（F-2-3）已启用，图片自动路由至 Vision 模型（F-1-5）。**Embedding 已定型（2026-08-07，POC-R8 收口）：内网 Ollama 部署的 bge-m3（1024 维），商用 Embedding API 对比暂不进行**；首轮基线 Recall@5=0.833（评测脚本 `scripts/embedding_poc.py`）。模型微调 F-9-6 仍推迟；涉密兜底（限用内部模型）合规口径需与安全方确认；架构上不得写死"仅外部 API"或"仅私有化"的假设。
 
 **技术栈（PRD 第 7 章建议选型）**：Python 3.12 + FastAPI、LangGraph 编排、LiteLLM/自研 LLM 适配层（统一 OpenAI 兼容协议，需支持私有化 vLLM/Ollama 与商用 token 两类来源、Vision 能力标识）、Milvus/Qdrant + Elasticsearch 混合检索、bge/m3e Embedding、Celery + Redis 任务队列、openpyxl 生成 Excel、XMind ZEN 格式（zip + content.json）生成脑图、Vue3/React 前端、Docker + K8s 部署。
 
