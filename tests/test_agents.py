@@ -122,3 +122,40 @@ async def test_run_analysis_仅拆解():
     assert analysis.test_points == [{"module": "登录", "points": ["正常登录", "密码错误"]}]
     assert analysis.blind_spots == ["未说明锁定策略"]
     assert len(llm.calls) == 1  # 只有拆解调用，无生成/评审
+
+
+# ---- 定点修正增量协议（只回传改动，服务端合并）----
+
+
+def test_merge_fix_incremental_replace_add_delete():
+    from app.agents.graph import merge_fix
+
+    current = [
+        make_case(),
+        make_case(case_id="TC-登录-002", title="验证密码错误提示"),
+        make_case(case_id="TC-登录-003", title="验证锁定策略"),
+    ]
+    data = {
+        "cases": [
+            make_case(case_id="TC-登录-002", title="验证密码错误提示", priority="P0"),  # 修改
+            make_case(case_id="TC-登录-004", title="验证验证码过期"),  # 新增
+        ],
+        "deleted": ["TC-登录-003"],
+    }
+    merged = merge_fix(current, data)
+    assert [c["title"] for c in merged] == [
+        "验证正确账号密码登录成功", "验证密码错误提示", "验证验证码过期",
+    ]
+    assert merged[1]["priority"] == "P0"  # 改动覆盖
+    assert merged[0]["priority"] == "P1"  # 未改动原样保留
+    assert [c["case_id"] for c in merged] == ["TC-登录-001", "TC-登录-002", "TC-登录-003"]  # 重排连续
+
+
+def test_merge_fix_full_echo_still_works():
+    """模型不守增量协议、仍回传全集时，合并结果等价于全量覆盖（向后兼容）。"""
+    from app.agents.graph import merge_fix
+
+    current = [make_case(), make_case(case_id="TC-登录-002", title="验证密码错误提示")]
+    echo = {"cases": [dict(c, priority="P2") for c in current]}
+    merged = merge_fix(current, echo)
+    assert len(merged) == 2 and all(c["priority"] == "P2" for c in merged)

@@ -20,9 +20,9 @@ async def lifespan(app: FastAPI):
     registry = ModelRegistry.from_yaml(settings.models_config_path)
     app.state.registry = registry
     app.state.llm = LLMClient(registry)
-    app.state.tasks = TaskStore(output_dir=BASE_DIR / "outputs")
-    app.state.templates = TemplateStore(storage_path=BASE_DIR / "data" / "templates.json")
-    app.state.memory = MemoryStore(storage_path=BASE_DIR / "data" / "memory.json")
+    app.state.tasks = TaskStore(output_dir=settings.outputs_dir)
+    app.state.templates = TemplateStore(storage_path=settings.data_dir / "templates.json")
+    app.state.memory = MemoryStore(storage_path=settings.data_dir / "memory.json")
     yield
 
 
