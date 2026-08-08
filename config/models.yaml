@@ -37,9 +37,10 @@ models:
     provider: ollama
     base_url: http://192.168.0.152:11434/v1
     api_key_env: null
-    # 派生别名：qwen3-vl:8b + PARAMETER num_ctx 16384（经 /api/create 固化；2026-08-09
-    # 由 30b 换为 8b——机器上模型清理后重建，别名不变则此处无需随底模调整）
-    model: qwen3-vl-16k
+    # 直连裸模型（2026-08-09 换用 8b）：原 30b 需派生别名固化 num_ctx，现服务端
+    # 默认窗口已实测 ≥9K token 输入无截断且召回正常，无需别名；若后续出现长输入
+    # 截断，按旧法经 /api/create 建 num_ctx 别名再切回
+    model: qwen3-vl:8b
     supports_vision: true
     temperature: 0.2
     # 思考型模型：思考与正文共享输出额度，需给足
