@@ -312,18 +312,27 @@ function renderConfirm(t) {
     <div class="toolbar"><button onclick="confirmPointsGo()">确认并生成用例</button>
       <span class="hint">可直接编辑上方 JSON 调整测试点</span></div></div>`;
 }
+let confirming = false;  // 单击即生效：请求在途时忽略重复点击（服务端另有状态锁兜底）
 async function confirmPointsGo() {
+  if (confirming) return;
   let points;
   try { points = JSON.parse($('pointsEdit').value); } catch { return alert('测试点 JSON 格式有误'); }
-  const btns = document.querySelectorAll('#detail button'); btns.forEach(b=>b.disabled=true);
-  $('detail').innerHTML = `<div class="panel"><h3>测试点已确认，按模块并行生成中 <span class="spin"></span></h3>
-    <div class="progress"><div class="bar" style="width:60%"></div></div>
-    <div class="steps"><span class="done">✓ 需求分析</span><span class="on">生成与评审</span><span>导出</span></div></div>`;
+  confirming = true;
+  const edited = $('pointsEdit').value;
+  document.querySelectorAll('#detail button').forEach(b=>b.disabled=true);
+  // 本地先切到运行态：进度面板立即出现，并由 1s/3s 轮询接管真实进度
+  currentTask.status = 'running'; currentTask.progress = 'generating_reviewing';
+  renderDetail();
   try {
     await api(`/api/v1/tasks/${currentTask.task_id}/confirm`,
       {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({test_points:points})});
-    openTask(currentTask.task_id);
-  } catch (e) { alert('生成失败: '+e.message); btns.forEach(b=>b.disabled=false); }
+    await openTask(currentTask.task_id);
+  } catch (e) {
+    alert('生成失败: ' + e.message);
+    await openTask(currentTask.task_id);  // 服务端已恢复待确认状态，重载确认视图
+    if ($('pointsEdit')) $('pointsEdit').value = edited;  // 保留用户已编辑的测试点
+  }
+  confirming = false;
 }
 
 /* 结果视图：用例表 + 评审操作 + 修订对话 + 下载 + 终稿上传 */

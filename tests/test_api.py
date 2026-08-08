@@ -199,3 +199,27 @@ async def test_指定未注册模型返回400(client):
     )
     assert resp.status_code == 400
     assert "未注册" in resp.json()["detail"]
+
+
+async def test_确认接口幂等_重复确认拒绝且故障可恢复重试(client):
+    app.state.llm = StubLLM([ANALYST_REPLY])
+    resp = await client.post(
+        "/api/v1/tasks", data={"text": "登录需求", "confirm_points": "true"}
+    )
+    task_id = resp.json()["task_id"]
+
+    # 生成故障（模型输出无法解析）：返回 502 且恢复待确认状态，可再次点击确认
+    app.state.llm = StubLLM(["不是JSON", "还不是JSON"])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={})
+    assert resp.status_code == 502
+    record = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert record["status"] == "awaiting_confirmation"
+
+    # 恢复后再次确认成功
+    app.state.llm = StubLLM([generator_reply(make_case()), review_reply(True)])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={})
+    assert resp.status_code == 200 and resp.json()["status"] == "completed"
+
+    # 完成后重复确认：409（点击一次即生效，重复请求被状态锁拒绝）
+    resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={})
+    assert resp.status_code == 409

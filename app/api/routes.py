@@ -633,6 +633,9 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
         raise HTTPException(status_code=400, detail="测试点为空，无法生成")
     template = request.app.state.templates.get(ctx.get("template_id"))
 
+    # 确认即锁定：状态先置 running（重复点击/重复请求直接 409，避免并行重复生成）
+    store.set_progress(task_id, status="running", progress="generating_reviewing")
+
     # 生成前注入需求/规则库；历史用例注入评审 Agent（知识管家 F-7-6）
     knowledge, snapshot = await _gather_knowledge(
         request.app, ctx.get("requirement", ""), ("analysis", "generation"), ctx.get("knowledge_space")
@@ -653,6 +656,8 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
             memory_notes=memory_notes,
         )
     except (MissingAPIKeyError, LLMOutputError) as e:
+        # 可重试的故障：恢复待确认状态，用户可再次点击确认
+        store.set_progress(task_id, status="awaiting_confirmation", progress=None)
         raise HTTPException(status_code=502, detail=str(e))
     except AllModelsFailedError as e:
         record.status = "failed"
