@@ -462,6 +462,10 @@ async def create_task(
     )
     sources = [doc.source for doc in docs]
     requirement = _merge_docs(docs)
+    # 使用习惯沉淀（F-8-2）：直接生成与拆解确认两条路径统一在此记录模板/模型使用
+    request.app.state.memory.record_usage("template", template.template_id)
+    if model:
+        request.app.state.memory.record_usage("model", model)
     logger.info(
         "任务 {} 创建：来源={} 共 {} 字（项目={} 模板={} 确认拆解={} 异步={}）",
         task_id, sources, len(requirement), project or "-", template.template_id, confirm_points, async_mode,
@@ -517,11 +521,6 @@ async def create_task(
         "knowledge_space": knowledge_space,
         "project": project,
     }
-    # 使用习惯沉淀（F-8-2）：常用模板/模型达到阈值后固化为默认偏好
-    memory_store = request.app.state.memory
-    memory_store.record_usage("template", template.template_id)
-    if model:
-        memory_store.record_usage("model", model)
 
     async def _generate() -> dict:
         knowledge, snapshot = await _gather_knowledge(
