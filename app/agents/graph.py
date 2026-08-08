@@ -8,6 +8,7 @@ import json
 import re
 
 from langgraph.graph import END, StateGraph
+from loguru import logger
 from pydantic import ValidationError
 
 from app.agents.json_utils import LLMOutputError, extract_json
@@ -78,6 +79,7 @@ async def _chat_json(llm: LLMClient, messages: list[dict], model: str | None) ->
             return extract_json(result.content), result
         except LLMOutputError as e:
             last_error = e
+            logger.warning("模型输出 JSON 解析失败（{}，输出 {} 字），重试", result.model_name, len(result.content))
     raise last_error
 
 
@@ -151,8 +153,13 @@ async def analyze_requirement(
         ],
         model,
     )
+    modules = data.get("modules", [])
+    logger.info(
+        "需求分析完成：{} 个模块 / {} 个测试点 / {} 条盲区",
+        len(modules), sum(len(m.get("points", [])) for m in modules), len(data.get("blind_spots", [])),
+    )
     return {
-        "test_points": data.get("modules", []),
+        "test_points": modules,
         "blind_spots": data.get("blind_spots", []),
         "model_name": result.model_name,
     }
@@ -205,7 +212,15 @@ def build_graph(
             state.get("model"),
         )
         trace = state.get("trace", []) + [{"agent": "用例生成", "action": action, "model": result.model_name}]
-        cases = merge_fix(state["cases"], data) if action == "定点修正" else data.get("cases", [])
+        if action == "定点修正":
+            cases = merge_fix(state["cases"], data)
+            logger.info(
+                "用例生成（定点修正）：改动 {} 条 / 删除 {} 条，合并后共 {} 条",
+                len(data.get("cases", [])), len(data.get("deleted", [])), len(cases),
+            )
+        else:
+            cases = data.get("cases", [])
+            logger.info("用例生成（全量）：{} 条", len(cases))
         return {"cases": cases, "trace": trace}
 
     async def review(state: OrchestrationState) -> dict:
@@ -250,9 +265,14 @@ def build_graph(
             "review_rounds": rounds,
             "trace": trace,
         }
+        logger.info(
+            "评审第 {} 轮：{}（问题 {} 条 / 遗漏 {} 条 / 建议 {} 条）",
+            rounds, "通过" if passed else "打回", len(issues), len(missing), len(data.get("suggestions", [])),
+        )
         if not passed and rounds >= MAX_REVIEW_ROUNDS:
             # 回环超限强制出稿，未解决项显式标注供人工重点关注
             update["unresolved"] = issues
+            logger.warning("评审 {} 轮未收敛，强制出稿，未解决项 {} 条", rounds, len(issues))
         return update
 
     def decide(state: OrchestrationState) -> str:

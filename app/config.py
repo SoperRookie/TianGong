@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     outputs_dir: Path = BASE_DIR / "outputs"
     data_dir: Path = BASE_DIR / "data"
 
+    # 日志（Loguru）：控制台级别与文件目录（按日滚动，DEBUG 全量）
+    log_level: str = "INFO"
+    log_dir: Path = BASE_DIR / "logs"
+
     # 文件上传限制（F-2-8），单位 MB
     max_upload_size_mb: int = 50
 

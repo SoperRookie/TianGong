@@ -4,14 +4,18 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
+from loguru import logger
 
 from app.api.routes import router
 from app.config import BASE_DIR, get_settings
 from app.llm.client import LLMClient
 from app.llm.registry import ModelRegistry
+from app.logging_setup import setup_logging
 from app.memory import MemoryStore
 from app.tasks import TaskStore
 from app.templates import TemplateStore
+
+setup_logging(get_settings().log_level, get_settings().log_dir)
 
 
 @asynccontextmanager
@@ -23,7 +27,15 @@ async def lifespan(app: FastAPI):
     app.state.tasks = TaskStore(output_dir=settings.outputs_dir)
     app.state.templates = TemplateStore(storage_path=settings.data_dir / "templates.json")
     app.state.memory = MemoryStore(storage_path=settings.data_dir / "memory.json")
+    logger.info(
+        "服务启动：默认模型={} 可用模型={} 输出目录={} 日志目录={}",
+        registry.default_model,
+        [m["name"] for m in registry.list_public()],
+        settings.outputs_dir,
+        settings.log_dir,
+    )
     yield
+    logger.info("服务关闭")
 
 
 app = FastAPI(title="TestCase Agent", version="0.1.0", lifespan=lifespan)

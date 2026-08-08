@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 import openai
+from loguru import logger
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -61,14 +62,18 @@ class LLMClient:
         chain = self.registry.call_chain(model, require_vision=require_vision)
         attempts = 0
         last_error: Exception | None = None
-        for cfg in chain:
+        for i, cfg in enumerate(chain):
+            if i > 0:
+                logger.warning("模型降级：{} → {}（原因: {}）", chain[i - 1].name, cfg.name, last_error)
             for _ in range(1 + self.registry.max_retries):
                 attempts += 1
                 try:
                     return await self._call_once(cfg, messages, attempts, **overrides)
                 except _RETRYABLE as e:
                     last_error = e
+                    logger.warning("模型调用失败（第 {} 次，{}）：{}", attempts, cfg.name, e)
         tried = " → ".join(c.name for c in chain)
+        logger.error("模型全链路失败（{} 次，链路: {}）：{}", attempts, tried, last_error)
         raise AllModelsFailedError(
             f"模型调用失败（已尝试 {attempts} 次，链路: {tried}）: {last_error}"
         ) from last_error
@@ -96,6 +101,10 @@ class LLMClient:
                 completion_tokens=resp.usage.completion_tokens,
                 total_tokens=resp.usage.total_tokens,
             )
+        logger.info(
+            "LLM 调用完成：{} {}ms tokens={}（输入 {} / 输出 {}）",
+            cfg.name, elapsed_ms, usage.total_tokens, usage.prompt_tokens, usage.completion_tokens,
+        )
         return ChatResult(
             content=resp.choices[0].message.content or "",
             model_name=cfg.name,

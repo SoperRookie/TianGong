@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
+from loguru import logger
 
 from pydantic import BaseModel
 
@@ -239,7 +240,10 @@ async def _gather_knowledge(
             if not bundle.empty:
                 out["refs"] = bundle.render()
                 snapshot.extend(bundle.snapshot)
-    except Exception:
+        if snapshot:
+            logger.info("知识注入：{} 个切片，共 {} 字", len(snapshot), sum(x["chars"] for x in snapshot))
+    except Exception as e:
+        logger.warning("知识检索故障，降级为无知识注入：{}", e)
         return {"cases": None, "refs": None}, snapshot
     return out, snapshot
 
@@ -247,10 +251,14 @@ async def _gather_knowledge(
 def _gather_memories(app, requirement: str, project: str | None) -> tuple[str | None, list[dict]]:
     """记忆检索注入（F-8-7）：用户偏好 + 当前项目记忆，独立预算，故障降级不阻塞主链路。"""
     try:
-        return app.state.memory.retrieve(
+        notes, snapshot = app.state.memory.retrieve(
             requirement[:1500], project=project, budget_chars=get_settings().memory_budget_chars
         )
-    except Exception:
+        if snapshot:
+            logger.info("记忆注入：{} 条（项目={}）", len(snapshot), project or "-")
+        return notes, snapshot
+    except Exception as e:
+        logger.warning("记忆检索故障，降级为无记忆注入：{}", e)
         return None, []
 
 
@@ -454,6 +462,10 @@ async def create_task(
     )
     sources = [doc.source for doc in docs]
     requirement = _merge_docs(docs)
+    logger.info(
+        "任务 {} 创建：来源={} 共 {} 字（项目={} 模板={} 确认拆解={} 异步={}）",
+        task_id, sources, len(requirement), project or "-", template.template_id, confirm_points, async_mode,
+    )
 
     # 1.5 拆解确认流程（F-3-3）：只做需求分析，等待用户确认测试点
     if confirm_points:
@@ -570,6 +582,7 @@ def _finalize_task(
             export_xmind(result.cases, task_dir / "测试用例.xmind", root_title=root_title)
         )
 
+    logger.info("任务 {} 导出完成：{} 条用例，格式={}", task_id, len(result.cases), list(files_map))
     record = store.get(task_id) or TaskRecord(task_id=task_id)
     record.status = "completed"
     record.progress = None
@@ -683,6 +696,7 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
         )
     if not body.instruction.strip():
         raise HTTPException(status_code=400, detail="修订要求不能为空")
+    logger.info("任务 {} 发起修订（第 {} 轮）：{}", task_id, len(record.revisions) + 1, body.instruction)
 
     ctx = record.context or {}
     template = request.app.state.templates.get(ctx.get("template_id"))
@@ -792,6 +806,7 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
         counts[item.action] += 1
         record.review_log.append(entry)
 
+    logger.info("任务 {} 在线评审：采纳 {} / 修改 {} / 删除 {}", task_id, counts["accept"], counts["modify"], counts["delete"])
     # 删除后重排各模块编号，按终稿重导出
     result = GenerationResult.model_validate({**record.result, "cases": cases})
     _renumber(result.cases)
@@ -830,6 +845,7 @@ async def upload_final_cases(
         raise HTTPException(status_code=400, detail=str(e))
 
     diff = diff_cases(record.result["cases"], final_cases)
+    logger.info("任务 {} 终稿回传 diff：{}", task_id, diff["stats"])
     record.offline_review = {
         "filename": file.filename,
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

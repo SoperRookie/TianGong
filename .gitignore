@@ -20,6 +20,7 @@ docs/xq/
 # 运行产物
 uploads/
 outputs/
+logs/
 data/
 *.log
 

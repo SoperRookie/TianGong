@@ -7,6 +7,7 @@
 import asyncio
 import re
 
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.agents.graph import analyze_requirement, build_graph
@@ -100,6 +101,7 @@ async def run_generation(
     if len(chunks) == 1:
         return await _run_single(requirement, llm, model, reviewer_model, template, **kw)
 
+    logger.info("需求 {} 字超过分片阈值，切分为 {} 片并行处理", len(requirement), len(chunks))
     outcomes = await asyncio.gather(
         *[_run_single(chunk, llm, model, reviewer_model, template, **kw) for chunk in chunks],
         return_exceptions=True,
@@ -248,6 +250,7 @@ def _merge(outcomes: list) -> GenerationResult:
             # 分片失败不阻塞整体交付，显式标注缺失范围（PRD 异常流程）
             merged.passed = False
             merged.unresolved.append({"case_id": f"<分片{i}>", "problem": f"分片处理失败: {outcome}"})
+            logger.error("分片 {} 处理失败（不阻塞整体交付）：{}", i, outcome)
             continue
         merged.passed = merged.passed and outcome.passed
         merged.review_rounds = max(merged.review_rounds, outcome.review_rounds)

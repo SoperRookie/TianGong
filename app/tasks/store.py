@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from loguru import logger
 from pydantic import BaseModel, Field
 
 # 任务状态机：queued → running → completed / failed；拆解确认流程有 awaiting_confirmation
@@ -100,9 +101,12 @@ class TaskStore:
 
         async def _run() -> None:
             self.set_progress(task_id, status="running")
+            logger.info("后台任务开始执行：{}", task_id)
             try:
                 await job()
+                logger.info("后台任务完成：{}", task_id)
             except Exception as e:  # 后台任务兜底：任何未捕获异常标记失败
+                logger.exception("后台任务失败：{}（{}）", task_id, e)
                 record = self.get(task_id)
                 if record is not None:
                     record.status = "failed"
