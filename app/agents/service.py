@@ -99,14 +99,41 @@ async def run_generation(
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     chunks = split_text(requirement, chunk_max_chars)
     if len(chunks) == 1:
-        return await _run_single(requirement, llm, model, reviewer_model, template, **kw)
+        return await _analyze_then_generate(requirement, llm, model, reviewer_model, template, **kw)
 
     logger.info("需求 {} 字超过分片阈值，切分为 {} 片并行处理", len(requirement), len(chunks))
     outcomes = await asyncio.gather(
-        *[_run_single(chunk, llm, model, reviewer_model, template, **kw) for chunk in chunks],
+        *[_analyze_then_generate(chunk, llm, model, reviewer_model, template, **kw) for chunk in chunks],
         return_exceptions=True,
     )
     return _merge(outcomes)
+
+
+async def _analyze_then_generate(
+    requirement: str,
+    llm: LLMClient,
+    model: str | None,
+    reviewer_model: str | None,
+    template: CustomTemplate | None,
+    knowledge_refs: str | None = None,
+    knowledge_cases: str | None = None,
+    memory_notes: str | None = None,
+) -> GenerationResult:
+    """先拆解，再按模块并行生成（PRD 4.1a 生成 Agent 多实例）。
+
+    单次生成调用只输出一个模块的用例，避免大需求下输出超过模型 max_tokens 被截断
+    （deepseek-chat 输出上限 8K，全模块一次性输出必然超限）。
+    """
+    analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
+    result = await _run_from_points(
+        requirement, llm, model, reviewer_model, template, analysis["test_points"],
+        knowledge_refs=knowledge_refs, knowledge_cases=knowledge_cases, memory_notes=memory_notes,
+    )
+    for spot in analysis["blind_spots"]:
+        if spot not in result.blind_spots:
+            result.blind_spots.insert(0, spot)
+    result.trace = [{"agent": "需求分析", "model": analysis["model_name"]}] + result.trace
+    return result
 
 
 async def _run_from_points(
@@ -123,10 +150,13 @@ async def _run_from_points(
     """从已确认测试点继续：单模块直接生成；多模块按模块并行多实例（PRD 4.1a 并行加速）。"""
     kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases,
           "memory_notes": memory_notes}
-    if len(test_points) <= 1:
+    if not test_points:  # 拆解为空的兜底：回退图内拆解
+        return await _run_single(requirement, llm, model, reviewer_model, template, **kw)
+    if len(test_points) == 1:
         return await _run_single(
             requirement, llm, model, reviewer_model, template, test_points=test_points, **kw
         )
+    logger.info("按 {} 个模块并行生成：{}", len(test_points), [str(tp.get("module", "")) for tp in test_points])
     outcomes = await asyncio.gather(
         *[
             _run_single(requirement, llm, model, reviewer_model, template, test_points=[tp], **kw)

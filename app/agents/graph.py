@@ -79,7 +79,13 @@ async def _chat_json(llm: LLMClient, messages: list[dict], model: str | None) ->
             return extract_json(result.content), result
         except LLMOutputError as e:
             last_error = e
-            logger.warning("模型输出 JSON 解析失败（{}，输出 {} 字），重试", result.model_name, len(result.content))
+            if result.finish_reason == "length":
+                logger.warning(
+                    "模型输出被 max_tokens 截断（{}，输出 {} 字），重试大概率仍超限——"
+                    "请检查单次生成范围是否过大", result.model_name, len(result.content),
+                )
+            else:
+                logger.warning("模型输出 JSON 解析失败（{}，输出 {} 字），重试", result.model_name, len(result.content))
     raise last_error
 
 
@@ -226,6 +232,13 @@ def build_graph(
     async def review(state: OrchestrationState) -> dict:
         issues = rule_check(state["cases"], template)
         current_round = state.get("review_rounds", 0) + 1
+        # 按模块并行的实例只评审自己负责的模块，遗漏判断限定范围，避免误报其他模块
+        modules = [str(tp.get("module", "")) for tp in state.get("test_points", [])]
+        scope = "、".join(m for m in modules if m and m != "(修订)")
+        scope_line = (
+            f"本次评审范围仅限模块「{scope}」：遗漏场景只评估该范围，其余模块由其他实例负责。\n\n"
+            if scope else ""
+        )
         prior = ""
         if state.get("issues"):
             prior = f"\n\n上一轮评审问题（本轮重点核对是否已修复）：\n{_dump(state['issues'])}"
@@ -239,7 +252,7 @@ def build_graph(
                 {
                     "role": "user",
                     "content": (
-                        f"本次为第 {current_round} 轮评审。\n\n"
+                        f"{scope_line}本次为第 {current_round} 轮评审。\n\n"
                         f"需求内容：\n{state['requirement']}\n\n"
                         f"待评审用例：\n{_dump(state['cases'])}{prior}"
                     ),

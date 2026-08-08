@@ -30,6 +30,7 @@ class ChatResult(BaseModel):
     usage: UsageInfo
     elapsed_ms: int
     attempts: int = 1  # 实际尝试次数（含重试与降级）
+    finish_reason: str | None = None  # length 表示输出被 max_tokens 截断
 
 
 class LLMClient:
@@ -112,4 +113,5 @@ class LLMClient:
             usage=usage,
             elapsed_ms=elapsed_ms,
             attempts=attempts,
+            finish_reason=getattr(resp.choices[0], "finish_reason", None),
         )
