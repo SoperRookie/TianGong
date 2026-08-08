@@ -159,3 +159,42 @@ def test_merge_fix_full_echo_still_works():
     echo = {"cases": [dict(c, priority="P2") for c in current]}
     merged = merge_fix(current, echo)
     assert len(merged) == 2 and all(c["priority"] == "P2" for c in merged)
+
+
+# ---- 畸形 JSON 抢救（模型长输出偶发 token 跳漏）----
+
+
+def test_extract_json_salvages_partially_corrupt_cases():
+    from app.agents.json_utils import extract_json
+
+    # 复刻线上故障：第 1 条用例中段丢字（标题直接跳到 precondition 中间），后续用例完好
+    corrupt = (
+        '{"cases": [{"case_id": "TC-游戏规则-001", "module": "游戏规则", '
+        '"title": "验证游戏ondition": "进入房间", "steps": [{"action": "开局", "expected": "正常"}]}, '
+        '{"case_id": "TC-游戏规则-002", "module": "游戏规则", "title": "验证发牌", "priority": "P0", '
+        '"precondition": "已开局", "steps": [{"action": "等待发牌", "expected": "6门手牌各2张"}], '
+        '"remark": "", "extras": {}}]}'
+    )
+    data = extract_json(corrupt)
+    assert [c["case_id"] for c in data["cases"]] == ["TC-游戏规则-002"]
+    # 内嵌 steps 对象不会被误认为用例
+    assert all("action" not in c for c in data["cases"])
+
+
+def test_extract_json_salvages_corrupt_analysis():
+    from app.agents.json_utils import extract_json
+
+    corrupt = (
+        '{"modules": [{"module": "投注", "points": ["正常投注", "超限投注"]}, '
+        '{"module": "结算", "poi<糟糕的输出>], "blind_spots": ["未说明超时"]}'
+    )
+    data = extract_json(corrupt)
+    assert data["modules"] == [{"module": "投注", "points": ["正常投注", "超限投注"]}]
+
+
+def test_extract_json_still_raises_on_hopeless_output():
+    import pytest as _pytest
+    from app.agents.json_utils import LLMOutputError, extract_json
+
+    with _pytest.raises(LLMOutputError):
+        extract_json("完全不是 JSON 的输出")
