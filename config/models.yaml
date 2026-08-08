@@ -37,7 +37,8 @@ models:
     provider: ollama
     base_url: http://192.168.0.152:11434/v1
     api_key_env: null
-    # 派生别名：qwen3-vl:30b + PARAMETER num_ctx 16384（经 /api/create 固化，不依赖环境变量）
+    # 派生别名：qwen3-vl:8b + PARAMETER num_ctx 16384（经 /api/create 固化；2026-08-09
+    # 由 30b 换为 8b——机器上模型清理后重建，别名不变则此处无需随底模调整）
     model: qwen3-vl-16k
     supports_vision: true
     temperature: 0.2
