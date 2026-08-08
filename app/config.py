@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # 记忆注入独立预算（F-8-7）：不占知识库配额，约为知识预算的 10%（PRD 建议 ≤5%-10%）
     memory_budget_chars: int = 600
 
+    # 使用习惯自动沉淀阈值（F-8-2）：模板/模型按使用次数、修订指令按跨任务重复次数。
+    # 调低会更快沉淀但更容易把一次性行为固化为偏好（修订阈值为 1 时每条修订都会注入后续生成）
+    memory_pref_threshold: int = 3
+    memory_revision_threshold: int = 2
+
 
 @lru_cache
 def get_settings() -> Settings:

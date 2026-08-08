@@ -26,7 +26,11 @@ async def lifespan(app: FastAPI):
     app.state.llm = LLMClient(registry)
     app.state.tasks = TaskStore(output_dir=settings.outputs_dir)
     app.state.templates = TemplateStore(storage_path=settings.data_dir / "templates.json")
-    app.state.memory = MemoryStore(storage_path=settings.data_dir / "memory.json")
+    app.state.memory = MemoryStore(
+        storage_path=settings.data_dir / "memory.json",
+        pref_threshold=settings.memory_pref_threshold,
+        revision_threshold=settings.memory_revision_threshold,
+    )
     logger.info(
         "服务启动：默认模型={} 可用模型={} 输出目录={} 日志目录={}",
         registry.default_model,

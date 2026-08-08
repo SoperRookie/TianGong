@@ -188,3 +188,12 @@ async def test_repeated_revision_precipitates_preference(client):
     await one_task_with_revision()  # 跨任务第二次提出同一修订要求 → 沉淀为偏好
     memories = (await client.get("/api/v1/memories")).json()["memories"]
     assert len(memories) == 1 and "补充兼容性用例" in memories[0]["content"]
+
+
+def test_threshold_one_precipitates_immediately(tmp_path):
+    store = MemoryStore(tmp_path / "m.json", pref_threshold=1, revision_threshold=1)
+    store.record_usage("template", "tpl-x")
+    assert store.defaults() == {"template_id": "tpl-x"}
+    store.record_usage("revision", "补充兼容性用例")
+    entries = store.list()
+    assert any("补充兼容性用例" in e.content for e in entries)
