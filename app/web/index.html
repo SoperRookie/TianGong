@@ -47,6 +47,14 @@ dialog { border:1px solid var(--border); border-radius:8px; width:520px; max-wid
 dialog h3 { margin-top:0; }
 .spin { display:inline-block; width:12px; height:12px; border:2px solid #ccc; border-top-color:var(--primary); border-radius:50%; animation:sp 1s linear infinite; vertical-align:-2px; }
 @keyframes sp { to { transform:rotate(360deg); } }
+.progress { height:10px; background:#e8ebf0; border-radius:5px; overflow:hidden; margin:10px 0 6px; }
+.progress .bar { height:100%; border-radius:5px; transition:width .8s ease;
+  background:repeating-linear-gradient(45deg, var(--primary) 0 12px, #4a76c4 12px 24px);
+  background-size:200% 100%; animation:flow 1.2s linear infinite; }
+@keyframes flow { to { background-position:-34px 0; } }
+.steps { display:flex; justify-content:space-between; font-size:12px; color:#999; }
+.steps span.on { color:var(--primary); font-weight:600; }
+.steps span.done { color:var(--ok); }
 </style>
 </head>
 <body>
@@ -156,6 +164,10 @@ async function init() {
   await refreshMemories(true);
   refreshList();
   setInterval(refreshList, 3000);
+  // 进行中任务每秒重绘进度面板（耗时与进度条平滑推进；真实阶段由 3s 轮询更新）
+  setInterval(() => {
+    if (currentTask && ['queued','running'].includes(currentTask.status)) renderDetail();
+  }, 1000);
 }
 
 /* ---- 记忆管理（F-8-6 可见可控）---- */
@@ -236,7 +248,12 @@ async function createTask() {
   fd.append('confirm_points', $('confirmPoints').checked);
   fd.append('async_mode', $('asyncMode').checked && !$('confirmPoints').checked);
   $('createBtn').disabled = true;
-  $('createMsg').innerHTML = '<span class="spin"></span> 提交中（含文档解析，图片较多时耗时更长）…';
+  $('createMsg').innerHTML = '<span class="spin"></span> 提交中…';
+  // 即时反馈：不等接口返回先展示进度面板（解析文档阶段，图片较多时耗时更长）
+  $('detail').innerHTML = `<div class="panel"><h3>已提交，解析需求中 <span class="spin"></span>
+      <span class="hint">含文档/图片解析，图片较多时耗时更长</span></h3>
+    <div class="progress"><div class="bar" style="width:12%"></div></div>
+    <div class="steps"><span class="on">上传与解析</span><span>需求分析</span><span>生成与评审</span><span>导出</span></div></div>`;
   try {
     const data = await api('/api/v1/tasks', {method:'POST', body:fd});
     $('reqText').value = ''; $('reqFiles').value = '';
@@ -263,9 +280,26 @@ function renderDetail() {
     <div class="hint">来源：${(t.sources||[]).map(esc).join('、')||'-'} · 创建于 ${t.created_at||''}</div>
     ${t.error?'<p style="color:var(--danger)">'+esc(t.error)+'</p>':''}</div>`;
 
+  if (['queued','running'].includes(t.status)) html += renderProgress(t);
   if (t.status === 'awaiting_confirmation') html += renderConfirm(t);
   if (t.result && t.result.cases && t.result.cases.length) html += renderResult(t);
   $('detail').innerHTML = html;
+}
+
+/* 阶段式进度条：排队 → 需求分析 → 生成与评审 → 导出（真实进度来自轮询的 progress 字段） */
+const STAGES = [['queued','排队'], ['analyzing','需求分析'], ['generating_reviewing','生成与评审'], ['exporting','导出']];
+const STAGE_PCT = {queued:8, analyzing:30, generating_reviewing:70, exporting:92};
+function renderProgress(t) {
+  const stage = t.progress || 'queued';
+  const idx = Math.max(0, STAGES.findIndex(s => s[0] === stage));
+  const elapsed = t.created_at ? Math.max(0, Math.floor((Date.now() - new Date(t.created_at).getTime())/1000)) : 0;
+  const mm = String(Math.floor(elapsed/60)), ss = String(elapsed%60).padStart(2,'0');
+  return `<div class="panel"><h3>正在生成 <span class="spin"></span>
+      <span class="hint">已耗时 ${mm}:${ss} · 生成与评审为主要耗时阶段（多模块并行）</span></h3>
+    <div class="progress"><div class="bar" style="width:${STAGE_PCT[stage] || 8}%"></div></div>
+    <div class="steps">${STAGES.map((s,i) =>
+      `<span class="${i < idx ? 'done' : i === idx ? 'on' : ''}">${i < idx ? '✓ ' : ''}${s[1]}</span>`).join('')}
+    </div></div>`;
 }
 
 /* 拆解确认视图（F-3-3） */
@@ -282,6 +316,9 @@ async function confirmPointsGo() {
   let points;
   try { points = JSON.parse($('pointsEdit').value); } catch { return alert('测试点 JSON 格式有误'); }
   const btns = document.querySelectorAll('#detail button'); btns.forEach(b=>b.disabled=true);
+  $('detail').innerHTML = `<div class="panel"><h3>测试点已确认，按模块并行生成中 <span class="spin"></span></h3>
+    <div class="progress"><div class="bar" style="width:60%"></div></div>
+    <div class="steps"><span class="done">✓ 需求分析</span><span class="on">生成与评审</span><span>导出</span></div></div>`;
   try {
     await api(`/api/v1/tasks/${currentTask.task_id}/confirm`,
       {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({test_points:points})});

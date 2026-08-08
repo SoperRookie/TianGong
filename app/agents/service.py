@@ -79,6 +79,7 @@ async def run_generation(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    on_analyzed=None,
 ) -> GenerationResult:
     """执行「拆解 → 生成 → 评审（≤3 轮回环）」全流程。
 
@@ -88,6 +89,7 @@ async def run_generation(
     test_points 传入已确认的拆解结果（F-3-3）：跳过需求分析，多模块时按模块并行生成。
     knowledge_refs / knowledge_cases：知识管家产出的分类知识（F-7-6 差异化注入时机）。
     memory_notes：用户偏好与项目记忆（F-8-7），独立预算注入生成 Agent。
+    on_analyzed：拆解完成回调（任务进度上报用，F-6-2）。
     """
     kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases,
           "memory_notes": memory_notes}
@@ -99,11 +101,16 @@ async def run_generation(
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     chunks = split_text(requirement, chunk_max_chars)
     if len(chunks) == 1:
-        return await _analyze_then_generate(requirement, llm, model, reviewer_model, template, **kw)
+        return await _analyze_then_generate(
+            requirement, llm, model, reviewer_model, template, on_analyzed=on_analyzed, **kw
+        )
 
     logger.info("需求 {} 字超过分片阈值，切分为 {} 片并行处理", len(requirement), len(chunks))
     outcomes = await asyncio.gather(
-        *[_analyze_then_generate(chunk, llm, model, reviewer_model, template, **kw) for chunk in chunks],
+        *[
+            _analyze_then_generate(chunk, llm, model, reviewer_model, template, on_analyzed=on_analyzed, **kw)
+            for chunk in chunks
+        ],
         return_exceptions=True,
     )
     return _merge(outcomes)
@@ -118,6 +125,7 @@ async def _analyze_then_generate(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    on_analyzed=None,
 ) -> GenerationResult:
     """先拆解，再按模块并行生成（PRD 4.1a 生成 Agent 多实例）。
 
@@ -125,6 +133,8 @@ async def _analyze_then_generate(
     （deepseek-chat 输出上限 8K，全模块一次性输出必然超限）。
     """
     analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
+    if on_analyzed:
+        on_analyzed()
     result = await _run_from_points(
         requirement, llm, model, reviewer_model, template, analysis["test_points"],
         knowledge_refs=knowledge_refs, knowledge_cases=knowledge_cases, memory_notes=memory_notes,

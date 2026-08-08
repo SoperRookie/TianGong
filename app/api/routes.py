@@ -529,7 +529,7 @@ async def create_task(
         )
         # 记忆检索注入（F-8-7）：独立预算，不占知识库配额
         memory_notes, memory_snapshot = _gather_memories(request.app, requirement, project)
-        store.set_progress(task_id, progress="generating_reviewing")
+        store.set_progress(task_id, progress="analyzing")
         result = await run_generation(
             requirement,
             llm=request.app.state.llm,
@@ -539,6 +539,7 @@ async def create_task(
             knowledge_refs=knowledge["refs"],
             knowledge_cases=knowledge["cases"],
             memory_notes=memory_notes,
+            on_analyzed=lambda: store.set_progress(task_id, progress="generating_reviewing"),
         )
         store.set_progress(task_id, progress="exporting")
         return _finalize_task(
