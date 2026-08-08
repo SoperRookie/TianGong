@@ -48,8 +48,10 @@ def setup_logging(level: str = "INFO", log_dir: Path | None = None) -> None:
             enqueue=True,  # 后台线程写文件，异步任务下不阻塞事件循环
         )
 
-    # 接管标准库与 uvicorn 的日志，统一走 Loguru
-    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+    # 接管标准库与 uvicorn 的日志，统一走 Loguru。
+    # 阈值取 INFO：openai/httpx 等三方库的 DEBUG 会携带完整请求体（含 base64 图片），
+    # 曾把日志文件刷出 MB 级单行；应用自身经 loguru 记录的 DEBUG 不受此影响
+    logging.basicConfig(handlers=[InterceptHandler()], level=logging.INFO, force=True)
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         std_logger = logging.getLogger(name)
         std_logger.handlers = [InterceptHandler()]

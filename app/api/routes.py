@@ -99,6 +99,8 @@ async def _parse_inputs(
             docs.append(parse_text(text))
     except (UnsupportedFormatError, ScannedPDFError, NoVisionModelError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except AllModelsFailedError as e:
+        raise HTTPException(status_code=502, detail=f"图片解析失败（Vision 模型不可用）：{e}")
     if not docs:
         raise HTTPException(status_code=400, detail="请上传需求文件或粘贴需求文本")
     return docs

@@ -73,6 +73,12 @@ class LLMClient:
                 except _RETRYABLE as e:
                     last_error = e
                     logger.warning("模型调用失败（第 {} 次，{}）：{}", attempts, cfg.name, e)
+                except openai.OpenAIError as e:
+                    # 配置/服务级错误（模型不存在、鉴权失败、参数非法）：重试无意义，
+                    # 换链路下一个模型；不再向上抛裸异常（曾致 500）
+                    last_error = e
+                    logger.error("模型不可用（{}）：{}，跳过重试", cfg.name, e)
+                    break
         tried = " → ".join(c.name for c in chain)
         logger.error("模型全链路失败（{} 次，链路: {}）：{}", attempts, tried, last_error)
         raise AllModelsFailedError(

@@ -1,23 +1,27 @@
 import os
+import tempfile
+from pathlib import Path
 
 import pytest
 
-from app.llm.registry import ModelRegistry
-from app.llm.schemas import ModelConfig
+# 存储隔离：必须在任何 app 模块导入前设置（app.main 导入即初始化日志文件目录），
+# 因此放在 conftest 导入期而非 fixture——pytest 保证 conftest 先于测试模块加载。
+# 避免测试污染仓库 data/（记忆、使用计数、模板）、outputs/ 与 logs/。
+_TEST_STORAGE = Path(tempfile.mkdtemp(prefix="tiangong-test-"))
+for _env, _sub in [
+    ("TIANGONG_OUTPUTS_DIR", "outputs"),
+    ("TIANGONG_DATA_DIR", "data"),
+    ("TIANGONG_KNOWLEDGE_DIR", "knowledge"),
+    ("TIANGONG_LOG_DIR", "logs"),
+]:
+    os.environ[_env] = str(_TEST_STORAGE / _sub)
 
+from app.config import get_settings  # noqa: E402
 
-@pytest.fixture(autouse=True, scope="session")
-def _isolate_storage(tmp_path_factory):
-    """存储隔离：API 测试经真实 lifespan 启动应用，落盘一律指向临时目录，
-    避免污染仓库 data/（记忆、使用计数、模板）与 outputs/。"""
-    from app.config import get_settings
+get_settings.cache_clear()
 
-    base = tmp_path_factory.mktemp("storage")
-    os.environ["TIANGONG_OUTPUTS_DIR"] = str(base / "outputs")
-    os.environ["TIANGONG_DATA_DIR"] = str(base / "data")
-    os.environ["TIANGONG_KNOWLEDGE_DIR"] = str(base / "knowledge")
-    get_settings.cache_clear()
-    yield
+from app.llm.registry import ModelRegistry  # noqa: E402
+from app.llm.schemas import ModelConfig  # noqa: E402
 
 
 @pytest.fixture
