@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TestCase Agent</title>
 <style>
-:root { --primary:#2f5aa8; --bg:#f5f6f8; --border:#dde1e6; --danger:#c0392b; --ok:#1e8449; }
+:root { --primary:#2f5aa8; --bg:#f5f6f8; --border:#dde1e6; --danger:#c0392b; --ok:#1e8449; --warn:#c98a1b; }
 * { box-sizing:border-box; }
 body { margin:0; font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:#222; }
 header { background:var(--primary); color:#fff; padding:10px 20px; font-size:17px; font-weight:600; }
@@ -15,12 +15,14 @@ header small { font-weight:400; opacity:.8; margin-left:10px; }
 .left { width:360px; flex-shrink:0; display:flex; flex-direction:column; gap:14px; }
 .right { flex:1; min-width:0; display:flex; flex-direction:column; gap:14px; }
 h3 { margin:0 0 10px; font-size:15px; }
+h4 { margin:12px 0 6px; font-size:14px; }
 label { display:block; margin:8px 0 2px; color:#555; }
 textarea,input[type=text],select { width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:5px; font:inherit; }
 textarea { resize:vertical; }
 button { padding:6px 14px; border:none; border-radius:5px; background:var(--primary); color:#fff; cursor:pointer; font:inherit; }
 button.secondary { background:#eef1f5; color:#333; }
 button.danger { background:var(--danger); }
+button.mini { padding:2px 8px; font-size:12px; }
 button:disabled { opacity:.5; cursor:not-allowed; }
 .task-item { padding:8px 10px; border:1px solid var(--border); border-radius:6px; margin-bottom:6px; cursor:pointer; }
 .task-item:hover { border-color:var(--primary); }
@@ -28,21 +30,30 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 .task-item .tid { font-family:monospace; font-size:12px; color:#666; }
 .status { display:inline-block; padding:0 8px; border-radius:9px; font-size:12px; color:#fff; }
 .status.completed { background:var(--ok); } .status.failed { background:var(--danger); }
-.status.running,.status.queued { background:#c98a1b; } .status.awaiting_confirmation { background:#7d3c98; }
+.status.running,.status.queued { background:var(--warn); } .status.awaiting_confirmation { background:#7d3c98; }
+.st { display:inline-block; padding:0 7px; border-radius:8px; font-size:12px; white-space:nowrap; }
+.st.pending { background:#eef1f5; color:#555; }
+.st.approved { background:#d5f0e0; color:var(--ok); }
+.st.rejected { background:#fadbd8; color:var(--danger); }
 table { width:100%; border-collapse:collapse; margin-top:8px; }
 th,td { border:1px solid var(--border); padding:5px 8px; text-align:left; vertical-align:top; font-size:13px; }
 th { background:#f0f2f5; }
 td.steps { white-space:pre-wrap; font-size:12px; color:#444; }
 .prio { font-weight:600; }
 .prio.P0 { color:#c0392b; } .prio.P1 { color:#ca6f1e; } .prio.P2 { color:#b7950b; } .prio.P3 { color:#7f8c8d; }
-.row-deleted { opacity:.45; text-decoration:line-through; }
-.row-modified { background:#fdf6e3; }
 .hint { color:#777; font-size:12px; }
+.warn { color:var(--warn); font-size:12px; }
 .chips span { display:inline-block; background:#fbeee6; border:1px solid #eccb9d; border-radius:4px; padding:1px 8px; margin:2px; font-size:12px; }
+.cov span { display:inline-block; border-radius:4px; padding:1px 8px; margin:2px; font-size:12px; border:1px solid var(--border); }
+.cov .c-ok { background:#d5f0e0; } .cov .c-miss { background:#fadbd8; }
+.cov .c-na { background:#eef1f5; color:#888; } .cov .c-tbd { background:#fdf6e3; }
 .chat { max-height:220px; overflow:auto; border:1px solid var(--border); border-radius:6px; padding:8px; background:#fafbfc; }
 .chat .msg { margin:4px 0; } .chat .me { color:var(--primary); }
 .dl a { margin-right:12px; }
 .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+.tabs { display:flex; gap:4px; margin-top:8px; }
+.tabs button { background:#eef1f5; color:#333; }
+.tabs button.on { background:var(--primary); color:#fff; }
 dialog { border:1px solid var(--border); border-radius:8px; width:520px; max-width:90vw; }
 dialog h3 { margin-top:0; }
 .spin { display:inline-block; width:12px; height:12px; border:2px solid #ccc; border-top-color:var(--primary); border-radius:50%; animation:sp 1s linear infinite; vertical-align:-2px; }
@@ -55,10 +66,14 @@ dialog h3 { margin-top:0; }
 .steps { display:flex; justify-content:space-between; font-size:12px; color:#999; }
 .steps span.on { color:var(--primary); font-weight:600; }
 .steps span.done { color:var(--ok); }
+.diffbox { border:1px solid var(--border); border-radius:6px; padding:8px; background:#fafbfc; margin-top:8px; font-size:12px; }
+.diffbox .del { color:var(--danger); text-decoration:line-through; }
+.diffbox .add { color:var(--ok); }
+.module-head { background:#f0f2f5; font-weight:600; }
 </style>
 </head>
 <body>
-<header>TestCase Agent<small>AI 测试用例生成平台（M4 试点版）</small></header>
+<header>TestCase Agent<small>AI 测试用例生成平台（生成质量闭环版）</small></header>
 <div class="layout">
   <div class="left">
     <div class="panel">
@@ -73,11 +88,11 @@ dialog h3 { margin-top:0; }
       </div>
       <label>用例模板</label>
       <select id="templateSel"></select>
-      <label>项目名（可选，同项目任务共享项目记忆）</label>
+      <label>项目名（可选，同项目任务共享项目记忆与规则）</label>
       <input type="text" id="projectInput" placeholder="如：斗地主赛季玩法">
 
       <div class="toolbar">
-        <label style="margin:0"><input type="checkbox" id="confirmPoints"> 先确认测试点</label>
+        <label style="margin:0"><input type="checkbox" id="confirmPoints" checked> 先审核测试点</label>
         <label style="margin:0"><input type="checkbox" id="asyncMode" checked> 后台执行</label>
       </div>
       <div class="toolbar">
@@ -88,6 +103,14 @@ dialog h3 { margin-top:0; }
     <div class="panel">
       <h3>任务列表 <span id="listSpin"></span></h3>
       <div id="taskList"></div>
+    </div>
+    <div class="panel">
+      <h3>学习规则（人工确认后反哺生成）</h3>
+      <div id="ruleList" class="hint">加载中…</div>
+      <div class="toolbar">
+        <button class="secondary" onclick="analyzeLearning()" id="learnBtn">分析修改习惯</button>
+      </div>
+      <div class="hint">从人工审核修改留痕中提炼规则候选，负责人确认范围后自动注入后续生成</div>
     </div>
     <div class="panel">
       <h3>记忆（用户偏好 / 项目记忆）</h3>
@@ -127,19 +150,24 @@ dialog h3 { margin-top:0; }
   <label>前置条件</label><input type="text" id="ePre">
   <label>测试步骤（每行一步：动作 =&gt; 预期）</label>
   <textarea id="eSteps" rows="5"></textarea>
+  <label>关键词</label><input type="text" id="eKeywords">
   <label>备注</label><input type="text" id="eRemark">
-  <label>反馈（可选，说明修改原因）</label><input type="text" id="eFeedback">
+  <label>反馈（可选，说明修改原因——学习语料）</label><input type="text" id="eFeedback">
   <div class="toolbar">
-    <button onclick="saveEdit()">确定</button>
+    <button onclick="saveEdit()">保存（人工定稿即通过并锁定）</button>
     <button class="secondary" onclick="document.getElementById('editDlg').close()">取消</button>
   </div>
 </dialog>
 
 <script>
 const $ = id => document.getElementById(id);
-let currentTask = null;        // 当前选中任务详情
-let pendingReview = {};        // case_id -> {action, case?, feedback}
+let currentTask = null;
 let editingCase = null;
+let caseTab = 'all';                 // 用例视图筛选：all / rejected / approved / pending
+let hiddenDupPairs = new Set();      // 忽略的重复提示（本地）
+let lastPointDiff = null;            // 最近一次测试点定点修改 Diff
+let lastCaseDiff = null;             // 最近一次用例定点修改 Diff
+let lastHints = [];                  // 连续驳回提示
 
 async function api(path, opts) {
   const resp = await fetch(path, opts);
@@ -147,8 +175,9 @@ async function api(path, opts) {
   if (!resp.ok) throw new Error(data.detail || resp.statusText);
   return data;
 }
+const jpost = (path, body) => api(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
 
-/* ---- 初始化：模型与模板下拉 ---- */
+/* ---- 初始化 ---- */
 async function init() {
   const m = await api('/api/v1/models');
   for (const sel of [$('modelSel'), $('reviewerSel')]) {
@@ -162,18 +191,69 @@ async function init() {
     new Option(x.name + (x.template_id === t.default_id ? '（默认）' : ''), x.template_id)));
   $('templateSel').value = t.default_id;
   await refreshMemories(true);
+  refreshRules();
   refreshList();
   setInterval(refreshList, 3000);
-  // 进行中任务每秒重绘进度面板（耗时与进度条平滑推进；真实阶段由 3s 轮询更新）
   setInterval(() => {
     if (currentTask && ['queued','running'].includes(currentTask.status)) renderDetail();
   }, 1000);
 }
 
-/* ---- 记忆管理（F-8-6 可见可控）---- */
+/* ---- 学习规则（需求三十六~三十九）---- */
+async function refreshRules() {
+  const data = await api('/api/v1/learning/rules');
+  const scopeText = {system:'系统', team:'团队', project:'项目', module:'模块'};
+  const rows = data.rules.filter(r => r.status !== 'ignored').map(r => `
+    <div class="task-item" style="cursor:default">
+      <div>
+        ${r.status==='candidate' ? '<span class="st pending">候选</span>' : `<span class="st approved">${scopeText[r.scope]||r.scope}级生效</span>`}
+        ${r.confidence ? `<span class="hint">可信度:${esc(r.confidence)}</span>` : ''}
+        <span style="float:right;white-space:nowrap">
+          ${r.status==='candidate' ? `<a href="#" onclick="confirmRule('${r.rule_id}');return false">确认</a>
+          <a href="#" onclick="ignoreRule('${r.rule_id}');return false" style="color:#888">忽略</a>` :
+          `<a href="#" onclick="deleteRule('${r.rule_id}');return false" style="color:var(--danger)">删</a>`}
+        </span>
+      </div>
+      <div style="font-size:12px;color:#444">${esc(r.content)}</div>
+      ${r.evidence ? `<div class="hint">依据：${esc(r.evidence)}</div>` : ''}
+    </div>`).join('');
+  $('ruleList').innerHTML = rows || '<div class="hint">暂无规则。点击「分析修改习惯」从审核留痕提炼候选</div>';
+}
+async function analyzeLearning() {
+  $('learnBtn').disabled = true; $('learnBtn').innerHTML = '<span class="spin"></span> 分析中…';
+  try {
+    const project = $('projectInput').value.trim() || null;
+    const data = await jpost('/api/v1/learning/analyze', {project});
+    alert(data.message || `分析 ${data.samples} 条留痕，新增 ${data.candidates.length} 条规则候选（需人工确认）`);
+    refreshRules();
+  } catch (e) { alert('分析失败: ' + e.message); }
+  $('learnBtn').disabled = false; $('learnBtn').textContent = '分析修改习惯';
+}
+async function confirmRule(id) {
+  const scope = window.prompt('规则适用范围：system（所有项目）/ team（团队）/ project（项目）/ module（模块）', 'team');
+  if (!scope) return;
+  let project = null, module = null;
+  if (['project','module'].includes(scope)) {
+    project = window.prompt('项目名：', $('projectInput').value.trim());
+    if (!project) return;
+    if (scope === 'module') { module = window.prompt('模块名：'); if (!module) return; }
+  }
+  try { await jpost(`/api/v1/learning/rules/${id}/confirm`, {scope, project, module}); refreshRules(); }
+  catch (e) { alert('确认失败: ' + e.message); }
+}
+async function ignoreRule(id) {
+  try { await jpost(`/api/v1/learning/rules/${id}/ignore`, {}); refreshRules(); }
+  catch (e) { alert('操作失败: ' + e.message); }
+}
+async function deleteRule(id) {
+  try { await api(`/api/v1/learning/rules/${id}`, {method:'DELETE'}); refreshRules(); }
+  catch (e) { alert('删除失败: ' + e.message); }
+}
+
+/* ---- 记忆管理 ---- */
 async function refreshMemories(applyDefaults) {
   const data = await api('/api/v1/memories');
-  if (applyDefaults) {  // 使用习惯沉淀的默认偏好（F-8-2）：预选常用模板/模型
+  if (applyDefaults) {
     const d = data.defaults || {};
     if (d.template_id && [...$('templateSel').options].some(o=>o.value===d.template_id)) $('templateSel').value = d.template_id;
     if (d.model && [...$('modelSel').options].some(o=>o.value===d.model)) $('modelSel').value = d.model;
@@ -186,14 +266,13 @@ async function refreshMemories(applyDefaults) {
           <a href="#" onclick="editMemory('${m.memory_id}');return false">改</a>
           <a href="#" onclick="deleteMemory('${m.memory_id}');return false" style="color:var(--danger)">删</a></span></div>
       <div style="font-size:12px;color:#444">${esc(m.content)}</div>
-    </div>`).join('') || '<div class="hint">暂无记忆。可手工添加，或随使用自动沉淀（常用模板/模型、重复的修订要求）</div>';
+    </div>`).join('') || '<div class="hint">暂无记忆。可手工添加，或随使用自动沉淀</div>';
   window._memories = data.memories;
 }
 function openMemDlg() { $('mContent').value=''; $('mScope').value='user'; $('mProject').style.display='none'; $('memDlg').showModal(); }
 async function saveMemory() {
   try {
-    await api('/api/v1/memories', {method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({content:$('mContent').value, scope:$('mScope').value, project:$('mProject').value||null})});
+    await jpost('/api/v1/memories', {content:$('mContent').value, scope:$('mScope').value, project:$('mProject').value||null});
     $('memDlg').close(); refreshMemories();
   } catch (e) { alert('保存失败: '+e.message); }
 }
@@ -201,11 +280,8 @@ async function editMemory(id) {
   const m = (window._memories||[]).find(x=>x.memory_id===id);
   const content = window.prompt('修改记忆内容（纠错）：', m ? m.content : '');
   if (content === null || !content.trim()) return;
-  try {
-    await api('/api/v1/memories/'+id, {method:'PUT', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({content})});
-    refreshMemories();
-  } catch (e) { alert('修改失败: '+e.message); }
+  try { await api('/api/v1/memories/'+id, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content})}); refreshMemories(); }
+  catch (e) { alert('修改失败: '+e.message); }
 }
 async function deleteMemory(id) {
   try { await api('/api/v1/memories/'+id, {method:'DELETE'}); refreshMemories(); }
@@ -217,7 +293,7 @@ async function clearMemories() {
   refreshMemories();
 }
 
-/* ---- 任务列表轮询 ---- */
+/* ---- 任务列表 ---- */
 async function refreshList() {
   const data = await api('/api/v1/tasks');
   $('listSpin').innerHTML = data.tasks.some(t => ['queued','running'].includes(t.status)) ? '<span class="spin"></span>' : '';
@@ -228,10 +304,9 @@ async function refreshList() {
         <span style="float:right" class="hint">${t.case_count?t.case_count+' 条用例':''}</span></div>
       <div class="tid">${t.task_id} · ${(t.sources||[]).map(shortName).join(', ')||'-'}</div>
     </div>`).join('') || '<div class="hint">暂无任务</div>';
-  // 进行中任务自动刷新详情
   if (currentTask && ['queued','running'].includes(currentTask.status)) openTask(currentTask.task_id, true);
 }
-const statusText = s => ({completed:'完成', failed:'失败', running:'执行中', queued:'排队中', awaiting_confirmation:'待确认'}[s]||s);
+const statusText = s => ({completed:'完成', failed:'失败', running:'执行中', queued:'排队中', awaiting_confirmation:'审核测试点'}[s]||s);
 const progressText = p => ({analyzing:'需求分析', generating_reviewing:'生成与评审', exporting:'导出'}[p]||p);
 const shortName = s => s.length>18 ? s.slice(0,15)+'…' : s;
 const esc = s => String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -249,25 +324,24 @@ async function createTask() {
   fd.append('async_mode', $('asyncMode').checked && !$('confirmPoints').checked);
   $('createBtn').disabled = true;
   $('createMsg').innerHTML = '<span class="spin"></span> 提交中…';
-  // 即时反馈：不等接口返回先展示进度面板（解析文档阶段，图片较多时耗时更长）
   $('detail').innerHTML = `<div class="panel"><h3>已提交，解析需求中 <span class="spin"></span>
-      <span class="hint">含文档/图片解析，图片较多时耗时更长</span></h3>
+      <span class="hint">含文档/图片解析与拆解后自动查漏、查重</span></h3>
     <div class="progress"><div class="bar" style="width:12%"></div></div>
     <div class="steps"><span class="on">上传与解析</span><span>需求分析</span><span>生成与评审</span><span>导出</span></div></div>`;
   try {
     const data = await api('/api/v1/tasks', {method:'POST', body:fd});
     $('reqText').value = ''; $('reqFiles').value = '';
-    refreshMemories();  // 使用习惯可能新沉淀偏好
+    refreshMemories();
     await refreshList(); openTask(data.task_id);
     $('createMsg').textContent = '';
-  } catch (e) { $('createMsg').textContent = '失败: ' + e.message; }
+  } catch (e) { $('createMsg').textContent = '失败: ' + e.message; $('detail').innerHTML = ''; }
   $('createBtn').disabled = false;
 }
 
 /* ---- 任务详情 ---- */
-async function openTask(id, keepReview) {
+async function openTask(id, keepLocal) {
   currentTask = await api('/api/v1/tasks/' + id);
-  if (!keepReview) pendingReview = {};
+  if (!keepLocal) { hiddenDupPairs = new Set(); lastPointDiff = null; lastCaseDiff = null; lastHints = []; caseTab = 'all'; }
   renderDetail();
   refreshList();
 }
@@ -281,12 +355,11 @@ function renderDetail() {
     ${t.error?'<p style="color:var(--danger)">'+esc(t.error)+'</p>':''}</div>`;
 
   if (['queued','running'].includes(t.status)) html += renderProgress(t);
-  if (t.status === 'awaiting_confirmation') html += renderConfirm(t);
+  if (t.status === 'awaiting_confirmation') html += renderPointWorkbench(t);
   if (t.result && t.result.cases && t.result.cases.length) html += renderResult(t);
   $('detail').innerHTML = html;
 }
 
-/* 阶段式进度条：排队 → 需求分析 → 生成与评审 → 导出（真实进度来自轮询的 progress 字段） */
 const STAGES = [['queued','排队'], ['analyzing','需求分析'], ['generating_reviewing','生成与评审'], ['exporting','导出']];
 const STAGE_PCT = {queued:8, analyzing:30, generating_reviewing:70, exporting:92};
 function renderProgress(t) {
@@ -302,92 +375,440 @@ function renderProgress(t) {
     </div></div>`;
 }
 
-/* 拆解确认视图（F-3-3） */
-function renderConfirm(t) {
-  const a = t.analysis || {};
-  return `<div class="panel"><h3>测试点拆解（确认后开始生成）</h3>
-    <textarea id="pointsEdit" rows="10">${esc(JSON.stringify(a.test_points, null, 1))}</textarea>
-    ${a.blind_spots && a.blind_spots.length ? '<label>疑似需求盲区</label><div class="chips">' +
-      a.blind_spots.map(b=>'<span>'+esc(b)+'</span>').join('')+'</div>' : ''}
-    <div class="toolbar"><button onclick="confirmPointsGo()">确认并生成用例</button>
-      <span class="hint">可直接编辑上方 JSON 调整测试点</span></div></div>`;
+/* ==== 测试点审核工作台（需求四十六~五十六）==== */
+
+function allPoints(t) {
+  const modules = (t.analysis||{}).test_points || [];
+  return modules.flatMap(m => (m.points||[]).map(p => ({...p, module:m.module})));
 }
-let confirming = false;  // 单击即生效：请求在途时忽略重复点击（服务端另有状态锁兜底）
+
+function renderPointWorkbench(t) {
+  const modules = (t.analysis||{}).test_points || [];
+  const pts = allPoints(t);
+  const approved = pts.filter(p=>p.status==='approved').length;
+  const rejected = pts.filter(p=>p.status==='rejected').length;
+  const pending = pts.length - approved - rejected;
+  const srcText = {ai:'AI拆解', gap:'查漏新增', supplement:'AI补充', manual:'手工', ai_fix:'修改新增'};
+
+  // 按需求分组审核（需求五十一）：模块分组行 + 组内测试点
+  const rows = modules.map(m => {
+    const head = `<tr class="module-head"><td colspan="7">
+      <input type="checkbox" onclick="toggleModule('${esc(m.module)}',this.checked)">
+      ${esc(m.module)} <span class="hint">（${(m.points||[]).length} 条）</span></td></tr>`;
+    const body = (m.points||[]).map(p => `
+      <tr>
+        <td><input type="checkbox" class="ptck" data-tp="${esc(p.tp_id)}" data-mod="${esc(m.module)}"></td>
+        <td>${esc(p.tp_id)}</td>
+        <td>${esc(p.point)}
+          ${(p.warnings||[]).map(w=>`<div class="warn">⚠ ${esc(w)}</div>`).join('')}
+          ${p.comment?`<div class="hint" style="color:var(--danger)">意见：${esc(p.comment)}</div>`:''}</td>
+        <td>${esc(p.dimension||'-')}</td>
+        <td class="hint">${srcText[p.source]||esc(p.source||'')}</td>
+        <td><span class="st ${p.status}">${{pending:'待审核',approved:'已通过🔒',rejected:'已驳回'}[p.status]||p.status}</span>
+          ${p.reject_count>1?`<div class="warn">驳回${p.reject_count}次</div>`:''}</td>
+        <td style="white-space:nowrap">
+          <button class="mini secondary" onclick="pointAct('${esc(p.tp_id)}','approve')">✓通过</button>
+          <button class="mini secondary" onclick="pointModify('${esc(p.tp_id)}')">✎</button>
+          <button class="mini secondary" onclick="pointReject('${esc(p.tp_id)}')">×驳回</button>
+          <button class="mini secondary" onclick="pointAct('${esc(p.tp_id)}','delete')">🗑</button>
+          ${p.status==='approved'?`<button class="mini secondary" onclick="pointAct('${esc(p.tp_id)}','unlock')">解锁</button>`:''}
+        </td>
+      </tr>`).join('');
+    return head + body;
+  }).join('');
+
+  return `<div class="panel"><h3>测试点审核工作台
+      <span class="hint">共 ${pts.length} 条 · 待审核 ${pending} · 已通过 ${approved} · 已驳回 ${rejected}</span></h3>
+    ${renderCoverage(t)}
+    ${renderReuseHints(t)}
+    ${renderDupReport(t)}
+    ${lastHints.length?`<div class="warn" style="margin-top:6px">${lastHints.map(esc).join('<br>')}</div>`:''}
+    ${(t.analysis&&t.analysis.blind_spots&&t.analysis.blind_spots.length)?
+      '<h4>疑似需求盲区</h4><div class="chips">'+t.analysis.blind_spots.map(b=>'<span>'+esc(b)+'</span>').join('')+'</div>':''}
+    <table>
+      <tr><th style="width:26px"></th><th>编号</th><th>测试点</th><th>维度</th><th>来源</th><th>状态</th><th>操作</th></tr>
+      ${rows}
+    </table>
+    <div class="toolbar">
+      <button class="secondary" onclick="batchPoints('approve')">批量通过（勾选）</button>
+      <button class="secondary" onclick="batchPoints('reject')">批量驳回（统一意见）</button>
+      ${rejected?`<button onclick="fixPoints()" id="fixPtBtn">AI 修改驳回项（${rejected}）</button>`:''}
+      <button class="secondary" onclick="gapCheck()">查漏补缺</button>
+      <button class="secondary" onclick="dupCheck()">重复检查</button>
+      <button class="secondary" onclick="supplementPoints()">AI 补充测试点</button>
+      <button class="secondary" onclick="manualAddPoint()">手工新增</button>
+    </div>
+    ${lastPointDiff?renderPointDiff(lastPointDiff):''}
+    <div class="toolbar" style="border-top:1px solid var(--border);padding-top:10px">
+      <button onclick="confirmPointsGo()" id="confirmBtn">确认并生成用例${approved?`（仅已通过的 ${approved} 条）`:'（全部未驳回项）'}</button>
+      <span class="hint">通过=锁定为正式测试点；驳回项修改后需再审核，不进入生成</span>
+    </div></div>`;
+}
+
+function renderCoverage(t) {
+  if (!t.coverage) return '';
+  const cls = {'已覆盖':'c-ok','未覆盖':'c-miss','不适用':'c-na','待确认':'c-tbd'};
+  const icon = {'已覆盖':'✓','未覆盖':'⚠','不适用':'—','待确认':'?'};
+  return `<h4>测试覆盖视图（独立查漏 Agent）</h4><div class="cov">${
+    Object.entries(t.coverage).map(([d,s]) =>
+      `<span class="${cls[s]||''}">${esc(d)} ${icon[s]||''} ${esc(s)}</span>`).join('')}</div>`;
+}
+
+function renderReuseHints(t) {
+  if (!t.reuse_hints || !t.reuse_hints.length) return '';
+  return `<h4>历史用例复用提示</h4>${t.reuse_hints.map(h=>`
+    <div class="diffbox">发现历史正式用例与当前需求高度相关（相似度 ${h.score}，来源 ${esc(h.source)}）：
+      <div class="hint" style="white-space:pre-wrap">${esc(h.text)}</div>
+      <span class="hint">可复用为参考，或忽略；生成时该用例已注入拆解与评审上下文</span></div>`).join('')}`;
+}
+
+function renderDupReport(t) {
+  const pairs = ((t.dup_report||{}).points||[]).filter(p=>!hiddenDupPairs.has(p.a+'|'+p.b));
+  if (!pairs.length) return '';
+  return `<h4>疑似重复测试点（AI 不删除，请人工处置）</h4>${pairs.map(p=>`
+    <div class="diffbox">
+      <b>${esc(p.a)}</b>「${esc(p.a_point)}」 与 <b>${esc(p.b)}</b>「${esc(p.b_point)}」
+      相似度 ${p.similarity}${p.verdict?` · 判定：${esc(p.verdict)}`:''}
+      ${p.reason?`<div class="hint">原因：${esc(p.reason)}</div>`:''}
+      ${p.suggestion?`<div class="hint">建议：${esc(p.suggestion)}</div>`:''}
+      <div class="toolbar">
+        <button class="mini secondary" onclick="pointAct('${esc(p.a)}','delete')">删除 ${esc(p.a)}</button>
+        <button class="mini secondary" onclick="pointAct('${esc(p.b)}','delete')">删除 ${esc(p.b)}</button>
+        <button class="mini secondary" onclick="hiddenDupPairs.add('${esc(p.a)}|${esc(p.b)}');renderDetail()">忽略</button>
+      </div></div>`).join('')}`;
+}
+
+function renderPointDiff(d) {
+  return `<h4>AI 定点修改结果（修改前 → 修改后）</h4>${d.diff.map(x=>`
+    <div class="diffbox">[${esc(x.comment_type||'')}] ${esc(x.tp_id)}
+      ${x.action==='split'
+        ? `<div><span class="del">${esc(x.before)}</span></div>` + x.after.map(a=>`<div class="add">+ ${esc(a)}</div>`).join('')
+        : x.action==='delete'
+        ? `<div><span class="del">${esc(x.before)}</span>（已删除）</div>`
+        : `<div><span class="del">${esc(x.before)}</span></div><div class="add">${esc(x.after)}</div>`}
+      ${x.note?`<div class="hint">${esc(x.note)}</div>`:''}</div>`).join('')}
+    ${d.added && d.added.length ? '<div class="chips">'+d.added.map(a=>`<span>新增: ${esc(a.point)}</span>`).join('')+'</div>' : ''}`;
+}
+
+async function pointsReview(items) {
+  try {
+    const data = await jpost(`/api/v1/tasks/${currentTask.task_id}/points/review`, {items});
+    lastHints = data.hints || [];
+    await openTask(currentTask.task_id, true);
+  } catch (e) { alert('操作失败: ' + e.message); }
+}
+const pointAct = (tp, action) => pointsReview([{tp_id:tp, action}]);
+function pointReject(tp) {
+  const comment = window.prompt('审核意见（必填，AI 将按意见定点修改）：');
+  if (!comment || !comment.trim()) return;
+  pointsReview([{tp_id:tp, action:'reject', comment:comment.trim()}]);
+}
+function pointModify(tp) {
+  const p = allPoints(currentTask).find(x=>x.tp_id===tp);
+  const text = window.prompt('修改测试点：', p ? p.point : '');
+  if (!text || !text.trim()) return;
+  pointsReview([{tp_id:tp, action:'modify', point:text.trim()}]);
+}
+function toggleModule(mod, checked) {
+  document.querySelectorAll(`.ptck[data-mod="${CSS.escape(mod)}"]`).forEach(c=>c.checked=checked);
+}
+function checkedPoints() {
+  return [...document.querySelectorAll('.ptck:checked')].map(c=>c.dataset.tp);
+}
+function batchPoints(action) {
+  const tps = checkedPoints();
+  if (!tps.length) return alert('请先勾选测试点');
+  if (action === 'reject') {
+    const comment = window.prompt(`批量驳回 ${tps.length} 条，统一审核意见（必填）：`, '与已有测试点重复，请合并处理');
+    if (!comment || !comment.trim()) return;
+    return pointsReview(tps.map(tp=>({tp_id:tp, action:'reject', comment:comment.trim()})));
+  }
+  pointsReview(tps.map(tp=>({tp_id:tp, action})));
+}
+async function fixPoints() {
+  const btn = $('fixPtBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> AI 修改中…'; }
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/points/fix`, {method:'POST'});
+    lastPointDiff = data;
+    await openTask(currentTask.task_id, true);
+  } catch (e) { alert('修改失败: ' + e.message); renderDetail(); }
+}
+async function gapCheck() {
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/points/gap-check`, {method:'POST'});
+    await openTask(currentTask.task_id, true);
+    alert(`查漏完成：新增 ${data.added.length} 条待审核测试点（存量不变）`);
+  } catch (e) { alert('查漏失败: ' + e.message); }
+}
+async function dupCheck() {
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/points/dup-check`, {method:'POST'});
+    hiddenDupPairs = new Set();
+    await openTask(currentTask.task_id, true);
+    if (!data.duplicates.length) alert('未发现疑似重复测试点');
+  } catch (e) { alert('重复检查失败: ' + e.message); }
+}
+async function supplementPoints() {
+  const instruction = window.prompt('AI 补充要求（只生成新增内容）：', '补充网络切换场景');
+  if (!instruction || !instruction.trim()) return;
+  try {
+    const data = await jpost(`/api/v1/tasks/${currentTask.task_id}/points/add`, {instruction:instruction.trim()});
+    await openTask(currentTask.task_id, true);
+    alert(`AI 补充了 ${data.added.length} 条待审核测试点`);
+  } catch (e) { alert('补充失败: ' + e.message); }
+}
+async function manualAddPoint() {
+  const module = window.prompt('模块名：');
+  if (!module) return;
+  const point = window.prompt('测试点描述：');
+  if (!point || !point.trim()) return;
+  try {
+    await jpost(`/api/v1/tasks/${currentTask.task_id}/points/add`, {points:[{module, point:point.trim()}]});
+    await openTask(currentTask.task_id, true);
+  } catch (e) { alert('新增失败: ' + e.message); }
+}
+let confirming = false;
 async function confirmPointsGo() {
   if (confirming) return;
-  let points;
-  try { points = JSON.parse($('pointsEdit').value); } catch { return alert('测试点 JSON 格式有误'); }
   confirming = true;
-  const edited = $('pointsEdit').value;
   document.querySelectorAll('#detail button').forEach(b=>b.disabled=true);
-  // 本地先切到运行态：进度面板立即出现，并由 1s/3s 轮询接管真实进度
   currentTask.status = 'running'; currentTask.progress = 'generating_reviewing';
   renderDetail();
   try {
-    await api(`/api/v1/tasks/${currentTask.task_id}/confirm`,
-      {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({test_points:points})});
+    await jpost(`/api/v1/tasks/${currentTask.task_id}/confirm`, {});
     await openTask(currentTask.task_id);
   } catch (e) {
     alert('生成失败: ' + e.message);
-    await openTask(currentTask.task_id);  // 服务端已恢复待确认状态，重载确认视图
-    if ($('pointsEdit')) $('pointsEdit').value = edited;  // 保留用户已编辑的测试点
+    await openTask(currentTask.task_id, true);
   }
   confirming = false;
 }
 
-/* 结果视图：用例表 + 评审操作 + 修订对话 + 下载 + 终稿上传 */
+/* ==== 用例审核（需求五十三~五十五）==== */
+
+function caseState(t, c) {
+  return (t.case_reviews||{})[c.uid] || {status:'pending', comment:'', reject_count:0, locked:false};
+}
+
 function renderResult(t) {
   const r = t.result;
-  const rows = r.cases.map(c => {
-    const p = pendingReview[c.case_id];
-    const cls = p ? (p.action==='delete'?'row-deleted':p.action==='modify'?'row-modified':'') : '';
-    const view = p && p.action==='modify' ? p.case : c;
-    return `<tr class="${cls}">
-      <td>${esc(view.case_id)}</td><td>${esc(view.module)}</td>
-      <td>${esc(view.title)}${p?'<div class="hint">['+({accept:'已采纳',modify:'已修改',delete:'待删除'}[p.action])+']</div>':''}</td>
-      <td class="prio ${esc(view.priority)}">${esc(view.priority)}</td>
-      <td class="steps">${(view.steps||[]).map((s,i)=>`${i+1}. ${esc(s.action)}\n   → ${esc(s.expected)}`).join('\n')}</td>
+  const states = r.cases.map(c => caseState(t, c));
+  const nRejected = states.filter(s=>s.status==='rejected').length;
+  const nApproved = states.filter(s=>s.status==='approved').length;
+  const nPending = r.cases.length - nRejected - nApproved;
+  const visible = r.cases.filter(c => {
+    const s = caseState(t, c).status;
+    return caseTab==='all' || s===caseTab;
+  });
+
+  const rows = visible.map(c => {
+    const s = caseState(t, c);
+    return `<tr>
+      <td><input type="checkbox" class="cck" data-cid="${esc(c.case_id)}"></td>
+      <td>${esc(c.case_id)}</td><td>${esc(c.module)}</td>
+      <td>${esc(c.title)}
+        ${s.comment?`<div class="hint" style="color:var(--danger)">意见：${esc(s.comment)}</div>`:''}</td>
+      <td class="prio ${esc(c.priority)}">${esc(c.priority)}</td>
+      <td class="steps">${(c.steps||[]).map((x,i)=>`${i+1}. ${esc(x.action)}\n   → ${esc(x.expected)}`).join('\n')}</td>
+      <td class="hint">${esc(c.keywords||'')}</td>
+      <td><span class="st ${s.status}">${{pending:'未审核',approved:'已通过🔒',rejected:'已驳回'}[s.status]}</span>
+        ${s.reject_count>1?`<div class="warn">驳回${s.reject_count}次</div>`:''}</td>
       <td style="white-space:nowrap">
-        <button class="secondary" onclick="mark('${esc(c.case_id)}','accept')">采纳</button>
-        <button class="secondary" onclick="openEdit('${esc(c.case_id)}')">修改</button>
-        <button class="secondary" onclick="mark('${esc(c.case_id)}','delete')">删除</button>
+        <button class="mini secondary" onclick="caseAct('${esc(c.case_id)}','approve')">✓通过</button>
+        <button class="mini secondary" onclick="openEdit('${esc(c.case_id)}')">✎</button>
+        <button class="mini secondary" onclick="caseReject('${esc(c.case_id)}')">×驳回</button>
+        <button class="mini secondary" onclick="caseAct('${esc(c.case_id)}','delete')">🗑</button>
+        ${s.locked?`<button class="mini secondary" onclick="caseAct('${esc(c.case_id)}','unlock')">解锁</button>`:''}
       </td></tr>`;
   }).join('');
 
-  const pendingCount = Object.keys(pendingReview).length;
   return `<div class="panel"><h3>生成结果
-      <span class="hint">${r.cases.length} 条 · 评审 ${r.review_rounds} 轮 · ${r.passed?'评审通过':'含未通过项'}${t.revisions.length?' · 已修订 '+t.revisions.length+' 轮':''}</span></h3>
+      <span class="hint">${r.cases.length} 条 · AI 评审 ${r.review_rounds} 轮 · ${r.passed?'评审通过':'含未通过项'}${t.revisions.length?' · 已修订 '+t.revisions.length+' 轮':''}</span></h3>
+    ${renderQuality(t)}
     ${r.blind_spots && r.blind_spots.length ? '<div class="chips">'+r.blind_spots.map(b=>'<span>'+esc(b)+'</span>').join('')+'</div>' : ''}
-    ${t.memories && t.memories.length ? '<div class="chips">'+t.memories.map(m=>'<span>记忆: '+esc(m.content)+'</span>').join('')+'<span class="hint" style="border:none;background:none">（本次生成引用的记忆 F-8-6）</span></div>' : ''}
+    ${t.memories && t.memories.length ? '<div class="chips">'+t.memories.map(m=>'<span>记忆: '+esc(m.content)+'</span>').join('')+'</div>' : ''}
+    ${t.rules && t.rules.length ? '<div class="chips">'+t.rules.map(x=>'<span>规则: '+esc(x.content)+'</span>').join('')+'</div>' : ''}
     <div class="dl" style="margin-top:6px">下载：
       ${Object.keys(t.files||{}).map(f=>`<a href="/api/v1/tasks/${t.task_id}/files/${f}">${f}</a>`).join('')}
     </div>
-    <table><tr><th>编号</th><th>模块</th><th>标题</th><th>优先级</th><th>步骤 → 预期</th><th>评审</th></tr>${rows}</table>
+    <div class="tabs">
+      <button class="${caseTab==='all'?'on':''}" onclick="caseTab='all';renderDetail()">全部（${r.cases.length}）</button>
+      <button class="${caseTab==='rejected'?'on':''}" onclick="caseTab='rejected';renderDetail()">待修改（${nRejected}）</button>
+      <button class="${caseTab==='approved'?'on':''}" onclick="caseTab='approved';renderDetail()">已通过（${nApproved}）</button>
+      <button class="${caseTab==='pending'?'on':''}" onclick="caseTab='pending';renderDetail()">未审核（${nPending}）</button>
+    </div>
+    <table><tr><th style="width:26px"><input type="checkbox" onclick="document.querySelectorAll('.cck').forEach(c=>c.checked=this.checked)"></th>
+      <th>编号</th><th>模块</th><th>标题</th><th>优先级</th><th>步骤 → 预期</th><th>关键词</th><th>状态</th><th>操作</th></tr>${rows}</table>
+    ${lastHints.length?`<div class="warn" style="margin-top:6px">${lastHints.map(esc).join('<br>')}</div>`:''}
     <div class="toolbar">
-      <button ${pendingCount?'':'disabled'} onclick="submitReview()">提交评审（${pendingCount} 条留痕）</button>
-      <span class="hint">逐条采纳/修改/删除将留痕并按终稿重导出（F-6-6）</span>
-    </div></div>
+      <button class="secondary" onclick="batchCases('approve')">批量通过（锁定）</button>
+      <button class="secondary" onclick="batchCases('reject')">批量驳回（统一意见）</button>
+      ${nRejected?`<button onclick="fixCases()" id="fixCaseBtn">AI 修改驳回用例（${nRejected}）</button>`:''}
+      <span class="hint">通过即锁定退出 AI 修改队列；驳回须填审核意见供 AI 定点修改</span>
+    </div>
+    ${lastCaseDiff?renderCaseDiff(lastCaseDiff):''}
+    </div>
+
+    <div class="panel"><h3>需求变更（最小范围更新）</h3>
+    <textarea id="newReqText" rows="3" placeholder="粘贴新版需求内容，分析变化与影响面…"></textarea>
+    <div class="toolbar">
+      <button class="secondary" onclick="reqDiff()" id="reqDiffBtn">分析差异</button>
+      ${t.requirement_diff && !t.requirement_diff.applied ? `<button onclick="applyReqDiff()" id="applyDiffBtn">应用最小范围更新</button>` : ''}
+    </div>
+    ${t.requirement_diff ? renderReqDiff(t.requirement_diff) : '<div class="hint">识别 文案/规则/新增/删除 变更类型，只更新真正受影响的用例；删除类仅标记由人工决定</div>'}
+    </div>
 
     <div class="panel"><h3>对话修订</h3>
     <div class="chat">${
-      t.revisions.map(r=>`<div class="msg"><span class="me">我：</span>${esc(r.instruction)}</div>
-        <div class="msg">已应用（${r.case_count} 条用例，评审 ${r.review_rounds} 轮）</div>`).join('')
-      || '<div class="hint">输入修订要求，例如：把限红相关用例优先级调整为 P0</div>'}</div>
+      t.revisions.map(x=>`<div class="msg"><span class="me">我：</span>${esc(x.instruction)}</div>
+        <div class="msg">已应用（${x.case_count} 条用例，评审 ${x.review_rounds} 轮）</div>`).join('')
+      || '<div class="hint">输入修订要求，例如：把限红相关用例优先级调整为 P0（已锁定用例不受影响）</div>'}</div>
     <div class="toolbar">
       <input type="text" id="reviseInput" placeholder="输入修订要求…" style="flex:1"
         onkeydown="if(event.key==='Enter')reviseGo()">
       <button onclick="reviseGo()" id="reviseBtn">发送</button>
     </div></div>
 
-    <div class="panel"><h3>离线终稿回传（F-6-8）</h3>
+    <div class="panel"><h3>离线终稿回传</h3>
     <div class="toolbar">
       <input type="file" id="finalFile" accept=".xlsx,.csv,.xmind">
       <button class="secondary" onclick="uploadFinal()">上传并对比</button>
     </div>
-    ${t.offline_review ? renderDiff(t.offline_review) : '<div class="hint">下载导出文件离线评审后，回传定稿自动计算差异，作为学习语料</div>'}
+    ${t.offline_review ? renderDiff(t.offline_review) : '<div class="hint">下载导出文件离线评审后，回传定稿自动计算差异，作为学习语料（左侧「分析修改习惯」可提炼规则）</div>'}
     </div>`;
 }
 
+function renderQuality(t) {
+  const q = t.quality;
+  if (!q) return '';
+  const dup = q['疑似重复用例对'] || [];
+  return `<div class="diffbox"><b>AI 自检（仅供参考，不作为自动通过依据）</b>
+    <div class="chips">
+      ${q['测试维度覆盖度']!=null?`<span>维度覆盖度 ${q['测试维度覆盖度']}</span>`:''}
+      <span>重复风险 ${esc(q['重复风险']||'-')}</span>
+      <span>待确认问题 ${q['待确认问题']}</span>
+      <span>未解决评审问题 ${q['未解决评审问题']}</span>
+      <span>历史用例参考 ${q['历史用例参考']}</span>
+      <span>评审轮次 ${q['评审轮次']}</span>
+    </div>
+    ${dup.length?dup.map(p=>`<div class="hint">疑似重复：${esc(p.a)}「${esc(p.a_title)}」≈ ${esc(p.b)}「${esc(p.b_title)}」（${p.similarity}）</div>`).join(''):''}
+  </div>`;
+}
+
+function renderCaseDiff(d) {
+  return `<h4>AI 定点修改结果</h4>${(d.fixes||[]).map(f=>
+    `<div class="hint">[${esc(f.comment_type)}] ${esc(f.case_id)}：${esc(f.note)}</div>`).join('')}
+  ${(d.diff||[]).map(x => x.action==='modify'
+    ? `<div class="diffbox">${esc(x.case_id)} 修改：${(x.changes||[]).map(c=>
+        `<div><b>${esc(c.field)}</b>：<span class="del">${esc(c.before)}</span> → <span class="add">${esc(c.after)}</span></div>`).join('')}</div>`
+    : x.action==='delete'
+    ? `<div class="diffbox"><span class="del">${esc(x.case_id)} 已删除</span></div>`
+    : `<div class="diffbox"><span class="add">新增 ${esc(x.case_id)}：${esc((x.after||{}).title||'')}</span></div>`).join('')}`;
+}
+
+function renderReqDiff(rd) {
+  return `<div class="diffbox"><b>${esc(rd.summary||'变更分析')}</b>${rd.applied?'<span class="st approved" style="margin-left:8px">已应用</span>':''}
+    ${(rd.changes||[]).map(c=>`<div style="margin-top:4px">
+      <span class="st pending">${esc(c.type)}</span> ${esc(c.description)}
+      ${(c.affected_cases&&c.affected_cases.length)?`<div class="hint">受影响用例：${c.affected_cases.map(esc).join('、')}</div>`:''}
+      ${(c.affected_points&&c.affected_points.length)?`<div class="hint">受影响测试点：${c.affected_points.map(esc).join('、')}</div>`:''}
+      ${c.action_hint?`<div class="hint">建议：${esc(c.action_hint)}</div>`:''}</div>`).join('')}
+    ${(rd.new_requirements&&rd.new_requirements.length)?`<div class="hint">新增需求：${rd.new_requirements.map(esc).join('；')}</div>`:''}
+  </div>`;
+}
+
+/* ---- 用例审核操作 ---- */
+async function casesReview(items) {
+  try {
+    const data = await jpost(`/api/v1/tasks/${currentTask.task_id}/review`, {items});
+    lastHints = (data.review||{}).hints || [];
+    await openTask(currentTask.task_id, true);
+    refreshMemories();
+  } catch (e) { alert('操作失败: ' + e.message); }
+}
+const caseAct = (cid, action) => casesReview([{case_id:cid, action}]);
+function caseReject(cid) {
+  const comment = window.prompt('审核意见（必填，AI 将按意见定点修改）：');
+  if (!comment || !comment.trim()) return;
+  casesReview([{case_id:cid, action:'reject', comment:comment.trim()}]);
+}
+function batchCases(action) {
+  const ids = [...document.querySelectorAll('.cck:checked')].map(c=>c.dataset.cid);
+  if (!ids.length) return alert('请先勾选用例');
+  if (action === 'reject') {
+    const comment = window.prompt(`批量驳回 ${ids.length} 条，统一审核意见（必填）：`, '与已有用例重复，请合并处理');
+    if (!comment || !comment.trim()) return;
+    return casesReview(ids.map(cid=>({case_id:cid, action:'reject', comment:comment.trim()})));
+  }
+  casesReview(ids.map(cid=>({case_id:cid, action})));
+}
+async function fixCases() {
+  const btn = $('fixCaseBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> AI 修改中…'; }
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/cases/fix`, {method:'POST'});
+    lastCaseDiff = data;
+    await openTask(currentTask.task_id, true);
+  } catch (e) { alert('修改失败: ' + e.message); renderDetail(); }
+}
+function openEdit(caseId) {
+  editingCase = currentTask.result.cases.find(c => c.case_id === caseId);
+  const c = editingCase;
+  $('editCaseId').textContent = caseId;
+  $('eTitle').value = c.title; $('ePrio').value = c.priority;
+  $('ePre').value = c.precondition; $('eRemark').value = c.remark || '';
+  $('eKeywords').value = c.keywords || '';
+  $('eSteps').value = (c.steps||[]).map(s=>`${s.action} => ${s.expected}`).join('\n');
+  $('eFeedback').value = '';
+  $('editDlg').showModal();
+}
+function saveEdit() {
+  const steps = $('eSteps').value.split('\n').filter(l=>l.trim()).map(l=>{
+    const [action, expected=''] = l.split('=>');
+    return {action: action.trim(), expected: expected.trim()};
+  });
+  const item = {case_id: editingCase.case_id, action:'modify', feedback:$('eFeedback').value, case:{
+    ...editingCase, title:$('eTitle').value, priority:$('ePrio').value,
+    precondition:$('ePre').value, remark:$('eRemark').value, keywords:$('eKeywords').value, steps
+  }};
+  $('editDlg').close();
+  casesReview([item]);
+}
+
+/* ---- 需求变更 ---- */
+async function reqDiff() {
+  const text = $('newReqText').value.trim();
+  if (!text) return alert('请粘贴新版需求内容');
+  $('reqDiffBtn').disabled = true; $('reqDiffBtn').innerHTML = '<span class="spin"></span> 分析中…';
+  try {
+    await jpost(`/api/v1/tasks/${currentTask.task_id}/requirement-diff`, {new_requirement:text});
+    await openTask(currentTask.task_id, true);
+  } catch (e) { alert('分析失败: ' + e.message); renderDetail(); }
+}
+async function applyReqDiff() {
+  if (!window.confirm('按差异分析结果应用最小范围更新？只有受影响用例会创建新版本，其余不动。')) return;
+  const btn = $('applyDiffBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 更新中…'; }
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/requirement-diff/apply`, {method:'POST'});
+    lastCaseDiff = data;
+    await openTask(currentTask.task_id, true);
+    if ((data.removed_marks||[]).length) alert('存在删除类变更：相关用例仅标记受影响，请人工决定保留/作废');
+  } catch (e) { alert('应用失败: ' + e.message); renderDetail(); }
+}
+
+/* ---- 对话修订 ---- */
+async function reviseGo() {
+  const instruction = $('reviseInput').value.trim();
+  if (!instruction) return;
+  $('reviseBtn').disabled = true; $('reviseBtn').innerHTML = '<span class="spin"></span>';
+  try {
+    await jpost(`/api/v1/tasks/${currentTask.task_id}/revise`, {instruction});
+    refreshMemories();
+    await openTask(currentTask.task_id);
+  } catch (e) { alert('修订失败: ' + e.message); }
+  $('reviseBtn').disabled = false; $('reviseBtn').textContent = '发送';
+}
+
+/* ---- 终稿上传 ---- */
 function renderDiff(o) {
   const s = o.stats;
   return `<div style="margin-top:8px">
@@ -399,67 +820,13 @@ function renderDiff(o) {
       ${o.modified.map(x=>'<span>修改: '+esc(x.title)+'（'+x.changes.map(c=>esc(c.field)).join('/')+'）</span>').join('')}
     </div></div>`;
 }
-
-/* ---- 在线评审操作 ---- */
-function mark(caseId, action) {
-  pendingReview[caseId] = {action, feedback: ''};
-  renderDetail();
-}
-function openEdit(caseId) {
-  editingCase = currentTask.result.cases.find(c => c.case_id === caseId);
-  const p = pendingReview[caseId];
-  const c = p && p.action==='modify' ? p.case : editingCase;
-  $('editCaseId').textContent = caseId;
-  $('eTitle').value = c.title; $('ePrio').value = c.priority;
-  $('ePre').value = c.precondition; $('eRemark').value = c.remark || '';
-  $('eSteps').value = (c.steps||[]).map(s=>`${s.action} => ${s.expected}`).join('\n');
-  $('eFeedback').value = p ? p.feedback : '';
-  $('editDlg').showModal();
-}
-function saveEdit() {
-  const steps = $('eSteps').value.split('\n').filter(l=>l.trim()).map(l=>{
-    const [action, expected=''] = l.split('=>');
-    return {action: action.trim(), expected: expected.trim()};
-  });
-  pendingReview[editingCase.case_id] = {action:'modify', feedback:$('eFeedback').value, case:{
-    ...editingCase, title:$('eTitle').value, priority:$('ePrio').value,
-    precondition:$('ePre').value, remark:$('eRemark').value, steps
-  }};
-  $('editDlg').close(); renderDetail();
-}
-async function submitReview() {
-  const items = Object.entries(pendingReview).map(([case_id, v]) => ({case_id, ...v}));
-  try {
-    const data = await api(`/api/v1/tasks/${currentTask.task_id}/review`,
-      {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({items})});
-    pendingReview = {};
-    await openTask(currentTask.task_id);
-    alert(`评审已留痕：采纳 ${data.review.accept} / 修改 ${data.review.modify} / 删除 ${data.review.delete}`);
-  } catch (e) { alert('提交失败: ' + e.message); }
-}
-
-/* ---- 对话修订 ---- */
-async function reviseGo() {
-  const instruction = $('reviseInput').value.trim();
-  if (!instruction) return;
-  $('reviseBtn').disabled = true; $('reviseBtn').innerHTML = '<span class="spin"></span>';
-  try {
-    await api(`/api/v1/tasks/${currentTask.task_id}/revise`,
-      {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({instruction})});
-    refreshMemories();  // 重复修订指令可能沉淀为偏好
-    await openTask(currentTask.task_id);
-  } catch (e) { alert('修订失败: ' + e.message); }
-  $('reviseBtn').disabled = false; $('reviseBtn').textContent = '发送';
-}
-
-/* ---- 终稿上传 ---- */
 async function uploadFinal() {
   const f = $('finalFile').files[0];
   if (!f) return alert('请选择终稿文件');
   const fd = new FormData(); fd.append('file', f);
   try {
     await api(`/api/v1/tasks/${currentTask.task_id}/final`, {method:'POST', body:fd});
-    openTask(currentTask.task_id);
+    openTask(currentTask.task_id, true);
   } catch (e) { alert('上传失败: ' + e.message); }
 }
 
