@@ -20,6 +20,7 @@ from app.agents.prompts import (
     KNOWLEDGE_REFS_BLOCK,
     MEMORY_BLOCK,
     REVIEWER_SYSTEM,
+    RULES_BLOCK,
 )
 from app.agents.state import MAX_REVIEW_ROUNDS, OrchestrationState
 from app.llm.client import LLMClient
@@ -159,7 +160,9 @@ async def analyze_requirement(
         ],
         model,
     )
-    modules = data.get("modules", [])
+    from app.tasks.points import normalize_points
+
+    modules = normalize_points(data.get("modules", []))
     logger.info(
         "需求分析完成：{} 个模块 / {} 个测试点 / {} 条盲区",
         len(modules), sum(len(m.get("points", [])) for m in modules), len(data.get("blind_spots", [])),
@@ -177,10 +180,12 @@ def build_graph(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
 ):
     """knowledge_refs：需求文档/规则库知识，生成前注入生成 Agent；
     knowledge_cases：历史用例，只注入拆解与评审 Agent（PRD 上下文隔离约束）；
-    memory_notes：用户偏好与项目记忆（F-8-7），独立预算注入生成 Agent。"""
+    memory_notes：用户偏好与项目记忆（F-8-7），独立预算注入生成 Agent；
+    rule_notes：学习规则库中已确认生效的团队/项目规则（需求三十九），注入生成 Agent。"""
     template = template or builtin_default_template()
     async def analyze(state: OrchestrationState) -> dict:
         analysis = await analyze_requirement(
@@ -212,6 +217,8 @@ def build_graph(
             action = "全量生成"
         if memory_notes:
             user += MEMORY_BLOCK.format(memories=memory_notes)
+        if rule_notes:
+            user += RULES_BLOCK.format(rules=rule_notes)
         data, result = await _chat_json(
             llm,
             [{"role": "system", "content": system}, {"role": "user", "content": user}],

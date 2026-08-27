@@ -70,9 +70,7 @@ class KnowledgeSteward:
         total_shares = sum(QUOTA_SHARES.values())
         candidates: dict[str, list[SearchHit]] = {}
         for category in categories:
-            candidates[category] = await self.service.search(
-                query, top_k=_CANDIDATES_PER_CATEGORY, category=category, space=space
-            )
+            candidates[category] = await self._layered_search(query, category, space)
 
         budgets = {
             c: self.budget_chars * QUOTA_SHARES[c] // total_shares for c in categories
@@ -110,6 +108,30 @@ class KnowledgeSteward:
                     }
                 )
         return bundle
+
+    async def _layered_search(
+        self, query: str, category: str, space: str | None
+    ) -> list[SearchHit]:
+        """分层检索（需求二十六）：当前项目空间优先，同类/全局知识空间兜底。
+
+        第一层：当前项目知识空间（space 指定时）；
+        第二层：全部知识空间的相似内容，去重后按序补足候选。
+        避免无关历史知识大量进入上下文：全局兜底仅在项目层候选不足时补充。
+        """
+        hits = await self.service.search(
+            query, top_k=_CANDIDATES_PER_CATEGORY, category=category, space=space
+        )
+        if space and len(hits) < _CANDIDATES_PER_CATEGORY:
+            seen = {(h.doc_id, h.chunk_index) for h in hits}
+            global_hits = await self.service.search(
+                query, top_k=_CANDIDATES_PER_CATEGORY, category=category, space=None
+            )
+            hits.extend(
+                h for h in global_hits
+                if (h.doc_id, h.chunk_index) not in seen
+            )
+            hits = hits[:_CANDIDATES_PER_CATEGORY]
+        return hits
 
     @staticmethod
     def _fill(

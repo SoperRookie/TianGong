@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     memory_pref_threshold: int = 3
     memory_revision_threshold: int = 2
 
+    # 学习规则注入预算（需求三十九）：已确认生效的团队/项目规则，独立于知识与记忆配额
+    rules_budget_chars: int = 800
+
+    # 历史用例复用提示阈值（需求二十九）：向量相似度达到该值提示「高度相关，可复用」
+    reuse_hint_score: float = 0.78
+
 
 @lru_cache
 def get_settings() -> Settings:

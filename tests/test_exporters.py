@@ -29,7 +29,7 @@ def test_excel导出(tmp_path):
     ws = load_workbook(str(path)).active
 
     assert [c.value for c in ws[1]] == [
-        "用例编号", "所属模块", "用例标题", "优先级", "前置条件", "测试步骤", "预期结果", "备注",
+        "用例编号", "所属模块", "用例标题", "优先级", "前置条件", "测试步骤", "预期结果", "关键词", "备注",
     ]
     assert ws.max_row == 3
     # 步骤与预期结果编号对应

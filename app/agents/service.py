@@ -79,6 +79,7 @@ async def run_generation(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
     on_analyzed=None,
 ) -> GenerationResult:
     """执行「拆解 → 生成 → 评审（≤3 轮回环）」全流程。
@@ -92,7 +93,7 @@ async def run_generation(
     on_analyzed：拆解完成回调（任务进度上报用，F-6-2）。
     """
     kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases,
-          "memory_notes": memory_notes}
+          "memory_notes": memory_notes, "rule_notes": rule_notes}
     if test_points:
         return await _run_from_points(
             requirement, llm, model, reviewer_model, template, test_points, **kw
@@ -125,6 +126,7 @@ async def _analyze_then_generate(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
     on_analyzed=None,
 ) -> GenerationResult:
     """先拆解，再按模块并行生成（PRD 4.1a 生成 Agent 多实例）。
@@ -137,7 +139,8 @@ async def _analyze_then_generate(
         on_analyzed()
     result = await _run_from_points(
         requirement, llm, model, reviewer_model, template, analysis["test_points"],
-        knowledge_refs=knowledge_refs, knowledge_cases=knowledge_cases, memory_notes=memory_notes,
+        knowledge_refs=knowledge_refs, knowledge_cases=knowledge_cases,
+        memory_notes=memory_notes, rule_notes=rule_notes,
     )
     for spot in analysis["blind_spots"]:
         if spot not in result.blind_spots:
@@ -156,10 +159,11 @@ async def _run_from_points(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
 ) -> GenerationResult:
     """从已确认测试点继续：单模块直接生成；多模块按模块并行多实例（PRD 4.1a 并行加速）。"""
     kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases,
-          "memory_notes": memory_notes}
+          "memory_notes": memory_notes, "rule_notes": rule_notes}
     if not test_points:  # 拆解为空的兜底：回退图内拆解
         return await _run_single(requirement, llm, model, reviewer_model, template, **kw)
     if len(test_points) == 1:
@@ -189,9 +193,11 @@ async def _run_single(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
 ) -> GenerationResult:
     graph = build_graph(llm, template, knowledge_refs=knowledge_refs,
-                        knowledge_cases=knowledge_cases, memory_notes=memory_notes)
+                        knowledge_cases=knowledge_cases, memory_notes=memory_notes,
+                        rule_notes=rule_notes)
     initial: dict = {
         "requirement": requirement,
         "model": model,
@@ -227,6 +233,7 @@ async def run_revision(
     history: list[str] | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
 ) -> GenerationResult:
     """多轮修订（F-3-5）：用户修订要求作为定点修正问题进入「生成→评审」回环。
 
@@ -238,7 +245,8 @@ async def run_revision(
     if history:
         applied = "；".join(history)
         problem += f"\n（此前已应用的修订，保持其效果不被本次修订破坏：{applied}）"
-    graph = build_graph(llm, template, knowledge_cases=knowledge_cases, memory_notes=memory_notes)
+    graph = build_graph(llm, template, knowledge_cases=knowledge_cases,
+                        memory_notes=memory_notes, rule_notes=rule_notes)
     initial: dict = {
         "requirement": requirement,
         "model": model,

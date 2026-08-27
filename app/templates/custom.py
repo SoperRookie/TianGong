@@ -15,7 +15,8 @@ from openpyxl import load_workbook
 from pydantic import BaseModel, Field
 
 CanonicalField = Literal[
-    "case_id", "module", "title", "priority", "precondition", "steps", "expected", "remark", "custom"
+    "case_id", "module", "title", "priority", "precondition", "steps", "expected",
+    "keywords", "remark", "custom",
 ]
 
 # 常见中文/英文列名 → 规范字段 的启发式映射（按顺序优先匹配）
@@ -27,6 +28,7 @@ _CANONICAL_PATTERNS: list[tuple[CanonicalField, list[str]]] = [
     ("precondition", ["前置条件", "预置条件", "前提条件", "前提"]),
     ("expected", ["预期结果", "期望结果", "预期输出", "预期"]),
     ("steps", ["测试步骤", "操作步骤", "执行步骤", "步骤"]),
+    ("keywords", ["关键词", "标签", "keywords", "tags"]),
     ("remark", ["备注", "说明", "注释"]),
 ]
 

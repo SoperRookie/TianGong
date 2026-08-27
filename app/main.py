@@ -10,6 +10,7 @@ from app.api.routes import router
 from app.config import BASE_DIR, get_settings
 from app.llm.client import LLMClient
 from app.llm.registry import ModelRegistry
+from app.learning import RuleStore
 from app.logging_setup import setup_logging
 from app.memory import MemoryStore
 from app.tasks import TaskStore
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI):
         pref_threshold=settings.memory_pref_threshold,
         revision_threshold=settings.memory_revision_threshold,
     )
+    app.state.rules = RuleStore(storage_path=settings.data_dir / "rules.json")
     logger.info(
         "服务启动：默认模型={} 可用模型={} 输出目录={} 日志目录={}",
         registry.default_model,

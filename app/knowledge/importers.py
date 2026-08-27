@@ -65,6 +65,8 @@ def render_case_chunk(case: dict) -> str:
             f"{i}. {s.get('action', '')} → 预期：{s.get('expected', '')}"
             for i, s in enumerate(steps, 1)
         )
+    if case.get("keywords"):
+        lines.append(f"关键词：{case['keywords']}")
     if case.get("remark"):
         lines.append(f"备注：{case['remark']}")
     return "\n".join(lines)

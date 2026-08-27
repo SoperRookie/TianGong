@@ -13,6 +13,7 @@ _DEFAULT_COLUMNS = [
     TemplateField(name="前置条件", maps_to="precondition"),
     TemplateField(name="测试步骤", maps_to="steps", required=True),
     TemplateField(name="预期结果", maps_to="expected", required=True),
+    TemplateField(name="关键词", maps_to="keywords"),
     TemplateField(name="备注", maps_to="remark"),
 ]
 
@@ -28,9 +29,9 @@ class TemplateStore:
         self._templates: dict[str, CustomTemplate] = {}
         self.default_id = "builtin-default"
         self._load()
-        if "builtin-default" not in self._templates:
-            self._templates["builtin-default"] = builtin_default_template()
-            self._persist()
+        # 内置模板始终以代码定义为准（列结构升级后旧持久化文件自动刷新）
+        self._templates["builtin-default"] = builtin_default_template()
+        self._persist()
 
     def _load(self) -> None:
         if not self.storage_path.exists():

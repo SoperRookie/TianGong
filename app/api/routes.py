@@ -264,6 +264,74 @@ def _gather_memories(app, requirement: str, project: str | None) -> tuple[str | 
         return None, []
 
 
+def _gather_rules(app, project: str | None) -> tuple[str | None, list[dict]]:
+    """规则注入（需求三十九）：已确认生效的团队/项目规则，独立预算，故障降级不阻塞。"""
+    try:
+        notes, snapshot = app.state.rules.render(
+            project=project, budget_chars=get_settings().rules_budget_chars
+        )
+        if snapshot:
+            logger.info("规则注入：{} 条（项目={}）", len(snapshot), project or "-")
+        return notes, snapshot
+    except Exception as e:
+        logger.warning("规则检索故障，降级为无规则注入：{}", e)
+        return None, []
+
+
+async def _reuse_hints(app, requirement: str, space: str | None) -> list[dict]:
+    """历史用例复用提示（需求二十九）：向量检索测试用例库，高相似即提示复用。"""
+    try:
+        service = _knowledge_service(app)
+        if not service.store.list_docs(space, "test_cases"):
+            return []
+        hits = await service.search(
+            requirement[:1500], top_k=3, category="test_cases", space=space, mode="vector"
+        )
+        threshold = get_settings().reuse_hint_score
+        return [
+            {"source": h.source, "text": h.text, "score": round(h.score, 3),
+             "hint": "发现历史正式用例与当前需求高度相关，可复用/作为参考/忽略"}
+            for h in hits if h.score >= threshold
+        ]
+    except Exception as e:
+        logger.warning("复用提示检索故障，跳过：{}", e)
+        return []
+
+
+async def _run_point_quality_checks(app, task_id: str, requirement: str, model: str | None) -> None:
+    """拆解后的质量闭环（需求六十一：测试点生成 → 独立覆盖检查 → 重复检查）。
+
+    独立查漏 Agent 产出覆盖矩阵与新增建议（只新增）；重复检查产出疑似重复对交人工处置。
+    任何一步故障均降级跳过，不阻塞拆解确认主链路。
+    """
+    from app.agents.quality import run_dup_judge, run_gap_check
+    from app.tasks.points import add_points, duplicate_candidates
+
+    store = app.state.tasks
+    record = store.get(task_id)
+    modules = (record.analysis or {}).get("test_points", [])
+    try:
+        gap = await run_gap_check(app.state.llm, requirement, modules, model)
+        record.coverage = gap["coverage"]
+        added = add_points(
+            modules,
+            [{"module": a.get("module", ""), "point": a.get("point", ""),
+              "dimension": a.get("dimension", "")} for a in gap["additions"]],
+            source="gap",
+        )
+        if added:
+            logger.info("独立查漏新增 {} 条待审核测试点", len(added))
+    except Exception as e:
+        logger.warning("独立查漏故障，跳过（不阻塞主链路）：{}", e)
+    try:
+        pairs = duplicate_candidates(modules)
+        judged = await run_dup_judge(app.state.llm, requirement, pairs, model) if pairs else []
+        record.dup_report = {"points": judged, "resolved": []}
+    except Exception as e:
+        logger.warning("重复检查故障，跳过（不阻塞主链路）：{}", e)
+    store.save(record)
+
+
 # ---- 长期记忆（F-8-2/3/6）----
 
 
@@ -490,12 +558,18 @@ async def create_task(
             raise HTTPException(status_code=400, detail=str(e))
         except (MissingAPIKeyError, AllModelsFailedError) as e:
             raise HTTPException(status_code=502, detail=str(e))
+        from app.tasks.points import assign_entities
+
+        analysis_data = analysis.model_dump()
+        # 测试点实体化：tp_id + 审核状态机（通过/驳回/锁定），支撑逐条与批量审核
+        analysis_data["test_points"] = assign_entities(analysis_data["test_points"])
         record = TaskRecord(
             task_id=task_id,
             status="awaiting_confirmation",
             sources=sources,
-            analysis=analysis.model_dump(),
+            analysis=analysis_data,
             knowledge=snapshot,
+            reuse_hints=await _reuse_hints(request.app, requirement, knowledge_space),
             context={
                 "requirement": requirement,
                 "model": model,
@@ -506,11 +580,17 @@ async def create_task(
             },
         )
         store.save(record)
+        # 拆解后自动执行：独立覆盖检查 + 重复检查（需求六十一闭环；故障降级不阻塞）
+        await _run_point_quality_checks(request.app, task_id, requirement, model)
+        record = store.get(task_id)
         return {
             "task_id": task_id,
             "status": record.status,
-            "test_points": analysis.test_points,
+            "test_points": (record.analysis or {}).get("test_points", []),
             "blind_spots": analysis.blind_spots,
+            "coverage": record.coverage,
+            "dup_report": record.dup_report,
+            "reuse_hints": record.reuse_hints,
             "confirm_url": f"/api/v1/tasks/{task_id}/confirm",
         }
 
@@ -530,6 +610,8 @@ async def create_task(
         )
         # 记忆检索注入（F-8-7）：独立预算，不占知识库配额
         memory_notes, memory_snapshot = _gather_memories(request.app, requirement, project)
+        # 规则注入（需求三十九）：已确认生效的团队/项目规则
+        rule_notes, rule_snapshot = _gather_rules(request.app, project)
         store.set_progress(task_id, progress="analyzing")
         result = await run_generation(
             requirement,
@@ -540,12 +622,14 @@ async def create_task(
             knowledge_refs=knowledge["refs"],
             knowledge_cases=knowledge["cases"],
             memory_notes=memory_notes,
+            rule_notes=rule_notes,
             on_analyzed=lambda: store.set_progress(task_id, progress="generating_reviewing"),
         )
         store.set_progress(task_id, progress="exporting")
         return _finalize_task(
             store, task_id, task_dir, sources, result, template,
             knowledge=snapshot, context=task_context, memories=memory_snapshot,
+            rules=rule_snapshot,
         )
 
     # 异步模式（F-6-1/2）：立即返回 task_id，后台执行，GET /tasks/{id} 轮询进度
@@ -569,12 +653,19 @@ async def create_task(
 def _finalize_task(
     store, task_id: str, task_dir: Path, sources: list[str], result, template,
     knowledge: list[dict] | None = None, context: dict | None = None,
-    memories: list[dict] | None = None,
+    memories: list[dict] | None = None, rules: list[dict] | None = None,
 ) -> dict:
     """导出多格式产物（F-5-1/2/3/4）并落库，返回任务响应。
 
     复用既有记录（异步任务/修订任务），保留 created_at 与修订历史等留痕。
+    用例分配稳定 uid（审核状态跟随 uid，不受编号重排影响）并初始化审核状态机。
     """
+    from app.tasks.points import new_uid
+
+    for case in result.cases:
+        if not case.uid:
+            case.uid = new_uid()
+
     files_map: dict[str, str] = {}
     if result.cases:
         files_map["xlsx"] = str(export_excel(result.cases, task_dir / "测试用例.xlsx", template))
@@ -592,12 +683,24 @@ def _finalize_task(
     record.sources = sources
     record.result = result.model_dump()
     record.files = files_map
+    # 用例审核状态机：新 uid 初始化为 pending；已不存在的 uid 清理
+    uids = {c.uid for c in result.cases}
+    record.case_reviews = {
+        uid: state for uid, state in record.case_reviews.items() if uid in uids
+    }
+    for uid in uids:
+        record.case_reviews.setdefault(
+            uid, {"status": "pending", "comment": "", "reject_count": 0, "locked": False}
+        )
+    record.quality = _quality_report(record, result)
     if knowledge is not None:
         record.knowledge = knowledge
     if context is not None:
         record.context = context
     if memories is not None:
         record.memories = memories
+    if rules is not None:
+        record.rules = rules
     store.save(record)
     return {
         "task_id": task_id,
@@ -608,7 +711,31 @@ def _finalize_task(
         "chunks": result.chunks,
         "unresolved": result.unresolved,
         "blind_spots": result.blind_spots,
+        "quality": record.quality,
         "downloads": {fmt: f"/api/v1/tasks/{task_id}/files/{fmt}" for fmt in files_map},
+    }
+
+
+def _quality_report(record: TaskRecord, result) -> dict:
+    """AI 自检评分（需求五十八）：由确定性信号汇总，仅作参考，不作为自动通过依据。"""
+    from app.tasks.points import case_duplicate_candidates
+
+    coverage = record.coverage or {}
+    applicable = [d for d, s in coverage.items() if s in ("已覆盖", "未覆盖", "待确认")]
+    covered = [d for d in applicable if coverage[d] == "已覆盖"]
+    coverage_score = round(len(covered) / len(applicable) * 100) if applicable else None
+
+    dup_pairs = case_duplicate_candidates([c.model_dump() for c in result.cases])
+    dup_risk = "高" if len(dup_pairs) >= 3 else "中" if dup_pairs else "低"
+    return {
+        "测试维度覆盖度": coverage_score,
+        "重复风险": dup_risk,
+        "疑似重复用例对": dup_pairs[:10],
+        "待确认问题": len(result.blind_spots),
+        "未解决评审问题": len(result.unresolved),
+        "历史用例参考": sum(1 for k in record.knowledge if k.get("category") == "test_cases"),
+        "评审轮次": result.review_rounds,
+        "note": "评分仅供参考，不作为自动通过依据（需求五十八）",
     }
 
 
@@ -626,12 +753,22 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     if record.status != "awaiting_confirmation":
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无待确认的拆解结果")
 
+    from app.tasks.points import confirmable_points, normalize_points
+
     ctx = record.context or {}
-    test_points = (body.test_points if body and body.test_points else None) or (
-        record.analysis or {}
-    ).get("test_points", [])
+    if body and body.test_points:
+        # 用户直接提交修改后的测试点（兼容 JSON 编辑路径）
+        test_points = normalize_points(body.test_points)
+        test_points = [
+            {"module": e["module"],
+             "points": [{"point": p["point"], "dimension": p.get("dimension", "")} for p in e["points"]]}
+            for e in test_points if e.get("points")
+        ]
+    else:
+        # 正式测试点（需求六十一）：有审核记录时只用已通过的；驳回项永不进入生成
+        test_points = confirmable_points((record.analysis or {}).get("test_points", []))
     if not test_points:
-        raise HTTPException(status_code=400, detail="测试点为空，无法生成")
+        raise HTTPException(status_code=400, detail="测试点为空，无法生成（请先通过至少一条测试点）")
     template = request.app.state.templates.get(ctx.get("template_id"))
 
     # 确认即锁定：状态先置 running（重复点击/重复请求直接 409，避免并行重复生成）
@@ -644,6 +781,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     memory_notes, memory_snapshot = _gather_memories(
         request.app, ctx.get("requirement", ""), ctx.get("project")
     )
+    rule_notes, rule_snapshot = _gather_rules(request.app, ctx.get("project"))
     try:
         result = await run_generation(
             ctx.get("requirement", ""),
@@ -655,6 +793,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
             knowledge_refs=knowledge["refs"],
             knowledge_cases=knowledge["cases"],
             memory_notes=memory_notes,
+            rule_notes=rule_notes,
         )
     except (MissingAPIKeyError, LLMOutputError) as e:
         # 可重试的故障：恢复待确认状态，用户可再次点击确认
@@ -670,7 +809,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     response = _finalize_task(
         store, task_id, task_dir, record.sources, result, template,
         knowledge=record.knowledge + snapshot,  # 拆解阶段 + 生成阶段的知识快照合并留痕
-        memories=memory_snapshot,
+        memories=memory_snapshot, rules=rule_snapshot,
     )
     # 保留拆解阶段留痕
     saved = store.get(task_id)
@@ -714,12 +853,18 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
     memory_notes, memory_snapshot = _gather_memories(
         request.app, ctx.get("requirement", ""), ctx.get("project")
     )
+    rule_notes, rule_snapshot = _gather_rules(request.app, ctx.get("project"))
     # 使用习惯沉淀（F-8-2）：跨任务重复的修订指令固化为偏好，后续生成主动满足
     request.app.state.memory.record_usage("revision", body.instruction)
+    # 已锁定用例退出 AI 修改队列（需求五十四）：不进入修订上下文，修订后原样合并回来
+    all_cases: list[dict] = record.result["cases"]
+    locked_uids = {uid for uid, s in record.case_reviews.items() if s.get("locked")}
+    unlocked = [c for c in all_cases if str(c.get("uid") or "") not in locked_uids]
+    locked = [c for c in all_cases if str(c.get("uid") or "") in locked_uids]
     try:
         result = await run_revision(
             ctx.get("requirement", ""),
-            cases=record.result["cases"],
+            cases=unlocked,
             instruction=body.instruction,
             llm=request.app.state.llm,
             model=body.model or ctx.get("model"),
@@ -729,16 +874,24 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
             history=[r["instruction"] for r in record.revisions],
             knowledge_cases=knowledge["cases"],
             memory_notes=memory_notes,
+            rule_notes=rule_notes,
         )
     except UnknownModelError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
 
+    if locked:
+        from app.agents.service import _renumber
+        from app.templates import TestCase as _TestCase
+
+        result.cases.extend(_TestCase.model_validate(c) for c in locked)
+        _renumber(result.cases)
+
     task_dir = store.output_dir / task_id
     response = _finalize_task(
         store, task_id, task_dir, record.sources, result, template,
-        knowledge=record.knowledge + snapshot, memories=memory_snapshot,
+        knowledge=record.knowledge + snapshot, memories=memory_snapshot, rules=rule_snapshot,
     )
     saved = store.get(task_id)
     saved.analysis = record.analysis
@@ -758,8 +911,9 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
 
 class ReviewItem(BaseModel):
     case_id: str
-    action: str  # accept / modify / delete
+    action: str  # approve / reject / modify / delete / unlock（accept 为 approve 的兼容别名）
     case: dict | None = None  # modify 时提交修改后的完整用例
+    comment: str = ""  # reject 时的审核意见（AI 定点修改的输入）
     feedback: str = ""  # 一键反馈：问题类型或意见（学习语料）
 
 
@@ -769,12 +923,16 @@ class ReviewBody(BaseModel):
 
 @router.post("/api/v1/tasks/{task_id}/review")
 async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
-    """在线评审留痕（F-6-6）：逐条采纳/修改/删除 + 一键反馈，按终稿重导出。
+    """在线评审（F-6-6 + 需求四十八/四十九/五十/五十四）：逐条与批量 通过/驳回/修改/删除。
 
-    留痕（含修改前后对照与反馈）是学习 Agent 归因与 Prompt 优化的核心语料。
+    - 通过（approve）即锁定（APPROVED+LOCKED），退出 AI 修改队列；
+    - 驳回（reject）必须带审核意见，供 AI 定点修改；连续驳回 2 次以上提示人工介入；
+    - 人工修改（modify）视为人工定稿，直接通过并锁定；
+    - 留痕（含修改前后对照与反馈）是学习 Agent 归因与 Prompt 优化的核心语料。
     """
     from app.agents import GenerationResult
     from app.agents.service import _renumber
+    from app.tasks.points import REJECT_HINT_THRESHOLD
     from app.templates import TestCase
 
     store = request.app.state.tasks
@@ -787,41 +945,489 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
     cases: list[dict] = list(record.result["cases"])
     by_id = {str(c.get("case_id")): c for c in cases}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    counts = {"accept": 0, "modify": 0, "delete": 0}
+    counts = {"approve": 0, "reject": 0, "modify": 0, "delete": 0, "unlock": 0}
+    hints: list[str] = []
+    deleted_any = False
     for item in body.items:
+        action = "approve" if item.action == "accept" else item.action
         origin = by_id.get(item.case_id)
         if origin is None:
             raise HTTPException(status_code=400, detail=f"用例不存在: {item.case_id}")
-        entry: dict = {"case_id": item.case_id, "action": item.action, "feedback": item.feedback, "at": now}
-        if item.action == "accept":
-            pass
-        elif item.action == "delete":
+        uid = str(origin.get("uid") or "")
+        state = record.case_reviews.setdefault(
+            uid, {"status": "pending", "comment": "", "reject_count": 0, "locked": False}
+        )
+        entry: dict = {"case_id": item.case_id, "action": action,
+                       "comment": item.comment, "feedback": item.feedback, "at": now}
+        if action == "approve":
+            state.update(status="approved", locked=True, comment="")
+        elif action == "reject":
+            comment = item.comment.strip() or item.feedback.strip()
+            if not comment:
+                raise HTTPException(status_code=400, detail=f"驳回用例 {item.case_id} 必须填写审核意见")
+            state.update(status="rejected", locked=False, comment=comment)
+            state["reject_count"] = int(state.get("reject_count", 0)) + 1
+            if state["reject_count"] >= REJECT_HINT_THRESHOLD:
+                hints.append(
+                    f"{item.case_id} 已连续 {state['reject_count']} 次未通过审核，"
+                    "建议检查：1) 需求是否存在歧义 2) 是否需要人工直接修改 3) 是否需要补充需求信息"
+                )
+        elif action == "delete":
             entry["before"] = origin
             cases.remove(origin)
-        elif item.action == "modify":
+            record.case_reviews.pop(uid, None)
+            deleted_any = True
+        elif action == "modify":
             if not item.case:
                 raise HTTPException(status_code=400, detail=f"修改操作需提交 case 字段: {item.case_id}")
             try:
-                updated = TestCase.model_validate(item.case).model_dump()
+                updated = TestCase.model_validate({**item.case, "uid": uid}).model_dump()
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"修改后的用例不合法: {e}")
             entry["before"], entry["after"] = origin, updated
             cases[cases.index(origin)] = updated
             by_id[item.case_id] = updated
+            # 人工定稿即通过并锁定（人工修改优于 AI 再改）
+            state.update(status="approved", locked=True, comment="")
+        elif action == "unlock":
+            state.update(status="pending", locked=False)
         else:
-            raise HTTPException(status_code=400, detail=f"未知评审操作: {item.action}（可用 accept/modify/delete）")
-        counts[item.action] += 1
+            raise HTTPException(
+                status_code=400,
+                detail=f"未知评审操作: {action}（可用 approve/reject/modify/delete/unlock）",
+            )
+        counts[action] += 1
         record.review_log.append(entry)
 
-    logger.info("任务 {} 在线评审：采纳 {} / 修改 {} / 删除 {}", task_id, counts["accept"], counts["modify"], counts["delete"])
-    # 删除后重排各模块编号，按终稿重导出
+    logger.info(
+        "任务 {} 在线评审：通过 {} / 驳回 {} / 修改 {} / 删除 {} / 解锁 {}",
+        task_id, counts["approve"], counts["reject"], counts["modify"], counts["delete"], counts["unlock"],
+    )
     result = GenerationResult.model_validate({**record.result, "cases": cases})
-    _renumber(result.cases)
+    if deleted_any:  # 删除后重排各模块编号（审核状态跟随 uid，不受编号重排影响）
+        _renumber(result.cases)
     task_dir = store.output_dir / task_id
     response = _finalize_task(store, task_id, task_dir, record.sources, result,
                               request.app.state.templates.get((record.context or {}).get("template_id")))
-    response["review"] = {**counts, "log_entries": len(record.review_log)}
+    response["review"] = {**counts, "log_entries": len(record.review_log), "hints": hints}
     return response
+
+
+# ---- 测试点审核工作台（生成质量核心需求 · 四十六~五十六）----
+
+
+class PointReviewItem(BaseModel):
+    tp_id: str
+    action: str  # approve / reject / modify / delete / unlock
+    point: str | None = None       # modify 时的新描述
+    dimension: str | None = None
+    comment: str = ""              # reject 时的审核意见
+
+
+class PointReviewBody(BaseModel):
+    items: list[PointReviewItem]
+
+
+def _points_record(store, task_id: str):
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    modules = (record.analysis or {}).get("test_points")
+    if not modules:
+        raise HTTPException(status_code=409, detail="任务无测试点拆解结果")
+    return record, modules
+
+
+@router.post("/api/v1/tasks/{task_id}/points/review")
+async def review_points(request: Request, task_id: str, body: PointReviewBody) -> dict:
+    """测试点逐条/批量审核（需求四十八/四十九/五十）：✓通过（锁定）/ ✎修改 / ×驳回 / 删除。
+
+    通过即锁定退出 AI 修改队列；驳回须带审核意见；连续驳回达阈值提示人工介入（需求三十五）。
+    """
+    from app.tasks.points import PointReviewError, apply_point_review
+
+    store = request.app.state.tasks
+    record, modules = _points_record(store, task_id)
+    try:
+        outcome = apply_point_review(modules, [i.model_dump() for i in body.items])
+    except PointReviewError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record.point_review_log.extend(dict(e, at=now) for e in outcome["log"])
+    store.save(record)
+    logger.info("任务 {} 测试点审核：{}", task_id, outcome["counts"])
+    return {
+        "task_id": task_id,
+        "counts": outcome["counts"],
+        "hints": outcome["hints"],
+        "test_points": modules,
+    }
+
+
+@router.post("/api/v1/tasks/{task_id}/points/fix")
+async def fix_points(request: Request, task_id: str) -> dict:
+    """AI 定点修改被驳回测试点（需求三十~三十四）。
+
+    只输入被驳回项+审核意见+关联需求；先识别意见类型再修改；输出修改前后 Diff；
+    修改后的测试点回到待审核状态（局部修改 → 再审核）。
+    """
+    from app.agents.quality import run_point_fix
+    from app.tasks.points import rejected_points
+
+    store = request.app.state.tasks
+    record, modules = _points_record(store, task_id)
+    rejected = rejected_points(modules)
+    if not rejected:
+        raise HTTPException(status_code=409, detail="没有被驳回的测试点，无需修改")
+    ctx = record.context or {}
+    try:
+        outcome = await run_point_fix(
+            request.app.state.llm, ctx.get("requirement", ""), modules, rejected, ctx.get("model")
+        )
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record.fix_log.append({"kind": "points", "at": now, "diff": outcome["diff"], "added": outcome["added"]})
+    store.save(record)
+    logger.info("任务 {} 测试点定点修改：改动 {} 条 / 新增 {} 条", task_id, len(outcome["diff"]), len(outcome["added"]))
+    return {"task_id": task_id, "diff": outcome["diff"], "added": outcome["added"], "test_points": modules}
+
+
+class PointAddBody(BaseModel):
+    points: list[dict] | None = None   # 手工新增：[{module, point, dimension?}]
+    instruction: str | None = None     # AI 补充：如「补充网络切换场景」
+
+
+@router.post("/api/v1/tasks/{task_id}/points/add")
+async def add_task_points(request: Request, task_id: str, body: PointAddBody) -> dict:
+    """审核人主动补充测试点（需求五十六）：手工直接新增，或让 AI 只生成新增内容。"""
+    from app.agents.quality import _points_view
+    from app.agents.graph import _chat_json
+    from app.tasks.points import add_points
+
+    store = request.app.state.tasks
+    record, modules = _points_record(store, task_id)
+    if body.points:
+        added = add_points(modules, body.points, source="manual")
+    elif body.instruction and body.instruction.strip():
+        ctx = record.context or {}
+        import json as _json
+
+        prompt = (
+            f"需求内容：\n{ctx.get('requirement', '')}\n\n"
+            f"已有测试点：\n{_json.dumps(_points_view(modules), ensure_ascii=False, indent=1)}\n\n"
+            f"用户补充要求：{body.instruction.strip()}\n\n"
+            "只生成满足补充要求的**新增**测试点，不要复述或修改已有测试点。"
+            '只输出 JSON：{"additions": [{"module": "模块名", "point": "测试点描述", "dimension": "维度"}]}'
+        )
+        try:
+            data, _ = await _chat_json(request.app.state.llm, [
+                {"role": "system", "content": "你是资深测试分析师，负责按用户要求补充测试点。一个测试点对应一个明确验证目标。"},
+                {"role": "user", "content": prompt},
+            ], ctx.get("model"))
+        except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        added = add_points(
+            modules,
+            [a for a in data.get("additions", []) if isinstance(a, dict)],
+            source="supplement",
+        )
+    else:
+        raise HTTPException(status_code=400, detail="请提供 points（手工新增）或 instruction（AI 补充）")
+    store.save(record)
+    return {"task_id": task_id, "added": added, "test_points": modules}
+
+
+@router.post("/api/v1/tasks/{task_id}/points/gap-check")
+async def gap_check_points(request: Request, task_id: str) -> dict:
+    """查漏补缺（需求七~十/五十七）：独立查漏 Agent 输出覆盖矩阵，只新增不改存量。"""
+    from app.agents.quality import run_gap_check
+    from app.tasks.points import add_points
+
+    store = request.app.state.tasks
+    record, modules = _points_record(store, task_id)
+    ctx = record.context or {}
+    try:
+        gap = await run_gap_check(
+            request.app.state.llm, ctx.get("requirement", ""), modules, ctx.get("model")
+        )
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    record.coverage = gap["coverage"]
+    added = add_points(
+        modules,
+        [{"module": a.get("module", ""), "point": a.get("point", ""),
+          "dimension": a.get("dimension", "")} for a in gap["additions"]],
+        source="gap",
+    )
+    store.save(record)
+    return {"task_id": task_id, "coverage": gap["coverage"], "added": added, "test_points": modules}
+
+
+@router.post("/api/v1/tasks/{task_id}/points/dup-check")
+async def dup_check_points(request: Request, task_id: str) -> dict:
+    """重复检查（需求十一~十三）：文字初筛 + 语义复核；AI 不删除，人工决定处置。"""
+    from app.agents.quality import run_dup_judge
+    from app.tasks.points import duplicate_candidates
+
+    store = request.app.state.tasks
+    record, modules = _points_record(store, task_id)
+    ctx = record.context or {}
+    pairs = duplicate_candidates(modules)
+    judged = await run_dup_judge(request.app.state.llm, ctx.get("requirement", ""), pairs, ctx.get("model"))
+    record.dup_report = {"points": judged, "resolved": (record.dup_report or {}).get("resolved", [])}
+    store.save(record)
+    return {"task_id": task_id, "duplicates": judged}
+
+
+# ---- 用例定点修改（需求三十~三十四/五十五）----
+
+
+@router.post("/api/v1/tasks/{task_id}/cases/fix")
+async def fix_cases(request: Request, task_id: str) -> dict:
+    """AI 定点修改被驳回用例：只输入被驳回用例+审核意见；锁定用例确定性保护；输出 Diff。"""
+    from app.agents import GenerationResult
+    from app.agents.quality import run_case_fix
+
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if record.status != "completed" or not (record.result or {}).get("cases"):
+        raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可修改的用例结果")
+    if not any(s.get("status") == "rejected" for s in record.case_reviews.values()):
+        raise HTTPException(status_code=409, detail="没有被驳回的用例，无需修改")
+    ctx = record.context or {}
+    template = request.app.state.templates.get(ctx.get("template_id"))
+    try:
+        outcome = await run_case_fix(
+            request.app.state.llm,
+            ctx.get("requirement", ""),
+            record.result["cases"],
+            record.case_reviews,
+            template,
+            ctx.get("model"),
+        )
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record.fix_log.append({
+        "kind": "cases", "at": now, "diff": outcome["diff"],
+        "fixes": outcome.get("fixes", []), "invalid": outcome.get("invalid", []),
+    })
+    result = GenerationResult.model_validate({**record.result, "cases": outcome["cases"]})
+    task_dir = store.output_dir / task_id
+    response = _finalize_task(store, task_id, task_dir, record.sources, result, template)
+    response["diff"] = outcome["diff"]
+    response["fixes"] = outcome.get("fixes", [])
+    logger.info("任务 {} 用例定点修改：Diff {} 条", task_id, len(outcome["diff"]))
+    return response
+
+
+# ---- 需求变更差异分析（需求四十~四十五）----
+
+
+class RequirementDiffBody(BaseModel):
+    new_requirement: str
+
+
+@router.post("/api/v1/tasks/{task_id}/requirement-diff")
+async def requirement_diff(request: Request, task_id: str, body: RequirementDiffBody) -> dict:
+    """需求变更差异分析：识别变化类型（文案/规则/新增/删除），标记受影响测试点与用例。
+
+    只分析不改动；删除类需求对应资产仅标记受影响，由人工决定保留/作废（需求四十五）。
+    """
+    from app.agents.quality import run_requirement_diff
+
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if not body.new_requirement.strip():
+        raise HTTPException(status_code=400, detail="新版需求内容不能为空")
+    ctx = record.context or {}
+    modules = (record.analysis or {}).get("test_points", [])
+    cases = (record.result or {}).get("cases", [])
+    try:
+        diff = await run_requirement_diff(
+            request.app.state.llm, ctx.get("requirement", ""), body.new_requirement,
+            modules, cases, ctx.get("model"),
+        )
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    record.requirement_diff = {
+        **diff,
+        "new_requirement": body.new_requirement,
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "applied": False,
+    }
+    store.save(record)
+    return {"task_id": task_id, **diff}
+
+
+@router.post("/api/v1/tasks/{task_id}/requirement-diff/apply")
+async def apply_requirement_diff(request: Request, task_id: str) -> dict:
+    """应用最小范围更新（需求四十三/四十四）：只修改受影响用例，新增需求只生成新增内容。
+
+    受影响用例走定点修正创建新版本（原版本留痕于 Diff）；未受影响资产不动；
+    删除类变更不自动删除任何资产。更新后的用例回到待审核状态。
+    """
+    from app.agents.quality import merge_case_fix
+    from app.agents import GenerationResult
+    from app.agents.graph import _chat_json
+    from app.agents.prompts import CASE_FIX_SYSTEM
+
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    rdiff = record.requirement_diff
+    if not rdiff:
+        raise HTTPException(status_code=409, detail="请先执行需求差异分析")
+    if rdiff.get("applied"):
+        raise HTTPException(status_code=409, detail="该需求变更已应用，请重新执行差异分析后再应用")
+    ctx = record.context or {}
+    cases: list[dict] = (record.result or {}).get("cases", [])
+    template = request.app.state.templates.get(ctx.get("template_id"))
+    affected_ids = {
+        cid for ch in rdiff.get("changes", [])
+        if ch.get("type") not in ("删除", "无变化")
+        for cid in ch.get("affected_cases", [])
+    }
+    new_req = rdiff.get("new_requirement", "")
+    instructions = [
+        {"变更": ch.get("description", ""), "类型": ch.get("type", ""),
+         "受影响用例": ch.get("affected_cases", []), "处理建议": ch.get("action_hint", "")}
+        for ch in rdiff.get("changes", []) if ch.get("type") not in ("删除", "无变化")
+    ]
+    diff_out: list[dict] = []
+    if affected_ids or rdiff.get("new_requirements"):
+        import json as _json
+
+        affected = [c for c in cases if str(c.get("case_id")) in affected_ids]
+        payload = {
+            "新版需求": new_req,
+            "变更清单": instructions,
+            "新增需求": rdiff.get("new_requirements", []),
+            "受影响用例": [{k: v for k, v in c.items() if k != "uid"} for c in affected],
+        }
+        system = CASE_FIX_SYSTEM.format(template_spec=(template.prompt_spec() if template else ""))
+        try:
+            data, _ = await _chat_json(request.app.state.llm, [
+                {"role": "system", "content": system},
+                {"role": "user", "content": (
+                    "需求发生变更，请按新版需求**只更新下列受影响用例**（创建新版本），"
+                    "并为「新增需求」生成新用例；其余用例系统已锁定不可改动。\n\n"
+                    + _json.dumps(payload, ensure_ascii=False, indent=1)
+                )},
+            ], ctx.get("model"))
+        except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        outcome = merge_case_fix(cases, data, affected_ids, record.case_reviews)
+        cases = outcome["cases"]
+        diff_out = outcome["diff"]
+    # 删除类变更：仅标记受影响，人工决定（需求四十五）
+    removed_marks = [
+        {"type": "删除", "description": ch.get("description", ""),
+         "affected_cases": ch.get("affected_cases", []), "note": "仅标记受影响，请人工决定保留/作废"}
+        for ch in rdiff.get("changes", []) if ch.get("type") == "删除"
+    ]
+    # 需求基线更新为新版，后续修订/定点修改以新版为准
+    ctx["requirement"] = new_req or ctx.get("requirement", "")
+    record.context = ctx
+    rdiff["applied"] = True
+    rdiff["applied_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record.fix_log.append({"kind": "requirement_change", "at": rdiff["applied_at"], "diff": diff_out})
+    result = GenerationResult.model_validate({**record.result, "cases": cases})
+    task_dir = store.output_dir / task_id
+    response = _finalize_task(store, task_id, task_dir, record.sources, result, template)
+    response["diff"] = diff_out
+    response["removed_marks"] = removed_marks
+    logger.info("任务 {} 需求变更最小范围更新：改动 {} 条 / 删除标记 {} 组", task_id, len(diff_out), len(removed_marks))
+    return response
+
+
+# ---- 学习候选与规则库（需求三十六~三十九）----
+
+
+@router.get("/api/v1/learning/rules")
+async def list_rules(request: Request, status: str | None = None, project: str | None = None) -> dict:
+    return {"rules": [r.model_dump() for r in request.app.state.rules.list(status, project)]}
+
+
+class LearningAnalyzeBody(BaseModel):
+    project: str | None = None
+    model: str | None = None
+
+
+@router.post("/api/v1/learning/analyze")
+async def analyze_learning(request: Request, body: LearningAnalyzeBody | None = None) -> dict:
+    """分析人工修改留痕，提炼规则候选（需求三十八）：候选须人工确认后才生效。"""
+    from app.agents.quality import run_learning_analysis
+    from app.learning import collect_samples
+
+    body = body or LearningAnalyzeBody()
+    samples = collect_samples(request.app.state.tasks, project=body.project)
+    if not samples:
+        return {"candidates": [], "samples": 0, "message": "暂无人工修改留痕可供学习"}
+    try:
+        candidates = await run_learning_analysis(request.app.state.llm, samples, body.model)
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    added = request.app.state.rules.add_candidates(candidates, project=body.project)
+    logger.info("学习分析：样本 {} 条 → 新候选 {} 条", len(samples), len(added))
+    return {
+        "candidates": [r.model_dump() for r in added],
+        "samples": len(samples),
+        "total_candidates": len(request.app.state.rules.list("candidate")),
+    }
+
+
+class RuleConfirmBody(BaseModel):
+    scope: str  # system / team / project / module
+    project: str | None = None
+    module: str | None = None
+
+
+@router.post("/api/v1/learning/rules/{rule_id}/confirm")
+async def confirm_rule(request: Request, rule_id: str, body: RuleConfirmBody) -> dict:
+    """负责人确认候选生效（需求三十八：加入项目规则/团队规则），并指定适用范围（需求三十九）。"""
+    try:
+        rule = request.app.state.rules.confirm(rule_id, body.scope, body.project, body.module)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e.args[0]))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return rule.model_dump()
+
+
+@router.post("/api/v1/learning/rules/{rule_id}/ignore")
+async def ignore_rule(request: Request, rule_id: str) -> dict:
+    try:
+        return request.app.state.rules.ignore(rule_id).model_dump()
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e.args[0]))
+
+
+class RuleUpdateBody(BaseModel):
+    content: str
+
+
+@router.put("/api/v1/learning/rules/{rule_id}")
+async def update_rule(request: Request, rule_id: str, body: RuleUpdateBody) -> dict:
+    try:
+        return request.app.state.rules.update(rule_id, body.content).model_dump()
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e.args[0]))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/api/v1/learning/rules/{rule_id}")
+async def delete_rule(request: Request, rule_id: str) -> dict:
+    if not request.app.state.rules.delete(rule_id):
+        raise HTTPException(status_code=404, detail=f"规则不存在: {rule_id}")
+    return {"deleted": rule_id}
 
 
 @router.post("/api/v1/tasks/{task_id}/final")

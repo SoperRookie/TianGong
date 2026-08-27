@@ -32,6 +32,7 @@ _CANONICAL_GETTERS: dict[str, Callable[[TestCase], str]] = {
     "precondition": lambda c: c.precondition,
     "steps": lambda c: "\n".join(f"{i}. {s.action}" for i, s in enumerate(c.steps, 1)),
     "expected": lambda c: "\n".join(f"{i}. {s.expected}" for i, s in enumerate(c.steps, 1)),
+    "keywords": lambda c: c.keywords,
     "remark": lambda c: c.remark,
 }
 
