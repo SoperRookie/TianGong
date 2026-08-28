@@ -144,6 +144,29 @@ async def auth_add_user(request: Request, body: UserBody) -> dict:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class UserUpdateBody(BaseModel):
+    role: str | None = None          # 修改角色（admin/member）
+    new_password: str | None = None  # 重置密码（无需原密码，重置后该用户需重新登录）
+
+
+@router.put("/api/v1/auth/users/{username}")
+async def auth_update_user(request: Request, username: str, body: UserUpdateBody) -> dict:
+    """管理员管理用户（重置密码 / 修改角色）。"""
+    from app.auth import AuthError
+
+    _require_admin(request)
+    if not body.role and not body.new_password:
+        raise HTTPException(status_code=400, detail="请提供要修改的角色或新密码")
+    try:
+        user = request.app.state.auth.admin_update(
+            username, role=body.role, new_password=body.new_password
+        )
+    except AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("管理员更新用户 {}：角色={} 重置密码={}", username, body.role or "-", bool(body.new_password))
+    return user
+
+
 @router.delete("/api/v1/auth/users/{username}")
 async def auth_delete_user(request: Request, username: str) -> dict:
     from app.auth import AuthError

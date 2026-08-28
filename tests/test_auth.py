@@ -77,6 +77,40 @@ async def test_用户管理与权限(client, auth_on):
     assert (await client.get("/api/v1/tasks", headers=member_headers)).status_code == 401
 
 
+async def test_管理员重置密码与修改角色(client, auth_on):
+    token = await _login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    await client.post("/api/v1/auth/users", headers=headers,
+                      json={"username": "zhang", "password": "zhang123", "role": "member"})
+    member_token = await _login(client, "zhang", "zhang123")
+
+    # 重置密码：旧密码失效、该用户会话全部注销，新密码可登录
+    resp = await client.put("/api/v1/auth/users/zhang", headers=headers,
+                            json={"new_password": "reset666"})
+    assert resp.status_code == 200
+    assert (await client.get("/api/v1/tasks",
+            headers={"Authorization": f"Bearer {member_token}"})).status_code == 401
+    assert (await client.post("/api/v1/auth/login",
+            json={"username": "zhang", "password": "zhang123"})).status_code == 401
+    token2 = await _login(client, "zhang", "reset666")
+
+    # 修改角色：member → admin 后可访问系统设置
+    resp = await client.put("/api/v1/auth/users/zhang", headers=headers, json={"role": "admin"})
+    assert resp.status_code == 200 and resp.json()["role"] == "admin"
+    assert (await client.get("/api/v1/auth/users",
+            headers={"Authorization": f"Bearer {token2}"})).status_code == 200
+
+    # 保护：不能降级最后一个管理员
+    await client.put("/api/v1/auth/users/zhang", headers=headers, json={"role": "member"})
+    resp = await client.put("/api/v1/auth/users/admin", headers=headers, json={"role": "member"})
+    assert resp.status_code == 400 and "最后一个管理员" in resp.json()["detail"]
+    # 空请求拒绝；member 无权调用
+    assert (await client.put("/api/v1/auth/users/zhang", headers=headers, json={})).status_code == 400
+    assert (await client.put("/api/v1/auth/users/zhang", json={"role": "admin"},
+            headers={"Authorization": f"Bearer {token2}"})).status_code == 403
+    await client.delete("/api/v1/auth/users/zhang", headers=headers)
+
+
 async def test_修改密码后需重新登录(client, auth_on):
     token = await _login(client)
     headers = {"Authorization": f"Bearer {token}"}

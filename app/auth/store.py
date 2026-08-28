@@ -105,6 +105,30 @@ class AuthStore:
         self._sessions = {t: s for t, s in self._sessions.items() if s["username"] != username}
         self._persist()
 
+    def admin_update(
+        self, username: str, role: str | None = None, new_password: str | None = None
+    ) -> dict:
+        """管理员管理用户：修改角色 / 重置密码（无需原密码，重置后该用户会话全部失效）。"""
+        user = self._users.get(username)
+        if user is None:
+            raise AuthError(f"用户不存在: {username}")
+        if role and role != user["role"]:
+            if role not in ROLES:
+                raise AuthError(f"未知角色: {role}（可用 {'/'.join(ROLES)}）")
+            admins = [u for u in self._users.values() if u["role"] == "admin"]
+            if user["role"] == "admin" and len(admins) <= 1:
+                raise AuthError("不能降级最后一个管理员")
+            user["role"] = role
+        if new_password:
+            if len(new_password) < 6:
+                raise AuthError("密码长度至少 6 位")
+            salt = secrets.token_hex(16)
+            user["salt"], user["password_hash"] = salt, _hash_password(new_password, salt)
+            # 重置密码后强制该用户重新登录
+            self._sessions = {t: s for t, s in self._sessions.items() if s["username"] != username}
+        self._persist()
+        return self.public_user(username)
+
     def list_users(self) -> list[dict]:
         return sorted((self.public_user(u) for u in self._users), key=lambda x: x["created_at"])
 

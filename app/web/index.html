@@ -551,6 +551,21 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<!-- 用户编辑（管理员：改角色 / 重置密码） -->
+<dialog id="editUserDlg">
+  <div class="dlg-h"><h3>编辑用户</h3><span class="meta"><code id="euName"></code></span></div>
+  <div class="dlg-b">
+    <label class="f">角色</label>
+    <select id="euRole"><option value="member">member（平台使用）</option><option value="admin">admin（含系统设置）</option></select>
+    <label class="f">重置密码<span class="hint">（留空则不修改；至少 6 位，重置后该用户需重新登录）</span></label>
+    <input type="text" id="euPwd" placeholder="留空不修改" autocomplete="off">
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('editUserDlg').close()">取消</button>
+    <button class="btn" onclick="saveUserEdit()">保存</button>
+  </div>
+</dialog>
+
 <!-- 用户新增 -->
 <dialog id="userDlg">
   <div class="dlg-h"><h3>添加用户</h3></div>
@@ -1770,7 +1785,8 @@ async function refreshUsers() {
         <td><span class="st ${u.role==='admin'?'approved':'pending'}">${esc(u.role)}</span></td>
         <td class="hint">${esc((u.created_at||'').replace('T',' ').replace('+00:00',''))}</td>
         <td><div class="rowops">
-          <button class="ibtn bad" title="删除" onclick="deleteUser('${esc(u.username)}')">${IC.trash}</button>
+          <button class="ibtn" title="编辑（改角色 / 重置密码）" onclick="openUserEdit('${esc(u.username)}','${esc(u.role)}')">${IC.edit}</button>
+          ${curUser&&u.username===curUser.username?'':`<button class="ibtn bad" title="删除" onclick="deleteUser('${esc(u.username)}')">${IC.trash}</button>`}
         </div></td></tr>`).join('')}
     </table></div>`;
   } catch (e) { toast(e.message, 'err'); }
@@ -1781,6 +1797,26 @@ async function addUser() {
     await api('/api/v1/auth/users', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({username: $('nuName').value, password: $('nuPwd').value, role: $('nuRole').value})});
     $('userDlg').close(); toast('用户已创建', 'ok'); refreshUsers();
+  } catch (e) { toast(e.message, 'err'); }
+}
+let _editingUser = null;
+function openUserEdit(username, role) {
+  _editingUser = username;
+  $('euName').textContent = username;
+  $('euRole').value = role;
+  $('euPwd').value = '';
+  $('editUserDlg').showModal();
+}
+async function saveUserEdit() {
+  const body = {role: $('euRole').value};
+  const pwd = $('euPwd').value.trim();
+  if (pwd) body.new_password = pwd;
+  try {
+    await api('/api/v1/auth/users/' + encodeURIComponent(_editingUser),
+      {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    $('editUserDlg').close();
+    toast(pwd ? '已保存；密码已重置，该用户需重新登录' : '已保存', 'ok');
+    refreshUsers();
   } catch (e) { toast(e.message, 'err'); }
 }
 async function deleteUser(username) {
