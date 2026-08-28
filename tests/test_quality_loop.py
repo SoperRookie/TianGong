@@ -404,6 +404,40 @@ async def test_task_list_项目名展示与过滤(client):
     assert empty["tasks"] == []
 
 
+async def test_项目增删改查与改名联动(client):
+    # 新建 + 重名拒绝
+    resp = await client.post("/api/v1/projects", json={"name": "增删改查", "description": "CRUD 验证"})
+    assert resp.status_code == 200
+    assert (await client.post("/api/v1/projects", json={"name": "增删改查"})).status_code == 400
+
+    # 创建任务时选择该项目（自动注册路径同样兼容新名称）
+    from tests.stubs import ANALYST_REPLY
+
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求", "project": "增删改查"})
+    task_id = resp.json()["task_id"]
+
+    # 列表带描述与统计
+    projects = (await client.get("/api/v1/projects")).json()["projects"]
+    row = next(p for p in projects if p["project"] == "增删改查")
+    assert row["description"] == "CRUD 验证" and row["tasks"] == 1
+
+    # 有任务不可删；改名联动任务归属
+    assert (await client.delete("/api/v1/projects/增删改查")).status_code == 400
+    resp = await client.put("/api/v1/projects/增删改查",
+                            json={"name": "增删改查V2", "description": "已改名"})
+    assert resp.status_code == 200
+    task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert task["context"]["project"] == "增删改查V2"
+    listed = (await client.get("/api/v1/tasks", params={"project": "增删改查V2"})).json()["tasks"]
+    assert any(t["task_id"] == task_id for t in listed)
+
+    # 空项目可删
+    await client.post("/api/v1/projects", json={"name": "空项目"})
+    assert (await client.delete("/api/v1/projects/空项目")).status_code == 200
+    assert (await client.delete("/api/v1/projects/空项目")).status_code == 404
+
+
 async def test_用例执行轮次与执行记录(client):
     task_id = await _create_completed_task(
         client, make_case(), make_case(case_id="TC-登录-002", title="验证密码错误提示"),

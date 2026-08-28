@@ -34,6 +34,9 @@ async def lifespan(app: FastAPI):
         revision_threshold=settings.memory_revision_threshold,
     )
     app.state.rules = RuleStore(storage_path=settings.data_dir / "rules.json")
+    from app.projects import ProjectStore
+
+    app.state.projects = ProjectStore(storage_path=settings.data_dir / "projects.json")
     app.state.auth = AuthStore(
         storage_path=settings.data_dir / "auth.json",
         session_ttl_hours=settings.session_ttl_hours,

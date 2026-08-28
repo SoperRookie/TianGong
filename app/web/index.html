@@ -479,8 +479,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     </div>
     <label class="f">用例模板</label>
     <select id="templateSel"></select>
-    <label class="f">项目名<span class="hint">（同项目共享项目记忆与规则）</span></label>
-    <input type="text" id="projectInput" placeholder="如：斗地主赛季玩法">
+    <label class="f">所属项目<span class="hint">（同项目共享项目记忆与规则）</span></label>
+    <select id="projectInput" onchange="if(this.value==='__new__')drawerNewProject()"></select>
     <div class="toolbar">
       <label class="check"><input type="checkbox" id="confirmPoints" checked> 先审核测试点</label>
       <label class="check"><input type="checkbox" id="asyncMode" checked> 后台执行</label>
@@ -574,6 +574,21 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="dlg-f">
     <button class="btn ghost" onclick="$('ruleDlg').close()">取消</button>
     <button class="btn" onclick="submitRuleConfirm()">确认生效</button>
+  </div>
+</dialog>
+
+<!-- 项目：新建 / 编辑 -->
+<dialog id="projDlg">
+  <div class="dlg-h"><h3 id="pjTitle">新建项目</h3></div>
+  <div class="dlg-b">
+    <label class="f">项目名</label><input type="text" id="pjName" placeholder="如：斗地主赛季玩法">
+    <label class="f">描述<span class="hint">（可选）</span></label>
+    <textarea id="pjDesc" rows="3" placeholder="项目背景 / 范围说明"></textarea>
+    <div class="hint" id="pjRenameHint" style="display:none;margin-top:8px">改名将联动更新该项目下所有任务的归属</div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('projDlg').close()">取消</button>
+    <button class="btn" onclick="saveProjDlg()">保存</button>
   </div>
 </dialog>
 
@@ -902,6 +917,7 @@ async function init() {
   $('templateSel').value = t.default_id;
   try { window._authSettings = await api('/api/v1/auth/settings'); } catch (e) { window._authSettings = {totp_enabled: true}; }
   await refreshMemories(true);
+  await fillProjectSelect('');
   refreshList();
   if (!window._pollStarted) {  // 定时器与全局监听只注册一次：重新登录不叠加轮询
     window._pollStarted = true;
@@ -1898,6 +1914,62 @@ function renderOfflineDiff(o) {
     </div></div>`;
 }
 /* ==================== 项目管理 ==================== */
+async function fillProjectSelect(keep) {
+  try { _projectsCache = (await api('/api/v1/projects')).projects; } catch (e) { return; }
+  const sel = $('projectInput');
+  const cur = keep !== undefined ? keep : sel.value;
+  sel.innerHTML = '<option value="">（不指定项目）</option>'
+    + _projectsCache.filter(p => !p.builtin).map(p =>
+      `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('')
+    + '<option value="__new__">＋ 新建项目…</option>';
+  if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+}
+async function drawerNewProject() {
+  $('projectInput').value = '';
+  const name = await askInput('新建项目', '项目名');
+  if (!name) return;
+  try {
+    await jpost('/api/v1/projects', {name});
+    await fillProjectSelect(name);
+    toast('项目已创建', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+let _editingProject = null;
+function openProjDlg(name) {
+  _editingProject = name || null;
+  const p = name ? _projectsCache.find(x => x.project === name) : null;
+  $('pjTitle').textContent = name ? '编辑项目 ' + name : '新建项目';
+  $('pjName').value = name || '';
+  $('pjDesc').value = p ? (p.description || '') : '';
+  $('pjRenameHint').style.display = name ? '' : 'none';
+  $('projDlg').showModal();
+}
+async function saveProjDlg() {
+  const name = $('pjName').value.trim(), description = $('pjDesc').value.trim();
+  if (!name) return toast('项目名不能为空', 'warn');
+  try {
+    if (_editingProject) {
+      await api('/api/v1/projects/' + encodeURIComponent(_editingProject),
+        {method:'PUT', headers:{'Content-Type':'application/json'},
+         body: JSON.stringify({name, description})});
+      if (curProject === _editingProject) curProject = name;
+    } else {
+      await jpost('/api/v1/projects', {name, description});
+    }
+    $('projDlg').close(); toast('已保存', 'ok');
+    await fillProjectSelect();
+    renderProjects(); refreshList();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function deleteProject(name) {
+  if (!await uiConfirm('删除项目', `确定删除项目「${name}」？仅允许删除没有任务的空项目。`, true)) return;
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(name), {method:'DELETE'});
+    toast('项目已删除', 'ok');
+    await fillProjectSelect();
+    renderProjects();
+  } catch (e) { toast(e.message, 'err'); }
+}
 let curProject = null, projTab = 'overview';
 let _projectsCache = [], _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '';
 const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved']};
@@ -1916,7 +1988,7 @@ async function renderProjects() {
   const rows = _projectsCache.map(p => {
     const reviewed = p.approved + p.rejected + p.pending;
     return `<tr class="rowlink" onclick="openProject('${esc(p.project)}')">
-      <td><b>${esc(p.project)}</b></td>
+      <td><b>${esc(p.project)}</b>${p.description?`<div class="hint">${esc(p.description)}</div>`:''}</td>
       <td>${p.tasks}</td>
       <td><b>${p.cases}</b> 条</td>
       <td style="min-width:170px">${reviewed ? `
@@ -1925,17 +1997,23 @@ async function renderProjects() {
           .filter(e=>e[1]).map(e=>`<i style="flex:${e[1]};background:${e[2]}" title="${e[0]} · ${e[1]}"></i>`).join('')}</div>
         <span class="hint">正式 ${p.approved} · 待审 ${p.pending} · 驳回 ${p.rejected}</span>` : '<span class="hint">—</span>'}</td>
       <td>${p.executed ? `已执行 ${p.executed}<div class="hint">通过率 ${(p.exec_pass/p.executed*100).toFixed(0)}%</div>` : '<span class="hint">未执行</span>'}</td>
-      <td class="hint">${relTime(p.last_activity)}</td>
+      <td class="hint">${relTime(p.last_activity)||'—'}</td>
+      <td onclick="event.stopPropagation()">${p.builtin?'':`<div class="rowops">
+        <button class="ibtn" title="编辑" onclick="openProjDlg('${esc(p.project)}')">${IC.edit}</button>
+        <button class="ibtn bad" title="删除（仅空项目）" onclick="deleteProject('${esc(p.project)}')">${IC.trash}</button>
+      </div>`}</td>
     </tr>`;
   }).join('');
   $('projArea').innerHTML = `<div class="card">
     <div class="card-h"><h3>项目</h3><span class="meta">共 ${_projectsCache.length} 个 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
-      <div class="grow"><button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
+      <div class="grow">
+        <button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>
+        <button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
     <div class="card-b">
       <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
         <thead><tr><th>项目</th><th style="width:70px">任务</th><th style="width:90px">用例</th>
-        <th>用例生命周期</th><th style="width:120px">执行</th><th style="width:100px">最近活动</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="6"><div class="empty">暂无项目：新建任务时填写项目名即可创建</div></td></tr>'}</tbody>
+        <th>用例生命周期</th><th style="width:120px">执行</th><th style="width:100px">最近活动</th><th style="width:80px">操作</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="7"><div class="empty">暂无项目，点击「新建项目」创建</div></td></tr>'}</tbody>
       </table></div>
     </div></div>`;
 }

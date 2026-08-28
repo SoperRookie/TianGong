@@ -834,6 +834,8 @@ async def create_task(
     )
     sources = [doc.source for doc in docs]
     requirement = _merge_docs(docs)
+    if project:  # 项目实体自动注册（下拉之外的直传名称也兼容）
+        request.app.state.projects.ensure([project], created_by=_operator(request))
     # 使用习惯沉淀（F-8-2）：直接生成与拆解确认两条路径统一在此记录模板/模型使用
     request.app.state.memory.record_usage("template", template.template_id)
     if model:
@@ -1795,13 +1797,91 @@ async def finish_execution_run(request: Request, task_id: str, run_id: str) -> d
 # ---- 项目视角（项目管理信息架构）----
 
 
+_EMPTY_STATS = {"tasks": 0, "cases": 0, "pending": 0, "rejected": 0,
+                "approved": 0, "executed": 0, "exec_pass": 0, "last_activity": ""}
+
+
 @router.get("/api/v1/projects")
 async def list_projects(request: Request) -> dict:
-    """项目汇总：任务/用例产出、用例生命周期分布（待审/驳回/正式）、执行情况、最近活动。"""
-    from app.reports import project_rollup
+    """项目列表：项目实体（描述/创建人）+ 汇总统计（产出、生命周期分布、执行、最近活动）。
+
+    历史任务中出现过的项目名自动注册为项目实体（兼容项目实体化之前的数据）。
+    """
+    from app.reports import UNASSIGNED, project_rollup
 
     records = request.app.state.tasks.list(limit=100000)
-    return {"projects": project_rollup(records)}
+    stats = {p["project"]: p for p in project_rollup(records)}
+    pstore = request.app.state.projects
+    pstore.ensure([n for n in stats if n != UNASSIGNED])
+    merged = []
+    for p in pstore.list():
+        merged.append({**_EMPTY_STATS, **stats.get(p["name"], {}), "project": p["name"],
+                       "description": p.get("description", ""), "created_by": p.get("created_by")})
+    if UNASSIGNED in stats:  # 未指定项目的任务聚合行（不可编辑/删除）
+        merged.append({**stats[UNASSIGNED], "description": "", "created_by": None, "builtin": True})
+    merged.sort(key=lambda x: x["last_activity"], reverse=True)
+    return {"projects": merged}
+
+
+class ProjectBody(BaseModel):
+    name: str
+    description: str = ""
+
+
+@router.post("/api/v1/projects")
+async def create_project(request: Request, body: ProjectBody) -> dict:
+    from app.projects import ProjectError
+
+    try:
+        return request.app.state.projects.create(
+            body.name, body.description, created_by=_operator(request)
+        )
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class ProjectUpdateBody(BaseModel):
+    name: str | None = None         # 改名（联动更新引用该项目的全部任务）
+    description: str | None = None
+
+
+@router.put("/api/v1/projects/{name}")
+async def update_project(request: Request, name: str, body: ProjectUpdateBody) -> dict:
+    from app.projects import ProjectError
+
+    store = request.app.state.tasks
+    try:
+        project = request.app.state.projects.update(name, body.name, body.description)
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if body.name and body.name.strip() and body.name.strip() != name:
+        # 改名联动：更新所有引用旧名的任务上下文
+        renamed = 0
+        for r in store.list(limit=100000):
+            if (r.context or {}).get("project") == name:
+                r.context["project"] = project["name"]
+                store.save(r)
+                renamed += 1
+        logger.info("项目改名 {} → {}：联动更新 {} 个任务", name, project["name"], renamed)
+    return project
+
+
+@router.delete("/api/v1/projects/{name}")
+async def delete_project(request: Request, name: str) -> dict:
+    """删除项目：仅允许空项目；有任务引用时拒绝（先迁移或删除任务）。"""
+    from app.projects import ProjectError
+
+    referenced = sum(
+        1 for r in request.app.state.tasks.list(limit=100000)
+        if (r.context or {}).get("project") == name
+    )
+    if referenced:
+        raise HTTPException(status_code=400, detail=f"项目下仍有 {referenced} 个任务，不可删除")
+    try:
+        request.app.state.projects.delete(name)
+    except ProjectError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"deleted": name}
 
 
 @router.get("/api/v1/projects/cases")
