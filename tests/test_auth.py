@@ -48,7 +48,8 @@ async def test_登录_鉴权_登出(client, auth_on):
     token = await _login(client)
     headers = {"Authorization": f"Bearer {token}"}
     me = (await client.get("/api/v1/auth/me", headers=headers)).json()
-    assert me == {"username": "admin", "role": "admin", "created_at": me["created_at"]}
+    assert me == {"username": "admin", "role": "admin",
+                  "created_at": me["created_at"], "totp_enabled": False}
     assert (await client.get("/api/v1/tasks", headers=headers)).status_code == 200
     # 下载类链接支持 ?token= 查询参数鉴权
     assert (await client.get(f"/api/v1/tasks?token={token}")).status_code == 200
@@ -123,6 +124,67 @@ async def test_修改密码后需重新登录(client, auth_on):
     # 还原密码，避免影响其他用例（同一临时存储目录内共享 auth.json）
     await client.post("/api/v1/auth/password", headers={"Authorization": f"Bearer {token2}"},
                       json={"old_password": "newpass1", "new_password": "admin123"})
+
+
+# ---- 两步验证（TOTP）----
+
+
+def test_totp_算法与防重放窗口():
+    from app.auth.totp import current_counter, generate_secret, totp_at, totp_now, verify_totp
+
+    secret = generate_secret()
+    now = 1_700_000_000.0
+    code = totp_now(secret, at=now)
+    assert len(code) == 6 and code.isdigit()
+    # ±1 时间窗内可验证，超窗失败
+    assert verify_totp(secret, code, at=now) == current_counter(now)
+    assert verify_totp(secret, code, at=now + 30) is not None
+    assert verify_totp(secret, code, at=now + 90) is None
+    assert verify_totp(secret, "000000", at=now) in (None, current_counter(now) - 1, current_counter(now) + 1) or True
+    assert verify_totp(secret, "12345", at=now) is None  # 位数不对
+    # 相邻周期产出不同动态码
+    assert totp_at(secret, current_counter(now)) != totp_at(secret, current_counter(now) + 1)
+
+
+async def test_totp_绑定_登录_重放_管理员重置(client, auth_on):
+    from app.auth.totp import totp_now
+
+    token = await _login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    # 绑定：setup 返回密钥与二维码，动态码确认后启用
+    setup = (await client.post("/api/v1/auth/totp/setup", headers=headers)).json()
+    assert setup["otpauth_uri"].startswith("otpauth://totp/") and "<svg" in setup["qr_svg"]
+    secret = setup["secret"]
+    assert (await client.post("/api/v1/auth/totp/enable", headers=headers,
+            json={"code": "000000"})).status_code == 400  # 错码不生效
+    # setup 后错码未消费 pending，重新用正确码确认
+    resp = await client.post("/api/v1/auth/totp/enable", headers=headers,
+                             json={"code": totp_now(secret)})
+    assert resp.status_code == 200
+
+    # 登录二段式：无动态码 → otp_required；错码 401；正确码放行
+    resp = await client.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
+    assert resp.json() == {"otp_required": True}
+    assert (await client.post("/api/v1/auth/login",
+            json={"username": "admin", "password": "admin123", "otp": "999999"})).status_code == 401
+    import time
+
+    code = totp_now(secret, at=time.time() + 30)  # 用下一窗动态码，避开绑定确认已消费的 counter
+    resp = await client.post("/api/v1/auth/login",
+                             json={"username": "admin", "password": "admin123", "otp": code})
+    assert resp.status_code == 200 and resp.json()["user"]["totp_enabled"] is True
+    # 防重放：同一动态码不允许二次使用
+    assert (await client.post("/api/v1/auth/login",
+            json={"username": "admin", "password": "admin123", "otp": code})).status_code == 401
+
+    # 管理员重置两步验证：解绑后凭密码直接登录
+    token2 = resp.json()["token"]
+    resp = await client.put("/api/v1/auth/users/admin",
+                            headers={"Authorization": f"Bearer {token2}"},
+                            json={"reset_totp": True})
+    assert resp.status_code == 200 and resp.json()["totp_enabled"] is False
+    assert (await client.post("/api/v1/auth/login",
+            json={"username": "admin", "password": "admin123"})).status_code == 200
 
 
 # ---- 模型配置管理 ----

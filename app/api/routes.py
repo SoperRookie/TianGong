@@ -78,18 +78,76 @@ def _require_admin(request: Request) -> dict:
 class LoginBody(BaseModel):
     username: str
     password: str
+    otp: str | None = None  # 两步验证动态码（绑定用户必填，二段式提交）
 
 
 @router.post("/api/v1/auth/login")
 async def auth_login(request: Request, body: LoginBody) -> dict:
     from app.auth import AuthError
+    from app.auth.store import OtpRequired
 
     try:
-        token, user = request.app.state.auth.login(body.username, body.password)
+        token, user = request.app.state.auth.login(body.username, body.password, otp=body.otp)
+    except OtpRequired:
+        # 口令正确但需动态码：不签发会话，前端展示验证码输入后重新提交
+        return {"otp_required": True}
     except AuthError as e:
         raise HTTPException(status_code=401, detail=str(e))
     logger.info("用户 {} 登录成功", user["username"])
     return {"token": token, "user": user}
+
+
+# ---- 两步验证（TOTP：Google Authenticator / 海月盾等标准验证器）----
+
+
+@router.post("/api/v1/auth/totp/setup")
+async def totp_setup(request: Request) -> dict:
+    """开始绑定：返回密钥、otpauth URI 与二维码 SVG（本地生成），扫码后回填动态码确认。"""
+    from app.auth import AuthError
+    from app.auth.totp import otpauth_uri, qr_svg
+
+    user = _current_user(request)
+    try:
+        secret = request.app.state.auth.totp_setup(user["username"])
+    except AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    uri = otpauth_uri(secret, user["username"])
+    return {"secret": secret, "otpauth_uri": uri, "qr_svg": qr_svg(uri)}
+
+
+class TotpCodeBody(BaseModel):
+    code: str
+
+
+@router.post("/api/v1/auth/totp/enable")
+async def totp_enable(request: Request, body: TotpCodeBody) -> dict:
+    from app.auth import AuthError
+
+    user = _current_user(request)
+    try:
+        request.app.state.auth.totp_enable(user["username"], body.code)
+    except AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("用户 {} 已绑定两步验证", user["username"])
+    return {"ok": True, "message": "两步验证已启用，下次登录需输入动态验证码"}
+
+
+class TotpDisableBody(BaseModel):
+    password: str
+    code: str
+
+
+@router.post("/api/v1/auth/totp/disable")
+async def totp_disable(request: Request, body: TotpDisableBody) -> dict:
+    from app.auth import AuthError
+
+    user = _current_user(request)
+    try:
+        request.app.state.auth.totp_disable(user["username"], body.password, body.code)
+    except AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("用户 {} 已解绑两步验证", user["username"])
+    return {"ok": True}
 
 
 @router.post("/api/v1/auth/logout")
@@ -147,23 +205,25 @@ async def auth_add_user(request: Request, body: UserBody) -> dict:
 class UserUpdateBody(BaseModel):
     role: str | None = None          # 修改角色（admin/member）
     new_password: str | None = None  # 重置密码（无需原密码，重置后该用户需重新登录）
+    reset_totp: bool = False         # 重置两步验证（手机丢失等场景解绑，用户可重新绑定）
 
 
 @router.put("/api/v1/auth/users/{username}")
 async def auth_update_user(request: Request, username: str, body: UserUpdateBody) -> dict:
-    """管理员管理用户（重置密码 / 修改角色）。"""
+    """管理员管理用户（重置密码 / 修改角色 / 重置两步验证）。"""
     from app.auth import AuthError
 
     _require_admin(request)
-    if not body.role and not body.new_password:
-        raise HTTPException(status_code=400, detail="请提供要修改的角色或新密码")
+    if not body.role and not body.new_password and not body.reset_totp:
+        raise HTTPException(status_code=400, detail="请提供要修改的角色、新密码或重置两步验证")
     try:
         user = request.app.state.auth.admin_update(
-            username, role=body.role, new_password=body.new_password
+            username, role=body.role, new_password=body.new_password, reset_totp=body.reset_totp
         )
     except AuthError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    logger.info("管理员更新用户 {}：角色={} 重置密码={}", username, body.role or "-", bool(body.new_password))
+    logger.info("管理员更新用户 {}：角色={} 重置密码={} 重置两步验证={}",
+                username, body.role or "-", bool(body.new_password), body.reset_totp)
     return user
 
 

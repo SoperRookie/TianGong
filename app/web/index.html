@@ -401,6 +401,12 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <label class="f">密码</label>
     <input type="password" id="loginPwd" autocomplete="current-password"
       onkeydown="if(event.key==='Enter')doLogin()">
+    <div id="loginOtpWrap" style="display:none">
+      <label class="f">动态验证码<span class="hint">（Google Authenticator / 海月盾等验证器中的 6 位数字）</span></label>
+      <input type="text" id="loginOtp" inputmode="numeric" maxlength="6" autocomplete="one-time-code"
+        style="letter-spacing:6px;font-family:var(--mono);text-align:center"
+        onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
     <div class="login-err" id="loginErr"></div>
     <button class="btn block" id="loginBtn" onclick="doLogin()">登 录</button>
   </div>
@@ -551,7 +557,14 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
-<!-- 用户编辑（管理员：改角色 / 重置密码） -->
+<!-- 两步验证（TOTP） -->
+<dialog id="totpDlg" style="width:460px">
+  <div class="dlg-h"><h3>两步验证</h3><span class="meta hint">Google Authenticator / 海月盾等标准验证器</span></div>
+  <div class="dlg-b" id="totpBody"></div>
+  <div class="dlg-f" id="totpFoot"></div>
+</dialog>
+
+<!-- 用户编辑（管理员：改角色 / 重置密码 / 重置两步验证） -->
 <dialog id="editUserDlg">
   <div class="dlg-h"><h3>编辑用户</h3><span class="meta"><code id="euName"></code></span></div>
   <div class="dlg-b">
@@ -559,6 +572,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <select id="euRole"><option value="member">member（平台使用）</option><option value="admin">admin（含系统设置）</option></select>
     <label class="f">重置密码<span class="hint">（留空则不修改；至少 6 位，重置后该用户需重新登录）</span></label>
     <input type="text" id="euPwd" placeholder="留空不修改" autocomplete="off">
+    <label class="check" id="euTotpWrap" style="margin-top:12px;display:none">
+      <input type="checkbox" id="euResetTotp"> 重置两步验证<span class="hint">（手机丢失等场景解绑，用户可重新绑定）</span></label>
   </div>
   <div class="dlg-f">
     <button class="btn ghost" onclick="$('editUserDlg').close()">取消</button>
@@ -741,11 +756,20 @@ function showLogin() {
 async function doLogin() {
   const btn = $('loginBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 登录中';
   try {
+    const body = {username: $('loginUser').value.trim(), password: $('loginPwd').value};
+    if ($('loginOtpWrap').style.display !== 'none') body.otp = $('loginOtp').value.trim();
     const data = await api('/api/v1/auth/login', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({username: $('loginUser').value.trim(), password: $('loginPwd').value})});
+      body: JSON.stringify(body)});
+    if (data.otp_required) {  // 口令正确，需补充动态验证码
+      $('loginOtpWrap').style.display = ''; $('loginOtp').value = '';
+      $('loginErr').textContent = '';
+      btn.disabled = false; btn.textContent = '登 录';
+      return $('loginOtp').focus();
+    }
     authToken = data.token; localStorage.setItem('tg_token', authToken);
     curUser = data.user;
     $('loginView').style.display = 'none'; $('loginPwd').value = '';
+    $('loginOtpWrap').style.display = 'none'; $('loginOtp').value = '';
     await init();
   } catch (e) { $('loginErr').textContent = e.message; }
   btn.disabled = false; btn.textContent = '登 录';
@@ -760,6 +784,7 @@ function renderUserBox() {
   $('userBox').innerHTML = `<b style="color:#c6cede">${esc(curUser.username)}</b>
     <span class="tag" style="background:#222c42;color:#7484a0">${esc(curUser.role)}</span><br>
     <a onclick="$('pwOld').value='';$('pwNew').value='';$('pwdDlg').showModal()" style="color:#7484a0;cursor:pointer">修改密码</a> ·
+    <a onclick="openTotpDlg()" style="color:#7484a0;cursor:pointer">两步验证${curUser.totp_enabled?' ✓':''}</a> ·
     <a onclick="doLogout()" style="color:#7484a0;cursor:pointer">退出登录</a>`;
   $('adminMenu').style.display = curUser.role === 'admin' ? '' : 'none';
 }
@@ -1779,13 +1804,14 @@ async function refreshUsers() {
   try {
     const data = await api('/api/v1/auth/users');
     $('usersList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
-      <tr><th>用户名</th><th>角色</th><th>创建时间</th><th style="width:80px">操作</th></tr>
+      <tr><th>用户名</th><th>角色</th><th>两步验证</th><th>创建时间</th><th style="width:80px">操作</th></tr>
       ${data.users.map(u => `<tr>
         <td><b>${esc(u.username)}</b>${curUser&&u.username===curUser.username?' <span class="tag">当前</span>':''}</td>
         <td><span class="st ${u.role==='admin'?'approved':'pending'}">${esc(u.role)}</span></td>
+        <td>${u.totp_enabled?'<span class="st approved">已绑定</span>':'<span class="hint">未绑定</span>'}</td>
         <td class="hint">${esc((u.created_at||'').replace('T',' ').replace('+00:00',''))}</td>
         <td><div class="rowops">
-          <button class="ibtn" title="编辑（改角色 / 重置密码）" onclick="openUserEdit('${esc(u.username)}','${esc(u.role)}')">${IC.edit}</button>
+          <button class="ibtn" title="编辑（改角色 / 重置密码 / 重置两步验证）" onclick="openUserEdit('${esc(u.username)}','${esc(u.role)}',${u.totp_enabled?1:0})">${IC.edit}</button>
           ${curUser&&u.username===curUser.username?'':`<button class="ibtn bad" title="删除" onclick="deleteUser('${esc(u.username)}')">${IC.trash}</button>`}
         </div></td></tr>`).join('')}
     </table></div>`;
@@ -1799,18 +1825,80 @@ async function addUser() {
     $('userDlg').close(); toast('用户已创建', 'ok'); refreshUsers();
   } catch (e) { toast(e.message, 'err'); }
 }
+/* ---- 两步验证（TOTP）绑定与解绑 ---- */
+function openTotpDlg() {
+  if (curUser.totp_enabled) {
+    $('totpBody').innerHTML = `
+      <div class="box accent">当前账号已绑定两步验证，登录时需输入验证器中的 6 位动态码。</div>
+      <label class="f">登录密码</label><input type="password" id="tdPwd" autocomplete="current-password">
+      <label class="f">当前动态验证码</label>
+      <input type="text" id="tdCode" inputmode="numeric" maxlength="6" style="letter-spacing:6px;font-family:var(--mono);text-align:center">`;
+    $('totpFoot').innerHTML = `
+      <button class="btn ghost" onclick="$('totpDlg').close()">关闭</button>
+      <button class="btn danger" onclick="totpUnbind()">解绑两步验证</button>`;
+  } else {
+    $('totpBody').innerHTML = `
+      <div class="hint">绑定后，登录除密码外还需输入验证器 App 中的 6 位动态码，防止密码泄露导致的账号盗用。</div>
+      <div class="empty" id="tdQrArea" style="padding:16px 0">点击「获取绑定二维码」开始</div>`;
+    $('totpFoot').innerHTML = `
+      <button class="btn ghost" onclick="$('totpDlg').close()">关闭</button>
+      <button class="btn" id="tdSetupBtn" onclick="totpSetup()">获取绑定二维码</button>`;
+  }
+  $('totpDlg').showModal();
+}
+async function totpSetup() {
+  const btn = $('tdSetupBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
+  try {
+    const data = await api('/api/v1/auth/totp/setup', {method:'POST'});
+    $('tdQrArea').outerHTML = `
+      <div style="text-align:center;margin:10px 0">
+        <div style="display:inline-block;padding:8px;border:1px solid var(--line);border-radius:10px;background:#fff">
+          <div style="width:180px;height:180px">${data.qr_svg.replace('<svg ', '<svg style="width:180px;height:180px" ')}</div>
+        </div>
+        <div class="hint" style="margin-top:6px">用 Google Authenticator / 海月盾等验证器扫码，<br>或手动输入密钥：<code>${esc(data.secret)}</code></div>
+      </div>
+      <label class="f">输入验证器中的 6 位动态码完成绑定</label>
+      <input type="text" id="tdBindCode" inputmode="numeric" maxlength="6"
+        style="letter-spacing:6px;font-family:var(--mono);text-align:center">`;
+    $('totpFoot').innerHTML = `
+      <button class="btn ghost" onclick="$('totpDlg').close()">取消</button>
+      <button class="btn" onclick="totpBind()">确认绑定</button>`;
+  } catch (e) { toast(e.message, 'err'); btn.disabled = false; btn.textContent = '获取绑定二维码'; }
+}
+async function totpBind() {
+  try {
+    const data = await api('/api/v1/auth/totp/enable', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({code: $('tdBindCode').value.trim()})});
+    $('totpDlg').close();
+    curUser.totp_enabled = true; renderUserBox(); if (currentView==='users') refreshUsers();
+    toast(data.message || '两步验证已启用', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function totpUnbind() {
+  try {
+    await api('/api/v1/auth/totp/disable', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({password: $('tdPwd').value, code: $('tdCode').value.trim()})});
+    $('totpDlg').close();
+    curUser.totp_enabled = false; renderUserBox(); if (currentView==='users') refreshUsers();
+    toast('两步验证已解绑', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
 let _editingUser = null;
-function openUserEdit(username, role) {
+function openUserEdit(username, role, totpEnabled) {
   _editingUser = username;
   $('euName').textContent = username;
   $('euRole').value = role;
   $('euPwd').value = '';
+  $('euTotpWrap').style.display = totpEnabled ? '' : 'none';
+  $('euResetTotp').checked = false;
   $('editUserDlg').showModal();
 }
 async function saveUserEdit() {
   const body = {role: $('euRole').value};
   const pwd = $('euPwd').value.trim();
   if (pwd) body.new_password = pwd;
+  if ($('euResetTotp').checked) body.reset_totp = true;
   try {
     await api('/api/v1/auth/users/' + encodeURIComponent(_editingUser),
       {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});

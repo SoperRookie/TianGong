@@ -35,6 +35,11 @@ class AuthError(ValueError):
     pass
 
 
+class OtpRequired(Exception):
+    """口令校验通过但需补充动态验证码（登录二段式流程）。"""
+    pass
+
+
 class AuthStore:
     def __init__(self, storage_path: Path, session_ttl_hours: int = 72):
         self._path = storage_path
@@ -106,12 +111,19 @@ class AuthStore:
         self._persist()
 
     def admin_update(
-        self, username: str, role: str | None = None, new_password: str | None = None
+        self,
+        username: str,
+        role: str | None = None,
+        new_password: str | None = None,
+        reset_totp: bool = False,
     ) -> dict:
-        """管理员管理用户：修改角色 / 重置密码（无需原密码，重置后该用户会话全部失效）。"""
+        """管理员管理用户：修改角色 / 重置密码 / 重置两步验证（手机丢失等场景解绑）。"""
         user = self._users.get(username)
         if user is None:
             raise AuthError(f"用户不存在: {username}")
+        if reset_totp:
+            for key in ("totp_secret", "totp_enabled", "totp_last_counter", "totp_pending"):
+                user.pop(key, None)
         if role and role != user["role"]:
             if role not in ROLES:
                 raise AuthError(f"未知角色: {role}（可用 {'/'.join(ROLES)}）")
@@ -134,14 +146,25 @@ class AuthStore:
 
     def public_user(self, username: str) -> dict:
         u = self._users[username]
-        return {"username": u["username"], "role": u["role"], "created_at": u["created_at"]}
+        return {"username": u["username"], "role": u["role"], "created_at": u["created_at"],
+                "totp_enabled": bool(u.get("totp_enabled"))}
 
     # ---- 登录会话 ----
 
-    def login(self, username: str, password: str) -> tuple[str, dict]:
+    def login(self, username: str, password: str, otp: str | None = None) -> tuple[str, dict]:
+        from app.auth.totp import verify_totp
+
         user = self._users.get(username.strip())
         if user is None or _hash_password(password, user["salt"]) != user["password_hash"]:
             raise AuthError("用户名或密码错误")
+        if user.get("totp_enabled"):
+            # 两步验证（TOTP，兼容 Google Authenticator / 海月盾等标准验证器）
+            if not otp:
+                raise OtpRequired()
+            counter = verify_totp(user["totp_secret"], otp)
+            if counter is None or counter <= int(user.get("totp_last_counter", -1)):
+                raise AuthError("动态验证码错误或已使用，请重新输入")
+            user["totp_last_counter"] = counter  # 防重放：同一动态码只允许使用一次
         token = secrets.token_urlsafe(32)
         self._sessions[token] = {
             "username": user["username"],
@@ -166,6 +189,51 @@ class AuthStore:
     def logout(self, token: str | None) -> None:
         if token and self._sessions.pop(token, None) is not None:
             self._persist()
+
+    # ---- 两步验证（TOTP）----
+
+    def totp_setup(self, username: str) -> str:
+        """开始绑定：生成待确认密钥（验证器扫码后须回填动态码确认才生效）。"""
+        from app.auth.totp import generate_secret
+
+        user = self._users.get(username)
+        if user is None:
+            raise AuthError(f"用户不存在: {username}")
+        if user.get("totp_enabled"):
+            raise AuthError("已绑定两步验证；如需换绑请先解绑或联系管理员重置")
+        user["totp_pending"] = generate_secret()
+        self._persist()
+        return user["totp_pending"]
+
+    def totp_enable(self, username: str, code: str) -> None:
+        """确认绑定：验证器产出的动态码校验通过后正式启用。"""
+        from app.auth.totp import verify_totp
+
+        user = self._users.get(username)
+        if user is None or not user.get("totp_pending"):
+            raise AuthError("请先获取绑定二维码")
+        counter = verify_totp(user["totp_pending"], code)
+        if counter is None:
+            raise AuthError("动态验证码错误，请确认验证器时间同步后重试")
+        user["totp_secret"] = user.pop("totp_pending")
+        user["totp_enabled"] = True
+        user["totp_last_counter"] = counter
+        self._persist()
+
+    def totp_disable(self, username: str, password: str, code: str) -> None:
+        """解绑：需同时校验密码与当前动态码。"""
+        from app.auth.totp import verify_totp
+
+        user = self._users.get(username)
+        if user is None or not user.get("totp_enabled"):
+            raise AuthError("未绑定两步验证")
+        if _hash_password(password, user["salt"]) != user["password_hash"]:
+            raise AuthError("密码错误")
+        if verify_totp(user["totp_secret"], code) is None:
+            raise AuthError("动态验证码错误")
+        for key in ("totp_secret", "totp_enabled", "totp_last_counter", "totp_pending"):
+            user.pop(key, None)
+        self._persist()
 
     def change_password(self, username: str, old_password: str, new_password: str) -> None:
         user = self._users.get(username)

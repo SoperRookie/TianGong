@@ -20,6 +20,7 @@ dependencies = [
     "pillow>=10.0",
     "qdrant-client>=1.9",
     "loguru>=0.7",
+    "qrcode>=7.4",
 ]
 
 [dependency-groups]
