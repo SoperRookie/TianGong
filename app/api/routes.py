@@ -58,11 +58,202 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+# ---- 登录认证与用户管理 ----
+
+
+def _current_user(request: Request) -> dict:
+    user = getattr(request.state, "user", None)
+    if user is None:  # auth_enabled=false（测试/内网免登）时兜底为管理员语义
+        return {"username": "anonymous", "role": "admin"}
+    return user
+
+
+def _require_admin(request: Request) -> dict:
+    user = _current_user(request)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="该操作需要管理员权限")
+    return user
+
+
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
+@router.post("/api/v1/auth/login")
+async def auth_login(request: Request, body: LoginBody) -> dict:
+    from app.auth import AuthError
+
+    try:
+        token, user = request.app.state.auth.login(body.username, body.password)
+    except AuthError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    logger.info("用户 {} 登录成功", user["username"])
+    return {"token": token, "user": user}
+
+
+@router.post("/api/v1/auth/logout")
+async def auth_logout(request: Request) -> dict:
+    header = request.headers.get("Authorization", "")
+    request.app.state.auth.logout(header.removeprefix("Bearer ").strip())
+    return {"ok": True}
+
+
+@router.get("/api/v1/auth/me")
+async def auth_me(request: Request) -> dict:
+    return _current_user(request)
+
+
+class PasswordBody(BaseModel):
+    old_password: str
+    new_password: str
+
+
+@router.post("/api/v1/auth/password")
+async def auth_change_password(request: Request, body: PasswordBody) -> dict:
+    from app.auth import AuthError
+
+    user = _current_user(request)
+    try:
+        request.app.state.auth.change_password(user["username"], body.old_password, body.new_password)
+    except AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "message": "密码已修改，请重新登录"}
+
+
+class UserBody(BaseModel):
+    username: str
+    password: str
+    role: str = "member"
+
+
+@router.get("/api/v1/auth/users")
+async def auth_list_users(request: Request) -> dict:
+    _require_admin(request)
+    return {"users": request.app.state.auth.list_users()}
+
+
+@router.post("/api/v1/auth/users")
+async def auth_add_user(request: Request, body: UserBody) -> dict:
+    from app.auth import AuthError
+
+    _require_admin(request)
+    try:
+        return request.app.state.auth.add_user(body.username, body.password, body.role)
+    except AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/api/v1/auth/users/{username}")
+async def auth_delete_user(request: Request, username: str) -> dict:
+    from app.auth import AuthError
+
+    operator = _require_admin(request)
+    try:
+        request.app.state.auth.delete_user(username, operator=operator["username"])
+    except AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"deleted": username}
+
+
+# ---- 模型接入配置（F-1-x 管理界面）----
+
+
 @router.get("/api/v1/models")
 async def list_models(request: Request) -> dict:
     """模型清单（不含密钥信息），供前端任务创建时选择（F-1-4）。"""
     registry = request.app.state.registry
     return {"default_model": registry.default_model, "models": registry.list_public()}
+
+
+@router.get("/api/v1/models/config")
+async def get_models_config(request: Request) -> dict:
+    """完整模型接入配置（管理员）：含 base_url / 密钥环境变量名 / 降级链路，不含密钥值。"""
+    _require_admin(request)
+    registry = request.app.state.registry
+    import os
+
+    return {
+        "default_model": registry.default_model,
+        "max_retries": registry.max_retries,
+        "models": [
+            {**m.model_dump(), "api_key_set": bool(not m.api_key_env or os.environ.get(m.api_key_env))}
+            for m in registry.all()
+        ],
+    }
+
+
+class ModelsConfigBody(BaseModel):
+    default_model: str
+    max_retries: int = 1
+    models: list[dict]
+
+
+@router.put("/api/v1/models/config")
+async def update_models_config(request: Request, body: ModelsConfigBody) -> dict:
+    """更新模型接入配置（管理员）：整体校验 → 写回 models.yaml → 热重载注册表与客户端。
+
+    密钥仍走环境变量（api_key_env 只存变量名），配置文件不落任何密钥值。
+    """
+    import yaml
+
+    from app.llm.client import LLMClient
+    from app.llm.registry import ModelRegistry
+    from app.llm.schemas import ModelConfig
+
+    _require_admin(request)
+    try:
+        models = [ModelConfig.model_validate(m) for m in body.models]
+        registry = ModelRegistry(
+            default_model=body.default_model, models=models, max_retries=max(0, body.max_retries)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"模型配置不合法: {e}")
+
+    # 保留 embeddings 段原样写回（Embedding 选型已定型，不在此界面管理）
+    path = get_settings().models_config_path
+    existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    data = {
+        "default_model": body.default_model,
+        "max_retries": registry.max_retries,
+        "models": [m.model_dump() for m in models],
+    }
+    for key in ("default_embedding", "embeddings"):
+        if key in existing:
+            data[key] = existing[key]
+    header = (
+        "# LLM 模型配置（F-1-1 ~ F-1-5）——本文件由平台「模型配置」界面管理，手工注释不会保留。\n"
+        "# 密钥不写入本文件：api_key_env 为密钥所在环境变量名，请在部署环境/.env 中配置。\n"
+    )
+    path.write_text(header + yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    request.app.state.registry = registry
+    request.app.state.llm = LLMClient(registry)
+    logger.info("模型配置已更新并热重载：默认={} 共 {} 个模型", registry.default_model, len(models))
+    return {"default_model": registry.default_model, "models": registry.list_public()}
+
+
+class ModelTestBody(BaseModel):
+    name: str
+
+
+@router.post("/api/v1/models/test")
+async def test_model(request: Request, body: ModelTestBody) -> dict:
+    """连通性测试（管理员）：向指定模型发送一次最小请求，返回耗时与结果。"""
+    _require_admin(request)
+    try:
+        request.app.state.registry.get(body.name)
+    except UnknownModelError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    try:
+        result = await request.app.state.llm.chat(
+            [{"role": "user", "content": "ping，请只回复 pong"}],
+            model=body.name, max_tokens=8,
+        )
+        return {"ok": True, "model": result.model_name, "provider": result.provider,
+                "elapsed_ms": result.elapsed_ms, "reply": result.content[:50]}
+    except Exception as e:
+        return {"ok": False, "model": body.name, "error": str(e)}
 
 
 async def _read_upload(upload: UploadFile, task_dir: Path, max_bytes: int) -> Path:

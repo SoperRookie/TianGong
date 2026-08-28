@@ -16,6 +16,9 @@ for _env, _sub in [
 ]:
     os.environ[_env] = str(_TEST_STORAGE / _sub)
 
+# 业务接口测试默认免登录；登录鉴权行为由 test_auth.py 显式开启后单独覆盖
+os.environ["TIANGONG_AUTH_ENABLED"] = "false"
+
 from app.config import get_settings  # noqa: E402
 
 get_settings.cache_clear()

@@ -72,10 +72,10 @@ body { margin:0; font:13.5px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",
 /* ================= 控件 ================= */
 label.f { display:block; margin:12px 0 4px; color:var(--ink-2); font-size:12.5px; font-weight:550; }
 label.f:first-child { margin-top:0; }
-textarea, input[type=text], select {
+textarea, input[type=text], input[type=password], input[type=number], select {
   width:100%; padding:7px 10px; border:1px solid var(--line); border-radius:var(--radius-s);
   font:inherit; color:var(--ink); background:#fff; transition:border-color .12s, box-shadow .12s; }
-textarea:focus, input[type=text]:focus, select:focus {
+textarea:focus, input:focus, select:focus {
   outline:none; border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-100); }
 textarea { resize:vertical; }
 input[type=file] { font-size:12.5px; color:var(--ink-2); width:100%; }
@@ -273,6 +273,19 @@ dialog::backdrop { background:rgba(15,22,36,.45); backdrop-filter:blur(2px); }
 .toast.ok { background:#0f5132; } .toast.err { background:#8a2620; } .toast.warn { background:#7a5410; }
 .toast.out { opacity:0; transform:translateY(6px); transition:all .25s; }
 @keyframes tin { from { opacity:0; transform:translateY(8px);} }
+/* ================= 登录页 ================= */
+.login-wrap { position:fixed; inset:0; z-index:200; display:grid; place-items:center;
+  background:linear-gradient(160deg,#151d2e 0%,#1d2942 55%,#232f52 100%); }
+.login-card { width:380px; max-width:92vw; background:#fff; border-radius:16px;
+  box-shadow:var(--shadow-lg); padding:34px 34px 30px; }
+.login-card .brand { display:flex; align-items:center; gap:12px; margin-bottom:22px; }
+.login-card .brand .mark { width:40px; height:40px; border-radius:11px; flex:none;
+  background:linear-gradient(135deg,#4c6fe8,#7a4ce8); display:grid; place-items:center;
+  color:#fff; font-size:19px; font-weight:650; }
+.login-card .brand b { font-size:17px; }
+.login-card .brand .sub { color:var(--ink-3); font-size:12px; }
+.login-err { color:var(--danger); font-size:12.5px; margin-top:10px; min-height:18px; }
+
 .empty { text-align:center; color:var(--ink-3); padding:40px 10px; font-size:13px; }
 .empty svg { width:36px; height:36px; opacity:.35; margin-bottom:8px; }
 .kw { color:var(--ink-3); font-size:12px; }
@@ -299,8 +312,19 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <button id="nav-memory" onclick="switchView('memory')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5.5" rx="8" ry="2.8"/><path d="M4 5.5V18c0 1.6 3.6 2.9 8 2.9s8-1.3 8-2.9V5.5M4 12c0 1.6 3.6 2.9 8 2.9s8-1.3 8-2.9"/></svg>
       记忆</button>
+    <div id="adminMenu" style="display:none">
+      <div class="grp">系统设置</div>
+      <button id="nav-models" onclick="switchView('models')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><circle cx="8" cy="7.5" r=".8" fill="currentColor"/><circle cx="8" cy="16.5" r=".8" fill="currentColor"/></svg>
+        模型配置</button>
+      <button id="nav-users" onclick="switchView('users')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.4 3.4-5 6.5-5s5.7 1.6 6.5 5"/><path d="M16.5 4.6a3.5 3.5 0 010 6.8M18.5 15.2c1.9.7 2.8 2 3 4.8"/></svg>
+        用户管理</button>
+    </div>
   </nav>
-  <div class="s-foot">生成质量核心闭环版<br><span id="barInfo"></span></div>
+  <div class="s-foot">
+    <div id="userBox" style="margin-bottom:8px"></div>
+    生成质量核心闭环版<br><span id="barInfo"></span></div>
 </aside>
 
 <div class="content">
@@ -340,8 +364,47 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </div></div>
 
+<!-- 模型配置视图（管理员） -->
+<div class="layout" id="view-models" style="display:none"><div class="page" style="max-width:1320px">
+  <div class="card">
+    <div class="card-h"><h3>模型配置</h3>
+      <span class="meta">密钥不落盘：仅记录环境变量名，请在部署环境 / .env 中配置密钥</span>
+      <div class="grow">
+        <label class="check">默认模型 <select id="cfgDefault" style="width:170px" onchange="saveModelsCfg()"></select></label>
+        <label class="check">失败重试 <input type="number" id="cfgRetries" min="0" max="5" style="width:64px" onchange="saveModelsCfg()"></label>
+        <button class="btn" onclick="openModelDlg()">＋ 添加模型</button>
+      </div></div>
+    <div class="card-b" id="modelsCfgList"></div>
+  </div>
+</div></div>
+
+<!-- 用户管理视图（管理员） -->
+<div class="layout" id="view-users" style="display:none"><div class="page" style="max-width:980px">
+  <div class="card">
+    <div class="card-h"><h3>用户管理</h3>
+      <span class="meta">admin 可管理用户与模型配置；member 使用平台功能</span>
+      <div class="grow"><button class="btn" onclick="openUserDlg()">＋ 添加用户</button></div></div>
+    <div class="card-b" id="usersList"></div>
+  </div>
+</div></div>
+
 </div><!-- /.content -->
 </div><!-- /.shell -->
+
+<!-- 登录页 -->
+<div class="login-wrap" id="loginView" style="display:none">
+  <div class="login-card">
+    <div class="brand"><span class="mark">天</span>
+      <div><b>天工</b><div class="sub">AI 测试用例平台 · 登录</div></div></div>
+    <label class="f">用户名</label>
+    <input type="text" id="loginUser" autocomplete="username">
+    <label class="f">密码</label>
+    <input type="password" id="loginPwd" autocomplete="current-password"
+      onkeydown="if(event.key==='Enter')doLogin()">
+    <div class="login-err" id="loginErr"></div>
+    <button class="btn block" id="loginBtn" onclick="doLogin()">登 录</button>
+  </div>
+</div>
 
 <!-- 新建任务抽屉 -->
 <div class="overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
@@ -474,6 +537,64 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<!-- 修改密码 -->
+<dialog id="pwdDlg">
+  <div class="dlg-h"><h3>修改密码</h3></div>
+  <div class="dlg-b">
+    <label class="f">原密码</label><input type="password" id="pwOld">
+    <label class="f">新密码<span class="hint">（至少 6 位；修改后需重新登录）</span></label>
+    <input type="password" id="pwNew">
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('pwdDlg').close()">取消</button>
+    <button class="btn" onclick="changePassword()">确认修改</button>
+  </div>
+</dialog>
+
+<!-- 用户新增 -->
+<dialog id="userDlg">
+  <div class="dlg-h"><h3>添加用户</h3></div>
+  <div class="dlg-b">
+    <label class="f">用户名</label><input type="text" id="nuName">
+    <label class="f">初始密码<span class="hint">（至少 6 位）</span></label><input type="text" id="nuPwd">
+    <label class="f">角色</label>
+    <select id="nuRole"><option value="member">member（平台使用）</option><option value="admin">admin（含系统设置）</option></select>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('userDlg').close()">取消</button>
+    <button class="btn" onclick="addUser()">创建</button>
+  </div>
+</dialog>
+
+<!-- 模型编辑 -->
+<dialog id="modelDlg" style="width:620px">
+  <div class="dlg-h"><h3 id="mdTitle">添加模型</h3></div>
+  <div class="dlg-b">
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">名称<span class="hint">（系统内唯一标识）</span></label><input type="text" id="mdName" placeholder="如 deepseek-chat"></div>
+      <div style="flex:1"><label class="f">厂商</label><input type="text" id="mdProvider" placeholder="deepseek / openai / dashscope / ollama / vllm"></div>
+    </div>
+    <label class="f">Base URL<span class="hint">（OpenAI 兼容协议地址）</span></label>
+    <input type="text" id="mdBaseUrl" placeholder="https://api.deepseek.com/v1">
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">厂商侧模型名</label><input type="text" id="mdModel" placeholder="deepseek-chat"></div>
+      <div style="flex:1"><label class="f">密钥环境变量名<span class="hint">（内网免鉴权可留空）</span></label><input type="text" id="mdKeyEnv" placeholder="DEEPSEEK_API_KEY"></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">temperature</label><input type="number" id="mdTemp" step="0.1" min="0" max="2"></div>
+      <div style="flex:1"><label class="f">max_tokens</label><input type="number" id="mdMaxTok" min="256"></div>
+      <div style="flex:1"><label class="f">超时（秒）</label><input type="number" id="mdTimeout" min="10"></div>
+    </div>
+    <label class="f">降级链路<span class="hint">（备用模型名，逗号分隔，按顺序尝试）</span></label>
+    <input type="text" id="mdFallbacks" placeholder="deepseek-reasoner">
+    <label class="check" style="margin-top:10px"><input type="checkbox" id="mdVision"> 支持 Vision（图片需求自动路由）</label>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('modelDlg').close()">取消</button>
+    <button class="btn" onclick="saveModelDlg()">保存</button>
+  </div>
+</dialog>
+
 <!-- 用例编辑 -->
 <dialog id="editDlg" style="width:640px">
   <div class="dlg-h"><h3>修改用例</h3><span class="meta"><code id="editCaseId"></code></span></div>
@@ -505,9 +626,14 @@ let hiddenDupPairs = new Set(), lastPointDiff = null, lastCaseDiff = null, lastH
 let expandedSteps = new Set();
 
 /* ---------- 基础设施 ---------- */
+let authToken = localStorage.getItem('tg_token') || '';
+let curUser = null;
 async function api(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers, authToken ? {Authorization: 'Bearer ' + authToken} : {});
   const resp = await fetch(path, opts);
   const data = await resp.json().catch(() => ({}));
+  if (resp.status === 401 && path !== '/api/v1/auth/login') { showLogin(); throw new Error(data.detail || '请先登录'); }
   if (!resp.ok) throw new Error(data.detail || resp.statusText);
   return data;
 }
@@ -590,8 +716,55 @@ const IC = {
   unlock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 019.9-1"/></svg>',
 };
 
+/* ---------- 登录认证 ---------- */
+function showLogin() {
+  curUser = null;
+  $('loginView').style.display = '';
+  $('loginErr').textContent = '';
+  setTimeout(() => $('loginUser').focus(), 50);
+}
+async function doLogin() {
+  const btn = $('loginBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 登录中';
+  try {
+    const data = await api('/api/v1/auth/login', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username: $('loginUser').value.trim(), password: $('loginPwd').value})});
+    authToken = data.token; localStorage.setItem('tg_token', authToken);
+    curUser = data.user;
+    $('loginView').style.display = 'none'; $('loginPwd').value = '';
+    await init();
+  } catch (e) { $('loginErr').textContent = e.message; }
+  btn.disabled = false; btn.textContent = '登 录';
+}
+async function doLogout() {
+  try { await api('/api/v1/auth/logout', {method:'POST'}); } catch (e) {}
+  authToken = ''; localStorage.removeItem('tg_token');
+  showLogin();
+}
+function renderUserBox() {
+  if (!curUser) return;
+  $('userBox').innerHTML = `<b style="color:#c6cede">${esc(curUser.username)}</b>
+    <span class="tag" style="background:#222c42;color:#7484a0">${esc(curUser.role)}</span><br>
+    <a onclick="$('pwOld').value='';$('pwNew').value='';$('pwdDlg').showModal()" style="color:#7484a0;cursor:pointer">修改密码</a> ·
+    <a onclick="doLogout()" style="color:#7484a0;cursor:pointer">退出登录</a>`;
+  $('adminMenu').style.display = curUser.role === 'admin' ? '' : 'none';
+}
+async function changePassword() {
+  try {
+    const data = await api('/api/v1/auth/password', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({old_password: $('pwOld').value, new_password: $('pwNew').value})});
+    $('pwdDlg').close(); toast(data.message || '密码已修改，请重新登录', 'ok');
+    authToken = ''; localStorage.removeItem('tg_token');
+    setTimeout(showLogin, 800);
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function boot() {
+  if (!authToken) return showLogin();
+  try { curUser = await api('/api/v1/auth/me'); await init(); }
+  catch (e) { /* 401 已由 api() 转入登录页 */ }
+}
+
 /* ---------- 视图切换与面包屑 ---------- */
-const VIEW_LABELS = {board:'任务列表', rules:'学习规则', memory:'记忆'};
+const VIEW_LABELS = {board:'任务列表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
 function setCrumb(html) { $('crumb').innerHTML = html; }
 function crumbForBoard() {
   if (currentTask) {
@@ -600,13 +773,15 @@ function crumbForBoard() {
 }
 function switchView(v) {
   currentView = v;
-  for (const k of ['board','rules','memory']) {
+  for (const k of ['board','rules','memory','models','users']) {
     $('view-'+k).style.display = k===v ? '' : 'none';
     $('nav-'+k).classList.toggle('on', k===v);
   }
   if (v==='board') crumbForBoard(); else setCrumb(VIEW_LABELS[v]);
   if (v==='rules') refreshRules();
   if (v==='memory') refreshMemories();
+  if (v==='models') refreshModelsCfg();
+  if (v==='users') refreshUsers();
   renderBatchBar();
 }
 
@@ -637,6 +812,8 @@ async function init() {
   document.addEventListener('change', e => {
     if (e.target.matches && (e.target.matches('.ptck') || e.target.matches('.cck') || e.target.matches('.allck'))) renderBatchBar();
   });
+  renderUserBox();
+  switchView('board');
 }
 
 /* ---------- 学习规则视图 ---------- */
@@ -1013,7 +1190,7 @@ function renderOverview(t) {
       <div><dt>创建时间</dt><dd>${esc((t.created_at||'').replace('T',' ').replace('+00:00',' UTC'))}</dd></div>
     </dl>
     ${hasCases ? `<div class="section-t">导出下载</div><div class="toolbar" style="margin-top:4px">
-      ${Object.keys(t.files||{}).map(f=>`<a class="btn ghost sm" href="/api/v1/tasks/${t.task_id}/files/${f}">${f}</a>`).join('')}</div>` : ''}
+      ${Object.keys(t.files||{}).map(f=>`<a class="btn ghost sm" href="/api/v1/tasks/${t.task_id}/files/${f}?token=${authToken}">${f}</a>`).join('')}</div>` : ''}
     ${dupCount ? `<div class="section-t">AI 自检 · 疑似重复用例</div>${((t.quality||{})['疑似重复用例对']||[]).map(p=>
       `<div class="hint">${esc(p.a)}「${esc(p.a_title)}」≈ ${esc(p.b)}「${esc(p.b_title)}」（${p.similarity}）</div>`).join('')}
       <div class="hint" style="margin-top:2px">评分仅供参考，不作为自动通过依据</div>` : ''}
@@ -1470,6 +1647,143 @@ function renderOfflineDiff(o) {
       ${o.modified.map(x=>'<span>修改：'+esc(x.title)+'（'+x.changes.map(c=>esc(c.field)).join('/')+'）</span>').join('')}
     </div></div>`;
 }
+/* ==================== 模型配置（管理员） ==================== */
+let _modelCfg = null, _editingModel = null;
+async function refreshModelsCfg() {
+  try { _modelCfg = await api('/api/v1/models/config'); } catch (e) { return toast(e.message, 'err'); }
+  $('cfgRetries').value = _modelCfg.max_retries;
+  $('cfgDefault').innerHTML = _modelCfg.models.map(m =>
+    `<option ${m.name===_modelCfg.default_model?'selected':''}>${esc(m.name)}</option>`).join('');
+  $('modelsCfgList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
+    <tr><th>名称</th><th>厂商</th><th>模型名</th><th>Base URL</th><th>密钥环境变量</th>
+    <th>Vision</th><th>max_tokens</th><th>降级链路</th><th style="width:150px">操作</th></tr>
+    ${_modelCfg.models.map(m => `<tr>
+      <td><b>${esc(m.name)}</b>${m.name===_modelCfg.default_model?' <span class="st approved">默认</span>':''}</td>
+      <td>${esc(m.provider)}</td>
+      <td class="cid">${esc(m.model)}</td>
+      <td class="hint" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.base_url)}">${esc(m.base_url)}</td>
+      <td>${m.api_key_env ? `<span class="cid">${esc(m.api_key_env)}</span> ${m.api_key_set?'<span class="st approved">已配置</span>':'<span class="st rejected">未配置</span>'}` : '<span class="hint">免鉴权</span>'}</td>
+      <td>${m.supports_vision?'<span class="tag">✓</span>':'<span class="hint">—</span>'}</td>
+      <td>${m.max_tokens}</td>
+      <td class="hint">${(m.fallbacks||[]).map(esc).join(' → ')||'—'}</td>
+      <td><div class="rowops">
+        <button class="ibtn" title="编辑" onclick="openModelDlg('${esc(m.name)}')">${IC.edit}</button>
+        <button class="ibtn ok" title="连通性测试" onclick="testModel('${esc(m.name)}')">${IC.check}</button>
+        ${m.name!==_modelCfg.default_model?`<button class="ibtn" title="设为默认" onclick="setDefaultModel('${esc(m.name)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M12 3l2.7 6.3 6.8.5-5.2 4.4 1.6 6.6L12 17.2 6.1 20.8l1.6-6.6L2.5 9.8l6.8-.5z"/></svg></button>`:''}
+        <button class="ibtn bad" title="删除" onclick="deleteModel('${esc(m.name)}')">${IC.trash}</button>
+      </div></td></tr>`).join('')}
+  </table></div>
+  <div class="hint" style="margin-top:8px">改动即时校验并热重载（无需重启服务）；密钥值不经过本界面，仅在服务器环境变量中配置</div>`;
+}
+async function saveModelsCfg(models) {
+  if (!_modelCfg) return;
+  const body = {
+    default_model: $('cfgDefault').value,
+    max_retries: parseInt($('cfgRetries').value || '1', 10),
+    models: (models || _modelCfg.models).map(m => { const {api_key_set, ...rest} = m; return rest; }),
+  };
+  try {
+    await api('/api/v1/models/config', {method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)});
+    toast('模型配置已保存并热重载', 'ok');
+    await refreshModelsCfg();
+    const m = await api('/api/v1/models');  // 刷新任务创建表单的模型下拉
+    for (const sel of [$('modelSel'), $('reviewerSel')]) {
+      const keep = sel.value; sel.innerHTML = '';
+      sel.add(new Option(sel === $('modelSel') ? '生成：默认' : '评审：同生成', ''));
+      m.models.forEach(x => sel.add(new Option(x.name, x.name)));
+      if ([...sel.options].some(o=>o.value===keep)) sel.value = keep;
+    }
+  } catch (e) { toast('保存失败：' + e.message, 'err'); refreshModelsCfg(); }
+}
+function openModelDlg(name) {
+  _editingModel = name || null;
+  const m = name ? _modelCfg.models.find(x=>x.name===name) : {
+    name:'', provider:'', base_url:'', api_key_env:'', model:'',
+    temperature:0.3, max_tokens:8192, timeout:120, fallbacks:[], supports_vision:false,
+  };
+  $('mdTitle').textContent = name ? '编辑模型 ' + name : '添加模型';
+  $('mdName').value = m.name; $('mdProvider').value = m.provider;
+  $('mdBaseUrl').value = m.base_url; $('mdModel').value = m.model;
+  $('mdKeyEnv').value = m.api_key_env || '';
+  $('mdTemp').value = m.temperature; $('mdMaxTok').value = m.max_tokens; $('mdTimeout').value = m.timeout;
+  $('mdFallbacks').value = (m.fallbacks||[]).join(', ');
+  $('mdVision').checked = !!m.supports_vision;
+  $('modelDlg').showModal();
+}
+async function saveModelDlg() {
+  const entry = {
+    name: $('mdName').value.trim(), provider: $('mdProvider').value.trim(),
+    base_url: $('mdBaseUrl').value.trim(), model: $('mdModel').value.trim(),
+    api_key_env: $('mdKeyEnv').value.trim() || null,
+    temperature: parseFloat($('mdTemp').value || '0.3'),
+    max_tokens: parseInt($('mdMaxTok').value || '8192', 10),
+    timeout: parseFloat($('mdTimeout').value || '120'),
+    fallbacks: $('mdFallbacks').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean),
+    supports_vision: $('mdVision').checked,
+  };
+  if (!entry.name || !entry.provider || !entry.base_url || !entry.model)
+    return toast('名称 / 厂商 / Base URL / 模型名为必填项', 'warn');
+  const models = _modelCfg.models.map(m => { const {api_key_set, ...rest} = m; return rest; });
+  const idx = models.findIndex(m => m.name === _editingModel);
+  if (idx >= 0) models[idx] = entry; else models.push(entry);
+  $('modelDlg').close();
+  await saveModelsCfg(models);
+}
+async function setDefaultModel(name) {
+  $('cfgDefault').value = name;  // 下拉可能无该选项值时先补
+  if ($('cfgDefault').value !== name) {
+    $('cfgDefault').add(new Option(name, name)); $('cfgDefault').value = name;
+  }
+  await saveModelsCfg();
+}
+async function deleteModel(name) {
+  if (!await uiConfirm('删除模型', `确定删除模型「${name}」？引用它作降级链路的模型需先解除引用。`, true)) return;
+  const models = _modelCfg.models.filter(m => m.name !== name)
+    .map(m => { const {api_key_set, ...rest} = m; return rest; });
+  if ($('cfgDefault').value === name && models.length) $('cfgDefault').value = models[0].name;
+  await saveModelsCfg(models);
+}
+async function testModel(name) {
+  toast(`正在测试 ${name} 连通性…`);
+  try {
+    const r = await api('/api/v1/models/test', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name})});
+    if (r.ok) toast(`${name} 连通正常：${r.elapsed_ms}ms · ${r.reply || ''}`, 'ok');
+    else toast(`${name} 测试失败：${r.error}`, 'err');
+  } catch (e) { toast('测试失败：' + e.message, 'err'); }
+}
+
+/* ==================== 用户管理（管理员） ==================== */
+async function refreshUsers() {
+  try {
+    const data = await api('/api/v1/auth/users');
+    $('usersList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
+      <tr><th>用户名</th><th>角色</th><th>创建时间</th><th style="width:80px">操作</th></tr>
+      ${data.users.map(u => `<tr>
+        <td><b>${esc(u.username)}</b>${curUser&&u.username===curUser.username?' <span class="tag">当前</span>':''}</td>
+        <td><span class="st ${u.role==='admin'?'approved':'pending'}">${esc(u.role)}</span></td>
+        <td class="hint">${esc((u.created_at||'').replace('T',' ').replace('+00:00',''))}</td>
+        <td><div class="rowops">
+          <button class="ibtn bad" title="删除" onclick="deleteUser('${esc(u.username)}')">${IC.trash}</button>
+        </div></td></tr>`).join('')}
+    </table></div>`;
+  } catch (e) { toast(e.message, 'err'); }
+}
+function openUserDlg() { $('nuName').value=''; $('nuPwd').value=''; $('nuRole').value='member'; $('userDlg').showModal(); }
+async function addUser() {
+  try {
+    await api('/api/v1/auth/users', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username: $('nuName').value, password: $('nuPwd').value, role: $('nuRole').value})});
+    $('userDlg').close(); toast('用户已创建', 'ok'); refreshUsers();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function deleteUser(username) {
+  if (!await uiConfirm('删除用户', `确定删除用户「${username}」？其会话将立即失效。`, true)) return;
+  try { await api('/api/v1/auth/users/' + encodeURIComponent(username), {method:'DELETE'}); refreshUsers(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
 async function uploadFinal() {
   const f = $('finalFile').files[0];
   if (!f) return toast('请选择终稿文件', 'warn');
@@ -1482,7 +1796,7 @@ async function uploadFinal() {
   } catch (e) { toast('上传失败：' + e.message, 'err'); }
 }
 
-init();
+boot();
 </script>
 </body>
 </html>

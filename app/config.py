@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     # 历史用例复用提示阈值（需求二十九）：向量相似度达到该值提示「高度相关，可复用」
     reuse_hint_score: float = 0.78
 
+    # 登录认证：默认开启；初始管理员账号首启自动创建（请部署后立即改密）
+    auth_enabled: bool = True
+    admin_username: str = "admin"
+    admin_password: str = "admin123"
+    session_ttl_hours: int = 72
+
 
 @lru_cache
 def get_settings() -> Settings:

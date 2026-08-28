@@ -76,5 +76,9 @@ class ModelRegistry:
         seen: set[str] = set()
         return [c for c in chain if not (c.name in seen or seen.add(c.name))]
 
+    def all(self) -> list[ModelConfig]:
+        """完整配置清单（模型配置管理界面用）。"""
+        return list(self._models.values())
+
     def list_public(self) -> list[dict]:
         return [m.public_view(is_default=(m.name == self.default_model)) for m in self._models.values()]

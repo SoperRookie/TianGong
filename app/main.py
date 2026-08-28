@@ -2,11 +2,12 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
 from app.api.routes import router
+from app.auth import AuthStore
 from app.config import BASE_DIR, get_settings
 from app.llm.client import LLMClient
 from app.llm.registry import ModelRegistry
@@ -33,6 +34,11 @@ async def lifespan(app: FastAPI):
         revision_threshold=settings.memory_revision_threshold,
     )
     app.state.rules = RuleStore(storage_path=settings.data_dir / "rules.json")
+    app.state.auth = AuthStore(
+        storage_path=settings.data_dir / "auth.json",
+        session_ttl_hours=settings.session_ttl_hours,
+    )
+    app.state.auth.ensure_admin(settings.admin_username, settings.admin_password)
     logger.info(
         "服务启动：默认模型={} 可用模型={} 输出目录={} 日志目录={}",
         registry.default_model,
@@ -46,6 +52,27 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TestCase Agent", version="0.1.0", lifespan=lifespan)
 app.include_router(router)
+
+# 无需登录即可访问：登录接口、健康检查（Web 首页为静态壳，登录态由前端接口驱动）
+_PUBLIC_API_PATHS = {"/api/v1/auth/login", "/health"}
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """登录鉴权：/api/v1/* 需携带有效 Bearer Token（文件下载支持 ?token= 查询参数）。"""
+    path = request.url.path
+    if (
+        get_settings().auth_enabled
+        and path.startswith("/api/v1")
+        and path not in _PUBLIC_API_PATHS
+    ):
+        header = request.headers.get("Authorization", "")
+        token = header.removeprefix("Bearer ").strip() or request.query_params.get("token")
+        user = request.app.state.auth.verify(token)
+        if user is None:
+            return JSONResponse({"detail": "未登录或会话已过期，请重新登录"}, status_code=401)
+        request.state.user = user
+    return await call_next(request)
 
 
 @app.get("/", include_in_schema=False)

@@ -1,0 +1,130 @@
+"""登录认证、用户管理与模型配置管理接口测试。"""
+
+import httpx
+import pytest
+from asgi_lifespan import LifespanManager
+
+from app.config import get_settings
+from app.main import app
+
+
+@pytest.fixture
+async def client():
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+
+
+@pytest.fixture
+def auth_on():
+    """临时开启登录鉴权（conftest 默认关闭以免侵入业务接口测试）。"""
+    settings = get_settings()
+    settings.auth_enabled = True
+    yield
+    settings.auth_enabled = False
+
+
+async def _login(client, username="admin", password="admin123") -> str:
+    resp = await client.post("/api/v1/auth/login", json={"username": username, "password": password})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["token"]
+
+
+# ---- 登录与会话 ----
+
+
+async def test_未登录拒绝访问业务接口(client, auth_on):
+    resp = await client.get("/api/v1/tasks")
+    assert resp.status_code == 401
+    assert (await client.get("/health")).status_code == 200  # 健康检查豁免
+
+
+async def test_登录_鉴权_登出(client, auth_on):
+    assert (await client.post(
+        "/api/v1/auth/login", json={"username": "admin", "password": "wrong"}
+    )).status_code == 401
+
+    token = await _login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    me = (await client.get("/api/v1/auth/me", headers=headers)).json()
+    assert me == {"username": "admin", "role": "admin", "created_at": me["created_at"]}
+    assert (await client.get("/api/v1/tasks", headers=headers)).status_code == 200
+    # 下载类链接支持 ?token= 查询参数鉴权
+    assert (await client.get(f"/api/v1/tasks?token={token}")).status_code == 200
+
+    await client.post("/api/v1/auth/logout", headers=headers)
+    assert (await client.get("/api/v1/tasks", headers=headers)).status_code == 401
+
+
+async def test_用户管理与权限(client, auth_on):
+    token = await _login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = await client.post("/api/v1/auth/users", headers=headers,
+                             json={"username": "tester", "password": "test123", "role": "member"})
+    assert resp.status_code == 200
+
+    member_token = await _login(client, "tester", "test123")
+    member_headers = {"Authorization": f"Bearer {member_token}"}
+    # 普通成员可用平台，但无用户管理/模型配置权限
+    assert (await client.get("/api/v1/tasks", headers=member_headers)).status_code == 200
+    assert (await client.get("/api/v1/auth/users", headers=member_headers)).status_code == 403
+    assert (await client.get("/api/v1/models/config", headers=member_headers)).status_code == 403
+
+    # 不能删除自己 / 删除后会话失效
+    assert (await client.delete("/api/v1/auth/users/admin", headers=headers)).status_code == 400
+    assert (await client.delete("/api/v1/auth/users/tester", headers=headers)).status_code == 200
+    assert (await client.get("/api/v1/tasks", headers=member_headers)).status_code == 401
+
+
+async def test_修改密码后需重新登录(client, auth_on):
+    token = await _login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    assert (await client.post("/api/v1/auth/password", headers=headers,
+                              json={"old_password": "bad", "new_password": "newpass1"})).status_code == 400
+    assert (await client.post("/api/v1/auth/password", headers=headers,
+                              json={"old_password": "admin123", "new_password": "newpass1"})).status_code == 200
+    assert (await client.get("/api/v1/tasks", headers=headers)).status_code == 401  # 旧会话已注销
+    token2 = await _login(client, "admin", "newpass1")
+    # 还原密码，避免影响其他用例（同一临时存储目录内共享 auth.json）
+    await client.post("/api/v1/auth/password", headers={"Authorization": f"Bearer {token2}"},
+                      json={"old_password": "newpass1", "new_password": "admin123"})
+
+
+# ---- 模型配置管理 ----
+
+
+async def test_模型配置读取与更新热重载(client, tmp_path, monkeypatch):
+    settings = get_settings()
+    # 用临时副本承接写回，避免污染仓库 config/models.yaml
+    tmp_yaml = tmp_path / "models.yaml"
+    tmp_yaml.write_text(settings.models_config_path.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(settings, "models_config_path", tmp_yaml)
+
+    cfg = (await client.get("/api/v1/models/config")).json()
+    assert cfg["default_model"] and cfg["models"]
+    assert all("api_key_set" in m and "api_key_env" in m for m in cfg["models"])
+
+    # 新增一个模型并设为默认
+    cfg["models"].append({
+        "name": "kimi-k2", "provider": "moonshot", "base_url": "https://api.moonshot.cn/v1",
+        "api_key_env": "MOONSHOT_API_KEY", "model": "kimi-k2", "max_tokens": 4096,
+    })
+    resp = await client.put("/api/v1/models/config", json={
+        "default_model": "kimi-k2", "max_retries": cfg["max_retries"], "models": cfg["models"],
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["default_model"] == "kimi-k2"
+    # 热重载生效 + yaml 写回保留 embeddings 段
+    assert (await client.get("/api/v1/models")).json()["default_model"] == "kimi-k2"
+    import yaml as _yaml
+
+    saved = _yaml.safe_load(tmp_yaml.read_text(encoding="utf-8"))
+    assert saved["default_model"] == "kimi-k2" and "embeddings" in saved
+
+    # 非法配置整体拒绝（default 不在清单中），现网配置不受影响
+    bad = await client.put("/api/v1/models/config", json={
+        "default_model": "不存在", "max_retries": 1, "models": cfg["models"],
+    })
+    assert bad.status_code == 400
+    assert (await client.get("/api/v1/models")).json()["default_model"] == "kimi-k2"
