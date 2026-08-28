@@ -142,14 +142,9 @@ td .cid { font-family:var(--mono); font-size:11.5px; color:var(--ink-2); }
 tbody tr:hover .stepbox:not(.open).long::after { background:linear-gradient(90deg,transparent,#fafbfd 30%); }
 
 /* ================= 任务列表 ================= */
-.tasklist { max-height:calc(100vh - 236px); overflow:auto; margin-top:10px; }
-.task-item { padding:9px 11px; border:1px solid var(--line); border-radius:var(--radius-s);
-  margin-bottom:7px; cursor:pointer; transition:border-color .12s, background .12s; background:#fff; }
-.task-item:hover { border-color:#bcc8dd; }
-.task-item.active { border-color:var(--primary); background:var(--primary-50); }
-.task-item .row1 { display:flex; align-items:center; gap:7px; }
-.task-item .tid { font-family:var(--mono); font-size:11.5px; color:var(--ink-3); margin-top:3px;
-  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+tr.rowlink { cursor:pointer; }
+tr.rowlink td { transition:background .1s; }
+.tid-cell { font-family:var(--mono); font-size:12px; color:var(--ink); font-weight:600; }
 
 /* ================= 详情页签 ================= */
 .dtabs { display:flex; gap:2px; border-bottom:1px solid var(--line); padding:0 16px; }
@@ -287,25 +282,9 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="right" id="barInfo"></div>
 </div>
 
-<!-- 工作台视图 -->
+<!-- 工作台视图：任务列表页 ⇄ 任务详情页 -->
 <div class="layout" id="view-board">
-  <div class="side">
-    <div class="card">
-      <div class="card-b" style="padding-bottom:10px">
-        <button class="btn block" onclick="openDrawer()">＋ 新建任务</button>
-        <div class="search" style="margin-top:10px">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-          <input type="text" id="taskSearch" placeholder="搜索任务…" oninput="refreshList()">
-        </div>
-        <div class="tasklist" id="taskList"></div>
-      </div>
-    </div>
-  </div>
-  <div class="main" id="detail">
-    <div class="card"><div class="card-b empty">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12h6m-6 4h6M7 3h7l5 5v13H7a2 2 0 01-2-2V5a2 2 0 012-2z"/></svg>
-      <div>选择或创建一个任务查看详情</div></div></div>
-  </div>
+  <div class="page" style="max-width:1560px" id="detail"></div>
 </div>
 
 <!-- 学习规则视图 -->
@@ -741,7 +720,6 @@ async function clearMemories() {
 /* ---------- 任务列表 ---------- */
 const statusText = s => ({completed:'完成', failed:'失败', running:'执行中', queued:'排队中', awaiting_confirmation:'审核测试点'}[s]||s);
 const progressText = p => ({analyzing:'需求分析', generating_reviewing:'生成与评审', exporting:'导出'}[p]||p);
-const shortName = s => s.length>18 ? s.slice(0,15)+'…' : s;
 function relTime(iso) {
   if (!iso) return '';
   const s = Math.max(0, (Date.now() - new Date(iso).getTime())/1000);
@@ -751,19 +729,72 @@ function relTime(iso) {
   return Math.floor(s/86400) + ' 天前';
 }
 let _tasksCache = [];
+let listQuery = '', listStatus = '';
 async function refreshList() {
   try { const data = await api('/api/v1/tasks'); _tasksCache = data.tasks; } catch (e) { return; }
-  const q = ($('taskSearch').value || '').trim().toLowerCase();
-  const tasks = _tasksCache.filter(t => !q || t.task_id.includes(q) ||
-    (t.sources||[]).some(s => s.toLowerCase().includes(q)));
-  $('taskList').innerHTML = tasks.map(t => `
-    <div class="task-item ${currentTask && currentTask.task_id===t.task_id?'active':''}" onclick="openTask('${t.task_id}')">
-      <div class="row1"><span class="pill ${t.status}">${statusText(t.status)}</span>
-        ${t.progress?'<span class="hint">'+progressText(t.progress)+'</span>':''}
-        <span style="margin-left:auto" class="hint">${t.case_count?t.case_count+' 条用例':relTime(t.created_at)}</span></div>
-      <div class="tid">${t.task_id} · ${(t.sources||[]).map(shortName).join(', ')||'-'}</div>
-    </div>`).join('') || '<div class="hint" style="margin-top:8px">暂无任务</div>';
+  if (currentView === 'board' && !currentTask) renderTaskListPage();
   if (currentTask && ['queued','running'].includes(currentTask.status)) openTask(currentTask.task_id, true);
+}
+
+/* 任务列表页：骨架只建一次，轮询仅更新表体与计数（保持搜索框输入焦点） */
+const LIST_FILTERS = [
+  ['', '全部'], ['active', '进行中'], ['awaiting_confirmation', '待审核'],
+  ['completed', '完成'], ['failed', '失败'],
+];
+const matchStatus = (t, f) => !f || (f === 'active' ? ['queued','running'].includes(t.status) : t.status === f);
+function filteredTasks() {
+  const q = listQuery.trim().toLowerCase();
+  return _tasksCache.filter(t => matchStatus(t, listStatus) &&
+    (!q || t.task_id.includes(q) || (t.sources||[]).some(s => s.toLowerCase().includes(q))));
+}
+function renderTaskListPage() {
+  if (!$('taskTbody')) {
+    $('detail').innerHTML = `<div class="card">
+      <div class="card-h"><h3>任务列表</h3><span class="meta" id="taskTotal"></span>
+        <div class="grow">
+          <div class="seg" id="listSeg"></div>
+          <div class="search" style="width:220px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <input type="text" id="taskSearch" placeholder="搜索任务 ID / 来源…" value="${esc(listQuery)}"
+              oninput="listQuery=this.value;renderTaskListRows()">
+          </div>
+          <button class="btn" onclick="openDrawer()">＋ 新建任务</button>
+        </div></div>
+      <div class="card-b">
+        <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
+          <thead><tr><th style="width:110px">状态</th><th style="width:130px">任务 ID</th><th>来源</th>
+          <th style="width:90px">用例数</th><th style="width:70px">修订</th><th style="width:110px">创建时间</th></tr></thead>
+          <tbody id="taskTbody"></tbody>
+        </table></div>
+      </div></div>`;
+  }
+  renderTaskListRows();
+}
+function renderTaskListRows() {
+  const tasks = filteredTasks();
+  $('listSeg').innerHTML = LIST_FILTERS.map(([v, label]) => {
+    const n = _tasksCache.filter(t => matchStatus(t, v)).length;
+    return `<button class="${listStatus===v?'on':''}" onclick="listStatus='${v}';renderTaskListRows()">${label} ${n}</button>`;
+  }).join('');
+  $('taskTotal').textContent = `共 ${_tasksCache.length} 个任务`;
+  $('taskTbody').innerHTML = tasks.map(t => `
+    <tr class="rowlink" onclick="openTask('${t.task_id}')">
+      <td><span class="pill ${t.status}">${statusText(t.status)}</span>
+        ${t.progress?`<div class="hint">${progressText(t.progress)} <span class="spin"></span></div>`:''}</td>
+      <td><span class="tid-cell">${t.task_id}</span></td>
+      <td>${(t.sources||[]).map(esc).join('、')||'-'}
+        ${t.error?`<div class="hint" style="color:var(--danger)">${esc(t.error)}</div>`:''}</td>
+      <td>${t.case_count ? `<b>${t.case_count}</b> 条` : '<span class="hint">—</span>'}</td>
+      <td>${t.revision_count ? t.revision_count + ' 轮' : '<span class="hint">—</span>'}</td>
+      <td class="hint" title="${esc(t.created_at||'')}">${relTime(t.created_at)}</td>
+    </tr>`).join('') || `<tr><td colspan="6"><div class="empty">
+      ${_tasksCache.length ? '当前筛选下无任务' : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
+}
+function backToList() {
+  currentTask = null;
+  $('detail').innerHTML = '';
+  renderTaskListPage();
+  renderBatchBar();
 }
 
 /* ---------- 创建任务 ---------- */
@@ -790,7 +821,7 @@ async function createTask() {
     refreshMemories();
     await refreshList(); openTask(data.task_id);
     $('createMsg').textContent = '';
-  } catch (e) { $('createMsg').textContent = ''; toast('创建失败：' + e.message, 'err'); $('detail').innerHTML = ''; }
+  } catch (e) { $('createMsg').textContent = ''; toast('创建失败：' + e.message, 'err'); backToList(); }
   $('createBtn').disabled = false;
 }
 
@@ -834,6 +865,7 @@ function renderDetail() {
 
   $('detail').innerHTML = `<div class="card">
     <div class="card-h" style="border-bottom:none">
+      <button class="btn ghost sm" onclick="backToList()" title="返回任务列表">← 列表</button>
       <h3>任务 <code>${t.task_id}</code></h3>
       <span class="pill ${t.status}">${statusText(t.status)}</span>
       ${t.progress?'<span class="hint">'+progressText(t.progress)+' <span class="spin"></span></span>':''}
