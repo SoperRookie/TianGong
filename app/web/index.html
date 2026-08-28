@@ -7,17 +7,17 @@
 <style>
 /* ================= 设计令牌 ================= */
 :root {
-  /* 品牌与语义色 */
   --primary:#2f54c9; --primary-600:#2646ad; --primary-50:#eef2fd; --primary-100:#dde6fb;
   --ok:#158249; --ok-bg:#e5f6ec; --danger:#c2372e; --danger-600:#a82d25; --danger-bg:#fdecea;
   --warn:#b26a08; --warn-bg:#fdf3e2; --purple:#6d3fa8; --purple-bg:#f1eafa;
-  /* 中性色 */
+  /* 优先级序列色阶（单色相，已过 CVD 校验）与状态条色 */
+  --p0:#29418f; --p1:#4b69c6; --p2:#7d97e0; --p3:#a2b4e6;
+  --s-ok:#158249; --s-pend:#98a3b3; --s-rej:#c2372e;
   --ink:#1c2430; --ink-2:#4a5568; --ink-3:#8b95a5; --line:#e4e8ee; --line-2:#eef1f5;
   --bg:#f3f5f8; --card:#ffffff; --well:#f8fafc;
-  /* 版式 */
   --radius:10px; --radius-s:7px;
   --shadow:0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.06);
-  --shadow-lg:0 10px 32px rgba(16,24,40,.14);
+  --shadow-lg:0 10px 32px rgba(16,24,40,.16);
   --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
 }
 * { box-sizing:border-box; }
@@ -25,19 +25,26 @@ html { -webkit-font-smoothing:antialiased; }
 body { margin:0; font:13.5px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
   background:var(--bg); color:var(--ink); }
 
-/* ================= 顶栏 ================= */
-.appbar { position:sticky; top:0; z-index:40; display:flex; align-items:center; gap:12px;
-  padding:0 22px; height:54px; background:#151d2e; color:#fff; }
-.appbar .logo { display:flex; align-items:center; gap:10px; font-size:15.5px; font-weight:650; letter-spacing:.3px; }
+/* ================= 顶栏与导航 ================= */
+.appbar { position:sticky; top:0; z-index:40; display:flex; align-items:center; gap:26px;
+  padding:0 22px; height:52px; background:#151d2e; color:#fff; }
+.appbar .logo { display:flex; align-items:center; gap:10px; font-size:15px; font-weight:650; letter-spacing:.3px; }
 .appbar .logo .mark { width:26px; height:26px; border-radius:7px; flex:none;
   background:linear-gradient(135deg,#4c6fe8,#7a4ce8); display:grid; place-items:center; font-size:13px; }
-.appbar .sub { color:#9aa6bd; font-size:12px; font-weight:400; margin-top:2px; }
+.nav { display:flex; gap:4px; height:100%; }
+.nav button { border:none; background:transparent; color:#9aa6bd; font:inherit; font-size:13.5px;
+  padding:0 14px; cursor:pointer; position:relative; }
+.nav button:hover { color:#dfe5f0; }
+.nav button.on { color:#fff; font-weight:600; }
+.nav button.on::after { content:""; position:absolute; left:12px; right:12px; bottom:0; height:2.5px;
+  background:linear-gradient(90deg,#4c6fe8,#7a4ce8); border-radius:2px 2px 0 0; }
 .appbar .right { margin-left:auto; color:#9aa6bd; font-size:12px; }
 
 /* ================= 布局 ================= */
-.layout { display:flex; gap:16px; padding:16px 22px 40px; align-items:flex-start; max-width:1720px; margin:0 auto; }
-.side { width:372px; flex-shrink:0; display:flex; flex-direction:column; gap:14px; }
+.layout { display:flex; gap:16px; padding:16px 22px 80px; align-items:flex-start; max-width:1760px; margin:0 auto; }
+.side { width:308px; flex-shrink:0; position:sticky; top:68px; }
 .main { flex:1; min-width:0; display:flex; flex-direction:column; gap:14px; }
+.page { max-width:1180px; margin:0 auto; width:100%; }
 
 /* ================= 卡片 ================= */
 .card { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); }
@@ -47,12 +54,12 @@ body { margin:0; font:13.5px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",
 .card-h .grow { margin-left:auto; display:flex; gap:8px; align-items:center; }
 .card-b { padding:14px 16px; }
 .card-f { padding:12px 16px; border-top:1px solid var(--line-2); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-.section-t { font-size:12.5px; font-weight:650; color:var(--ink-2); text-transform:none;
-  letter-spacing:.3px; margin:16px 0 8px; display:flex; align-items:center; gap:6px; }
+.section-t { font-size:12.5px; font-weight:650; color:var(--ink-2); letter-spacing:.3px;
+  margin:18px 0 8px; display:flex; align-items:center; gap:6px; }
 .section-t:first-child { margin-top:0; }
 
-/* ================= 表单控件 ================= */
-label.f { display:block; margin:10px 0 4px; color:var(--ink-2); font-size:12.5px; font-weight:550; }
+/* ================= 控件 ================= */
+label.f { display:block; margin:12px 0 4px; color:var(--ink-2); font-size:12.5px; font-weight:550; }
 label.f:first-child { margin-top:0; }
 textarea, input[type=text], select {
   width:100%; padding:7px 10px; border:1px solid var(--line); border-radius:var(--radius-s);
@@ -65,20 +72,23 @@ input[type=file]::file-selector-button { margin-right:8px; padding:5px 12px; bor
   border-radius:var(--radius-s); background:#fff; color:var(--ink-2); cursor:pointer; font:inherit; font-size:12.5px; }
 input[type=checkbox] { accent-color:var(--primary); width:14px; height:14px; }
 .check { display:inline-flex; align-items:center; gap:6px; color:var(--ink-2); font-size:12.5px; cursor:pointer; }
+.search { position:relative; }
+.search svg { position:absolute; left:9px; top:8px; width:14px; height:14px; color:var(--ink-3); }
+.search input { padding-left:30px; }
 
-/* ================= 按钮 ================= */
 .btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:7px 14px;
   border:1px solid transparent; border-radius:var(--radius-s); background:var(--primary); color:#fff;
   cursor:pointer; font:inherit; font-size:13px; font-weight:550; white-space:nowrap;
-  transition:background .12s, border-color .12s, color .12s, box-shadow .12s; }
+  transition:background .12s, border-color .12s, color .12s; }
 .btn:hover { background:var(--primary-600); }
 .btn.ghost { background:#fff; color:var(--ink-2); border-color:var(--line); }
 .btn.ghost:hover { border-color:#c9d2df; color:var(--ink); background:var(--well); }
-.btn.soft { background:var(--primary-50); color:var(--primary); border-color:transparent; }
+.btn.soft { background:var(--primary-50); color:var(--primary); }
 .btn.soft:hover { background:var(--primary-100); }
 .btn.danger { background:var(--danger); }
 .btn.danger:hover { background:var(--danger-600); }
 .btn.sm { padding:4px 10px; font-size:12.5px; }
+.btn.block { width:100%; }
 .btn:disabled { opacity:.5; cursor:not-allowed; }
 .ibtn { display:inline-grid; place-items:center; width:26px; height:26px; border-radius:6px;
   border:1px solid transparent; background:transparent; color:var(--ink-3); cursor:pointer; padding:0;
@@ -88,7 +98,7 @@ input[type=checkbox] { accent-color:var(--primary); width:14px; height:14px; }
 .ibtn.bad:hover { background:var(--danger-bg); color:var(--danger); }
 .ibtn svg { width:15px; height:15px; }
 
-/* ================= 徽标 / 状态 ================= */
+/* ================= 徽标 ================= */
 .pill { display:inline-flex; align-items:center; gap:5px; padding:1px 9px; border-radius:99px;
   font-size:11.5px; font-weight:600; white-space:nowrap; }
 .pill::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
@@ -110,7 +120,7 @@ input[type=checkbox] { accent-color:var(--primary); width:14px; height:14px; }
 .chips.plain span { background:var(--well); border-color:var(--line); color:var(--ink-2); }
 
 /* ================= 表格 ================= */
-.tbl-wrap { overflow-x:auto; border:1px solid var(--line); border-radius:var(--radius-s); margin-top:10px; }
+.tbl-wrap { overflow:auto; border:1px solid var(--line); border-radius:var(--radius-s); margin-top:10px; max-height:70vh; }
 table { width:100%; border-collapse:collapse; font-size:12.8px; }
 th { position:sticky; top:0; background:var(--well); color:var(--ink-2); font-weight:600;
   font-size:12px; letter-spacing:.2px; text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
@@ -120,13 +130,19 @@ tr:last-child td { border-bottom:none; }
 tbody tr:hover td { background:#fafbfd; }
 tr.module-head td { background:#f4f6fa; font-weight:650; color:var(--ink); border-bottom:1px solid var(--line); }
 tr.module-head:hover td { background:#f4f6fa; }
-td.steps { white-space:pre-wrap; font-size:12px; color:var(--ink-2); max-width:420px; }
 td .cid { font-family:var(--mono); font-size:11.5px; color:var(--ink-2); }
 .prio { font-weight:700; font-size:12px; font-family:var(--mono); }
-.prio.P0 { color:#c2372e; } .prio.P1 { color:#c06615; } .prio.P2 { color:#a08408; } .prio.P3 { color:#8b95a5; }
+.prio.P0 { color:var(--p0); } .prio.P1 { color:var(--p1); } .prio.P2 { color:#5d78c9; } .prio.P3 { color:var(--ink-3); }
 .rowops { display:flex; gap:2px; }
+.stepbox { position:relative; white-space:pre-wrap; font-size:12px; color:var(--ink-2);
+  max-height:63px; overflow:hidden; cursor:pointer; }
+.stepbox.open { max-height:none; }
+.stepbox:not(.open).long::after { content:"展开 ▾"; position:absolute; right:0; bottom:0;
+  background:linear-gradient(90deg,transparent,#fff 30%); padding:0 2px 0 26px; color:var(--primary); font-size:11.5px; }
+tbody tr:hover .stepbox:not(.open).long::after { background:linear-gradient(90deg,transparent,#fafbfd 30%); }
 
 /* ================= 任务列表 ================= */
+.tasklist { max-height:calc(100vh - 236px); overflow:auto; margin-top:10px; }
 .task-item { padding:9px 11px; border:1px solid var(--line); border-radius:var(--radius-s);
   margin-bottom:7px; cursor:pointer; transition:border-color .12s, background .12s; background:#fff; }
 .task-item:hover { border-color:#bcc8dd; }
@@ -134,19 +150,38 @@ td .cid { font-family:var(--mono); font-size:11.5px; color:var(--ink-2); }
 .task-item .row1 { display:flex; align-items:center; gap:7px; }
 .task-item .tid { font-family:var(--mono); font-size:11.5px; color:var(--ink-3); margin-top:3px;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.mini-item { padding:9px 11px; border:1px solid var(--line); border-radius:var(--radius-s); margin-bottom:7px; background:#fff; }
-.mini-item .ops { float:right; display:flex; gap:2px; }
-.mini-item .body { font-size:12.5px; color:var(--ink-2); margin-top:2px; }
 
-/* ================= 标签页 / 工具条 ================= */
-.tabs { display:inline-flex; background:var(--line-2); border-radius:8px; padding:3px; gap:2px; margin-top:12px; }
-.tabs button { border:none; background:transparent; padding:4px 13px; border-radius:6px; font:inherit;
-  font-size:12.5px; font-weight:550; color:var(--ink-2); cursor:pointer; }
-.tabs button.on { background:#fff; color:var(--ink); box-shadow:var(--shadow); }
-.toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; }
-.hint { color:var(--ink-3); font-size:12px; }
-.warnline { color:var(--warn); font-size:12.5px; background:var(--warn-bg);
-  border:1px solid #f0dfc0; border-radius:var(--radius-s); padding:8px 12px; margin-top:10px; }
+/* ================= 详情页签 ================= */
+.dtabs { display:flex; gap:2px; border-bottom:1px solid var(--line); padding:0 16px; }
+.dtabs button { border:none; background:transparent; font:inherit; font-size:13px; color:var(--ink-2);
+  padding:11px 13px; cursor:pointer; position:relative; font-weight:550; }
+.dtabs button:hover { color:var(--ink); }
+.dtabs button.on { color:var(--primary); font-weight:650; }
+.dtabs button.on::after { content:""; position:absolute; left:10px; right:10px; bottom:-1px; height:2px;
+  background:var(--primary); border-radius:2px 2px 0 0; }
+.dtabs .cnt { display:inline-block; min-width:17px; padding:0 5px; border-radius:9px; background:var(--line-2);
+  color:var(--ink-2); font-size:11px; margin-left:5px; line-height:17px; }
+.dtabs button.on .cnt { background:var(--primary-100); color:var(--primary); }
+.dtabs .cnt.hot { background:var(--danger-bg); color:var(--danger); }
+
+/* ================= 统计 ================= */
+.statrow { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; }
+.stat { border:1px solid var(--line); border-radius:var(--radius-s); padding:12px 14px; background:#fff; }
+.stat .lab { font-size:12px; color:var(--ink-3); font-weight:550; }
+.stat .num { font-size:26px; font-weight:700; letter-spacing:-.5px; line-height:1.2; margin-top:2px; }
+.stat .sub { font-size:11.5px; color:var(--ink-3); margin-top:2px; }
+.segbar { display:flex; gap:2px; height:10px; border-radius:5px; overflow:hidden; margin:10px 0 8px; }
+.segbar i { display:block; min-width:3px; }
+.leg { display:flex; flex-wrap:wrap; gap:4px 12px; font-size:11.5px; color:var(--ink-2); }
+.leg b { font-weight:650; color:var(--ink); }
+.leg i { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:4px; vertical-align:0; }
+.donut { display:flex; align-items:center; gap:14px; }
+.donut .ring { width:64px; height:64px; border-radius:50%; display:grid; place-items:center; flex:none; }
+.donut .ring > div { width:46px; height:46px; border-radius:50%; background:#fff; display:grid;
+  place-items:center; font-size:14px; font-weight:700; }
+.meta-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:2px 20px; font-size:12.8px; }
+.meta-grid dt { color:var(--ink-3); font-size:11.5px; margin-top:6px; }
+.meta-grid dd { margin:0; color:var(--ink); }
 
 /* ================= 覆盖矩阵 ================= */
 .cov { display:grid; grid-template-columns:repeat(auto-fill,minmax(128px,1fr)); gap:6px; margin-top:8px; }
@@ -159,14 +194,22 @@ td .cid { font-family:var(--mono); font-size:11.5px; color:var(--ink-2); }
 .cov .c-tbd { border-color:#f0dfc0; background:#fdfaf2; } .cov .c-tbd i { background:var(--warn); }
 .cov .cell b { font-weight:600; margin-left:auto; font-size:11.5px; }
 
-/* ================= Diff / 信息盒 ================= */
+/* ================= 信息盒 / 进度 ================= */
 .box { border:1px solid var(--line); border-radius:var(--radius-s); padding:10px 13px;
   background:var(--well); margin-top:8px; font-size:12.5px; }
 .box .del { color:var(--danger); text-decoration:line-through; text-decoration-thickness:1px; }
 .box .add { color:var(--ok); }
 .box.accent { border-left:3px solid var(--primary); }
-
-/* ================= 进度 ================= */
+.warnline { color:var(--warn); font-size:12.5px; background:var(--warn-bg);
+  border:1px solid #f0dfc0; border-radius:var(--radius-s); padding:8px 12px; margin-top:10px; }
+.hint { color:var(--ink-3); font-size:12px; }
+.toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; }
+.filters { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; }
+.filters select { width:auto; }
+.seg { display:inline-flex; background:var(--line-2); border-radius:8px; padding:3px; gap:2px; }
+.seg button { border:none; background:transparent; padding:4px 13px; border-radius:6px; font:inherit;
+  font-size:12.5px; font-weight:550; color:var(--ink-2); cursor:pointer; }
+.seg button.on { background:#fff; color:var(--ink); box-shadow:var(--shadow); }
 .stepper { display:flex; align-items:center; margin:16px 4px 6px; }
 .stepper .node { display:flex; flex-direction:column; align-items:center; gap:6px; width:90px; flex:none; }
 .stepper .dot { width:26px; height:26px; border-radius:50%; display:grid; place-items:center;
@@ -182,7 +225,31 @@ td .cid { font-family:var(--mono); font-size:11.5px; color:var(--ink-2); }
   border-top-color:var(--primary); border-radius:50%; animation:sp .9s linear infinite; vertical-align:-2px; }
 @keyframes sp { to { transform:rotate(360deg); } }
 
-/* ================= 对话框 ================= */
+/* ================= 抽屉 ================= */
+.overlay { position:fixed; inset:0; background:rgba(15,22,36,.45); z-index:60; opacity:0;
+  pointer-events:none; transition:opacity .18s; }
+.overlay.on { opacity:1; pointer-events:auto; }
+.drawer { position:fixed; top:0; right:0; bottom:0; width:430px; max-width:94vw; background:#fff; z-index:61;
+  box-shadow:var(--shadow-lg); transform:translateX(105%); transition:transform .2s ease;
+  display:flex; flex-direction:column; }
+.drawer.on { transform:none; }
+.drawer .d-h { display:flex; align-items:center; padding:15px 20px; border-bottom:1px solid var(--line-2); }
+.drawer .d-h h3 { margin:0; font-size:15px; }
+.drawer .d-b { padding:14px 20px; overflow:auto; flex:1; }
+.drawer .d-f { padding:13px 20px; border-top:1px solid var(--line-2); display:flex; gap:8px; align-items:center; }
+
+/* ================= 批量操作浮动条 ================= */
+.batchbar { position:fixed; left:50%; bottom:22px; transform:translateX(-50%) translateY(80px); z-index:50;
+  display:flex; align-items:center; gap:10px; background:#1c2430; color:#fff; border-radius:12px;
+  padding:9px 10px 9px 18px; box-shadow:var(--shadow-lg); transition:transform .2s ease; font-size:13px; }
+.batchbar.on { transform:translateX(-50%); }
+.batchbar .n { font-weight:700; color:#8fb0ff; }
+.batchbar button { border:none; border-radius:8px; font:inherit; font-size:12.5px; padding:6px 13px; cursor:pointer; }
+.batchbar .b-ok { background:#1f6e44; color:#fff; }
+.batchbar .b-rej { background:#93362e; color:#fff; }
+.batchbar .b-x { background:#2c3648; color:#c6cede; }
+
+/* ================= 对话框 / Toast / 空态 ================= */
 dialog { border:none; border-radius:14px; width:560px; max-width:92vw; padding:0;
   box-shadow:var(--shadow-lg); color:var(--ink); }
 dialog::backdrop { background:rgba(15,22,36,.45); backdrop-filter:blur(2px); }
@@ -191,8 +258,6 @@ dialog::backdrop { background:rgba(15,22,36,.45); backdrop-filter:blur(2px); }
 .dlg-h .meta { margin-left:8px; }
 .dlg-b { padding:8px 20px 4px; }
 .dlg-f { display:flex; justify-content:flex-end; gap:8px; padding:14px 20px 16px; }
-
-/* ================= 对话 / Toast ================= */
 .chat { max-height:230px; overflow:auto; border:1px solid var(--line); border-radius:var(--radius-s);
   padding:10px 12px; background:var(--well); }
 .chat .msg { margin:5px 0; } .chat .me { color:var(--primary); font-weight:600; }
@@ -202,9 +267,7 @@ dialog::backdrop { background:rgba(15,22,36,.45); backdrop-filter:blur(2px); }
 .toast.ok { background:#0f5132; } .toast.err { background:#8a2620; } .toast.warn { background:#7a5410; }
 .toast.out { opacity:0; transform:translateY(6px); transition:all .25s; }
 @keyframes tin { from { opacity:0; transform:translateY(8px);} }
-
-/* ================= 空态 ================= */
-.empty { text-align:center; color:var(--ink-3); padding:34px 10px; font-size:13px; }
+.empty { text-align:center; color:var(--ink-3); padding:40px 10px; font-size:13px; }
 .empty svg { width:36px; height:36px; opacity:.35; margin-bottom:8px; }
 .kw { color:var(--ink-3); font-size:12px; }
 a { color:var(--primary); text-decoration:none; }
@@ -215,72 +278,98 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <body>
 
 <div class="appbar">
-  <div class="logo"><span class="mark">天</span>
-    <div>天工 · AI 测试用例平台<div class="sub">拆解 → 查漏 → 查重 → 人工审核 → 定点修改 → 学习反哺</div></div>
+  <div class="logo"><span class="mark">天</span><span>天工 · AI 测试用例平台</span></div>
+  <div class="nav">
+    <button id="nav-board" class="on" onclick="switchView('board')">工作台</button>
+    <button id="nav-rules" onclick="switchView('rules')">学习规则</button>
+    <button id="nav-memory" onclick="switchView('memory')">记忆</button>
   </div>
   <div class="right" id="barInfo"></div>
 </div>
 
-<div class="layout">
+<!-- 工作台视图 -->
+<div class="layout" id="view-board">
   <div class="side">
     <div class="card">
-      <div class="card-h"><h3>新建任务</h3></div>
-      <div class="card-b">
-        <label class="f">需求文本<span class="hint">（可与文件混合提交）</span></label>
-        <textarea id="reqText" rows="4" placeholder="粘贴需求内容…"></textarea>
-        <label class="f">需求文件<span class="hint">（PDF / Word / 图片 / 文本，可多选）</span></label>
-        <input type="file" id="reqFiles" multiple>
-        <label class="f">生成模型 / 评审模型</label>
-        <div style="display:flex;gap:8px">
-          <select id="modelSel"></select><select id="reviewerSel"></select>
+      <div class="card-b" style="padding-bottom:10px">
+        <button class="btn block" onclick="openDrawer()">＋ 新建任务</button>
+        <div class="search" style="margin-top:10px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="text" id="taskSearch" placeholder="搜索任务…" oninput="refreshList()">
         </div>
-        <label class="f">用例模板</label>
-        <select id="templateSel"></select>
-        <label class="f">项目名<span class="hint">（同项目共享项目记忆与规则）</span></label>
-        <input type="text" id="projectInput" placeholder="如：斗地主赛季玩法">
-        <div class="toolbar">
-          <label class="check"><input type="checkbox" id="confirmPoints" checked> 先审核测试点</label>
-          <label class="check"><input type="checkbox" id="asyncMode" checked> 后台执行</label>
-        </div>
-      </div>
-      <div class="card-f">
-        <button class="btn" id="createBtn" onclick="createTask()">生成测试用例</button>
-        <span id="createMsg" class="hint"></span>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-h"><h3>任务</h3><div class="grow"><span id="listSpin"></span></div></div>
-      <div class="card-b" id="taskList"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-h"><h3>学习规则</h3>
-        <div class="grow"><button class="btn ghost sm" onclick="analyzeLearning()" id="learnBtn">分析修改习惯</button></div></div>
-      <div class="card-b">
-        <div id="ruleList"></div>
-        <div class="hint" style="margin-top:6px">从人工审核修改留痕提炼规则候选，负责人确认范围后自动注入后续生成</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-h"><h3>记忆</h3>
-        <div class="grow">
-          <button class="btn ghost sm" onclick="openMemDlg()">新增</button>
-          <button class="btn ghost sm" onclick="clearMemories()">清空</button>
-        </div></div>
-      <div class="card-b">
-        <div id="memList"></div>
-        <div class="hint" style="margin-top:6px">生成任务时自动注入（独立配额），任务详情可见本次引用</div>
+        <div class="tasklist" id="taskList"></div>
       </div>
     </div>
   </div>
-
   <div class="main" id="detail">
     <div class="card"><div class="card-b empty">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12h6m-6 4h6M7 3h7l5 5v13H7a2 2 0 01-2-2V5a2 2 0 012-2z"/></svg>
       <div>选择或创建一个任务查看详情</div></div></div>
   </div>
+</div>
+
+<!-- 学习规则视图 -->
+<div class="layout" id="view-rules" style="display:none"><div class="page">
+  <div class="card">
+    <div class="card-h"><h3>学习规则</h3>
+      <span class="meta">从人工审核修改留痕提炼规则候选，负责人确认范围后自动注入后续生成</span>
+      <div class="grow">
+        <input type="text" id="ruleProject" placeholder="项目名（可选）" style="width:180px">
+        <button class="btn" onclick="analyzeLearning()" id="learnBtn">分析修改习惯</button>
+      </div></div>
+    <div class="card-b" id="ruleList"></div>
+  </div>
+</div></div>
+
+<!-- 记忆视图 -->
+<div class="layout" id="view-memory" style="display:none"><div class="page">
+  <div class="card">
+    <div class="card-h"><h3>记忆</h3>
+      <span class="meta">用户偏好与项目记忆，生成任务时自动注入（独立配额）</span>
+      <div class="grow">
+        <button class="btn ghost sm" onclick="openMemDlg()">新增记忆</button>
+        <button class="btn ghost sm" onclick="clearMemories()">一键清空</button>
+      </div></div>
+    <div class="card-b" id="memList"></div>
+  </div>
+</div></div>
+
+<!-- 新建任务抽屉 -->
+<div class="overlay" id="drawerOverlay" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+  <div class="d-h"><h3>新建任务</h3></div>
+  <div class="d-b">
+    <label class="f">需求文本<span class="hint">（可与文件混合提交）</span></label>
+    <textarea id="reqText" rows="5" placeholder="粘贴需求内容…"></textarea>
+    <label class="f">需求文件<span class="hint">（PDF / Word / 图片 / 文本，可多选）</span></label>
+    <input type="file" id="reqFiles" multiple>
+    <label class="f">生成模型 / 评审模型</label>
+    <div style="display:flex;gap:8px">
+      <select id="modelSel"></select><select id="reviewerSel"></select>
+    </div>
+    <label class="f">用例模板</label>
+    <select id="templateSel"></select>
+    <label class="f">项目名<span class="hint">（同项目共享项目记忆与规则）</span></label>
+    <input type="text" id="projectInput" placeholder="如：斗地主赛季玩法">
+    <div class="toolbar">
+      <label class="check"><input type="checkbox" id="confirmPoints" checked> 先审核测试点</label>
+      <label class="check"><input type="checkbox" id="asyncMode" checked> 后台执行</label>
+    </div>
+    <div class="hint" style="margin-top:10px">勾选「先审核测试点」：拆解后自动执行独立查漏与重复检查，人工逐条/批量审核后再生成用例（推荐）</div>
+  </div>
+  <div class="d-f">
+    <button class="btn" id="createBtn" onclick="createTask()">生成测试用例</button>
+    <button class="btn ghost" onclick="closeDrawer()">取消</button>
+    <span id="createMsg" class="hint"></span>
+  </div>
+</div>
+
+<!-- 批量操作浮动条 -->
+<div class="batchbar" id="batchbar">
+  <span>已选 <span class="n" id="bbCount">0</span> 条<span id="bbKind"></span></span>
+  <button class="b-ok" onclick="batchGo('approve')">批量通过</button>
+  <button class="b-rej" onclick="batchGo('reject')">批量驳回</button>
+  <button class="b-x" onclick="clearChecks()">取消选择</button>
 </div>
 
 <div id="toasts"></div>
@@ -394,15 +483,17 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
   <div class="dlg-f">
     <button class="btn ghost" onclick="$('editDlg').close()">取消</button>
-    <button class="btn" onclick="saveEdit()">保存<span class="hint" style="color:#cdd6f7;margin-left:4px">人工定稿即通过并锁定</span></button>
+    <button class="btn" onclick="saveEdit()">保存并通过锁定</button>
   </div>
 </dialog>
 
 <script>
 const $ = id => document.getElementById(id);
 const DIMENSIONS = ["正常流程","异常流程","输入校验","边界值","状态转换","权限","数据","重复操作","中断","网络"];
-let currentTask = null, editingCase = null, caseTab = 'all';
+let currentTask = null, editingCase = null, currentView = 'board';
+let detailTab = 'overview', caseTab = 'all', caseModule = '';
 let hiddenDupPairs = new Set(), lastPointDiff = null, lastCaseDiff = null, lastHints = [];
+let expandedSteps = new Set();
 
 /* ---------- 基础设施 ---------- */
 async function api(path, opts) {
@@ -420,7 +511,6 @@ function toast(msg, type='') {
   $('toasts').appendChild(el);
   setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 260); }, 3800);
 }
-
 let _cfResolve = null;
 function uiConfirm(title, msg, danger=false) {
   return new Promise(res => {
@@ -431,7 +521,6 @@ function uiConfirm(title, msg, danger=false) {
   });
 }
 function resolveConfirm(v) { $('confirmDlg').close(); const r=_cfResolve; _cfResolve=null; r && r(v); }
-
 let _cmResolve = null;
 function askComment(title, meta, preset='') {
   return new Promise(res => {
@@ -447,7 +536,6 @@ function submitComment() {
   resolveComment(v);
 }
 function resolveComment(v) { $('commentDlg').close(); const r=_cmResolve; _cmResolve=null; r && r(v); }
-
 let _pdResolve = null;
 function askPoint(title, {module=null, point='', dimension=''}={}) {
   return new Promise(res => {
@@ -470,7 +558,6 @@ function submitPoint() {
   resolvePoint({module, point, dimension: $('pdDim').value});
 }
 function resolvePoint(v) { $('pointDlg').close(); const r=_pdResolve; _pdResolve=null; r && r(v); }
-
 let _inResolve = null;
 function askInput(title, label, preset='') {
   return new Promise(res => {
@@ -486,15 +573,29 @@ function submitInput() {
 }
 function resolveInput(v) { $('inputDlg').close(); const r=_inResolve; _inResolve=null; r && r(v); }
 
-/* 图标 */
 const IC = {
   check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>',
   x:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>',
   edit:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4z"/></svg>',
   trash:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/></svg>',
   unlock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 019.9-1"/></svg>',
-  lock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>',
 };
+
+/* ---------- 视图切换 ---------- */
+function switchView(v) {
+  currentView = v;
+  for (const k of ['board','rules','memory']) {
+    $('view-'+k).style.display = k===v ? '' : 'none';
+    $('nav-'+k).classList.toggle('on', k===v);
+  }
+  if (v==='rules') refreshRules();
+  if (v==='memory') refreshMemories();
+  renderBatchBar();
+}
+
+/* ---------- 抽屉 ---------- */
+function openDrawer() { $('drawer').classList.add('on'); $('drawerOverlay').classList.add('on'); }
+function closeDrawer() { $('drawer').classList.remove('on'); $('drawerOverlay').classList.remove('on'); }
 
 /* ---------- 初始化 ---------- */
 async function init() {
@@ -511,39 +612,46 @@ async function init() {
     new Option(x.name + (x.template_id === t.default_id ? '（默认）' : ''), x.template_id)));
   $('templateSel').value = t.default_id;
   await refreshMemories(true);
-  refreshRules();
   refreshList();
   setInterval(refreshList, 3000);
   setInterval(() => {
     if (currentTask && ['queued','running'].includes(currentTask.status)) renderDetail();
   }, 1000);
+  document.addEventListener('change', e => {
+    if (e.target.matches && (e.target.matches('.ptck') || e.target.matches('.cck') || e.target.matches('.allck'))) renderBatchBar();
+  });
 }
 
-/* ---------- 学习规则 ---------- */
+/* ---------- 学习规则视图 ---------- */
 const scopeText = {system:'系统级', team:'团队级', project:'项目级', module:'模块级'};
 async function refreshRules() {
   const data = await api('/api/v1/learning/rules');
-  const rows = data.rules.filter(r => r.status !== 'ignored').map(r => `
-    <div class="mini-item">
-      <span class="ops">
+  window._rules = data.rules;
+  const rules = data.rules.filter(r => r.status !== 'ignored');
+  if (!rules.length) {
+    $('ruleList').innerHTML = '<div class="empty">暂无规则。点击「分析修改习惯」从人工审核留痕中提炼候选</div>';
+    return;
+  }
+  $('ruleList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
+    <tr><th>规则内容</th><th>依据</th><th style="width:70px">可信度</th><th style="width:110px">状态 / 范围</th><th style="width:100px">操作</th></tr>
+    ${rules.map(r => `<tr>
+      <td>${esc(r.content)}</td>
+      <td class="hint">${esc(r.evidence||'—')}${r.occurrences?`（${r.occurrences} 次）`:''}</td>
+      <td>${esc(r.confidence||'—')}</td>
+      <td>${r.status==='candidate' ? '<span class="st candidate">候选待确认</span>'
+          : `<span class="st approved">${scopeText[r.scope]||r.scope}生效</span>${r.scope==='module'&&r.module?`<div class="hint">${esc(r.module)}</div>`:''}${r.project?`<div class="hint">${esc(r.project)}</div>`:''}`}</td>
+      <td><div class="rowops">
         ${r.status==='candidate'
           ? `<button class="ibtn ok" title="确认生效" onclick="confirmRule('${r.rule_id}')">${IC.check}</button>
              <button class="ibtn" title="忽略" onclick="ignoreRule('${r.rule_id}')">${IC.x}</button>`
           : `<button class="ibtn bad" title="删除" onclick="deleteRule('${r.rule_id}')">${IC.trash}</button>`}
-      </span>
-      ${r.status==='candidate'
-        ? `<span class="st candidate">候选</span>${r.confidence?` <span class="tag">可信度 ${esc(r.confidence)}</span>`:''}`
-        : `<span class="st approved">${scopeText[r.scope]||r.scope}生效</span>${r.scope==='module'&&r.module?` <span class="tag">${esc(r.module)}</span>`:''}`}
-      <div class="body">${esc(r.content)}</div>
-      ${r.evidence ? `<div class="hint">依据：${esc(r.evidence)}</div>` : ''}
-    </div>`).join('');
-  $('ruleList').innerHTML = rows || '<div class="hint">暂无规则。点击「分析修改习惯」从审核留痕提炼候选</div>';
-  window._rules = data.rules;
+      </div></td></tr>`).join('')}
+  </table></div>`;
 }
 async function analyzeLearning() {
   const btn = $('learnBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 分析中';
   try {
-    const data = await jpost('/api/v1/learning/analyze', {project: $('projectInput').value.trim() || null});
+    const data = await jpost('/api/v1/learning/analyze', {project: ($('ruleProject')?.value || '').trim() || null});
     toast(data.message || `分析 ${data.samples} 条留痕，新增 ${data.candidates.length} 条规则候选`, 'ok');
     refreshRules();
   } catch (e) { toast('分析失败：' + e.message, 'err'); }
@@ -581,7 +689,7 @@ async function deleteRule(id) {
   catch (e) { toast('删除失败：' + e.message, 'err'); }
 }
 
-/* ---------- 记忆 ---------- */
+/* ---------- 记忆视图 ---------- */
 async function refreshMemories(applyDefaults) {
   const data = await api('/api/v1/memories');
   if (applyDefaults) {
@@ -589,17 +697,22 @@ async function refreshMemories(applyDefaults) {
     if (d.template_id && [...$('templateSel').options].some(o=>o.value===d.template_id)) $('templateSel').value = d.template_id;
     if (d.model && [...$('modelSel').options].some(o=>o.value===d.model)) $('modelSel').value = d.model;
   }
-  $('memList').innerHTML = data.memories.map(m => `
-    <div class="mini-item">
-      <span class="ops">
+  window._memories = data.memories;
+  if (!data.memories.length) {
+    $('memList').innerHTML = '<div class="empty">暂无记忆。可手工添加，或随使用自动沉淀（常用模板/模型、重复的修订要求）</div>';
+    return;
+  }
+  $('memList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
+    <tr><th style="width:140px">维度</th><th>内容</th><th style="width:90px">来源</th><th style="width:80px">操作</th></tr>
+    ${data.memories.map(m => `<tr>
+      <td>${m.scope==='project' ? `<span class="tag">项目</span> ${esc(m.project||'')}` : '<span class="tag">用户偏好</span>'}</td>
+      <td>${esc(m.content)}</td>
+      <td class="hint">${m.source==='usage'?'自动沉淀':'手工'}</td>
+      <td><div class="rowops">
         <button class="ibtn" title="修改" onclick="editMemory('${m.memory_id}')">${IC.edit}</button>
         <button class="ibtn bad" title="删除" onclick="deleteMemory('${m.memory_id}')">${IC.trash}</button>
-      </span>
-      <span class="tag">${m.scope==='project' ? '项目 · '+esc(m.project||'') : '偏好'}</span>
-      ${m.source==='usage' ? '<span class="tag">自动沉淀</span>' : ''}
-      <div class="body">${esc(m.content)}</div>
-    </div>`).join('') || '<div class="hint">暂无记忆。可手工添加，或随使用自动沉淀</div>';
-  window._memories = data.memories;
+      </div></td></tr>`).join('')}
+  </table></div>`;
 }
 function openMemDlg() { $('mContent').value=''; $('mScope').value='user'; $('mProjWrap').style.display='none'; $('memDlg').showModal(); }
 async function saveMemory() {
@@ -637,16 +750,19 @@ function relTime(iso) {
   if (s < 86400) return Math.floor(s/3600) + ' 小时前';
   return Math.floor(s/86400) + ' 天前';
 }
+let _tasksCache = [];
 async function refreshList() {
-  const data = await api('/api/v1/tasks');
-  $('listSpin').innerHTML = data.tasks.some(t => ['queued','running'].includes(t.status)) ? '<span class="spin"></span>' : '';
-  $('taskList').innerHTML = data.tasks.map(t => `
+  try { const data = await api('/api/v1/tasks'); _tasksCache = data.tasks; } catch (e) { return; }
+  const q = ($('taskSearch').value || '').trim().toLowerCase();
+  const tasks = _tasksCache.filter(t => !q || t.task_id.includes(q) ||
+    (t.sources||[]).some(s => s.toLowerCase().includes(q)));
+  $('taskList').innerHTML = tasks.map(t => `
     <div class="task-item ${currentTask && currentTask.task_id===t.task_id?'active':''}" onclick="openTask('${t.task_id}')">
       <div class="row1"><span class="pill ${t.status}">${statusText(t.status)}</span>
         ${t.progress?'<span class="hint">'+progressText(t.progress)+'</span>':''}
         <span style="margin-left:auto" class="hint">${t.case_count?t.case_count+' 条用例':relTime(t.created_at)}</span></div>
       <div class="tid">${t.task_id} · ${(t.sources||[]).map(shortName).join(', ')||'-'}</div>
-    </div>`).join('') || '<div class="hint">暂无任务</div>';
+    </div>`).join('') || '<div class="hint" style="margin-top:8px">暂无任务</div>';
   if (currentTask && ['queued','running'].includes(currentTask.status)) openTask(currentTask.task_id, true);
 }
 
@@ -670,6 +786,7 @@ async function createTask() {
   try {
     const data = await api('/api/v1/tasks', {method:'POST', body:fd});
     $('reqText').value = ''; $('reqFiles').value = '';
+    closeDrawer();
     refreshMemories();
     await refreshList(); openTask(data.task_id);
     $('createMsg').textContent = '';
@@ -680,24 +797,54 @@ async function createTask() {
 /* ---------- 任务详情 ---------- */
 async function openTask(id, keepLocal) {
   currentTask = await api('/api/v1/tasks/' + id);
-  if (!keepLocal) { hiddenDupPairs = new Set(); lastPointDiff = null; lastCaseDiff = null; lastHints = []; caseTab = 'all'; }
+  if (!keepLocal) {
+    hiddenDupPairs = new Set(); lastPointDiff = null; lastCaseDiff = null; lastHints = [];
+    caseTab = 'all'; caseModule = ''; expandedSteps = new Set();
+    detailTab = currentTask.status === 'awaiting_confirmation' ? 'points'
+      : (currentTask.result && currentTask.result.cases && currentTask.result.cases.length) ? 'cases' : 'overview';
+  }
   renderDetail();
   refreshList();
 }
+function setTab(tab) { detailTab = tab; renderDetail(); }
 
 function renderDetail() {
   const t = currentTask;
-  let html = `<div class="card"><div class="card-h">
-    <h3>任务 <code>${t.task_id}</code></h3>
-    <span class="pill ${t.status}">${statusText(t.status)}</span>
-    ${t.progress?'<span class="hint">'+progressText(t.progress)+' <span class="spin"></span></span>':''}
-    <div class="grow"><span class="hint">${(t.sources||[]).map(esc).join('、')||'-'} · ${relTime(t.created_at)}</span></div>
-  </div>${t.error?'<div class="card-b" style="color:var(--danger)">'+esc(t.error)+'</div>':''}</div>`;
+  if (!t) return;
+  const hasCases = t.result && t.result.cases && t.result.cases.length;
+  const pts = allPoints(t);
+  const nRejCases = hasCases ? Object.values(t.case_reviews||{}).filter(s=>s.status==='rejected').length : 0;
+  const running = ['queued','running'].includes(t.status);
 
-  if (['queued','running'].includes(t.status)) html += renderProgress(t);
-  if (t.status === 'awaiting_confirmation') html += renderPointWorkbench(t);
-  if (t.result && t.result.cases && t.result.cases.length) html += renderResult(t);
-  $('detail').innerHTML = html;
+  const tabs = [
+    ['overview', '概览', ''],
+    ...(pts.length ? [['points', '测试点审核', `<span class="cnt">${pts.length}</span>`]] : []),
+    ...(hasCases ? [['cases', '用例审核', `<span class="cnt ${nRejCases?'hot':''}">${nRejCases?nRejCases+' 待修改':t.result.cases.length}</span>`]] : []),
+    ...(hasCases ? [['change', '需求变更', '']] : []),
+    ...(hasCases ? [['history', '修订与终稿', '']] : []),
+  ];
+  if (!tabs.some(x => x[0]===detailTab)) detailTab = tabs[0][0];
+
+  let body = '';
+  if (detailTab==='overview') body = renderOverview(t);
+  else if (detailTab==='points') body = renderPointWorkbench(t);
+  else if (detailTab==='cases') body = renderCases(t);
+  else if (detailTab==='change') body = renderChange(t);
+  else if (detailTab==='history') body = renderHistory(t);
+
+  $('detail').innerHTML = `<div class="card">
+    <div class="card-h" style="border-bottom:none">
+      <h3>任务 <code>${t.task_id}</code></h3>
+      <span class="pill ${t.status}">${statusText(t.status)}</span>
+      ${t.progress?'<span class="hint">'+progressText(t.progress)+' <span class="spin"></span></span>':''}
+      <div class="grow"><span class="hint">${(t.sources||[]).map(esc).join('、')||'-'} · ${relTime(t.created_at)}</span></div>
+    </div>
+    ${t.error?'<div class="card-b" style="color:var(--danger);padding-top:0">'+esc(t.error)+'</div>':''}
+    <div class="dtabs">${tabs.map(([k,label,badge]) =>
+      `<button class="${detailTab===k?'on':''}" onclick="setTab('${k}')">${label}${badge}</button>`).join('')}</div>
+    <div class="card-b">${running ? renderProgress(t) + body : body}</div>
+  </div>`;
+  renderBatchBar();
 }
 
 const STAGES = [['queued','排队'], ['analyzing','需求分析'], ['generating_reviewing','生成与评审'], ['exporting','导出']];
@@ -712,14 +859,79 @@ function renderProgress(t) {
   const idx = Math.max(0, STAGES.findIndex(s => s[0] === stage));
   const elapsed = t.created_at ? Math.max(0, Math.floor((Date.now() - new Date(t.created_at).getTime())/1000)) : 0;
   const mm = String(Math.floor(elapsed/60)), ss = String(elapsed%60).padStart(2,'0');
-  return `<div class="card"><div class="card-b">
-    <h3 style="margin:0;font-size:14px">正在生成 <span class="spin"></span>
-      <span class="hint" style="font-weight:400">已耗时 ${mm}:${ss} · 生成与评审为主要耗时阶段（多模块并行）</span></h3>
-    ${stepperHtml(idx)}</div></div>`;
+  return `<div class="box accent" style="margin:0 0 14px">
+    正在生成 <span class="spin"></span>
+    <span class="hint">已耗时 ${mm}:${ss} · 生成与评审为主要耗时阶段（多模块并行）</span>
+    ${stepperHtml(idx)}</div>`;
 }
 
-/* ==================== 测试点审核工作台 ==================== */
-/* 旧任务兼容：实体化之前的测试点为纯字符串（无 tp_id），降级为只读展示 */
+/* ==================== 概览 ==================== */
+function renderOverview(t) {
+  const ctx = t.context || {};
+  const r = t.result;
+  const hasCases = r && r.cases && r.cases.length;
+  let stats = '';
+  if (hasCases) {
+    const cases = r.cases;
+    const pc = {P0:0,P1:0,P2:0,P3:0};
+    cases.forEach(c => { if (pc[c.priority]!=null) pc[c.priority]++; });
+    const states = cases.map(c => caseState(t, c).status);
+    const sc = {approved:0, pending:0, rejected:0};
+    states.forEach(s => sc[s]!=null ? sc[s]++ : sc.pending++);
+    const total = cases.length;
+    const PRIO_COLOR = {P0:'var(--p0)',P1:'var(--p1)',P2:'var(--p2)',P3:'var(--p3)'};
+    const prioBar = ['P0','P1','P2','P3'].filter(p=>pc[p]).map(p =>
+      `<i style="flex:${pc[p]};background:${PRIO_COLOR[p]}" title="${p} · ${pc[p]} 条"></i>`).join('');
+    const prioLeg = ['P0','P1','P2','P3'].map(p =>
+      `<span><i style="background:${PRIO_COLOR[p]}"></i>${p} <b>${pc[p]}</b></span>`).join('');
+    const SC_COLOR = {approved:'var(--s-ok)', pending:'var(--s-pend)', rejected:'var(--s-rej)'};
+    const SC_LABEL = {approved:'已通过', pending:'未审核', rejected:'已驳回'};
+    const revBar = ['approved','pending','rejected'].filter(k=>sc[k]).map(k =>
+      `<i style="flex:${sc[k]};background:${SC_COLOR[k]}" title="${SC_LABEL[k]} · ${sc[k]} 条"></i>`).join('');
+    const revLeg = ['approved','pending','rejected'].map(k =>
+      `<span><i style="background:${SC_COLOR[k]}"></i>${SC_LABEL[k]} <b>${sc[k]}</b></span>`).join('');
+    const covPct = t.quality && t.quality['测试维度覆盖度'] != null ? t.quality['测试维度覆盖度'] : null;
+    stats = `<div class="statrow">
+      <div class="stat"><div class="lab">测试用例</div><div class="num">${total}</div>
+        <div class="segbar">${prioBar}</div><div class="leg">${prioLeg}</div></div>
+      <div class="stat"><div class="lab">审核进度</div><div class="num">${sc.approved}<span style="font-size:14px;color:var(--ink-3);font-weight:550"> / ${total} 已通过</span></div>
+        <div class="segbar">${revBar}</div><div class="leg">${revLeg}</div></div>
+      <div class="stat"><div class="lab">维度覆盖度</div>
+        <div class="donut" style="margin-top:6px">
+          <div class="ring" style="background:${covPct!=null?`conic-gradient(var(--primary) ${covPct*3.6}deg, var(--line-2) 0)`:'var(--line-2)'}">
+            <div>${covPct!=null?covPct:'—'}</div></div>
+          <div class="hint">适用维度中已覆盖比例<br>由独立查漏 Agent 评估</div></div></div>
+      <div class="stat"><div class="lab">AI 评审</div><div class="num">${r.review_rounds}<span style="font-size:14px;color:var(--ink-3);font-weight:550"> 轮</span></div>
+        <div class="sub">${r.passed?'评审通过':'含未通过项'}${r.chunks>1?` · ${r.chunks} 分片`:''} · 重复风险 ${esc((t.quality||{})['重复风险']||'—')}</div></div>
+    </div>`;
+  }
+  const pts = allPoints(t);
+  const dupCount = ((t.quality||{})['疑似重复用例对']||[]).length;
+  return `${stats}
+    <div class="section-t">任务信息</div>
+    <dl class="meta-grid">
+      <div><dt>来源</dt><dd>${(t.sources||[]).map(esc).join('、')||'-'}</dd></div>
+      <div><dt>项目</dt><dd>${esc(ctx.project||'—')}</dd></div>
+      <div><dt>生成模型</dt><dd>${esc(ctx.model||'默认')}</dd></div>
+      <div><dt>模板</dt><dd>${esc(ctx.template_id||'—')}</dd></div>
+      <div><dt>测试点</dt><dd>${pts.length||'—'}</dd></div>
+      <div><dt>创建时间</dt><dd>${esc((t.created_at||'').replace('T',' ').replace('+00:00',' UTC'))}</dd></div>
+    </dl>
+    ${hasCases ? `<div class="section-t">导出下载</div><div class="toolbar" style="margin-top:4px">
+      ${Object.keys(t.files||{}).map(f=>`<a class="btn ghost sm" href="/api/v1/tasks/${t.task_id}/files/${f}">${f}</a>`).join('')}</div>` : ''}
+    ${dupCount ? `<div class="section-t">AI 自检 · 疑似重复用例</div>${((t.quality||{})['疑似重复用例对']||[]).map(p=>
+      `<div class="hint">${esc(p.a)}「${esc(p.a_title)}」≈ ${esc(p.b)}「${esc(p.b_title)}」（${p.similarity}）</div>`).join('')}
+      <div class="hint" style="margin-top:2px">评分仅供参考，不作为自动通过依据</div>` : ''}
+    ${r && r.unresolved && r.unresolved.length ? `<div class="section-t">未解决评审问题</div>${r.unresolved.map(u=>
+      `<div class="hint" style="color:var(--warn)">⚠ ${esc(u.case_id)}：${esc(u.problem)}</div>`).join('')}` : ''}
+    ${(t.analysis&&t.analysis.blind_spots&&t.analysis.blind_spots.length)?
+      `<div class="section-t">疑似需求盲区</div><div class="chips">${t.analysis.blind_spots.map(b=>'<span>'+esc(b)+'</span>').join('')}</div>`:''}
+    ${(t.memories&&t.memories.length)||(t.rules&&t.rules.length) ? `<div class="section-t">本次注入</div><div class="chips plain">
+      ${(t.memories||[]).map(m=>'<span>记忆：'+esc(m.content)+'</span>').join('')}
+      ${(t.rules||[]).map(x=>'<span>规则：'+esc(x.content)+'</span>').join('')}</div>` : ''}`;
+}
+
+/* ==================== 测试点审核 ==================== */
 const normPoint = p => typeof p === 'string' ? {point:p, tp_id:'', status:'pending', legacy:true} : p;
 function allPoints(t) {
   const modules = (t.analysis||{}).test_points || [];
@@ -734,6 +946,7 @@ function renderPointWorkbench(t) {
   const approved = pts.filter(p=>p.status==='approved').length;
   const rejected = pts.filter(p=>p.status==='rejected').length;
   const pending = pts.length - approved - rejected;
+  const confirmable = t.status === 'awaiting_confirmation';
 
   const rows = modules.map(m => {
     const head = `<tr class="module-head"><td colspan="7">
@@ -748,7 +961,7 @@ function renderPointWorkbench(t) {
           ${p.comment?`<div class="hint" style="color:var(--danger)">意见：${esc(p.comment)}</div>`:''}</td>
         <td style="width:84px">${p.dimension?`<span class="tag">${esc(p.dimension)}</span>`:'<span class="hint">—</span>'}</td>
         <td style="width:76px" class="hint">${srcText[p.source]||esc(p.source||'')}</td>
-        <td style="width:92px"><span class="st ${p.status}">${p.status==='approved'?IC.lock.replace('width:15','width:11')+' ':''}${pStatusText[p.status]||p.status}</span>
+        <td style="width:92px"><span class="st ${p.status}">${pStatusText[p.status]||p.status}</span>
           ${p.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${p.reject_count} 次</div>`:''}</td>
         <td style="width:132px">${p.legacy?'<span class="hint">旧版任务只读</span>':`<div class="rowops">
           <button class="ibtn ok" title="通过（锁定）" onclick="pointAct('${esc(p.tp_id)}','approve')">${IC.check}</button>
@@ -761,37 +974,29 @@ function renderPointWorkbench(t) {
     return head + body;
   }).join('');
 
-  return `<div class="card"><div class="card-h"><h3>测试点审核</h3>
-      <span class="meta">共 ${pts.length} 条 · 待审核 ${pending} · 已通过 ${approved} · 已驳回 ${rejected}</span>
-      <div class="grow">
-        <button class="btn ghost sm" onclick="gapCheck()">查漏补缺</button>
+  return `<div class="toolbar" style="margin-top:0">
+      <span class="hint">共 ${pts.length} 条 · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b></span>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        ${confirmable?`<button class="btn ghost sm" onclick="gapCheck()">查漏补缺</button>
         <button class="btn ghost sm" onclick="dupCheck()">重复检查</button>
         <button class="btn ghost sm" onclick="supplementPoints()">AI 补充</button>
-        <button class="btn ghost sm" onclick="manualAddPoint()">手工新增</button>
+        <button class="btn ghost sm" onclick="manualAddPoint()">手工新增</button>`:''}
       </div></div>
-    <div class="card-b">
     ${renderCoverage(t)}
     ${renderReuseHints(t)}
     ${renderDupReport(t)}
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
-    ${(t.analysis&&t.analysis.blind_spots&&t.analysis.blind_spots.length)?
-      `<div class="section-t">疑似需求盲区</div><div class="chips">${t.analysis.blind_spots.map(b=>'<span>'+esc(b)+'</span>').join('')}</div>`:''}
     <div class="tbl-wrap"><table>
       <tr><th></th><th>编号</th><th>测试点</th><th>维度</th><th>来源</th><th>状态</th><th>操作</th></tr>
       ${rows}
     </table></div>
-    <div class="toolbar">
-      <button class="btn ghost sm" onclick="batchPoints('approve')">批量通过</button>
-      <button class="btn ghost sm" onclick="batchPoints('reject')">批量驳回</button>
-      ${rejected?`<button class="btn soft sm" onclick="fixPoints()" id="fixPtBtn">AI 修改驳回项（${rejected}）</button>`:''}
-      <span class="hint">勾选后批量操作；通过 = 锁定为正式测试点</span>
-    </div>
+    ${rejected&&confirmable?`<div class="toolbar"><button class="btn soft sm" onclick="fixPoints()" id="fixPtBtn">AI 修改驳回项（${rejected}）</button>
+      <span class="hint">只输入被驳回项与审核意见，先识别意见类型再定点修改</span></div>`:''}
     ${lastPointDiff?renderPointDiff(lastPointDiff):''}
-    </div>
-    <div class="card-f">
+    ${confirmable?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
       <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">确认并生成用例${approved?`（仅已通过的 ${approved} 条）`:'（全部未驳回项）'}</button>
-      <span class="hint">驳回项修改后需再审核，不进入生成</span>
-    </div></div>`;
+      <span class="hint">通过 = 锁定为正式测试点；驳回项修改后需再审核，不进入生成</span>
+    </div>`:'<div class="hint" style="margin-top:12px">该任务已完成生成，此页为测试点留档视图</div>'}`;
 }
 
 function renderCoverage(t) {
@@ -801,14 +1006,12 @@ function renderCoverage(t) {
     <div class="cov">${Object.entries(t.coverage).map(([d,s]) =>
       `<div class="cell ${cls[s]||''}"><i></i>${esc(d)}<b>${esc(s)}</b></div>`).join('')}</div>`;
 }
-
 function renderReuseHints(t) {
   if (!t.reuse_hints || !t.reuse_hints.length) return '';
   return `<div class="section-t">历史用例复用提示</div>${t.reuse_hints.map(h=>`
     <div class="box accent">历史正式用例与当前需求高度相关（相似度 ${h.score} · 来源 ${esc(h.source)}）
       <div class="hint" style="white-space:pre-wrap;margin-top:4px">${esc(h.text)}</div></div>`).join('')}`;
 }
-
 function renderDupReport(t) {
   const pairs = ((t.dup_report||{}).points||[]).filter(p=>!hiddenDupPairs.has(p.a+'|'+p.b));
   if (!pairs.length) return '';
@@ -824,7 +1027,6 @@ function renderDupReport(t) {
         <button class="btn ghost sm" onclick="hiddenDupPairs.add('${esc(p.a)}|${esc(p.b)}');renderDetail()">忽略</button>
       </div></div>`).join('')}`;
 }
-
 function renderPointDiff(d) {
   return `<div class="section-t">AI 定点修改结果<span class="hint">（修改前 → 修改后）</span></div>${d.diff.map(x=>`
     <div class="box">${x.comment_type?`<span class="tag">${esc(x.comment_type)}</span> `:''}<span class="cid">${esc(x.tp_id)}</span>
@@ -860,16 +1062,7 @@ async function pointModify(tp) {
 }
 function toggleModule(mod, checked) {
   document.querySelectorAll(`.ptck[data-mod="${CSS.escape(mod)}"]`).forEach(c=>c.checked=checked);
-}
-async function batchPoints(action) {
-  const tps = [...document.querySelectorAll('.ptck:checked')].map(c=>c.dataset.tp);
-  if (!tps.length) return toast('请先勾选测试点', 'warn');
-  if (action === 'reject') {
-    const comment = await askComment('批量驳回', `${tps.length} 条 · 统一审核意见`, '与已有测试点重复，请合并处理');
-    if (!comment) return;
-    return pointsReview(tps.map(tp=>({tp_id:tp, action:'reject', comment})));
-  }
-  pointsReview(tps.map(tp=>({tp_id:tp, action})));
+  renderBatchBar();
 }
 async function fixPoints() {
   const btn = $('fixPtBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> AI 修改中'; }
@@ -938,25 +1131,31 @@ function caseState(t, c) {
 }
 const cStatusText = {pending:'未审核', approved:'已通过', rejected:'已驳回'};
 
-function renderResult(t) {
+function renderCases(t) {
   const r = t.result;
   const states = r.cases.map(c => caseState(t, c));
   const nRejected = states.filter(s=>s.status==='rejected').length;
   const nApproved = states.filter(s=>s.status==='approved').length;
   const nPending = r.cases.length - nRejected - nApproved;
-  const visible = r.cases.filter(c => caseTab==='all' || caseState(t, c).status===caseTab);
+  const modules = [...new Set(r.cases.map(c=>c.module))];
+  const visible = r.cases.filter(c =>
+    (caseTab==='all' || caseState(t, c).status===caseTab) &&
+    (!caseModule || c.module===caseModule));
 
   const rows = visible.map(c => {
     const s = caseState(t, c);
+    const stepsText = (c.steps||[]).map((x,i)=>`${i+1}. ${esc(x.action)}\n   → ${esc(x.expected)}`).join('\n');
+    const long = (c.steps||[]).length > 2;
+    const open = expandedSteps.has(c.uid);
     return `<tr>
       <td style="width:30px"><input type="checkbox" class="cck" data-cid="${esc(c.case_id)}"></td>
       <td style="width:104px"><span class="cid">${esc(c.case_id)}</span></td>
       <td style="width:80px">${esc(c.module)}</td>
-      <td>${esc(c.title)}
+      <td style="min-width:180px">${esc(c.title)}
         ${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}
         ${s.comment?`<div class="hint" style="color:var(--danger)">意见：${esc(s.comment)}</div>`:''}</td>
       <td style="width:44px"><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
-      <td class="steps">${(c.steps||[]).map((x,i)=>`${i+1}. ${esc(x.action)}\n   → ${esc(x.expected)}`).join('\n')}</td>
+      <td style="max-width:430px"><div class="stepbox ${long?'long':''} ${open?'open':''}" onclick="toggleSteps('${esc(c.uid)}')">${stepsText}</div></td>
       <td style="width:92px"><span class="st ${s.status}">${cStatusText[s.status]}</span>
         ${s.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${s.reject_count} 次</div>`:''}</td>
       <td style="width:132px"><div class="rowops">
@@ -968,84 +1167,32 @@ function renderResult(t) {
       </div></td></tr>`;
   }).join('');
 
-  return `<div class="card"><div class="card-h"><h3>生成结果</h3>
-      <span class="meta">${r.cases.length} 条 · AI 评审 ${r.review_rounds} 轮 · ${r.passed?'评审通过':'含未通过项'}${t.revisions.length?' · 已修订 '+t.revisions.length+' 轮':''}</span>
-      <div class="grow">${Object.keys(t.files||{}).map(f=>`<a class="btn ghost sm" href="/api/v1/tasks/${t.task_id}/files/${f}">${f}</a>`).join('')}</div></div>
-    <div class="card-b">
-    ${renderQuality(t)}
-    ${r.blind_spots && r.blind_spots.length ? `<div class="section-t">疑似需求盲区</div><div class="chips">${r.blind_spots.map(b=>'<span>'+esc(b)+'</span>').join('')}</div>` : ''}
-    ${(t.memories&&t.memories.length)||(t.rules&&t.rules.length) ? `<div class="section-t">本次注入</div><div class="chips plain">
-      ${(t.memories||[]).map(m=>'<span>记忆：'+esc(m.content)+'</span>').join('')}
-      ${(t.rules||[]).map(x=>'<span>规则：'+esc(x.content)+'</span>').join('')}</div>` : ''}
-    <div class="tabs">
-      <button class="${caseTab==='all'?'on':''}" onclick="caseTab='all';renderDetail()">全部 ${r.cases.length}</button>
-      <button class="${caseTab==='rejected'?'on':''}" onclick="caseTab='rejected';renderDetail()">待修改 ${nRejected}</button>
-      <button class="${caseTab==='approved'?'on':''}" onclick="caseTab='approved';renderDetail()">已通过 ${nApproved}</button>
-      <button class="${caseTab==='pending'?'on':''}" onclick="caseTab='pending';renderDetail()">未审核 ${nPending}</button>
-    </div>
+  return `<div class="filters" style="margin-top:0">
+      <div class="seg">
+        <button class="${caseTab==='all'?'on':''}" onclick="caseTab='all';renderDetail()">全部 ${r.cases.length}</button>
+        <button class="${caseTab==='rejected'?'on':''}" onclick="caseTab='rejected';renderDetail()">待修改 ${nRejected}</button>
+        <button class="${caseTab==='approved'?'on':''}" onclick="caseTab='approved';renderDetail()">已通过 ${nApproved}</button>
+        <button class="${caseTab==='pending'?'on':''}" onclick="caseTab='pending';renderDetail()">未审核 ${nPending}</button>
+      </div>
+      <select onchange="caseModule=this.value;renderDetail()" style="width:150px">
+        <option value="">全部模块</option>
+        ${modules.map(m=>`<option ${caseModule===m?'selected':''}>${esc(m)}</option>`).join('')}
+      </select>
+      <div style="margin-left:auto">
+        ${nRejected?`<button class="btn soft sm" onclick="fixCases()" id="fixCaseBtn">AI 修改驳回用例（${nRejected}）</button>`:''}
+      </div></div>
     <div class="tbl-wrap"><table>
-      <tr><th><input type="checkbox" onclick="document.querySelectorAll('.cck').forEach(c=>c.checked=this.checked)"></th>
+      <tr><th><input type="checkbox" class="allck" onclick="document.querySelectorAll('.cck').forEach(c=>c.checked=this.checked)"></th>
       <th>编号</th><th>模块</th><th>标题 / 关键词</th><th>优先级</th><th>步骤 → 预期</th><th>状态</th><th>操作</th></tr>
       ${rows || `<tr><td colspan="8"><div class="empty">该筛选下暂无用例</div></td></tr>`}</table></div>
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
-    <div class="toolbar">
-      <button class="btn ghost sm" onclick="batchCases('approve')">批量通过（锁定）</button>
-      <button class="btn ghost sm" onclick="batchCases('reject')">批量驳回</button>
-      ${nRejected?`<button class="btn soft sm" onclick="fixCases()" id="fixCaseBtn">AI 修改驳回用例（${nRejected}）</button>`:''}
-      <span class="hint">通过即锁定退出 AI 修改队列；驳回须填审核意见供 AI 定点修改</span>
-    </div>
-    ${lastCaseDiff?renderCaseDiff(lastCaseDiff):''}
-    </div></div>
-
-    <div class="card"><div class="card-h"><h3>需求变更</h3><span class="meta">最小范围更新</span></div>
-    <div class="card-b">
-    <textarea id="newReqText" rows="3" placeholder="粘贴新版需求内容，分析变化类型与影响面…"></textarea>
-    <div class="toolbar">
-      <button class="btn ghost sm" onclick="reqDiff()" id="reqDiffBtn">分析差异</button>
-      ${t.requirement_diff && !t.requirement_diff.applied ? `<button class="btn sm" onclick="applyReqDiff()" id="applyDiffBtn">应用最小范围更新</button>` : ''}
-    </div>
-    ${t.requirement_diff ? renderReqDiff(t.requirement_diff) : '<div class="hint" style="margin-top:8px">识别 文案 / 规则 / 新增 / 删除 变更类型，只更新真正受影响的用例；删除类仅标记由人工决定</div>'}
-    </div></div>
-
-    <div class="card"><div class="card-h"><h3>对话修订</h3><span class="meta">已锁定用例不受影响</span></div>
-    <div class="card-b">
-    <div class="chat">${
-      t.revisions.map(x=>`<div class="msg"><span class="me">我：</span>${esc(x.instruction)}</div>
-        <div class="msg hint">已应用（${x.case_count} 条用例，评审 ${x.review_rounds} 轮）</div>`).join('')
-      || '<div class="hint">输入修订要求，例如：把限红相关用例优先级调整为 P0</div>'}</div>
-    <div class="toolbar">
-      <input type="text" id="reviseInput" placeholder="输入修订要求…" style="flex:1"
-        onkeydown="if(event.key==='Enter')reviseGo()">
-      <button class="btn" onclick="reviseGo()" id="reviseBtn">发送</button>
-    </div></div></div>
-
-    <div class="card"><div class="card-h"><h3>离线终稿回传</h3></div>
-    <div class="card-b">
-    <div class="toolbar" style="margin-top:0">
-      <input type="file" id="finalFile" accept=".xlsx,.csv,.xmind" style="width:auto;flex:1">
-      <button class="btn ghost sm" onclick="uploadFinal()">上传并对比</button>
-    </div>
-    ${t.offline_review ? renderOfflineDiff(t.offline_review) : '<div class="hint" style="margin-top:8px">下载导出文件离线评审后，回传定稿自动计算差异，作为学习语料（左侧「分析修改习惯」可提炼规则）</div>'}
-    </div></div>`;
+    <div class="hint" style="margin-top:10px">通过即锁定退出 AI 修改队列；驳回须填审核意见供 AI 定点修改；人工修改视为定稿直接通过</div>
+    ${lastCaseDiff?renderCaseDiff(lastCaseDiff):''}`;
 }
-
-function renderQuality(t) {
-  const q = t.quality;
-  if (!q) return '';
-  const dup = q['疑似重复用例对'] || [];
-  return `<div class="box accent"><b>AI 自检</b><span class="hint">　仅供参考，不作为自动通过依据</span>
-    <div class="chips plain" style="margin-top:6px">
-      ${q['测试维度覆盖度']!=null?`<span>维度覆盖度 ${q['测试维度覆盖度']}</span>`:''}
-      <span>重复风险 ${esc(q['重复风险']||'-')}</span>
-      <span>待确认问题 ${q['待确认问题']}</span>
-      <span>未解决评审问题 ${q['未解决评审问题']}</span>
-      <span>历史用例参考 ${q['历史用例参考']}</span>
-      <span>评审轮次 ${q['评审轮次']}</span>
-    </div>
-    ${dup.map(p=>`<div class="hint">疑似重复：${esc(p.a)}「${esc(p.a_title)}」≈ ${esc(p.b)}「${esc(p.b_title)}」（${p.similarity}）</div>`).join('')}
-  </div>`;
+function toggleSteps(uid) {
+  if (expandedSteps.has(uid)) expandedSteps.delete(uid); else expandedSteps.add(uid);
+  renderDetail();
 }
-
 function renderCaseDiff(d) {
   return `<div class="section-t">AI 定点修改结果</div>${(d.fixes||[]).map(f=>
     `<div class="hint"><span class="tag">${esc(f.comment_type)}</span> <span class="cid">${esc(f.case_id)}</span> ${esc(f.note)}</div>`).join('')}
@@ -1057,18 +1204,6 @@ function renderCaseDiff(d) {
     : `<div class="box"><span class="add">新增 ${esc(x.case_id)}：${esc((x.after||{}).title||'')}</span></div>`).join('')}`;
 }
 
-function renderReqDiff(rd) {
-  return `<div class="box" style="margin-top:10px"><b>${esc(rd.summary||'变更分析')}</b>${rd.applied?' <span class="st approved">已应用</span>':''}
-    ${(rd.changes||[]).map(c=>`<div style="margin-top:6px">
-      <span class="tag">${esc(c.type)}</span> ${esc(c.description)}
-      ${(c.affected_cases&&c.affected_cases.length)?`<div class="hint">受影响用例：${c.affected_cases.map(esc).join('、')}</div>`:''}
-      ${(c.affected_points&&c.affected_points.length)?`<div class="hint">受影响测试点：${c.affected_points.map(esc).join('、')}</div>`:''}
-      ${c.action_hint?`<div class="hint">建议：${esc(c.action_hint)}</div>`:''}</div>`).join('')}
-    ${(rd.new_requirements&&rd.new_requirements.length)?`<div class="hint" style="margin-top:4px">新增需求：${rd.new_requirements.map(esc).join('；')}</div>`:''}
-  </div>`;
-}
-
-/* ---- 用例操作 ---- */
 async function casesReview(items) {
   try {
     const data = await jpost(`/api/v1/tasks/${currentTask.task_id}/review`, {items});
@@ -1085,16 +1220,6 @@ async function caseDelete(cid) {
 async function caseReject(cid) {
   const comment = await askComment('驳回用例', cid);
   if (comment) casesReview([{case_id:cid, action:'reject', comment}]);
-}
-async function batchCases(action) {
-  const ids = [...document.querySelectorAll('.cck:checked')].map(c=>c.dataset.cid);
-  if (!ids.length) return toast('请先勾选用例', 'warn');
-  if (action === 'reject') {
-    const comment = await askComment('批量驳回', `${ids.length} 条 · 统一审核意见`, '与已有用例重复，请合并处理');
-    if (!comment) return;
-    return casesReview(ids.map(cid=>({case_id:cid, action:'reject', comment})));
-  }
-  casesReview(ids.map(cid=>({case_id:cid, action})));
 }
 async function fixCases() {
   const btn = $('fixCaseBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> AI 修改中'; }
@@ -1129,7 +1254,61 @@ function saveEdit() {
   casesReview([item]);
 }
 
-/* ---- 需求变更 ---- */
+/* ---------- 批量操作浮动条 ---------- */
+function checkedOf(cls) { return [...document.querySelectorAll(cls+':checked')]; }
+function renderBatchBar() {
+  const pts = checkedOf('.ptck'), cs = checkedOf('.cck');
+  const n = pts.length || cs.length;
+  $('batchbar').classList.toggle('on', n > 0);
+  $('bbCount').textContent = n;
+  $('bbKind').textContent = pts.length ? '测试点' : cs.length ? '用例' : '';
+}
+function clearChecks() {
+  document.querySelectorAll('.ptck:checked,.cck:checked,.allck:checked').forEach(c=>c.checked=false);
+  renderBatchBar();
+}
+async function batchGo(action) {
+  const pts = checkedOf('.ptck').map(c=>c.dataset.tp);
+  const cs = checkedOf('.cck').map(c=>c.dataset.cid);
+  if (pts.length) {
+    if (action==='reject') {
+      const comment = await askComment('批量驳回测试点', `${pts.length} 条 · 统一审核意见`, '与已有测试点重复，请合并处理');
+      if (!comment) return;
+      return pointsReview(pts.map(tp=>({tp_id:tp, action:'reject', comment})));
+    }
+    return pointsReview(pts.map(tp=>({tp_id:tp, action})));
+  }
+  if (cs.length) {
+    if (action==='reject') {
+      const comment = await askComment('批量驳回用例', `${cs.length} 条 · 统一审核意见`, '与已有用例重复，请合并处理');
+      if (!comment) return;
+      return casesReview(cs.map(cid=>({case_id:cid, action:'reject', comment})));
+    }
+    return casesReview(cs.map(cid=>({case_id:cid, action})));
+  }
+  toast('请先勾选条目', 'warn');
+}
+
+/* ==================== 需求变更 ==================== */
+function renderChange(t) {
+  return `<textarea id="newReqText" rows="4" placeholder="粘贴新版需求内容，分析变化类型与影响面…"></textarea>
+    <div class="toolbar">
+      <button class="btn ghost sm" onclick="reqDiff()" id="reqDiffBtn">分析差异</button>
+      ${t.requirement_diff && !t.requirement_diff.applied ? `<button class="btn sm" onclick="applyReqDiff()" id="applyDiffBtn">应用最小范围更新</button>` : ''}
+    </div>
+    ${t.requirement_diff ? renderReqDiff(t.requirement_diff) : '<div class="hint" style="margin-top:8px">识别 文案 / 规则 / 新增 / 删除 变更类型，只更新真正受影响的用例并创建新版本；删除类仅标记由人工决定；未受影响资产与锁定用例不动</div>'}
+    ${lastCaseDiff?renderCaseDiff(lastCaseDiff):''}`;
+}
+function renderReqDiff(rd) {
+  return `<div class="box" style="margin-top:10px"><b>${esc(rd.summary||'变更分析')}</b>${rd.applied?' <span class="st approved">已应用</span>':''}
+    ${(rd.changes||[]).map(c=>`<div style="margin-top:6px">
+      <span class="tag">${esc(c.type)}</span> ${esc(c.description)}
+      ${(c.affected_cases&&c.affected_cases.length)?`<div class="hint">受影响用例：${c.affected_cases.map(esc).join('、')}</div>`:''}
+      ${(c.affected_points&&c.affected_points.length)?`<div class="hint">受影响测试点：${c.affected_points.map(esc).join('、')}</div>`:''}
+      ${c.action_hint?`<div class="hint">建议：${esc(c.action_hint)}</div>`:''}</div>`).join('')}
+    ${(rd.new_requirements&&rd.new_requirements.length)?`<div class="hint" style="margin-top:4px">新增需求：${rd.new_requirements.map(esc).join('；')}</div>`:''}
+  </div>`;
+}
 async function reqDiff() {
   const text = $('newReqText').value.trim();
   if (!text) return toast('请粘贴新版需求内容', 'warn');
@@ -1151,7 +1330,28 @@ async function applyReqDiff() {
   } catch (e) { toast('应用失败：' + e.message, 'err'); renderDetail(); }
 }
 
-/* ---- 对话修订 ---- */
+/* ==================== 修订与终稿 ==================== */
+function renderHistory(t) {
+  const fixKind = {points:'测试点定点修改', cases:'用例定点修改', requirement_change:'需求变更更新'};
+  return `<div class="section-t">对话修订<span class="hint">（已锁定用例不受影响）</span></div>
+    <div class="chat">${
+      t.revisions.map(x=>`<div class="msg"><span class="me">我：</span>${esc(x.instruction)}</div>
+        <div class="msg hint">已应用（${x.case_count} 条用例，评审 ${x.review_rounds} 轮）</div>`).join('')
+      || '<div class="hint">输入修订要求，例如：把限红相关用例优先级调整为 P0</div>'}</div>
+    <div class="toolbar">
+      <input type="text" id="reviseInput" placeholder="输入修订要求…" style="flex:1"
+        onkeydown="if(event.key==='Enter')reviseGo()">
+      <button class="btn" onclick="reviseGo()" id="reviseBtn">发送</button>
+    </div>
+    <div class="section-t">离线终稿回传</div>
+    <div class="toolbar" style="margin-top:4px">
+      <input type="file" id="finalFile" accept=".xlsx,.csv,.xmind" style="width:auto;flex:1">
+      <button class="btn ghost sm" onclick="uploadFinal()">上传并对比</button>
+    </div>
+    ${t.offline_review ? renderOfflineDiff(t.offline_review) : '<div class="hint" style="margin-top:6px">下载导出文件离线评审后，回传定稿自动计算差异，作为学习语料（「学习规则」页可提炼规则）</div>'}
+    ${t.fix_log && t.fix_log.length ? `<div class="section-t">定点修改留痕</div>${t.fix_log.slice().reverse().map(f=>
+      `<div class="hint">· ${esc((f.at||'').replace('T',' ').slice(0,16))}　${fixKind[f.kind]||esc(f.kind)}　${(f.diff||[]).length} 处改动${f.added&&f.added.length?` · 新增 ${f.added.length}`:''}</div>`).join('')}` : ''}`;
+}
 async function reviseGo() {
   const instruction = $('reviseInput').value.trim();
   if (!instruction) return;
@@ -1160,14 +1360,13 @@ async function reviseGo() {
     await jpost(`/api/v1/tasks/${currentTask.task_id}/revise`, {instruction});
     refreshMemories();
     await openTask(currentTask.task_id);
+    detailTab = 'history'; renderDetail();
   } catch (e) { toast('修订失败：' + e.message, 'err'); }
-  $('reviseBtn').disabled = false; $('reviseBtn').textContent = '发送';
+  const b = $('reviseBtn'); if (b) { b.disabled = false; b.textContent = '发送'; }
 }
-
-/* ---- 终稿上传 ---- */
 function renderOfflineDiff(o) {
   const s = o.stats;
-  return `<div class="box" style="margin-top:10px">
+  return `<div class="box" style="margin-top:8px">
     <b>${esc(o.filename)}</b> 对比结果：完全采纳率 <b>${(s.adoption_rate*100).toFixed(1)}%</b>
     <span class="hint">（新增 ${s.added} / 删除 ${s.deleted} / 修改 ${s.modified} / 未改动 ${s.unchanged}）</span>
     <div class="chips" style="margin-top:6px">
@@ -1182,7 +1381,8 @@ async function uploadFinal() {
   const fd = new FormData(); fd.append('file', f);
   try {
     await api(`/api/v1/tasks/${currentTask.task_id}/final`, {method:'POST', body:fd});
-    openTask(currentTask.task_id, true);
+    await openTask(currentTask.task_id, true);
+    detailTab = 'history'; renderDetail();
     toast('终稿对比完成', 'ok');
   } catch (e) { toast('上传失败：' + e.message, 'err'); }
 }
