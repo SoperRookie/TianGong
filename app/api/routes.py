@@ -1470,9 +1470,13 @@ async def upload_final_cases(
 
 
 @router.get("/api/v1/tasks")
-async def list_tasks(request: Request, status: str | None = None, limit: int = 50) -> dict:
-    """任务列表（F-6-1）：倒序返回任务概要，供任务管理界面轮询。"""
+async def list_tasks(
+    request: Request, status: str | None = None, project: str | None = None, limit: int = 50
+) -> dict:
+    """任务列表（F-6-1）：倒序返回任务概要（含项目名），支持按状态/项目过滤。"""
     records = request.app.state.tasks.list(status=status, limit=limit)
+    if project is not None:
+        records = [r for r in records if (r.context or {}).get("project") == project]
     return {
         "tasks": [
             {
@@ -1481,6 +1485,7 @@ async def list_tasks(request: Request, status: str | None = None, limit: int = 5
                 "progress": r.progress,
                 "created_at": r.created_at,
                 "sources": r.sources,
+                "project": (r.context or {}).get("project"),
                 "case_count": len((r.result or {}).get("cases", [])),
                 "revision_count": len(r.revisions),
                 "error": r.error,

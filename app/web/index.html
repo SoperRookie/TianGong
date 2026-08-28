@@ -729,7 +729,7 @@ function relTime(iso) {
   return Math.floor(s/86400) + ' 天前';
 }
 let _tasksCache = [];
-let listQuery = '', listStatus = '';
+let listQuery = '', listStatus = '', listProject = '';
 async function refreshList() {
   try { const data = await api('/api/v1/tasks'); _tasksCache = data.tasks; } catch (e) { return; }
   if (currentView === 'board' && !currentTask) renderTaskListPage();
@@ -742,10 +742,12 @@ const LIST_FILTERS = [
   ['completed', '完成'], ['failed', '失败'],
 ];
 const matchStatus = (t, f) => !f || (f === 'active' ? ['queued','running'].includes(t.status) : t.status === f);
+const matchProject = (t, p) => !p || (p === '__none__' ? !t.project : t.project === p);
 function filteredTasks() {
   const q = listQuery.trim().toLowerCase();
-  return _tasksCache.filter(t => matchStatus(t, listStatus) &&
-    (!q || t.task_id.includes(q) || (t.sources||[]).some(s => s.toLowerCase().includes(q))));
+  return _tasksCache.filter(t => matchStatus(t, listStatus) && matchProject(t, listProject) &&
+    (!q || t.task_id.includes(q) || (t.project||'').toLowerCase().includes(q) ||
+      (t.sources||[]).some(s => s.toLowerCase().includes(q))));
 }
 function renderTaskListPage() {
   if (!$('taskTbody')) {
@@ -753,16 +755,17 @@ function renderTaskListPage() {
       <div class="card-h"><h3>任务列表</h3><span class="meta" id="taskTotal"></span>
         <div class="grow">
           <div class="seg" id="listSeg"></div>
-          <div class="search" style="width:220px">
+          <select id="projectSel" style="width:150px" onchange="listProject=this.value;renderTaskListRows()"></select>
+          <div class="search" style="width:210px">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            <input type="text" id="taskSearch" placeholder="搜索任务 ID / 来源…" value="${esc(listQuery)}"
+            <input type="text" id="taskSearch" placeholder="搜索任务 / 项目 / 来源…" value="${esc(listQuery)}"
               oninput="listQuery=this.value;renderTaskListRows()">
           </div>
           <button class="btn" onclick="openDrawer()">＋ 新建任务</button>
         </div></div>
       <div class="card-b">
         <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
-          <thead><tr><th style="width:110px">状态</th><th style="width:130px">任务 ID</th><th>来源</th>
+          <thead><tr><th style="width:110px">状态</th><th style="width:130px">任务 ID</th><th style="width:150px">项目</th><th>来源</th>
           <th style="width:90px">用例数</th><th style="width:70px">修订</th><th style="width:110px">创建时间</th></tr></thead>
           <tbody id="taskTbody"></tbody>
         </table></div>
@@ -773,21 +776,28 @@ function renderTaskListPage() {
 function renderTaskListRows() {
   const tasks = filteredTasks();
   $('listSeg').innerHTML = LIST_FILTERS.map(([v, label]) => {
-    const n = _tasksCache.filter(t => matchStatus(t, v)).length;
+    const n = _tasksCache.filter(t => matchStatus(t, v) && matchProject(t, listProject)).length;
     return `<button class="${listStatus===v?'on':''}" onclick="listStatus='${v}';renderTaskListRows()">${label} ${n}</button>`;
   }).join('');
+  // 项目过滤下拉：由当前任务集合聚合（保持已选值，轮询不打断）
+  const projects = [...new Set(_tasksCache.map(t => t.project).filter(Boolean))].sort();
+  const hasNone = _tasksCache.some(t => !t.project);
+  $('projectSel').innerHTML = `<option value="">全部项目</option>`
+    + projects.map(p => `<option value="${esc(p)}" ${listProject===p?'selected':''}>${esc(p)}</option>`).join('')
+    + (hasNone ? `<option value="__none__" ${listProject==='__none__'?'selected':''}>（未指定项目）</option>` : '');
   $('taskTotal').textContent = `共 ${_tasksCache.length} 个任务`;
   $('taskTbody').innerHTML = tasks.map(t => `
     <tr class="rowlink" onclick="openTask('${t.task_id}')">
       <td><span class="pill ${t.status}">${statusText(t.status)}</span>
         ${t.progress?`<div class="hint">${progressText(t.progress)} <span class="spin"></span></div>`:''}</td>
       <td><span class="tid-cell">${t.task_id}</span></td>
+      <td>${t.project?`<span class="tag">${esc(t.project)}</span>`:'<span class="hint">—</span>'}</td>
       <td>${(t.sources||[]).map(esc).join('、')||'-'}
         ${t.error?`<div class="hint" style="color:var(--danger)">${esc(t.error)}</div>`:''}</td>
       <td>${t.case_count ? `<b>${t.case_count}</b> 条` : '<span class="hint">—</span>'}</td>
       <td>${t.revision_count ? t.revision_count + ' 轮' : '<span class="hint">—</span>'}</td>
       <td class="hint" title="${esc(t.created_at||'')}">${relTime(t.created_at)}</td>
-    </tr>`).join('') || `<tr><td colspan="6"><div class="empty">
+    </tr>`).join('') || `<tr><td colspan="7"><div class="empty">
       ${_tasksCache.length ? '当前筛选下无任务' : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
 }
 function backToList() {

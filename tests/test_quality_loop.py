@@ -343,6 +343,21 @@ async def test_revise_不动锁定用例(client):
     assert "验证正确账号密码登录成功" in titles  # 锁定用例完好
 
 
+async def test_task_list_项目名展示与过滤(client):
+    from tests.stubs import ANALYST_REPLY
+
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求", "project": "德州扑克"})
+    assert resp.status_code == 200
+
+    data = (await client.get("/api/v1/tasks")).json()
+    assert any(t["project"] == "德州扑克" for t in data["tasks"])
+    filtered = (await client.get("/api/v1/tasks", params={"project": "德州扑克"})).json()
+    assert filtered["tasks"] and all(t["project"] == "德州扑克" for t in filtered["tasks"])
+    empty = (await client.get("/api/v1/tasks", params={"project": "不存在的项目"})).json()
+    assert empty["tasks"] == []
+
+
 # ---- API：需求变更最小范围更新 ----
 
 
