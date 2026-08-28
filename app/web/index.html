@@ -682,6 +682,7 @@ const DIMENSIONS = ["正常流程","异常流程","输入校验","边界值","�
 let currentTask = null, editingCase = null, currentView = 'board';
 let detailTab = 'overview', caseTab = 'all', caseModule = '';
 let hiddenDupPairs = new Set(), lastPointDiff = null, lastCaseDiff = null, lastHints = [];
+let execRunId = null;
 let expandedSteps = new Set();
 
 /* ---------- 基础设施 ---------- */
@@ -884,7 +885,7 @@ async function init() {
       if (curUser && currentTask && taskBusy(currentTask)) renderDetail();
     }, 1000);
     document.addEventListener('change', e => {
-      if (e.target.matches && (e.target.matches('.ptck') || e.target.matches('.cck') || e.target.matches('.allck'))) renderBatchBar();
+      if (e.target.matches && (e.target.matches('.ptck') || e.target.matches('.cck') || e.target.matches('.eck') || e.target.matches('.allck'))) renderBatchBar();
     });
   }
   renderUserBox();
@@ -1142,7 +1143,7 @@ async function openTask(id, keepLocal) {
   currentTask = await api('/api/v1/tasks/' + id);
   if (!keepLocal) {
     hiddenDupPairs = new Set(); lastPointDiff = null; lastCaseDiff = null; lastHints = [];
-    caseTab = 'all'; caseModule = ''; expandedSteps = new Set();
+    caseTab = 'all'; caseModule = ''; expandedSteps = new Set(); execRunId = null;
     detailTab = currentTask.status === 'awaiting_confirmation' ? 'points'
       : (currentTask.result && currentTask.result.cases && currentTask.result.cases.length) ? 'cases' : 'overview';
   }
@@ -1164,6 +1165,7 @@ function renderDetail() {
     ['overview', '概览', ''],
     ...(pts.length ? [['points', '测试点审核', `<span class="cnt">${pts.length}</span>`]] : []),
     ...(hasCases ? [['cases', '用例审核', `<span class="cnt ${nRejCases?'hot':''}">${nRejCases?nRejCases+' 待修改':t.result.cases.length}</span>`]] : []),
+    ...(hasCases ? [['exec', '用例执行', (t.executions||[]).length?`<span class="cnt">${t.executions.length} 轮</span>`:'']] : []),
     ...(hasCases ? [['change', '需求变更', '']] : []),
     ...(hasCases ? [['history', '修订与终稿', '']] : []),
   ];
@@ -1173,6 +1175,7 @@ function renderDetail() {
   if (detailTab==='overview') body = renderOverview(t);
   else if (detailTab==='points') body = renderPointWorkbench(t);
   else if (detailTab==='cases') body = renderCases(t);
+  else if (detailTab==='exec') body = renderExec(t);
   else if (detailTab==='change') body = renderChange(t);
   else if (detailTab==='history') body = renderHistory(t);
 
@@ -1611,20 +1614,157 @@ function saveEdit() {
   casesReview([item]);
 }
 
+/* ==================== 用例执行 ==================== */
+const EXEC_LABEL = {pass:'通过', fail:'失败', blocked:'阻塞', skipped:'跳过'};
+const EXEC_CLS = {pass:'approved', fail:'rejected', blocked:'candidate', skipped:'pending'};
+function curExecRun(t) {
+  const runs = t.executions || [];
+  if (!runs.length) return null;
+  return runs.find(r => r.run_id === execRunId) || runs[runs.length - 1];
+}
+function renderExec(t) {
+  const runs = t.executions || [];
+  const run = curExecRun(t);
+  const cases = t.result.cases;
+  const results = run ? run.results : {};
+  const cnt = {pass:0, fail:0, blocked:0, skipped:0};
+  cases.forEach(c => { const r = results[c.uid]; if (r && cnt[r.status] != null) cnt[r.status]++; });
+  const executed = cnt.pass + cnt.fail + cnt.blocked + cnt.skipped;
+  const pending = cases.length - executed;
+  const active = run && !run.finished_at;
+
+  const runBar = `<div class="filters" style="margin-top:0">
+    ${runs.length ? `<select style="width:230px" onchange="execRunId=this.value;renderDetail()">
+      ${runs.map(r => `<option value="${r.run_id}" ${run&&r.run_id===run.run_id?'selected':''}>${esc(r.name)} · ${esc(r.by)} · ${r.finished_at?'已结束':'进行中'}</option>`).join('')}
+    </select>` : '<span class="hint">尚未开始执行，点击右侧新建执行轮次</span>'}
+    <div style="margin-left:auto;display:flex;gap:8px">
+      ${active ? `<button class="btn ghost sm" onclick="execFinish()">结束本轮</button>` : ''}
+      <button class="btn sm" onclick="execNewRun()">＋ 新建执行轮次</button>
+    </div></div>`;
+
+  const summary = run ? `<div style="margin-top:10px">
+    <div class="segbar">${[['通过',cnt.pass,'var(--s-ok)'],['失败',cnt.fail,'var(--s-rej)'],['阻塞',cnt.blocked,'var(--warn)'],['跳过',cnt.skipped,'var(--s-pend)'],['未执行',pending,'var(--line-2)']]
+      .filter(e=>e[1]).map(e=>`<i style="flex:${e[1]};background:${e[2]}" title="${e[0]} · ${e[1]}"></i>`).join('')}</div>
+    <div class="leg">
+      <span><i style="background:var(--s-ok)"></i>通过 <b>${cnt.pass}</b></span>
+      <span><i style="background:var(--s-rej)"></i>失败 <b>${cnt.fail}</b></span>
+      <span><i style="background:var(--warn)"></i>阻塞 <b>${cnt.blocked}</b></span>
+      <span><i style="background:var(--s-pend)"></i>跳过 <b>${cnt.skipped}</b></span>
+      <span><i style="background:var(--line)"></i>未执行 <b>${pending}</b></span>
+      <span style="margin-left:auto">执行进度 <b>${executed}/${cases.length}</b>${executed?` · 通过率 <b>${(cnt.pass/executed*100).toFixed(1)}%</b>`:''}</span>
+    </div></div>` : '';
+
+  const rows = cases.map(c => {
+    const r = results[c.uid];
+    const stepsText = (c.steps||[]).map((x,i)=>`${i+1}. ${esc(x.action)}\n   → ${esc(x.expected)}`).join('\n');
+    const long = (c.steps||[]).length > 2;
+    const open = expandedSteps.has(c.uid);
+    return `<tr>
+      <td style="width:30px">${active?`<input type="checkbox" class="eck" data-cid="${esc(c.case_id)}">`:''}</td>
+      <td style="width:104px"><span class="cid">${esc(c.case_id)}</span></td>
+      <td style="min-width:170px">${esc(c.title)}${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}</td>
+      <td style="width:44px"><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
+      <td style="max-width:400px"><div class="stepbox ${long?'long':''} ${open?'open':''}" onclick="toggleSteps('${esc(c.uid)}')">${stepsText}</div></td>
+      <td style="width:120px">${r ? `<span class="st ${EXEC_CLS[r.status]}">${EXEC_LABEL[r.status]}</span>
+          ${r.note?`<div class="hint" style="color:var(--danger)">${esc(r.note)}</div>`:''}
+          ${(r.history||[]).length?`<div class="hint">第 ${r.history.length+1} 次执行 · ${esc(r.by)}</div>`:`<div class="hint">${esc(r.by)}</div>`}`
+        : '<span class="hint">未执行</span>'}</td>
+      <td style="width:150px">${active?`<div class="rowops">
+        <button class="ibtn ok" title="通过" onclick="execAct('${esc(c.case_id)}','pass')">${IC.check}</button>
+        <button class="ibtn bad" title="失败（填写原因/缺陷号）" onclick="execAct('${esc(c.case_id)}','fail')">${IC.x}</button>
+        <button class="ibtn" title="阻塞" onclick="execAct('${esc(c.case_id)}','blocked')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg></button>
+        <button class="ibtn" title="跳过" onclick="execAct('${esc(c.case_id)}','skipped')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:15px;height:15px"><path d="M5 4l10 8-10 8M19 4v16"/></svg></button>
+      </div>`:'<span class="hint">轮次已结束</span>'}</td>
+    </tr>`;
+  }).join('');
+
+  const history = runs.length ? `<div class="section-t">执行记录</div>
+    <div class="tbl-wrap" style="margin-top:4px;max-height:220px"><table>
+      <tr><th>轮次</th><th>执行人</th><th>开始</th><th>结束</th><th>进度</th><th>通过率</th></tr>
+      ${runs.slice().reverse().map(r => {
+        const rc = {pass:0,fail:0,blocked:0,skipped:0};
+        Object.values(r.results).forEach(x => { if (rc[x.status]!=null) rc[x.status]++; });
+        const ex = rc.pass+rc.fail+rc.blocked+rc.skipped;
+        return `<tr class="rowlink" onclick="execRunId='${r.run_id}';renderDetail()">
+          <td><b>${esc(r.name)}</b>${run&&r.run_id===run.run_id?' <span class="tag">当前</span>':''}</td>
+          <td>${esc(r.by)}</td>
+          <td class="hint">${esc((r.started_at||'').replace('T',' ').slice(0,16))}</td>
+          <td class="hint">${r.finished_at?esc(r.finished_at.replace('T',' ').slice(0,16)):'<span class="st candidate">进行中</span>'}</td>
+          <td>${ex}/${cases.length}</td>
+          <td>${ex?`<b>${(rc.pass/ex*100).toFixed(1)}%</b> <span class="hint">（失败 ${rc.fail} 阻塞 ${rc.blocked}）</span>`:'—'}</td>
+        </tr>`;}).join('')}
+    </table></div>` : '';
+
+  return `${runBar}${summary}
+    <div class="tbl-wrap"><table>
+      <tr><th></th><th>编号</th><th>标题 / 关键词</th><th>优先级</th><th>步骤 → 预期</th><th>执行状态</th><th>操作</th></tr>
+      ${rows}
+    </table></div>
+    ${active?'<div class="hint" style="margin-top:8px">失败/阻塞须填写原因或缺陷号；同轮次重复执行覆盖结果并保留历史；勾选可批量执行</div>':''}
+    ${history}`;
+}
+async function execNewRun() {
+  const t = currentTask;
+  const name = await askInput('新建执行轮次', '轮次名称', `第 ${(t.executions||[]).length + 1} 轮执行`);
+  if (!name) return;
+  try {
+    const run = await jpost(`/api/v1/tasks/${t.task_id}/executions`, {name});
+    execRunId = run.run_id; detailTab = 'exec';
+    await openTask(t.task_id, true);
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function execPost(items) {
+  const run = curExecRun(currentTask);
+  try {
+    await jpost(`/api/v1/tasks/${currentTask.task_id}/executions/${run.run_id}/results`, {items});
+    await openTask(currentTask.task_id, true);
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function execAct(cid, status) {
+  if (status === 'fail' || status === 'blocked') {
+    const note = await askComment(status==='fail'?'执行失败':'执行阻塞', cid + ' · 原因 / 缺陷号');
+    if (!note) return;
+    return execPost([{case_id: cid, status, note}]);
+  }
+  execPost([{case_id: cid, status}]);
+}
+async function execFinish() {
+  const run = curExecRun(currentTask);
+  if (!await uiConfirm('结束执行轮次', `结束「${run.name}」？结束后记录定格，继续执行需新建轮次。`)) return;
+  try {
+    await api(`/api/v1/tasks/${currentTask.task_id}/executions/${run.run_id}/finish`, {method:'POST'});
+    await openTask(currentTask.task_id, true);
+    toast('执行轮次已结束', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
 /* ---------- 批量操作浮动条 ---------- */
 function checkedOf(cls) { return [...document.querySelectorAll(cls+':checked')]; }
 function renderBatchBar() {
-  const pts = checkedOf('.ptck'), cs = checkedOf('.cck');
-  const n = pts.length || cs.length;
+  const pts = checkedOf('.ptck'), cs = checkedOf('.cck'), ex = checkedOf('.eck');
+  const n = pts.length || cs.length || ex.length;
   $('batchbar').classList.toggle('on', n > 0);
   $('bbCount').textContent = n;
-  $('bbKind').textContent = pts.length ? '测试点' : cs.length ? '用例' : '';
+  $('bbKind').textContent = pts.length ? '测试点' : cs.length ? '用例' : ex.length ? '待执行用例' : '';
+  const rej = document.querySelector('.batchbar .b-rej');
+  if (rej) rej.textContent = ex.length ? '批量失败' : '批量驳回';
+  const ok = document.querySelector('.batchbar .b-ok');
+  if (ok) ok.textContent = ex.length ? '批量通过' : '批量通过';
 }
 function clearChecks() {
-  document.querySelectorAll('.ptck:checked,.cck:checked,.allck:checked').forEach(c=>c.checked=false);
+  document.querySelectorAll('.ptck:checked,.cck:checked,.allck:checked,.eck:checked').forEach(c=>c.checked=false);
   renderBatchBar();
 }
 async function batchGo(action) {
+  const ex = checkedOf('.eck').map(c=>c.dataset.cid);
+  if (ex.length) {
+    if (action === 'reject') {
+      const note = await askComment('批量标记失败', `${ex.length} 条 · 统一原因 / 缺陷号`);
+      if (!note) return;
+      return execPost(ex.map(cid=>({case_id: cid, status:'fail', note})));
+    }
+    return execPost(ex.map(cid=>({case_id: cid, status:'pass'})));
+  }
   const pts = checkedOf('.ptck').map(c=>c.dataset.tp);
   const cs = checkedOf('.cck').map(c=>c.dataset.cid);
   if (pts.length) {

@@ -404,6 +404,50 @@ async def test_task_list_项目名展示与过滤(client):
     assert empty["tasks"] == []
 
 
+async def test_用例执行轮次与执行记录(client):
+    task_id = await _create_completed_task(
+        client, make_case(), make_case(case_id="TC-登录-002", title="验证密码错误提示"),
+    )
+    # 新建轮次
+    run = (await client.post(f"/api/v1/tasks/{task_id}/executions", json={"name": "冒烟"})).json()
+    assert run["name"] == "冒烟" and run["summary"]["total"] == 2
+    # 未结束前不可再开新轮次
+    assert (await client.post(f"/api/v1/tasks/{task_id}/executions", json={})).status_code == 409
+
+    rid = run["run_id"]
+    # 失败必须填原因；未知状态拒绝
+    assert (await client.post(f"/api/v1/tasks/{task_id}/executions/{rid}/results",
+            json={"items": [{"case_id": "TC-登录-001", "status": "fail"}]})).status_code == 400
+    assert (await client.post(f"/api/v1/tasks/{task_id}/executions/{rid}/results",
+            json={"items": [{"case_id": "TC-登录-001", "status": "ok"}]})).status_code == 400
+    # 批量记录：1 通过 + 1 失败（带缺陷号）
+    resp = await client.post(f"/api/v1/tasks/{task_id}/executions/{rid}/results", json={"items": [
+        {"case_id": "TC-登录-001", "status": "pass"},
+        {"case_id": "TC-登录-002", "status": "fail", "note": "BUG-1024 提示文案错误"},
+    ]})
+    assert resp.status_code == 200
+    summary = resp.json()["summary"]
+    assert summary["pass"] == 1 and summary["fail"] == 1 and summary["pass_rate"] == 0.5
+
+    # 复测覆盖并保留历史
+    resp = await client.post(f"/api/v1/tasks/{task_id}/executions/{rid}/results", json={"items": [
+        {"case_id": "TC-登录-002", "status": "pass"},
+    ]})
+    results = resp.json()["results"]
+    retested = next(r for r in results.values() if r["case_id"] == "TC-登录-002")
+    assert retested["status"] == "pass" and retested["history"][0]["status"] == "fail"
+    assert resp.json()["summary"]["pass_rate"] == 1.0
+
+    # 结束轮次后不可继续记录；可开第二轮（回归）
+    assert (await client.post(f"/api/v1/tasks/{task_id}/executions/{rid}/finish")).status_code == 200
+    assert (await client.post(f"/api/v1/tasks/{task_id}/executions/{rid}/results",
+            json={"items": [{"case_id": "TC-登录-001", "status": "pass"}]})).status_code == 409
+    run2 = (await client.post(f"/api/v1/tasks/{task_id}/executions", json={})).json()
+    assert run2["name"] == "第 2 轮执行"
+    task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert len(task["executions"]) == 2 and task["executions"][0]["finished_at"]
+
+
 # ---- API：需求变更最小范围更新 ----
 
 

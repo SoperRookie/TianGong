@@ -1666,6 +1666,132 @@ async def apply_requirement_diff(request: Request, task_id: str) -> dict:
     return response
 
 
+# ---- 用例执行（执行轮次 + 执行记录留痕）----
+
+EXEC_STATUSES = ("pass", "fail", "blocked", "skipped")
+
+
+def _exec_task(store, task_id: str):
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if record.status != "completed" or not (record.result or {}).get("cases"):
+        raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可执行的用例")
+    return record
+
+
+def _exec_run(record, run_id: str) -> dict:
+    run = next((r for r in record.executions if r["run_id"] == run_id), None)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"执行轮次不存在: {run_id}")
+    return run
+
+
+def _run_summary(record, run: dict) -> dict:
+    total = len((record.result or {}).get("cases", []))
+    counts = {s: 0 for s in EXEC_STATUSES}
+    for r in run["results"].values():
+        if r["status"] in counts:
+            counts[r["status"]] += 1
+    executed = sum(counts.values())
+    return {
+        **counts, "executed": executed, "total": total,
+        "pass_rate": round(counts["pass"] / executed, 3) if executed else None,
+    }
+
+
+class ExecRunBody(BaseModel):
+    name: str | None = None
+
+
+@router.post("/api/v1/tasks/{task_id}/executions")
+async def create_execution_run(request: Request, task_id: str, body: ExecRunBody | None = None) -> dict:
+    """新建执行轮次：一次完整的用例执行（冒烟/回归各开一轮，记录互不覆盖）。"""
+    import uuid
+
+    store = request.app.state.tasks
+    record = _exec_task(store, task_id)
+    if any(not r.get("finished_at") for r in record.executions):
+        raise HTTPException(status_code=409, detail="存在未结束的执行轮次，请先结束后再新建")
+    run = {
+        "run_id": uuid.uuid4().hex[:8],
+        "name": ((body.name if body else None) or f"第 {len(record.executions) + 1} 轮执行").strip(),
+        "by": _operator(request),
+        "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "finished_at": None,
+        "results": {},  # case_uid -> {case_id, title, status, note, by, at}
+    }
+    record.executions.append(run)
+    store.save(record)
+    logger.info("任务 {} 新建执行轮次 {}（{}）", task_id, run["run_id"], run["name"])
+    return {**run, "summary": _run_summary(record, run)}
+
+
+class ExecResultItem(BaseModel):
+    case_id: str
+    status: str  # pass / fail / blocked / skipped
+    note: str = ""  # 失败原因 / 缺陷号 / 阻塞说明
+
+
+class ExecResultsBody(BaseModel):
+    items: list[ExecResultItem]
+
+
+@router.post("/api/v1/tasks/{task_id}/executions/{run_id}/results")
+async def record_execution_results(
+    request: Request, task_id: str, run_id: str, body: ExecResultsBody
+) -> dict:
+    """记录执行结果（支持批量）：同轮次内重复执行覆盖并保留历史（history）。"""
+    store = request.app.state.tasks
+    record = _exec_task(store, task_id)
+    run = _exec_run(record, run_id)
+    if run.get("finished_at"):
+        raise HTTPException(status_code=409, detail="该执行轮次已结束，如需继续执行请新建轮次")
+    by_id = {str(c.get("case_id")): c for c in record.result["cases"]}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for item in body.items:
+        case = by_id.get(item.case_id)
+        if case is None:
+            raise HTTPException(status_code=400, detail=f"用例不存在: {item.case_id}")
+        if item.status not in EXEC_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"未知执行状态: {item.status}（可用 {'/'.join(EXEC_STATUSES)}）",
+            )
+        if item.status in ("fail", "blocked") and not item.note.strip():
+            raise HTTPException(status_code=400, detail=f"{item.case_id} 标记{'失败' if item.status=='fail' else '阻塞'}须填写原因/缺陷号")
+        uid = str(case.get("uid") or case.get("case_id"))
+        prev = run["results"].get(uid)
+        entry = {
+            "case_id": item.case_id, "title": case.get("title", ""),
+            "status": item.status, "note": item.note.strip(),
+            "by": _operator(request), "at": now,
+            "history": (prev.get("history", []) + [
+                {k: prev[k] for k in ("status", "note", "by", "at")}
+            ]) if prev else [],
+        }
+        run["results"][uid] = entry
+    store.save(record)
+    summary = _run_summary(record, run)
+    logger.info("任务 {} 轮次 {} 记录执行 {} 条（{}）", task_id, run_id, len(body.items), summary)
+    return {"run_id": run_id, "summary": summary, "results": run["results"]}
+
+
+@router.post("/api/v1/tasks/{task_id}/executions/{run_id}/finish")
+async def finish_execution_run(request: Request, task_id: str, run_id: str) -> dict:
+    """结束执行轮次：定格记录；未执行用例保持未执行状态留痕。"""
+    store = request.app.state.tasks
+    record = _exec_task(store, task_id)
+    run = _exec_run(record, run_id)
+    if run.get("finished_at"):
+        raise HTTPException(status_code=409, detail="该执行轮次已结束")
+    run["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    store.save(record)
+    summary = _run_summary(record, run)
+    logger.info("任务 {} 轮次 {} 已结束：{}", task_id, run_id, summary)
+    return {"run_id": run_id, "finished_at": run["finished_at"], "summary": summary}
+
+
 # ---- 报表 ----
 
 
