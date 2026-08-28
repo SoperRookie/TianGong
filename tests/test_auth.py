@@ -187,6 +187,37 @@ async def test_totp_绑定_登录_重放_管理员重置(client, auth_on):
             json={"username": "admin", "password": "admin123"})).status_code == 200
 
 
+async def test_两步验证总开关(client, auth_on):
+    from app.auth.totp import totp_now
+
+    token = await _login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    assert (await client.get("/api/v1/auth/settings", headers=headers)).json() == {"totp_enabled": True}
+
+    # 绑定后关闭总开关：登录不再要求动态码；不可新绑定
+    secret = (await client.post("/api/v1/auth/totp/setup", headers=headers)).json()["secret"]
+    await client.post("/api/v1/auth/totp/enable", headers=headers, json={"code": totp_now(secret)})
+    resp = await client.put("/api/v1/auth/settings", headers=headers, json={"totp_enabled": False})
+    assert resp.json() == {"totp_enabled": False}
+    resp = await client.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
+    assert resp.status_code == 200 and "token" in resp.json()  # 无需动态码直接放行
+    assert (await client.post("/api/v1/auth/totp/setup", headers=headers)).status_code == 400
+
+    # 重新开启：已绑定密钥继续生效，登录恢复二段式
+    await client.put("/api/v1/auth/settings", headers=headers, json={"totp_enabled": True})
+    resp = await client.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
+    assert resp.json() == {"otp_required": True}
+
+    # 收尾解绑 + 权限：member 不可改开关
+    await client.put("/api/v1/auth/users/admin", headers=headers, json={"reset_totp": True})
+    await client.post("/api/v1/auth/users", headers=headers,
+                      json={"username": "guard", "password": "guard123", "role": "member"})
+    member_token = await _login(client, "guard", "guard123")
+    assert (await client.put("/api/v1/auth/settings", json={"totp_enabled": False},
+            headers={"Authorization": f"Bearer {member_token}"})).status_code == 403
+    await client.delete("/api/v1/auth/users/guard", headers=headers)
+
+
 # ---- 模型配置管理 ----
 
 

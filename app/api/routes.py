@@ -97,6 +97,29 @@ async def auth_login(request: Request, body: LoginBody) -> dict:
     return {"token": token, "user": user}
 
 
+# ---- 安全设置（系统级开关）----
+
+
+@router.get("/api/v1/auth/settings")
+async def auth_settings(request: Request) -> dict:
+    """安全设置：两步验证功能总开关状态（登录用户可读，用于界面展隐）。"""
+    return {"totp_enabled": request.app.state.auth.totp_policy()}
+
+
+class AuthSettingsBody(BaseModel):
+    totp_enabled: bool
+
+
+@router.put("/api/v1/auth/settings")
+async def update_auth_settings(request: Request, body: AuthSettingsBody) -> dict:
+    """更新安全设置（管理员）：关闭两步验证后全平台登录不再校验动态码，也不可新绑定；
+    已绑定用户的密钥保留，重新开启后继续生效。"""
+    _require_admin(request)
+    request.app.state.auth.set_totp_policy(body.totp_enabled)
+    logger.info("两步验证功能总开关：{}", "开启" if body.totp_enabled else "关闭")
+    return {"totp_enabled": request.app.state.auth.totp_policy()}
+
+
 # ---- 两步验证（TOTP：Google Authenticator / 海月盾等标准验证器）----
 
 

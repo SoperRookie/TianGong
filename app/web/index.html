@@ -286,6 +286,14 @@ dialog::backdrop { background:rgba(15,22,36,.45); backdrop-filter:blur(2px); }
 .login-card .brand .sub { color:var(--ink-3); font-size:12px; }
 .login-err { color:var(--danger); font-size:12.5px; margin-top:10px; min-height:18px; }
 
+.switch { position:relative; display:inline-block; width:38px; height:21px; flex:none; cursor:pointer; }
+.switch input { opacity:0; width:0; height:0; }
+.switch i { position:absolute; inset:0; background:#c9d2df; border-radius:99px; transition:background .15s; }
+.switch i::before { content:""; position:absolute; width:17px; height:17px; border-radius:50%;
+  background:#fff; top:2px; left:2px; transition:transform .15s; box-shadow:0 1px 2px rgba(0,0,0,.2); }
+.switch input:checked + i { background:var(--ok); }
+.switch input:checked + i::before { transform:translateX(17px); }
+
 .empty { text-align:center; color:var(--ink-3); padding:40px 10px; font-size:13px; }
 .empty svg { width:36px; height:36px; opacity:.35; margin-bottom:8px; }
 .kw { color:var(--ink-3); font-size:12px; }
@@ -383,7 +391,13 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="card">
     <div class="card-h"><h3>用户管理</h3>
       <span class="meta">admin 可管理用户与模型配置；member 使用平台功能</span>
-      <div class="grow"><button class="btn" onclick="openUserDlg()">＋ 添加用户</button></div></div>
+      <div class="grow">
+        <label class="check" title="关闭后全平台登录不再校验动态码，也不可新绑定；已绑定密钥保留，重新开启后继续生效">
+          两步验证功能
+          <span class="switch"><input type="checkbox" id="totpPolicySwitch" onchange="saveTotpPolicy(this.checked)"><i></i></span>
+        </label>
+        <button class="btn" onclick="openUserDlg()">＋ 添加用户</button>
+      </div></div>
     <div class="card-b" id="usersList"></div>
   </div>
 </div></div>
@@ -784,7 +798,7 @@ function renderUserBox() {
   $('userBox').innerHTML = `<b style="color:#c6cede">${esc(curUser.username)}</b>
     <span class="tag" style="background:#222c42;color:#7484a0">${esc(curUser.role)}</span><br>
     <a onclick="$('pwOld').value='';$('pwNew').value='';$('pwdDlg').showModal()" style="color:#7484a0;cursor:pointer">修改密码</a> ·
-    <a onclick="openTotpDlg()" style="color:#7484a0;cursor:pointer">两步验证${curUser.totp_enabled?' ✓':''}</a> ·
+    ${(window._authSettings||{}).totp_enabled !== false ? `<a onclick="openTotpDlg()" style="color:#7484a0;cursor:pointer">两步验证${curUser.totp_enabled?' ✓':''}</a> · ` : ''}
     <a onclick="doLogout()" style="color:#7484a0;cursor:pointer">退出登录</a>`;
   $('adminMenu').style.display = curUser.role === 'admin' ? '' : 'none';
 }
@@ -843,6 +857,7 @@ async function init() {
   t.templates.forEach(x => $('templateSel').add(
     new Option(x.name + (x.template_id === t.default_id ? '（默认）' : ''), x.template_id)));
   $('templateSel').value = t.default_id;
+  try { window._authSettings = await api('/api/v1/auth/settings'); } catch (e) { window._authSettings = {totp_enabled: true}; }
   await refreshMemories(true);
   refreshList();
   if (!window._pollStarted) {  // 定时器与全局监听只注册一次：重新登录不叠加轮询
@@ -1800,8 +1815,18 @@ async function testModel(name) {
 }
 
 /* ==================== 用户管理（管理员） ==================== */
+async function saveTotpPolicy(enabled) {
+  try {
+    window._authSettings = await api('/api/v1/auth/settings', {method:'PUT',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({totp_enabled: enabled})});
+    toast(enabled ? '两步验证功能已开启' : '两步验证功能已关闭：登录不再校验动态码（已绑定密钥保留）', 'ok');
+    renderUserBox();
+  } catch (e) { toast(e.message, 'err'); refreshUsers(); }
+}
 async function refreshUsers() {
   try {
+    window._authSettings = await api('/api/v1/auth/settings').catch(()=>window._authSettings);
+    if ($('totpPolicySwitch')) $('totpPolicySwitch').checked = (window._authSettings||{}).totp_enabled !== false;
     const data = await api('/api/v1/auth/users');
     $('usersList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
       <tr><th>用户名</th><th>角色</th><th>两步验证</th><th>创建时间</th><th style="width:80px">操作</th></tr>

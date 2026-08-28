@@ -46,6 +46,7 @@ class AuthStore:
         self._ttl = timedelta(hours=session_ttl_hours)
         self._users: dict[str, dict] = {}
         self._sessions: dict[str, dict] = {}
+        self._settings: dict = {"totp_enabled": True}
         self._load()
 
     def _load(self) -> None:
@@ -56,6 +57,7 @@ class AuthStore:
         except json.JSONDecodeError:
             return
         self._users = raw.get("users", {})
+        self._settings.update(raw.get("settings", {}))
         now = _now().isoformat()
         self._sessions = {
             t: s for t, s in raw.get("sessions", {}).items() if s.get("expires_at", "") > now
@@ -64,9 +66,22 @@ class AuthStore:
     def _persist(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
-            json.dumps({"users": self._users, "sessions": self._sessions}, ensure_ascii=False),
+            json.dumps(
+                {"users": self._users, "sessions": self._sessions, "settings": self._settings},
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
+
+    # ---- 安全设置（系统级开关）----
+
+    def totp_policy(self) -> bool:
+        """两步验证功能总开关：关闭时全平台登录不校验动态码、不可新绑定。"""
+        return bool(self._settings.get("totp_enabled", True))
+
+    def set_totp_policy(self, enabled: bool) -> None:
+        self._settings["totp_enabled"] = bool(enabled)
+        self._persist()
 
     # ---- 用户管理 ----
 
@@ -157,7 +172,7 @@ class AuthStore:
         user = self._users.get(username.strip())
         if user is None or _hash_password(password, user["salt"]) != user["password_hash"]:
             raise AuthError("用户名或密码错误")
-        if user.get("totp_enabled"):
+        if user.get("totp_enabled") and self.totp_policy():
             # 两步验证（TOTP，兼容 Google Authenticator / 海月盾等标准验证器）
             if not otp:
                 raise OtpRequired()
@@ -199,6 +214,8 @@ class AuthStore:
         user = self._users.get(username)
         if user is None:
             raise AuthError(f"用户不存在: {username}")
+        if not self.totp_policy():
+            raise AuthError("两步验证功能已被管理员关闭")
         if user.get("totp_enabled"):
             raise AuthError("已绑定两步验证；如需换绑请先解绑或联系管理员重置")
         user["totp_pending"] = generate_secret()
