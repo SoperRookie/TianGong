@@ -1666,6 +1666,29 @@ async def apply_requirement_diff(request: Request, task_id: str) -> dict:
     return response
 
 
+# ---- 报表 ----
+
+
+@router.get("/api/v1/reports/summary")
+async def reports_summary(
+    request: Request, days: int = 30, project: str | None = None
+) -> dict:
+    """报表聚合：任务/用例产出、AI 一次通过率、采纳率、审核动作、趋势与分布。
+
+    days=0 表示全部历史。纯留痕统计，不产生模型调用。
+    """
+    from app.reports import summarize
+
+    records = request.app.state.tasks.list(limit=100000)
+    data = summarize(records, days=max(0, days), project=project)
+    rules = request.app.state.rules
+    data["rules"] = {
+        "candidates": len(rules.list("candidate")),
+        "active": len(rules.list("active")),
+    }
+    return data
+
+
 # ---- 学习候选与规则库（需求三十六~三十九）----
 
 
