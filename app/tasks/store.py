@@ -67,6 +67,7 @@ class TaskStore:
             if record.status in ("queued", "running"):
                 record.status = "failed"
                 record.error = "服务重启导致任务中断，请重新提交"
+            record.progress = None  # 进度是进程内状态，重启后一律清除
             records[record.task_id] = record
         return records
 
@@ -104,6 +105,24 @@ class TaskStore:
         self._persist()
 
     # ---- 异步执行（F-6-2）：进程内后台任务，Celery 落地时替换此层 ----
+
+    def cancel(self, task_id: str) -> bool:
+        """取消后台任务（任务管理）：中断执行并标记失败留痕。
+
+        仅对后台队列中的任务有效；前台同步请求中的执行无法从此处中断。
+        """
+        record = self._records.get(task_id)
+        job = self._jobs.get(task_id)
+        if record is None or record.status not in ("queued", "running") or job is None:
+            return False
+        job.cancel()
+        self._jobs.pop(task_id, None)
+        record.status = "failed"
+        record.error = "任务已被用户取消"
+        record.progress = None
+        self._persist()
+        logger.info("任务 {} 已被用户取消", task_id)
+        return True
 
     def submit(self, task_id: str, job: Callable[[], Awaitable[None]]) -> None:
         """将任务放入后台执行；job 自身负责更新最终状态。"""

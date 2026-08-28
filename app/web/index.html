@@ -364,7 +364,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <label class="check"><input type="checkbox" id="confirmPoints" checked> 先审核测试点</label>
       <label class="check"><input type="checkbox" id="asyncMode" checked> 后台执行</label>
     </div>
-    <div class="hint" style="margin-top:10px">勾选「先审核测试点」：拆解后自动执行独立查漏与重复检查，人工逐条/批量审核后再生成用例（推荐）</div>
+    <div class="hint" style="margin-top:10px">勾选「先审核测试点」：拆解与查漏/查重在后台执行，任务列表随时可查看进度、可取消；拆解完成后进入人工审核（推荐）</div>
   </div>
   <div class="d-f">
     <button class="btn" id="createBtn" onclick="createTask()">生成测试用例</button>
@@ -757,7 +757,7 @@ async function clearMemories() {
 
 /* ---------- 任务列表 ---------- */
 const statusText = s => ({completed:'完成', failed:'失败', running:'执行中', queued:'排队中', awaiting_confirmation:'审核测试点'}[s]||s);
-const progressText = p => ({analyzing:'需求分析', generating_reviewing:'生成与评审', exporting:'导出'}[p]||p);
+const progressText = p => ({analyzing:'需求分析', generating_reviewing:'生成与评审', exporting:'导出', quality_check:'查漏与查重'}[p]||p);
 function relTime(iso) {
   if (!iso) return '';
   const s = Math.max(0, (Date.now() - new Date(iso).getTime())/1000);
@@ -771,8 +771,10 @@ let listQuery = '', listStatus = '', listProject = '';
 async function refreshList() {
   try { const data = await api('/api/v1/tasks'); _tasksCache = data.tasks; } catch (e) { return; }
   if (currentView === 'board' && !currentTask) renderTaskListPage();
-  if (currentTask && ['queued','running'].includes(currentTask.status)) openTask(currentTask.task_id, true);
+  if (currentTask && taskBusy(currentTask)) openTask(currentTask.task_id, true);
 }
+const taskBusy = t => ['queued','running'].includes(t.status) ||
+  (t.status === 'awaiting_confirmation' && t.progress);
 
 /* 任务列表页：骨架只建一次，轮询仅更新表体与计数（保持搜索框输入焦点） */
 const LIST_FILTERS = [
@@ -856,7 +858,7 @@ async function createTask() {
   if ($('projectInput').value.trim()) fd.append('project', $('projectInput').value.trim());
   fd.append('template_id', $('templateSel').value);
   fd.append('confirm_points', $('confirmPoints').checked);
-  fd.append('async_mode', $('asyncMode').checked && !$('confirmPoints').checked);
+  fd.append('async_mode', $('asyncMode').checked);
   $('createBtn').disabled = true;
   $('createMsg').innerHTML = '<span class="spin"></span> 提交中';
   $('detail').innerHTML = `<div class="card"><div class="card-b">
@@ -919,7 +921,9 @@ function renderDetail() {
       <h3>任务 <code>${t.task_id}</code></h3>
       <span class="pill ${t.status}">${statusText(t.status)}</span>
       ${t.progress?'<span class="hint">'+progressText(t.progress)+' <span class="spin"></span></span>':''}
-      <div class="grow"><span class="hint">${(t.sources||[]).map(esc).join('、')||'-'} · ${relTime(t.created_at)}</span></div>
+      <div class="grow">
+        ${running?'<button class="btn ghost sm" onclick="cancelTask()">取消任务</button>':''}
+        <span class="hint">${(t.sources||[]).map(esc).join('、')||'-'} · ${relTime(t.created_at)}</span></div>
     </div>
     ${t.error?'<div class="card-b" style="color:var(--danger);padding-top:0">'+esc(t.error)+'</div>':''}
     <div class="dtabs">${tabs.map(([k,label,badge]) =>
@@ -927,6 +931,15 @@ function renderDetail() {
     <div class="card-b">${running ? renderProgress(t) + body : body}</div>
   </div>`;
   renderBatchBar();
+}
+
+async function cancelTask() {
+  if (!await uiConfirm('取消任务', '中断后台执行，任务将标记为失败（可重新提交）。', true)) return;
+  try {
+    await api(`/api/v1/tasks/${currentTask.task_id}/cancel`, {method:'POST'});
+    toast('任务已取消', 'ok');
+    await openTask(currentTask.task_id, true);
+  } catch (e) { toast('取消失败：' + e.message, 'err'); }
 }
 
 const STAGES = [['queued','排队'], ['analyzing','需求分析'], ['generating_reviewing','生成与评审'], ['exporting','导出']];

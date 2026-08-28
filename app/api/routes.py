@@ -541,60 +541,6 @@ async def create_task(
         task_id, sources, len(requirement), project or "-", template.template_id, confirm_points, async_mode,
     )
 
-    # 1.5 拆解确认流程（F-3-3）：只做需求分析，等待用户确认测试点
-    if confirm_points:
-        # 拆解阶段注入历史用例做覆盖度查漏（知识管家 F-7-6，检索时机约束）
-        knowledge, snapshot = await _gather_knowledge(
-            request.app, requirement, ("analysis",), knowledge_space
-        )
-        try:
-            analysis = await run_analysis(
-                requirement,
-                llm=request.app.state.llm,
-                model=model,
-                knowledge_cases=knowledge["cases"],
-            )
-        except (UnknownModelError,) as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except (MissingAPIKeyError, AllModelsFailedError) as e:
-            raise HTTPException(status_code=502, detail=str(e))
-        from app.tasks.points import assign_entities
-
-        analysis_data = analysis.model_dump()
-        # 测试点实体化：tp_id + 审核状态机（通过/驳回/锁定），支撑逐条与批量审核
-        analysis_data["test_points"] = assign_entities(analysis_data["test_points"])
-        record = TaskRecord(
-            task_id=task_id,
-            status="awaiting_confirmation",
-            sources=sources,
-            analysis=analysis_data,
-            knowledge=snapshot,
-            reuse_hints=await _reuse_hints(request.app, requirement, knowledge_space),
-            context={
-                "requirement": requirement,
-                "model": model,
-                "reviewer_model": reviewer_model,
-                "template_id": template.template_id,
-                "knowledge_space": knowledge_space,
-                "project": project,
-            },
-        )
-        store.save(record)
-        # 拆解后自动执行：独立覆盖检查 + 重复检查（需求六十一闭环；故障降级不阻塞）
-        await _run_point_quality_checks(request.app, task_id, requirement, model)
-        record = store.get(task_id)
-        return {
-            "task_id": task_id,
-            "status": record.status,
-            "test_points": (record.analysis or {}).get("test_points", []),
-            "blind_spots": analysis.blind_spots,
-            "coverage": record.coverage,
-            "dup_report": record.dup_report,
-            "reuse_hints": record.reuse_hints,
-            "confirm_url": f"/api/v1/tasks/{task_id}/confirm",
-        }
-
-    # 2. 编排生成（超长需求自动分片并行，F-2-6）；知识管家按时机注入（F-7-6）
     task_context = {
         "requirement": requirement,
         "model": model,
@@ -603,6 +549,66 @@ async def create_task(
         "knowledge_space": knowledge_space,
         "project": project,
     }
+
+    # 1.5 拆解确认流程（F-3-3）：只做需求分析，等待用户确认测试点。
+    # 支持后台执行：任务先落库（queued），拆解与查漏/查重在后台跑，列表随时可见可管理。
+    if confirm_points:
+        async def _analyze() -> dict:
+            # 拆解阶段注入历史用例做覆盖度查漏（知识管家 F-7-6，检索时机约束）
+            knowledge, snapshot = await _gather_knowledge(
+                request.app, requirement, ("analysis",), knowledge_space
+            )
+            store.set_progress(task_id, progress="analyzing")
+            analysis = await run_analysis(
+                requirement,
+                llm=request.app.state.llm,
+                model=model,
+                knowledge_cases=knowledge["cases"],
+            )
+            from app.tasks.points import assign_entities
+
+            analysis_data = analysis.model_dump()
+            # 测试点实体化：tp_id + 审核状态机（通过/驳回/锁定），支撑逐条与批量审核
+            analysis_data["test_points"] = assign_entities(analysis_data["test_points"])
+            record = store.get(task_id) or TaskRecord(task_id=task_id)
+            record.status = "awaiting_confirmation"
+            record.progress = "quality_check"  # 拆解已可审核，查漏/查重继续后台补充
+            record.error = None
+            record.sources = sources
+            record.analysis = analysis_data
+            record.knowledge = snapshot
+            record.reuse_hints = await _reuse_hints(request.app, requirement, knowledge_space)
+            record.context = task_context
+            store.save(record)
+            # 拆解后自动执行：独立覆盖检查 + 重复检查（需求六十一闭环；故障降级不阻塞）
+            await _run_point_quality_checks(request.app, task_id, requirement, model)
+            store.set_progress(task_id, progress=None)
+            record = store.get(task_id)
+            return {
+                "task_id": task_id,
+                "status": record.status,
+                "test_points": (record.analysis or {}).get("test_points", []),
+                "blind_spots": analysis.blind_spots,
+                "coverage": record.coverage,
+                "dup_report": record.dup_report,
+                "reuse_hints": record.reuse_hints,
+                "confirm_url": f"/api/v1/tasks/{task_id}/confirm",
+            }
+
+        if async_mode:
+            store.save(TaskRecord(task_id=task_id, status="queued", sources=sources, context=task_context))
+            store.submit(task_id, _analyze)
+            return {"task_id": task_id, "status": "queued", "poll_url": f"/api/v1/tasks/{task_id}"}
+        try:
+            return await _analyze()
+        except (UnknownModelError,) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except (MissingAPIKeyError, AllModelsFailedError) as e:
+            store.save(TaskRecord(task_id=task_id, status="failed", sources=sources,
+                                  context=task_context, error=str(e)))
+            raise HTTPException(status_code=502, detail=str(e))
+
+    # 2. 编排生成（超长需求自动分片并行，F-2-6）；知识管家按时机注入（F-7-6）
 
     async def _generate() -> dict:
         knowledge, snapshot = await _gather_knowledge(
@@ -1493,6 +1499,22 @@ async def list_tasks(
             for r in records
         ]
     }
+
+
+@router.post("/api/v1/tasks/{task_id}/cancel")
+async def cancel_task(request: Request, task_id: str) -> dict:
+    """取消进行中的后台任务（任务管理）：中断执行，任务标记失败并留痕取消原因。"""
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if record.status not in ("queued", "running"):
+        raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可取消的执行")
+    if not store.cancel(task_id):
+        raise HTTPException(
+            status_code=409, detail="该任务正在前台请求中执行，无法从后台取消，请等待其完成"
+        )
+    return {"task_id": task_id, "status": "failed", "canceled": True}
 
 
 @router.get("/api/v1/tasks/{task_id}")

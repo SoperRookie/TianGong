@@ -343,6 +343,52 @@ async def test_revise_不动锁定用例(client):
     assert "验证正确账号密码登录成功" in titles  # 锁定用例完好
 
 
+async def test_confirm_points_后台执行可见可管理(client):
+    """先审核测试点 + 后台执行：任务立即落库可见，拆解完成后进入待确认。"""
+    import asyncio
+
+    app.state.llm = StubLLM([ANALYST_REPLY_V2, GAP_REPLY])
+    resp = await client.post(
+        "/api/v1/tasks",
+        data={"text": "登录需求", "confirm_points": "true", "async_mode": "true"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "queued"  # 立即返回，任务已可在列表查看
+    task_id = body["task_id"]
+
+    for _ in range(100):  # 等待后台拆解 + 查漏完成
+        await asyncio.sleep(0.02)
+        task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+        if task["status"] == "awaiting_confirmation" and task["progress"] is None:
+            break
+    assert task["status"] == "awaiting_confirmation"
+    points = task["analysis"]["test_points"][0]["points"]
+    assert points[0]["tp_id"] == "TP001"  # 实体化完成
+    assert task["coverage"]["输入校验"] == "未覆盖"  # 后台查漏已补充
+
+
+async def test_cancel_运行中的后台任务(client):
+    """任务管理：进行中的后台任务可取消，标记失败并留痕。"""
+    import asyncio
+
+    class HangLLM:  # 模拟长时间运行的模型调用
+        async def chat(self, *args, **kwargs):
+            await asyncio.Event().wait()
+
+    app.state.llm = HangLLM()
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求", "async_mode": "true"})
+    task_id = resp.json()["task_id"]
+    await asyncio.sleep(0.05)  # 等后台任务启动
+
+    resp = await client.post(f"/api/v1/tasks/{task_id}/cancel")
+    assert resp.status_code == 200 and resp.json()["canceled"] is True
+    task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert task["status"] == "failed" and "取消" in task["error"]
+    # 重复取消：无可取消的执行
+    assert (await client.post(f"/api/v1/tasks/{task_id}/cancel")).status_code == 409
+
+
 async def test_task_list_项目名展示与过滤(client):
     from tests.stubs import ANALYST_REPLY
 
