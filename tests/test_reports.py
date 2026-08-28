@@ -14,6 +14,49 @@ def _record(days_ago=1, **kw) -> TaskRecord:
     return TaskRecord(task_id=f"t{days_ago}{kw.get('created_by','x')}", created_at=_iso(days_ago), **kw)
 
 
+def test_project_rollup_与用例库生命周期():
+    from app.reports import project_cases, project_rollup
+
+    records = [
+        _record(1, status="completed", created_by="makino",
+                context={"project": "德州"},
+                result={"cases": [
+                    {"uid": "u1", "case_id": "TC-登录-001", "module": "登录", "title": "正常登录",
+                     "priority": "P0", "keywords": "登录"},
+                    {"uid": "u2", "case_id": "TC-登录-002", "module": "登录", "title": "密码错误",
+                     "priority": "P1"},
+                    {"uid": "u3", "case_id": "TC-登录-003", "module": "登录", "title": "账号锁定",
+                     "priority": "P1"},
+                ], "passed": True, "review_rounds": 1},
+                case_reviews={"u1": {"status": "approved", "locked": True},
+                              "u2": {"status": "rejected", "comment": "预期不可验证"},
+                              "u3": {"status": "pending"}},
+                executions=[
+                    {"run_id": "r1", "name": "冒烟", "results": {
+                        "u1": {"status": "fail", "note": "BUG-1", "by": "makino", "at": "t1"}}},
+                    {"run_id": "r2", "name": "回归", "results": {
+                        "u1": {"status": "pass", "by": "makino", "at": "t2"}}},
+                ]),
+        _record(2, status="completed", context={"project": "斗地主"},
+                result={"cases": [{"uid": "u9", "case_id": "TC-发牌-001", "module": "发牌",
+                                   "title": "正常发牌", "priority": "P0"}], "passed": True, "review_rounds": 1}),
+    ]
+    rollup = {p["project"]: p for p in project_rollup(records)}
+    dz = rollup["德州"]
+    assert (dz["cases"], dz["approved"], dz["rejected"], dz["pending"]) == (3, 1, 1, 1)
+    assert dz["executed"] == 1 and dz["exec_pass"] == 1  # 最新轮次结果为准（复测通过）
+
+    cases = project_cases(records, "德州")
+    assert len(cases) == 3
+    c1 = next(c for c in cases if c["uid"] == "u1")
+    assert c1["review"] == "approved" and c1["locked"] is True
+    assert c1["exec"]["status"] == "pass" and c1["exec"]["run"] == "回归"  # 取最新执行
+    c2 = next(c for c in cases if c["uid"] == "u2")
+    assert c2["review"] == "rejected" and c2["review_comment"] == "预期不可验证"
+    assert c2["exec"] is None
+    assert project_cases(records, "斗地主")[0]["module"] == "发牌"
+
+
 def test_summarize_核心口径():
     records = [
         _record(1, status="completed", created_by="makino",

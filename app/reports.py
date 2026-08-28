@@ -21,6 +21,76 @@ def _day(iso: str) -> str:
     return (iso or "")[:10]
 
 
+UNASSIGNED = "（未指定）"
+
+
+def _case_exec(record: TaskRecord, uid: str) -> dict | None:
+    """用例最新执行结果：从最近轮次向前找第一条记录。"""
+    for run in reversed(record.executions):
+        result = run["results"].get(uid)
+        if result:
+            return {
+                "status": result["status"], "note": result.get("note", ""),
+                "run": run.get("name", ""), "at": result.get("at", ""), "by": result.get("by", ""),
+            }
+    return None
+
+
+def project_rollup(records: list[TaskRecord]) -> list[dict]:
+    """项目汇总：任务/用例产出 + 用例生命周期分布 + 执行情况 + 最近活动。"""
+    projects: dict[str, dict] = {}
+    for r in records:
+        name = (r.context or {}).get("project") or UNASSIGNED
+        p = projects.setdefault(name, {
+            "project": name, "tasks": 0, "cases": 0,
+            "pending": 0, "rejected": 0, "approved": 0,
+            "executed": 0, "exec_pass": 0, "last_activity": "",
+        })
+        p["tasks"] += 1
+        p["last_activity"] = max(p["last_activity"], r.created_at or "")
+        cases = (r.result or {}).get("cases", [])
+        p["cases"] += len(cases)
+        for c in cases:
+            uid = str(c.get("uid") or "")
+            state = (r.case_reviews.get(uid) or {}).get("status", "pending")
+            p[state if state in ("pending", "rejected", "approved") else "pending"] += 1
+            exec_result = _case_exec(r, uid)
+            if exec_result:
+                p["executed"] += 1
+                if exec_result["status"] == "pass":
+                    p["exec_pass"] += 1
+    return sorted(projects.values(), key=lambda x: x["last_activity"], reverse=True)
+
+
+def project_cases(records: list[TaskRecord], project: str) -> list[dict]:
+    """项目用例库：跨任务聚合全部用例，标注生命周期阶段与最新执行结果。
+
+    生命周期：待审核（AI 生成/修改后）→ 已驳回（待定点修改）→ 正式（通过锁定）；
+    正式用例进入执行（通过/失败/阻塞/跳过），需求变更创建新版本后回到待审核。
+    """
+    rows: list[dict] = []
+    for r in sorted(records, key=lambda x: x.created_at or "", reverse=True):
+        name = (r.context or {}).get("project") or UNASSIGNED
+        if name != project:
+            continue
+        for c in (r.result or {}).get("cases", []):
+            uid = str(c.get("uid") or "")
+            state = r.case_reviews.get(uid) or {}
+            rows.append({
+                "task_id": r.task_id,
+                "case_id": c.get("case_id"), "uid": uid,
+                "module": c.get("module", ""), "title": c.get("title", ""),
+                "priority": c.get("priority", ""), "keywords": c.get("keywords", ""),
+                "review": state.get("status", "pending"),
+                "locked": bool(state.get("locked")),
+                "review_comment": state.get("comment", ""),
+                "exec": _case_exec(r, uid),
+                "created_at": r.created_at,
+                "created_by": r.created_by,
+            })
+    return rows
+
+
 def summarize(
     records: list[TaskRecord], days: int = 30, project: str | None = None
 ) -> dict:

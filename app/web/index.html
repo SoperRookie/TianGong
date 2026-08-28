@@ -273,6 +273,20 @@ dialog::backdrop { background:rgba(15,22,36,.45); backdrop-filter:blur(2px); }
 .toast.ok { background:#0f5132; } .toast.err { background:#8a2620; } .toast.warn { background:#7a5410; }
 .toast.out { opacity:0; transform:translateY(6px); transition:all .25s; }
 @keyframes tin { from { opacity:0; transform:translateY(8px);} }
+/* ================= 生命周期管道 ================= */
+.pipeline { display:flex; align-items:stretch; gap:0; overflow-x:auto; margin-top:10px; }
+.pipeline .stage { flex:1; min-width:118px; border:1px solid var(--line); border-radius:var(--radius-s);
+  padding:10px 12px; background:#fff; position:relative; }
+.pipeline .stage + .stage { margin-left:22px; }
+.pipeline .stage + .stage::before { content:"→"; position:absolute; left:-18px; top:50%;
+  transform:translateY(-50%); color:var(--ink-3); font-size:14px; }
+.pipeline .stage .n { font-size:21px; font-weight:700; letter-spacing:-.5px; }
+.pipeline .stage .lab { font-size:12px; color:var(--ink-2); font-weight:600; }
+.pipeline .stage .sub { font-size:11px; color:var(--ink-3); }
+.pipeline .stage.s-ok { border-color:#cbe8d6; background:#f6fcf8; }
+.pipeline .stage.s-warn { border-color:#f0dfc0; background:#fdfaf2; }
+.pipeline .stage.s-bad { border-color:#f2cfcb; background:#fdf7f6; }
+
 /* ================= 登录页 ================= */
 .login-wrap { position:fixed; inset:0; z-index:200; display:grid; place-items:center;
   background:linear-gradient(160deg,#151d2e 0%,#1d2942 55%,#232f52 100%); }
@@ -310,7 +324,10 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <div>天工<div class="sub">AI 测试用例平台</div></div></div>
   <nav class="menu">
     <div class="grp">工作台</div>
-    <button id="nav-board" class="on" onclick="switchView('board')">
+    <button id="nav-projects" class="on" onclick="switchView('projects')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+      项目</button>
+    <button id="nav-board" onclick="switchView('board')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>
       任务列表</button>
     <button id="nav-reports" onclick="switchView('reports')">
@@ -342,6 +359,11 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <div class="topbar">
   <div class="crumb" id="crumb">任务列表</div>
   <div class="right" id="topbarRight"></div>
+</div>
+
+<!-- 项目视图：项目列表 ⇄ 项目工作区 -->
+<div class="layout" id="view-projects" style="display:none">
+  <div class="page" style="max-width:1420px" id="projArea"></div>
 </div>
 
 <!-- 工作台视图：任务列表页 ⇄ 任务详情页 -->
@@ -835,7 +857,7 @@ async function boot() {
 }
 
 /* ---------- 视图切换与面包屑 ---------- */
-const VIEW_LABELS = {board:'任务列表', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
+const VIEW_LABELS = {projects:'项目', board:'任务列表', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
 function setCrumb(html) { $('crumb').innerHTML = html; }
 function crumbForBoard() {
   if (currentTask) {
@@ -844,11 +866,14 @@ function crumbForBoard() {
 }
 function switchView(v) {
   currentView = v;
-  for (const k of ['board','reports','rules','memory','models','users']) {
+  for (const k of ['projects','board','reports','rules','memory','models','users']) {
     $('view-'+k).style.display = k===v ? '' : 'none';
     $('nav-'+k).classList.toggle('on', k===v);
   }
-  if (v==='board') crumbForBoard(); else setCrumb(VIEW_LABELS[v]);
+  if (v==='board') crumbForBoard();
+  else if (v==='projects') crumbForProjects();
+  else setCrumb(VIEW_LABELS[v]);
+  if (v==='projects') renderProjects();
   if (v==='reports') renderReports();
   if (v==='rules') refreshRules();
   if (v==='memory') refreshMemories();
@@ -889,7 +914,7 @@ async function init() {
     });
   }
   renderUserBox();
-  switchView('board');
+  switchView('projects');
 }
 
 /* ---------- 学习规则视图 ---------- */
@@ -1872,6 +1897,193 @@ function renderOfflineDiff(o) {
       ${o.modified.map(x=>'<span>修改：'+esc(x.title)+'（'+x.changes.map(c=>esc(c.field)).join('/')+'）</span>').join('')}
     </div></div>`;
 }
+/* ==================== 项目管理 ==================== */
+let curProject = null, projTab = 'overview';
+let _projectsCache = [], _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '';
+const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved']};
+
+function crumbForProjects() {
+  if (curProject) {
+    setCrumb(`<a onclick="backToProjects()">项目</a><span class="sep">/</span>${esc(curProject)}`);
+  } else setCrumb('项目');
+}
+function backToProjects() { curProject = null; renderProjects(); }
+
+async function renderProjects() {
+  crumbForProjects();
+  if (curProject) return renderProjectWorkspace();
+  try { _projectsCache = (await api('/api/v1/projects')).projects; } catch (e) { return toast(e.message, 'err'); }
+  const rows = _projectsCache.map(p => {
+    const reviewed = p.approved + p.rejected + p.pending;
+    return `<tr class="rowlink" onclick="openProject('${esc(p.project)}')">
+      <td><b>${esc(p.project)}</b></td>
+      <td>${p.tasks}</td>
+      <td><b>${p.cases}</b> 条</td>
+      <td style="min-width:170px">${reviewed ? `
+        <div class="segbar" style="margin:2px 0 4px">${[
+          ['正式',p.approved,'var(--s-ok)'],['待审核',p.pending,'var(--s-pend)'],['已驳回',p.rejected,'var(--s-rej)']]
+          .filter(e=>e[1]).map(e=>`<i style="flex:${e[1]};background:${e[2]}" title="${e[0]} · ${e[1]}"></i>`).join('')}</div>
+        <span class="hint">正式 ${p.approved} · 待审 ${p.pending} · 驳回 ${p.rejected}</span>` : '<span class="hint">—</span>'}</td>
+      <td>${p.executed ? `已执行 ${p.executed}<div class="hint">通过率 ${(p.exec_pass/p.executed*100).toFixed(0)}%</div>` : '<span class="hint">未执行</span>'}</td>
+      <td class="hint">${relTime(p.last_activity)}</td>
+    </tr>`;
+  }).join('');
+  $('projArea').innerHTML = `<div class="card">
+    <div class="card-h"><h3>项目</h3><span class="meta">共 ${_projectsCache.length} 个 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
+      <div class="grow"><button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
+    <div class="card-b">
+      <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
+        <thead><tr><th>项目</th><th style="width:70px">任务</th><th style="width:90px">用例</th>
+        <th>用例生命周期</th><th style="width:120px">执行</th><th style="width:100px">最近活动</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6"><div class="empty">暂无项目：新建任务时填写项目名即可创建</div></td></tr>'}</tbody>
+      </table></div>
+    </div></div>`;
+}
+
+function openProject(name) {
+  curProject = name; projTab = 'overview';
+  projStage = 'all'; projExec = 'all'; projModule = ''; projQuery = '';
+  renderProjects();
+}
+function setProjTab(tab) { projTab = tab; renderProjectWorkspace(); }
+
+async function renderProjectWorkspace() {
+  crumbForProjects();
+  const p = _projectsCache.find(x => x.project === curProject) ||
+    {project: curProject, tasks:0, cases:0, pending:0, rejected:0, approved:0, executed:0, exec_pass:0};
+  let body = '';
+  if (projTab === 'overview') body = await projOverviewHtml(p);
+  else if (projTab === 'tasks') body = projTasksHtml();
+  else if (projTab === 'cases') body = await projCasesHtml();
+  $('projArea').innerHTML = `<div class="card">
+    <div class="card-h" style="border-bottom:none">
+      <button class="btn ghost sm" onclick="backToProjects()">← 项目</button>
+      <h3>${esc(curProject)}</h3>
+      <span class="meta">${p.tasks} 个任务 · ${p.cases} 条用例</span>
+      <div class="grow"><button class="btn sm" onclick="$('projectInput').value=curProject==='（未指定）'?'':curProject;openDrawer()">＋ 新建任务</button></div>
+    </div>
+    <div class="dtabs">
+      <button class="${projTab==='overview'?'on':''}" onclick="setProjTab('overview')">概览</button>
+      <button class="${projTab==='tasks'?'on':''}" onclick="setProjTab('tasks')">任务<span class="cnt">${p.tasks}</span></button>
+      <button class="${projTab==='cases'?'on':''}" onclick="setProjTab('cases')">用例库<span class="cnt">${p.cases}</span></button>
+      <button onclick="repProject=curProject==='（未指定）'?'':curProject;switchView('reports')">报表 ↗</button>
+    </div>
+    <div class="card-b">${body}</div></div>`;
+}
+
+async function projOverviewHtml(p) {
+  // 用例生命周期管道（生成 → 审核 → 正式 → 执行 → 反哺）
+  const failCnt = p.executed - p.exec_pass;
+  const pipeline = `<div class="section-t">用例生命周期</div>
+    <div class="pipeline">
+      <div class="stage"><div class="lab">AI 生成</div><div class="n">${p.cases}</div><div class="sub">拆解确认后生成</div></div>
+      <div class="stage ${p.pending?'s-warn':''}"><div class="lab">审核中</div><div class="n">${p.pending}</div><div class="sub">待人工审核</div></div>
+      <div class="stage ${p.rejected?'s-bad':''}"><div class="lab">已驳回</div><div class="n">${p.rejected}</div><div class="sub">待 AI 定点修改</div></div>
+      <div class="stage ${p.approved?'s-ok':''}"><div class="lab">正式用例</div><div class="n">${p.approved}</div><div class="sub">通过并锁定</div></div>
+      <div class="stage"><div class="lab">已执行</div><div class="n">${p.executed}</div><div class="sub">冒烟 / 回归轮次</div></div>
+      <div class="stage ${failCnt?'s-bad':(p.exec_pass?'s-ok':'')}"><div class="lab">执行通过</div><div class="n">${p.exec_pass}</div>
+        <div class="sub">${failCnt?`失败/阻塞 ${failCnt}`:'—'}</div></div>
+    </div>
+    <div class="hint" style="margin-top:6px">闭环：执行失败回归缺陷修复后复测；人工修改留痕进入「学习规则」反哺下一次生成；需求变更只更新受影响用例并回到审核</div>`;
+  let kpi = '';
+  try {
+    const d = await api(`/api/v1/reports/summary?days=0&project=${encodeURIComponent(curProject==='（未指定）'?'':curProject)}`);
+    const pct = v => v == null ? '—' : (v * 100).toFixed(1) + '%';
+    kpi = `<div class="statrow" style="margin-top:16px">
+      <div class="stat"><div class="lab">AI 一次通过率</div><div class="num">${pct(d.totals.ai_pass_rate)}</div>
+        <div class="sub">平均评审 ${d.totals.avg_review_rounds ?? '—'} 轮</div></div>
+      <div class="stat"><div class="lab">完全采纳率</div><div class="num">${pct(d.totals.adoption_rate)}</div>
+        <div class="sub">离线终稿口径 · ${d.totals.adoption_samples} 样本</div></div>
+      <div class="stat"><div class="lab">优先级分布</div>
+        <div class="segbar" style="margin-top:10px">${['P0','P1','P2','P3'].filter(k=>d.priority[k]).map(k=>
+          `<i style="flex:${d.priority[k]};background:${PRIO_COLORS[k]}" title="${k} · ${d.priority[k]}"></i>`).join('')}</div>
+        <div class="leg">${['P0','P1','P2','P3'].map(k=>`<span><i style="background:${PRIO_COLORS[k]}"></i>${k} <b>${d.priority[k]}</b></span>`).join('')}</div></div>
+      <div class="stat"><div class="lab">人工审核动作</div><div class="num">${d.review_actions.approve+d.review_actions.modify+d.review_actions.reject+d.review_actions.delete}</div>
+        <div class="sub">通过 ${d.review_actions.approve} · 修改 ${d.review_actions.modify} · 驳回 ${d.review_actions.reject}</div></div>
+    </div>`;
+  } catch (e) {}
+  return pipeline + kpi;
+}
+
+function projTasksHtml() {
+  const key = curProject === '（未指定）' ? null : curProject;
+  const tasks = _tasksCache.filter(t => key === null ? !t.project : t.project === key);
+  return `<div class="tbl-wrap" style="margin-top:0"><table>
+    <thead><tr><th style="width:110px">状态</th><th style="width:130px">任务 ID</th><th>来源</th>
+    <th style="width:90px">创建人</th><th style="width:80px">用例数</th><th style="width:100px">创建时间</th></tr></thead>
+    <tbody>${tasks.map(t => `<tr class="rowlink" onclick="openTaskFromProject('${t.task_id}')">
+      <td><span class="pill ${t.status}">${statusText(t.status)}</span>
+        ${t.progress?`<div class="hint">${progressText(t.progress)} <span class="spin"></span></div>`:''}</td>
+      <td><span class="tid-cell">${t.task_id}</span></td>
+      <td>${(t.sources||[]).map(esc).join('、')||'-'}
+        ${t.error?`<div class="hint" style="color:var(--danger)">${esc(t.error)}</div>`:''}</td>
+      <td>${t.created_by?`<span class="tag">${esc(t.created_by)}</span>`:'—'}</td>
+      <td>${t.case_count?`<b>${t.case_count}</b> 条`:'—'}</td>
+      <td class="hint">${relTime(t.created_at)}</td>
+    </tr>`).join('') || '<tr><td colspan="6"><div class="empty">该项目暂无任务</div></td></tr>'}</tbody>
+  </table></div>`;
+}
+function openTaskFromProject(id, tab) {
+  switchView('board');
+  openTask(id).then(() => { if (tab) { detailTab = tab; renderDetail(); } });
+}
+
+async function projCasesHtml() {
+  try {
+    _projCases = (await api(`/api/v1/projects/cases?project=${encodeURIComponent(curProject)}`)).cases;
+  } catch (e) { return `<div class="empty">${esc(e.message)}</div>`; }
+  const modules = [...new Set(_projCases.map(c => c.module))].sort();
+  const q = projQuery.trim().toLowerCase();
+  const list = _projCases.filter(c =>
+    (projStage === 'all' || c.review === projStage) &&
+    (projExec === 'all' || (projExec === 'none' ? !c.exec : (c.exec && (projExec === 'pass' ? c.exec.status === 'pass' : c.exec.status !== 'pass')))) &&
+    (!projModule || c.module === projModule) &&
+    (!q || (c.title||'').toLowerCase().includes(q) || (c.case_id||'').toLowerCase().includes(q) || (c.keywords||'').toLowerCase().includes(q)));
+  const stageCnt = {all:_projCases.length, pending:0, rejected:0, approved:0};
+  _projCases.forEach(c => { if (stageCnt[c.review] != null) stageCnt[c.review]++; });
+  return `<div class="filters" style="margin-top:0">
+      <div class="seg">
+        <button class="${projStage==='all'?'on':''}" onclick="projStage='all';renderProjectWorkspace()">全部 ${stageCnt.all}</button>
+        <button class="${projStage==='pending'?'on':''}" onclick="projStage='pending';renderProjectWorkspace()">待审核 ${stageCnt.pending}</button>
+        <button class="${projStage==='rejected'?'on':''}" onclick="projStage='rejected';renderProjectWorkspace()">已驳回 ${stageCnt.rejected}</button>
+        <button class="${projStage==='approved'?'on':''}" onclick="projStage='approved';renderProjectWorkspace()">正式 ${stageCnt.approved}</button>
+      </div>
+      <div class="seg">
+        <button class="${projExec==='all'?'on':''}" onclick="projExec='all';renderProjectWorkspace()">全部执行态</button>
+        <button class="${projExec==='none'?'on':''}" onclick="projExec='none';renderProjectWorkspace()">未执行</button>
+        <button class="${projExec==='pass'?'on':''}" onclick="projExec='pass';renderProjectWorkspace()">执行通过</button>
+        <button class="${projExec==='notpass'?'on':''}" onclick="projExec='notpass';renderProjectWorkspace()">失败/阻塞</button>
+      </div>
+      <select style="width:130px" onchange="projModule=this.value;renderProjectWorkspace()">
+        <option value="">全部模块</option>
+        ${modules.map(m => `<option ${projModule===m?'selected':''}>${esc(m)}</option>`).join('')}
+      </select>
+      <div class="search" style="width:190px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input type="text" placeholder="搜索用例…" value="${esc(projQuery)}"
+          oninput="projQuery=this.value" onchange="renderProjectWorkspace()">
+      </div></div>
+    <div class="tbl-wrap" style="max-height:calc(100vh - 320px)"><table>
+      <thead><tr><th style="width:104px">编号</th><th style="width:90px">模块</th><th>标题 / 关键词</th>
+      <th style="width:44px">优先级</th><th style="width:96px">生命周期</th><th style="width:130px">执行状态</th>
+      <th style="width:120px">所属任务</th></tr></thead>
+      <tbody>${list.map(c => {
+        const [label, cls] = REVIEW_STAGE[c.review] || REVIEW_STAGE.pending;
+        return `<tr class="rowlink" onclick="openTaskFromProject('${c.task_id}','cases')">
+          <td><span class="cid">${esc(c.case_id)}</span></td>
+          <td>${esc(c.module)}</td>
+          <td>${esc(c.title)}${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}
+            ${c.review_comment?`<div class="hint" style="color:var(--danger)">意见：${esc(c.review_comment)}</div>`:''}</td>
+          <td><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
+          <td><span class="st ${cls}">${label}${c.locked?' 🔒':''}</span></td>
+          <td>${c.exec ? `<span class="st ${EXEC_CLS[c.exec.status]}">${EXEC_LABEL[c.exec.status]}</span>
+              <div class="hint">${esc(c.exec.run)}${c.exec.note?` · ${esc(c.exec.note)}`:''}</div>` : '<span class="hint">未执行</span>'}</td>
+          <td><span class="cid">${c.task_id}</span></td>
+        </tr>`;}).join('') || '<tr><td colspan="7"><div class="empty">当前筛选下无用例</div></td></tr>'}</tbody>
+    </table></div>
+    <div class="hint" style="margin-top:8px">生命周期：AI 生成 → 待审核 → （驳回 → 定点修改 → 再审核）→ 正式（锁定）→ 执行 → 失败复测 / 需求变更新版本回到待审核；点击行进入所属任务处理</div>`;
+}
+
 /* ==================== 报表 ==================== */
 let repDays = 30, repProject = '';
 const PRIO_COLORS = {P0:'var(--p0)', P1:'var(--p1)', P2:'var(--p2)', P3:'var(--p3)'};

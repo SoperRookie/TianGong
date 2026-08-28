@@ -1792,6 +1792,27 @@ async def finish_execution_run(request: Request, task_id: str, run_id: str) -> d
     return {"run_id": run_id, "finished_at": run["finished_at"], "summary": summary}
 
 
+# ---- 项目视角（项目管理信息架构）----
+
+
+@router.get("/api/v1/projects")
+async def list_projects(request: Request) -> dict:
+    """项目汇总：任务/用例产出、用例生命周期分布（待审/驳回/正式）、执行情况、最近活动。"""
+    from app.reports import project_rollup
+
+    records = request.app.state.tasks.list(limit=100000)
+    return {"projects": project_rollup(records)}
+
+
+@router.get("/api/v1/projects/cases")
+async def list_project_cases(request: Request, project: str) -> dict:
+    """项目用例库：跨任务聚合全部用例，带生命周期阶段与最新执行结果。"""
+    from app.reports import project_cases
+
+    records = request.app.state.tasks.list(limit=100000)
+    return {"project": project, "cases": project_cases(records, project)}
+
+
 # ---- 报表 ----
 
 
