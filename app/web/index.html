@@ -719,6 +719,7 @@ const IC = {
 /* ---------- 登录认证 ---------- */
 function showLogin() {
   curUser = null;
+  if ($('loginView').style.display !== 'none') return;  // 已在登录页：不重复抢焦点
   $('loginView').style.display = '';
   $('loginErr').textContent = '';
   setTimeout(() => $('loginUser').focus(), 50);
@@ -805,13 +806,16 @@ async function init() {
   $('templateSel').value = t.default_id;
   await refreshMemories(true);
   refreshList();
-  setInterval(refreshList, 3000);
-  setInterval(() => {
-    if (currentTask && ['queued','running'].includes(currentTask.status)) renderDetail();
-  }, 1000);
-  document.addEventListener('change', e => {
-    if (e.target.matches && (e.target.matches('.ptck') || e.target.matches('.cck') || e.target.matches('.allck'))) renderBatchBar();
-  });
+  if (!window._pollStarted) {  // 定时器与全局监听只注册一次：重新登录不叠加轮询
+    window._pollStarted = true;
+    setInterval(refreshList, 3000);
+    setInterval(() => {
+      if (curUser && currentTask && taskBusy(currentTask)) renderDetail();
+    }, 1000);
+    document.addEventListener('change', e => {
+      if (e.target.matches && (e.target.matches('.ptck') || e.target.matches('.cck') || e.target.matches('.allck'))) renderBatchBar();
+    });
+  }
   renderUserBox();
   switchView('board');
 }
@@ -946,6 +950,7 @@ function relTime(iso) {
 let _tasksCache = [];
 let listQuery = '', listStatus = '', listProject = '';
 async function refreshList() {
+  if (!curUser) return;  // 未登录暂停轮询，避免 401 循环
   try { const data = await api('/api/v1/tasks'); _tasksCache = data.tasks; } catch (e) { return; }
   if (currentView === 'board' && !currentTask) renderTaskListPage();
   if (currentTask && taskBusy(currentTask)) openTask(currentTask.task_id, true);
