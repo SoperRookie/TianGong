@@ -23,6 +23,7 @@ class TaskRecord(BaseModel):
     status: str = "completed"
     progress: str | None = Field(default=None, description="执行阶段：analyzing / generating_reviewing / exporting")
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    created_by: str | None = Field(default=None, description="创建人（登录用户名），任务归属精确到人")
     sources: list[str] = Field(default_factory=list)
     result: dict | None = None
     error: str | None = None

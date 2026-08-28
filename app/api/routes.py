@@ -68,6 +68,11 @@ def _current_user(request: Request) -> dict:
     return user
 
 
+def _operator(request: Request) -> str:
+    """当前操作人（登录用户名）：任务归属与审核留痕精确到人。"""
+    return _current_user(request)["username"]
+
+
 def _require_admin(request: Request) -> dict:
     user = _current_user(request)
     if user["role"] != "admin":
@@ -868,6 +873,7 @@ async def create_task(
             # 测试点实体化：tp_id + 审核状态机（通过/驳回/锁定），支撑逐条与批量审核
             analysis_data["test_points"] = assign_entities(analysis_data["test_points"])
             record = store.get(task_id) or TaskRecord(task_id=task_id)
+            record.created_by = record.created_by or _operator(request)
             record.status = "awaiting_confirmation"
             record.progress = "quality_check"  # 拆解已可审核，查漏/查重继续后台补充
             record.error = None
@@ -893,7 +899,8 @@ async def create_task(
             }
 
         if async_mode:
-            store.save(TaskRecord(task_id=task_id, status="queued", sources=sources, context=task_context))
+            store.save(TaskRecord(task_id=task_id, status="queued", sources=sources,
+                                  context=task_context, created_by=_operator(request)))
             store.submit(task_id, _analyze)
             return {"task_id": task_id, "status": "queued", "poll_url": f"/api/v1/tasks/{task_id}"}
         try:
@@ -902,12 +909,17 @@ async def create_task(
             raise HTTPException(status_code=400, detail=str(e))
         except (MissingAPIKeyError, AllModelsFailedError) as e:
             store.save(TaskRecord(task_id=task_id, status="failed", sources=sources,
-                                  context=task_context, error=str(e)))
+                                  context=task_context, error=str(e), created_by=_operator(request)))
             raise HTTPException(status_code=502, detail=str(e))
 
     # 2. 编排生成（超长需求自动分片并行，F-2-6）；知识管家按时机注入（F-7-6）
 
+    creator = _operator(request)
+
     async def _generate() -> dict:
+        if store.get(task_id) is None:  # 同步路径预建记录：归属与失败留痕都有主
+            store.save(TaskRecord(task_id=task_id, status="running", sources=sources,
+                                  context=task_context, created_by=creator))
         knowledge, snapshot = await _gather_knowledge(
             request.app, requirement, ("analysis", "generation"), knowledge_space
         )
@@ -937,7 +949,8 @@ async def create_task(
 
     # 异步模式（F-6-1/2）：立即返回 task_id，后台执行，GET /tasks/{id} 轮询进度
     if async_mode:
-        store.save(TaskRecord(task_id=task_id, status="queued", sources=sources, context=task_context))
+        store.save(TaskRecord(task_id=task_id, status="queued", sources=sources,
+                              context=task_context, created_by=_operator(request)))
         store.submit(task_id, _generate)
         return {"task_id": task_id, "status": "queued", "poll_url": f"/api/v1/tasks/{task_id}"}
 
@@ -948,7 +961,8 @@ async def create_task(
     except (MissingAPIKeyError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     except AllModelsFailedError as e:
-        record = TaskRecord(task_id=task_id, status="failed", sources=sources, error=str(e))
+        record = TaskRecord(task_id=task_id, status="failed", sources=sources, error=str(e),
+                            created_by=_operator(request))
         store.save(record)
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -1200,6 +1214,7 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
     saved.analysis = record.analysis
     saved.revisions = record.revisions + [
         {
+            "by": _operator(request),
             "instruction": body.instruction,
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "passed": result.passed,
@@ -1260,7 +1275,7 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
         state = record.case_reviews.setdefault(
             uid, {"status": "pending", "comment": "", "reject_count": 0, "locked": False}
         )
-        entry: dict = {"case_id": item.case_id, "action": action,
+        entry: dict = {"case_id": item.case_id, "action": action, "by": _operator(request),
                        "comment": item.comment, "feedback": item.feedback, "at": now}
         if action == "approve":
             state.update(status="approved", locked=True, comment="")
@@ -1356,7 +1371,7 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
     except PointReviewError as e:
         raise HTTPException(status_code=400, detail=str(e))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    record.point_review_log.extend(dict(e, at=now) for e in outcome["log"])
+    record.point_review_log.extend(dict(e, at=now, by=_operator(request)) for e in outcome["log"])
     store.save(record)
     logger.info("任务 {} 测试点审核：{}", task_id, outcome["counts"])
     return {
@@ -1390,7 +1405,8 @@ async def fix_points(request: Request, task_id: str) -> dict:
     except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    record.fix_log.append({"kind": "points", "at": now, "diff": outcome["diff"], "added": outcome["added"]})
+    record.fix_log.append({"kind": "points", "at": now, "by": _operator(request),
+                           "diff": outcome["diff"], "added": outcome["added"]})
     store.save(record)
     logger.info("任务 {} 测试点定点修改：改动 {} 条 / 新增 {} 条", task_id, len(outcome["diff"]), len(outcome["added"]))
     return {"task_id": task_id, "diff": outcome["diff"], "added": outcome["added"], "test_points": modules}
@@ -1515,7 +1531,7 @@ async def fix_cases(request: Request, task_id: str) -> dict:
         raise HTTPException(status_code=502, detail=str(e))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     record.fix_log.append({
-        "kind": "cases", "at": now, "diff": outcome["diff"],
+        "kind": "cases", "at": now, "by": _operator(request), "diff": outcome["diff"],
         "fixes": outcome.get("fixes", []), "invalid": outcome.get("invalid", []),
     })
     result = GenerationResult.model_validate({**record.result, "cases": outcome["cases"]})
@@ -1764,6 +1780,7 @@ async def upload_final_cases(
     logger.info("任务 {} 终稿回传 diff：{}", task_id, diff["stats"])
     record.offline_review = {
         "filename": file.filename,
+        "by": _operator(request),
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         **diff,
     }
@@ -1774,12 +1791,15 @@ async def upload_final_cases(
 
 @router.get("/api/v1/tasks")
 async def list_tasks(
-    request: Request, status: str | None = None, project: str | None = None, limit: int = 50
+    request: Request, status: str | None = None, project: str | None = None,
+    created_by: str | None = None, limit: int = 50
 ) -> dict:
-    """任务列表（F-6-1）：倒序返回任务概要（含项目名），支持按状态/项目过滤。"""
+    """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人过滤。"""
     records = request.app.state.tasks.list(status=status, limit=limit)
     if project is not None:
         records = [r for r in records if (r.context or {}).get("project") == project]
+    if created_by is not None:
+        records = [r for r in records if r.created_by == created_by]
     return {
         "tasks": [
             {
@@ -1789,6 +1809,7 @@ async def list_tasks(
                 "created_at": r.created_at,
                 "sources": r.sources,
                 "project": (r.context or {}).get("project"),
+                "created_by": r.created_by,
                 "case_count": len((r.result or {}).get("cases", [])),
                 "revision_count": len(r.revisions),
                 "error": r.error,

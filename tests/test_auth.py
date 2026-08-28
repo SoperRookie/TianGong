@@ -218,6 +218,40 @@ async def test_两步验证总开关(client, auth_on):
     await client.delete("/api/v1/auth/users/guard", headers=headers)
 
 
+async def test_任务创建精确到人(client, auth_on):
+    """任务归属创建人：列表展示与按人过滤；审核留痕记操作人。"""
+    import json as _json
+
+    from tests.stubs import ANALYST_REPLY, StubLLM, generator_reply, make_case, review_reply
+    from app.main import app as _app
+
+    token = await _login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    await client.post("/api/v1/auth/users", headers=headers,
+                      json={"username": "lisi", "password": "lisi123", "role": "member"})
+    lisi_headers = {"Authorization": f"Bearer {await _login(client, 'lisi', 'lisi123')}"}
+
+    _app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+    resp = await client.post("/api/v1/tasks", headers=lisi_headers, data={"text": "登录需求"})
+    task_id = resp.json()["task_id"]
+
+    task = (await client.get(f"/api/v1/tasks/{task_id}", headers=headers)).json()
+    assert task["created_by"] == "lisi"
+    listed = (await client.get("/api/v1/tasks", headers=headers,
+                               params={"created_by": "lisi"})).json()["tasks"]
+    assert listed and all(t["created_by"] == "lisi" for t in listed)
+    assert (await client.get("/api/v1/tasks", headers=headers,
+            params={"created_by": "nobody"})).json()["tasks"] == []
+
+    # 审核留痕精确到操作人（admin 操作 lisi 的任务）
+    resp = await client.post(f"/api/v1/tasks/{task_id}/review", headers=headers,
+                             json={"items": [{"case_id": "TC-登录-001", "action": "approve"}]})
+    assert resp.status_code == 200, resp.text
+    task = (await client.get(f"/api/v1/tasks/{task_id}", headers=headers)).json()
+    assert task["review_log"][-1]["by"] == "admin"
+    await client.delete("/api/v1/auth/users/lisi", headers=headers)
+
+
 # ---- 模型配置管理 ----
 
 

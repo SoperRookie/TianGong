@@ -1002,7 +1002,7 @@ function relTime(iso) {
   return Math.floor(s/86400) + ' 天前';
 }
 let _tasksCache = [];
-let listQuery = '', listStatus = '', listProject = '';
+let listQuery = '', listStatus = '', listProject = '', listCreator = '';
 async function refreshList() {
   if (!curUser) return;  // 未登录暂停轮询，避免 401 循环
   try { const data = await api('/api/v1/tasks'); _tasksCache = data.tasks; } catch (e) { return; }
@@ -1019,10 +1019,13 @@ const LIST_FILTERS = [
 ];
 const matchStatus = (t, f) => !f || (f === 'active' ? ['queued','running'].includes(t.status) : t.status === f);
 const matchProject = (t, p) => !p || (p === '__none__' ? !t.project : t.project === p);
+const matchCreator = (t, c) => !c || t.created_by === c;
 function filteredTasks() {
   const q = listQuery.trim().toLowerCase();
   return _tasksCache.filter(t => matchStatus(t, listStatus) && matchProject(t, listProject) &&
+    matchCreator(t, listCreator) &&
     (!q || t.task_id.includes(q) || (t.project||'').toLowerCase().includes(q) ||
+      (t.created_by||'').toLowerCase().includes(q) ||
       (t.sources||[]).some(s => s.toLowerCase().includes(q))));
 }
 function renderTaskListPage() {
@@ -1031,7 +1034,8 @@ function renderTaskListPage() {
       <div class="card-h"><h3>任务列表</h3><span class="meta" id="taskTotal"></span>
         <div class="grow">
           <div class="seg" id="listSeg"></div>
-          <select id="projectSel" style="width:150px" onchange="listProject=this.value;renderTaskListRows()"></select>
+          <select id="projectSel" style="width:140px" onchange="listProject=this.value;renderTaskListRows()"></select>
+          <select id="creatorSel" style="width:120px" onchange="listCreator=this.value;renderTaskListRows()"></select>
           <div class="search" style="width:210px">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
             <input type="text" id="taskSearch" placeholder="搜索任务 / 项目 / 来源…" value="${esc(listQuery)}"
@@ -1041,8 +1045,8 @@ function renderTaskListPage() {
         </div></div>
       <div class="card-b">
         <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
-          <thead><tr><th style="width:110px">状态</th><th style="width:130px">任务 ID</th><th style="width:150px">项目</th><th>来源</th>
-          <th style="width:90px">用例数</th><th style="width:70px">修订</th><th style="width:110px">创建时间</th></tr></thead>
+          <thead><tr><th style="width:110px">状态</th><th style="width:130px">任务 ID</th><th style="width:140px">项目</th><th>来源</th>
+          <th style="width:100px">创建人</th><th style="width:80px">用例数</th><th style="width:60px">修订</th><th style="width:100px">创建时间</th></tr></thead>
           <tbody id="taskTbody"></tbody>
         </table></div>
       </div></div>`;
@@ -1061,6 +1065,9 @@ function renderTaskListRows() {
   $('projectSel').innerHTML = `<option value="">全部项目</option>`
     + projects.map(p => `<option value="${esc(p)}" ${listProject===p?'selected':''}>${esc(p)}</option>`).join('')
     + (hasNone ? `<option value="__none__" ${listProject==='__none__'?'selected':''}>（未指定项目）</option>` : '');
+  const creators = [...new Set(_tasksCache.map(t => t.created_by).filter(Boolean))].sort();
+  $('creatorSel').innerHTML = `<option value="">全部创建人</option>`
+    + creators.map(c => `<option value="${esc(c)}" ${listCreator===c?'selected':''}>${esc(c)}${curUser&&c===curUser.username?'（我）':''}</option>`).join('');
   $('taskTotal').textContent = `共 ${_tasksCache.length} 个任务`;
   $('taskTbody').innerHTML = tasks.map(t => `
     <tr class="rowlink" onclick="openTask('${t.task_id}')">
@@ -1070,10 +1077,11 @@ function renderTaskListRows() {
       <td>${t.project?`<span class="tag">${esc(t.project)}</span>`:'<span class="hint">—</span>'}</td>
       <td>${(t.sources||[]).map(esc).join('、')||'-'}
         ${t.error?`<div class="hint" style="color:var(--danger)">${esc(t.error)}</div>`:''}</td>
+      <td>${t.created_by?`<span class="tag">${esc(t.created_by)}</span>`:'<span class="hint">—</span>'}</td>
       <td>${t.case_count ? `<b>${t.case_count}</b> 条` : '<span class="hint">—</span>'}</td>
       <td>${t.revision_count ? t.revision_count + ' 轮' : '<span class="hint">—</span>'}</td>
       <td class="hint" title="${esc(t.created_at||'')}">${relTime(t.created_at)}</td>
-    </tr>`).join('') || `<tr><td colspan="7"><div class="empty">
+    </tr>`).join('') || `<tr><td colspan="8"><div class="empty">
       ${_tasksCache.length ? '当前筛选下无任务' : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
 }
 function backToList() {
@@ -1159,7 +1167,7 @@ function renderDetail() {
       ${t.progress?'<span class="hint">'+progressText(t.progress)+' <span class="spin"></span></span>':''}
       <div class="grow">
         ${running?'<button class="btn ghost sm" onclick="cancelTask()">取消任务</button>':''}
-        <span class="hint">${(t.sources||[]).map(esc).join('、')||'-'} · ${relTime(t.created_at)}</span></div>
+        <span class="hint">${t.created_by?esc(t.created_by)+' · ':''}${(t.sources||[]).map(esc).join('、')||'-'} · ${relTime(t.created_at)}</span></div>
     </div>
     ${t.error?'<div class="card-b" style="color:var(--danger);padding-top:0">'+esc(t.error)+'</div>':''}
     <div class="dtabs">${tabs.map(([k,label,badge]) =>
@@ -1242,6 +1250,7 @@ function renderOverview(t) {
     <div class="section-t">任务信息</div>
     <dl class="meta-grid">
       <div><dt>来源</dt><dd>${(t.sources||[]).map(esc).join('、')||'-'}</dd></div>
+      <div><dt>创建人</dt><dd>${esc(t.created_by||'—')}</dd></div>
       <div><dt>项目</dt><dd>${esc(ctx.project||'—')}</dd></div>
       <div><dt>生成模型</dt><dd>${esc(ctx.model||'默认')}</dd></div>
       <div><dt>模板</dt><dd>${esc(ctx.template_id||'—')}</dd></div>
