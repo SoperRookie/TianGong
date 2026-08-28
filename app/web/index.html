@@ -583,7 +583,6 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <div style="display:flex;gap:10px">
       <div style="flex:1"><label class="f">temperature</label><input type="number" id="mdTemp" step="0.1" min="0" max="2"></div>
       <div style="flex:1"><label class="f">max_tokens</label><input type="number" id="mdMaxTok" min="256"></div>
-      <div style="flex:1"><label class="f">超时（秒）</label><input type="number" id="mdTimeout" min="10"></div>
     </div>
     <label class="f">降级链路<span class="hint">（备用模型名，逗号分隔，按顺序尝试）</span></label>
     <input type="text" id="mdFallbacks" placeholder="deepseek-reasoner">
@@ -1711,7 +1710,8 @@ function openModelDlg(name) {
   $('mdName').value = m.name; $('mdProvider').value = m.provider;
   $('mdBaseUrl').value = m.base_url; $('mdModel').value = m.model;
   $('mdKeyEnv').value = m.api_key_env || '';
-  $('mdTemp').value = m.temperature; $('mdMaxTok').value = m.max_tokens; $('mdTimeout').value = m.timeout;
+  $('mdTemp').value = m.temperature; $('mdMaxTok').value = m.max_tokens;
+  window._editingTimeout = m.timeout;  // 超时不在界面配置：编辑沿用原值，新增用默认
   $('mdFallbacks').value = (m.fallbacks||[]).join(', ');
   $('mdVision').checked = !!m.supports_vision;
   $('modelDlg').showModal();
@@ -1723,7 +1723,7 @@ async function saveModelDlg() {
     api_key_env: $('mdKeyEnv').value.trim() || null,
     temperature: parseFloat($('mdTemp').value || '0.3'),
     max_tokens: parseInt($('mdMaxTok').value || '8192', 10),
-    timeout: parseFloat($('mdTimeout').value || '120'),
+    timeout: window._editingTimeout || 120,
     fallbacks: $('mdFallbacks').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean),
     supports_vision: $('mdVision').checked,
   };
