@@ -65,6 +65,7 @@ body { margin:0; font:13.5px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",
 #view-cases .tbl-wrap { flex:1; max-height:none; margin-top:0; border:none; border-radius:0; }
 #view-cases .filters { margin:0; padding:8px 16px; border-top:1px solid var(--line-2); }
 #view-cases .empty { flex:1; display:flex; align-items:center; justify-content:center; }
+#view-cases .mind { flex:1; }
 
 /* ================= 卡片 ================= */
 .card { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); }
@@ -2546,9 +2547,47 @@ async function planUploadAtt(input) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
+/* 只读脑图（测试用例页 / 项目用例库共用）：项目? → 模块 → 用例 → 步骤，点节点跳所属任务编辑 */
+function mindFromRows(rows, rootLabel, withProject) {
+  if (!rows.length) return '<div class="empty">没有符合条件的用例</div>';
+  const stClr = {approved:'var(--s-ok)', rejected:'var(--s-rej)', pending:'var(--s-pend)'};
+  const caseNode = c => {
+    const open = expandedSteps.has(c.uid);
+    return `<li><div class="mlabel mcase" style="border-left:3px solid ${stClr[c.review]||'var(--s-pend)'}"
+        onclick="openTaskFromProject('${c.task_id}','cases')" title="进入所属任务的用例审核在线编辑">
+        <span class="cid">${esc(c.case_id)}</span><span class="hint">v${c.version||1}</span>
+        <span class="prio ${esc(c.priority)}">${esc(c.priority)}</span><span>${esc(c.title)}</span>
+        <button class="ibtn" style="margin-left:auto" title="${open?'收起步骤':'展开步骤'}"
+          onclick="event.stopPropagation();toggleSteps('${esc(c.uid)}')">${open?'▾':'▸'}</button></div>
+      ${open?`<ul>${(c.steps||[]).map((x,i)=>`<li><div class="mlabel mstep"><b>${i+1}.</b> ${esc(x.action)}
+        <div class="hint">→ ${esc(x.expected)}</div></div></li>`).join('')||'<li><div class="mlabel mstep hint">无步骤</div></li>'}</ul>`:''}</li>`;
+  };
+  const moduleTree = cs => {
+    const mods = {};
+    cs.forEach(c => (mods[c.module] = mods[c.module] || []).push(c));
+    return Object.entries(mods).map(([m, list]) => `<li>
+      <div class="mlabel mmod">${esc(m)}<span class="cnt" style="margin-left:6px">${list.length}</span></div>
+      <ul>${list.map(caseNode).join('')}</ul></li>`).join('');
+  };
+  let inner;
+  if (withProject) {
+    const projs = {};
+    rows.forEach(c => (projs[c.project] = projs[c.project] || []).push(c));
+    inner = Object.keys(projs).length > 1
+      ? Object.entries(projs).map(([p, list]) => `<li>
+          <div class="mlabel mmod" style="background:var(--purple-bg);border-color:#e3d6f2">${esc(p)}<span class="cnt" style="margin-left:6px">${list.length}</span></div>
+          <ul>${moduleTree(list)}</ul></li>`).join('')
+      : moduleTree(rows);
+  } else inner = moduleTree(rows);
+  return `<div class="mind"><div class="mroot">
+      <div class="mlabel mrootlab">${esc(rootLabel)}<div class="hint">${rows.length} 条用例</div></div>
+      <ul>${inner}</ul></div>
+    <div class="hint" style="margin-top:6px">只读脑图：点击用例节点进入所属任务的用例审核在线编辑；▸ 展开步骤与预期</div></div>`;
+}
+
 /* ---------- 测试用例视图：全库用例分页浏览（20/50/100/200，默认 20） ---------- */
 const CASE_PAGE_SIZES = [20, 50, 100, 200];
-let acPage = 1, acSize = 20, acProject = '', acModule = '', acPriority = '', acReview = '', acKeyword = '';
+let acPage = 1, acSize = 20, acProject = '', acModule = '', acPriority = '', acReview = '', acKeyword = '', acView = 'table';
 
 function acSet(field, value) {
   if (field === 'acSize') acSize = value;
@@ -2633,14 +2672,19 @@ async function renderAllCases() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
           <input type="text" placeholder="搜索标题/编号/标签…" value="${esc(acKeyword)}"
             oninput="acKeyword=this.value" onchange="acSet('acKeyword', this.value)">
+        </div>
+        <div class="seg">
+          <button class="${acView==='table'?'on':''}" onclick="acView='table';renderAllCases()">表格</button>
+          <button class="${acView==='mind'?'on':''}" onclick="acView='mind';renderAllCases()">脑图</button>
         </div></div></div>
     <div class="card-b">
-      ${data.total ? `<div class="tbl-wrap"><table>
+      ${data.total && acView==='mind' ? mindFromRows(data.cases, acProject || '全部项目', !acProject) + pager : ''}
+      ${data.total && acView!=='mind' ? `<div class="tbl-wrap"><table>
         <thead><tr><th style="width:104px">编号 / 版本</th><th style="width:100px">项目</th><th style="width:80px">模块</th>
         <th>标题</th><th>操作步骤</th><th>预期结果</th><th style="width:110px">标签</th><th style="width:44px">优先级</th><th style="width:80px">生命周期</th>
         <th style="width:90px">最新执行</th><th style="width:70px">执行次数</th><th style="width:80px">创建人</th><th style="width:90px">创建时间</th></tr></thead>
-        <tbody>${rows}</tbody></table></div>${pager}`
-      : '<div class="empty">没有符合条件的用例</div>'}
+        <tbody>${rows}</tbody></table></div>${pager}` : ''}
+      ${data.total ? '' : '<div class="empty">没有符合条件的用例</div>'}
     </div></div>`;
 }
 
@@ -2825,7 +2869,7 @@ async function deleteProject(name) {
   } catch (e) { toast(e.message, 'err'); }
 }
 let curProject = null, projTab = 'overview';
-let _projectsCache = [], _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '';
+let _projectsCache = [], _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
 const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved']};
 
 function crumbForProjects() {
@@ -2996,8 +3040,12 @@ async function projCasesHtml() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
         <input type="text" placeholder="搜索用例…" value="${esc(projQuery)}"
           oninput="projQuery=this.value" onchange="renderProjectWorkspace()">
+      </div>
+      <div class="seg">
+        <button class="${projCaseView==='table'?'on':''}" onclick="projCaseView='table';renderProjectWorkspace()">表格</button>
+        <button class="${projCaseView==='mind'?'on':''}" onclick="projCaseView='mind';renderProjectWorkspace()">脑图</button>
       </div></div>
-    <div class="tbl-wrap" style="max-height:calc(100vh - 320px)"><table>
+    ${projCaseView==='mind' ? mindFromRows(list, curProject, false) : `<div class="tbl-wrap" style="max-height:calc(100vh - 320px)"><table>
       <thead><tr><th style="width:104px">编号 / 版本</th><th style="width:90px">模块</th><th>标题 / 关键词</th>
       <th>操作步骤</th><th>预期结果</th>
       <th style="width:44px">优先级</th><th style="width:96px">生命周期</th><th style="width:130px">执行状态</th>
@@ -3016,7 +3064,7 @@ async function projCasesHtml() {
               <div class="hint">${esc(c.exec.run)}${c.exec.note?` · ${esc(c.exec.note)}`:''}</div>` : '<span class="hint">未执行</span>'}</td>
           <td><span class="cid">${c.task_id}</span></td>
         </tr>`;}).join('') || '<tr><td colspan="9"><div class="empty">当前筛选下无用例</div></td></tr>'}</tbody>
-    </table></div>
+    </table></div>`}
     <div class="hint" style="margin-top:8px">生命周期：AI 生成 → 待审核 → （驳回 → 定点修改 → 再审核）→ 正式（锁定）→ 执行 → 失败复测 / 需求变更新版本回到待审核；点击行进入所属任务处理</div>`;
 }
 
