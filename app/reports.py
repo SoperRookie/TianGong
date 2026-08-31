@@ -79,6 +79,8 @@ def project_cases(records: list[TaskRecord], project: str | None) -> list[dict]:
             rows.append({
                 "task_id": r.task_id, "project": name,
                 "case_id": c.get("case_id"), "uid": uid,
+                "version": int(c.get("version", 1) or 1),
+                "steps": c.get("steps") or [],
                 "module": c.get("module", ""), "title": c.get("title", ""),
                 "priority": c.get("priority", ""), "keywords": c.get("keywords", ""),
                 "review": state.get("status", "pending"),

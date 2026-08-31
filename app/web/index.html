@@ -1778,19 +1778,16 @@ function renderCases(t) {
 
   const rows = visible.map(c => {
     const s = caseState(t, c);
-    const stepsText = (c.steps||[]).map((x,i)=>`${i+1}. ${esc(x.action)}\n   → ${esc(x.expected)}`).join('\n');
-    const long = (c.steps||[]).length > 2;
-    const open = expandedSteps.has(c.uid);
     return `<tr>
       <td style="width:30px"><input type="checkbox" class="cck" data-cid="${esc(c.case_id)}"></td>
-      <td style="width:104px"><span class="cid">${esc(c.case_id)}</span></td>
+      <td style="width:104px"><span class="cid">${esc(c.case_id)}</span><div class="hint">v${c.version||1}</div></td>
       <td style="width:80px">${esc(c.module)}</td>
       <td style="min-width:180px">${esc(c.title)}
         ${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}
         ${editingHint('case', c.uid)}
         ${rejectInfoLine(s)}</td>
       <td style="width:44px"><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
-      <td style="max-width:430px"><div class="stepbox ${long?'long':''} ${open?'open':''}" onclick="toggleSteps('${esc(c.uid)}')">${stepsText}</div></td>
+      ${stepCells(c.uid, c.steps, 230)}
       <td style="width:92px"><span class="st ${s.status}">${cStatusText[s.status]}</span>
         ${s.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${s.reject_count} 次</div>`:''}</td>
       <td style="width:132px"><div class="rowops">
@@ -1820,15 +1817,27 @@ function renderCases(t) {
     ${t.pending_fix&&t.pending_fix.kind==='cases'?renderFixProposals(t.pending_fix):''}
     <div class="tbl-wrap"><table>
       <tr><th><input type="checkbox" class="allck" onclick="document.querySelectorAll('.cck').forEach(c=>c.checked=this.checked)"></th>
-      <th>编号</th><th>模块</th><th>标题 / 关键词</th><th>优先级</th><th>步骤 → 预期</th><th>状态</th><th>操作</th></tr>
-      ${rows || `<tr><td colspan="8"><div class="empty">该筛选下暂无用例</div></td></tr>`}</table></div>
+      <th>编号 / 版本</th><th>模块</th><th>标题 / 关键词</th><th>优先级</th><th>操作步骤</th><th>预期结果</th><th>状态</th><th>操作</th></tr>
+      ${rows || `<tr><td colspan="9"><div class="empty">该筛选下暂无用例</div></td></tr>`}</table></div>
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
     <div class="hint" style="margin-top:10px">通过即锁定退出 AI 修改队列；驳回须填审核意见供 AI 定点修改；人工修改视为定稿直接通过</div>
     ${lastCaseDiff?renderCaseDiff(lastCaseDiff):''}`;
 }
-function toggleSteps(uid) {
-  if (expandedSteps.has(uid)) expandedSteps.delete(uid); else expandedSteps.add(uid);
-  renderDetail();
+function toggleSteps(key) {
+  if (expandedSteps.has(key)) expandedSteps.delete(key); else expandedSteps.add(key);
+  if (currentView === 'plans') renderPlanDetail();
+  else if (currentView === 'cases') renderAllCases();
+  else if (currentView === 'projects') renderProjectWorkspace();
+  else renderDetail();
+}
+/* 步骤/预期两列展示（全站用例表统一）：同一把展开开关，两列同步展开收起 */
+function stepCells(key, steps, width) {
+  const acts = (steps||[]).map((x,i)=>`${i+1}. ${esc(x.action)}`).join('\n');
+  const exps = (steps||[]).map((x,i)=>`${i+1}. ${esc(x.expected)}`).join('\n');
+  const long = (steps||[]).length > 2;
+  const open = expandedSteps.has(key);
+  const box = txt => `<div class="stepbox ${long?'long':''} ${open?'open':''}" onclick="event.stopPropagation();toggleSteps('${key}')">${txt}</div>`;
+  return `<td style="max-width:${width||240}px">${box(acts)}</td><td style="max-width:${width||240}px">${box(exps)}</td>`;
 }
 function renderCaseDiff(d) {
   return `<div class="section-t">AI 定点修改结果</div>${(d.fixes||[]).map(f=>
@@ -2109,15 +2118,13 @@ async function renderPlanDetail() {
   const rows = p.items.map(it => {
     const r = results[it.item_id];
     const c = it.snapshot;
-    const stepsText = (c.steps || []).map((x, i) => `${i+1}. ${esc(x.action)}\n   → ${esc(x.expected)}`).join('\n');
-    const long = (c.steps || []).length > 2, open = expandedSteps.has(it.item_id);
     return `<tr>
       <td style="width:30px">${editable ? `<input type="checkbox" class="plck" data-iid="${it.item_id}">` : ''}</td>
       <td style="width:104px"><span class="cid">${esc(it.case_id)}</span><div class="hint">v${it.version_no}</div></td>
       <td style="min-width:170px">${esc(it.title)}${c.keywords ? `<div class="kw">${esc(c.keywords)}</div>` : ''}</td>
       <td style="width:80px">${esc(it.module)}</td>
       <td style="width:44px"><span class="prio ${esc(it.priority)}">${esc(it.priority)}</span></td>
-      <td style="max-width:360px"><div class="stepbox ${long?'long':''} ${open?'open':''}" onclick="toggleSteps('${it.item_id}')">${stepsText}</div></td>
+      ${stepCells(it.item_id, c.steps, 200)}
       <td style="width:110px">${it.assignee ? `<b>${esc(it.assignee)}</b>` : '<span class="hint">未分配</span>'}
         ${(it.assign_log || []).length > 1 ? `<div class="hint" title="${esc(it.assign_log.map(x => `${x.prev || '—'} → ${x.assignee}（${x.by}）`).join('\n'))}">已改派 ${it.assign_log.length - 1} 次</div>` : ''}</td>
       <td style="width:118px">${r ? `<span class="st ${EXEC_CLS[r.status]}">${EXEC_LABEL[r.status]}</span>
@@ -2145,7 +2152,7 @@ async function renderPlanDetail() {
       <button class="btn sm" onclick="openPlanCaseDlg()">＋ 加入用例</button>` : ''}
     </div></div>
     <div class="card-b">${p.items.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
-      <tr><th></th><th>编号 / 版本</th><th>标题</th><th>模块</th><th>优先级</th><th>步骤 → 预期</th><th>执行人</th><th>执行状态</th><th>操作</th></tr>
+      <tr><th></th><th>编号 / 版本</th><th>标题</th><th>模块</th><th>优先级</th><th>操作步骤</th><th>预期结果</th><th>执行人</th><th>执行状态</th><th>操作</th></tr>
       ${rows}</table></div>` : '<div class="empty">尚未加入用例。点击「＋ 加入用例」从本项目已通过的正式用例中挑选</div>'}</div></div>`;
 
   const atts = run ? (run.attachments || []) : [];
@@ -2220,10 +2227,10 @@ async function pcLoadCases() {
   $('pcModule').innerHTML = '<option value="">全部模块</option>'
     + data.modules.map(m => `<option value="${esc(m)}" ${m===cur?'selected':''}>${esc(m)}</option>`).join('');
   $('pcList').innerHTML = data.cases.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
-    <tr><th style="width:26px"></th><th style="width:110px">编号</th><th>标题</th><th style="width:90px">模块</th><th style="width:50px">优先级</th><th style="width:70px">状态</th></tr>
+    <tr><th style="width:26px"></th><th style="width:110px">编号 / 版本</th><th>标题</th><th style="width:90px">模块</th><th style="width:50px">优先级</th><th style="width:70px">状态</th></tr>
     ${data.cases.map(c => `<tr>
       <td>${c.added ? '' : `<input type="checkbox" class="pcck" data-uid="${esc(c.uid)}">`}</td>
-      <td><span class="cid">${esc(c.case_id)}</span></td>
+      <td><span class="cid">${esc(c.case_id)}</span><div class="hint">v${c.version||1}</div></td>
       <td>${esc(c.title)}${c.keywords ? `<div class="kw">${esc(c.keywords)}</div>` : ''}</td>
       <td>${esc(c.module)}</td>
       <td><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
@@ -2396,10 +2403,11 @@ async function renderAllCases() {
   const rows = data.cases.map(c => {
     const [label, cls] = REVIEW_STAGE[c.review] || REVIEW_STAGE.pending;
     return `<tr class="rowlink" onclick="openTaskFromProject('${c.task_id}','cases')">
-      <td><span class="cid">${esc(c.case_id)}</span></td>
+      <td><span class="cid">${esc(c.case_id)}</span><div class="hint">v${c.version||1}</div></td>
       <td>${esc(c.project)}</td>
       <td>${esc(c.module)}</td>
       <td>${esc(c.title)}</td>
+      ${stepCells(c.uid, c.steps, 220)}
       <td>${c.keywords?`<span class="kw">${esc(c.keywords)}</span>`:'<span class="hint">—</span>'}</td>
       <td><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
       <td><span class="st ${cls}">${label}</span></td>
@@ -2452,8 +2460,8 @@ async function renderAllCases() {
         </div></div></div>
     <div class="card-b">
       ${data.total ? `<div class="tbl-wrap"><table>
-        <thead><tr><th style="width:104px">编号</th><th style="width:110px">项目</th><th style="width:90px">模块</th>
-        <th>标题</th><th style="width:130px">标签</th><th style="width:44px">优先级</th><th style="width:80px">生命周期</th>
+        <thead><tr><th style="width:104px">编号 / 版本</th><th style="width:100px">项目</th><th style="width:80px">模块</th>
+        <th>标题</th><th>操作步骤</th><th>预期结果</th><th style="width:110px">标签</th><th style="width:44px">优先级</th><th style="width:80px">生命周期</th>
         <th style="width:90px">最新执行</th><th style="width:80px">创建人</th><th style="width:90px">创建时间</th></tr></thead>
         <tbody>${rows}</tbody></table></div>${pager}`
       : '<div class="empty">没有符合条件的用例</div>'}
@@ -2814,22 +2822,24 @@ async function projCasesHtml() {
           oninput="projQuery=this.value" onchange="renderProjectWorkspace()">
       </div></div>
     <div class="tbl-wrap" style="max-height:calc(100vh - 320px)"><table>
-      <thead><tr><th style="width:104px">编号</th><th style="width:90px">模块</th><th>标题 / 关键词</th>
+      <thead><tr><th style="width:104px">编号 / 版本</th><th style="width:90px">模块</th><th>标题 / 关键词</th>
+      <th>操作步骤</th><th>预期结果</th>
       <th style="width:44px">优先级</th><th style="width:96px">生命周期</th><th style="width:130px">执行状态</th>
       <th style="width:120px">所属任务</th></tr></thead>
       <tbody>${list.map(c => {
         const [label, cls] = REVIEW_STAGE[c.review] || REVIEW_STAGE.pending;
         return `<tr class="rowlink" onclick="openTaskFromProject('${c.task_id}','cases')">
-          <td><span class="cid">${esc(c.case_id)}</span></td>
+          <td><span class="cid">${esc(c.case_id)}</span><div class="hint">v${c.version||1}</div></td>
           <td>${esc(c.module)}</td>
           <td>${esc(c.title)}${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}
             ${c.review_comment?`<div class="hint" style="color:var(--danger)">意见：${esc(c.review_comment)}</div>`:''}</td>
+          ${stepCells(c.uid, c.steps, 210)}
           <td><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
           <td><span class="st ${cls}">${label}${c.locked?' 🔒':''}</span></td>
           <td>${c.exec ? `<span class="st ${EXEC_CLS[c.exec.status]}">${EXEC_LABEL[c.exec.status]}</span>
               <div class="hint">${esc(c.exec.run)}${c.exec.note?` · ${esc(c.exec.note)}`:''}</div>` : '<span class="hint">未执行</span>'}</td>
           <td><span class="cid">${c.task_id}</span></td>
-        </tr>`;}).join('') || '<tr><td colspan="7"><div class="empty">当前筛选下无用例</div></td></tr>'}</tbody>
+        </tr>`;}).join('') || '<tr><td colspan="9"><div class="empty">当前筛选下无用例</div></td></tr>'}</tbody>
     </table></div>
     <div class="hint" style="margin-top:8px">生命周期：AI 生成 → 待审核 → （驳回 → 定点修改 → 再审核）→ 正式（锁定）→ 执行 → 失败复测 / 需求变更新版本回到待审核；点击行进入所属任务处理</div>`;
 }

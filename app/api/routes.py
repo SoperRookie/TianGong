@@ -2381,6 +2381,7 @@ async def plan_candidates(
             continue
         cases.append({
             "uid": str(c.get("uid") or ""), "case_id": c.get("case_id", ""),
+            "version": int(c.get("version", 1) or 1),
             "title": c.get("title", ""), "module": c.get("module", ""),
             "priority": c.get("priority", ""), "keywords": c.get("keywords", ""),
             "added": (task_id, str(c.get("uid") or "")) in added,
