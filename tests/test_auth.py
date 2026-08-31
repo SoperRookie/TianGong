@@ -71,6 +71,15 @@ async def test_用户管理与权限(client, auth_on):
     assert (await client.get("/api/v1/tasks", headers=member_headers)).status_code == 200
     assert (await client.get("/api/v1/auth/users", headers=member_headers)).status_code == 403
     assert (await client.get("/api/v1/models/config", headers=member_headers)).status_code == 403
+    # 沉淀与反哺（学习规则/记忆维护）仅管理员；记忆读取保持开放（任务抽屉默认回填要用）
+    assert (await client.get("/api/v1/learning/rules", headers=member_headers)).status_code == 403
+    assert (await client.post("/api/v1/learning/analyze", headers=member_headers,
+                              json={})).status_code == 403
+    assert (await client.post("/api/v1/memories", headers=member_headers,
+                              json={"content": "x", "scope": "user"})).status_code == 403
+    assert (await client.delete("/api/v1/memories", headers=member_headers)).status_code == 403
+    assert (await client.get("/api/v1/memories", headers=member_headers)).status_code == 200
+    assert (await client.get("/api/v1/learning/rules", headers=headers)).status_code == 200
 
     # 不能删除自己 / 删除后会话失效
     assert (await client.delete("/api/v1/auth/users/admin", headers=headers)).status_code == 400

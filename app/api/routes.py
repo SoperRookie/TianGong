@@ -662,7 +662,8 @@ async def list_memories(
 
 @router.post("/api/v1/memories")
 async def create_memory(request: Request, body: MemoryBody) -> dict:
-    """手工维护记忆：用户偏好（scope=user）或项目记忆（scope=project + 项目名）。"""
+    """手工维护记忆（仅管理员；member 的记忆由使用习惯自动沉淀）。"""
+    _require_admin(request)
     try:
         entry = request.app.state.memory.add(body.content, scope=body.scope, project=body.project)
     except ValueError as e:
@@ -672,7 +673,8 @@ async def create_memory(request: Request, body: MemoryBody) -> dict:
 
 @router.put("/api/v1/memories/{memory_id}")
 async def update_memory(request: Request, memory_id: str, body: MemoryUpdateBody) -> dict:
-    """记忆纠错（F-8-6）：直接改写记忆内容。"""
+    """记忆纠错（F-8-6，仅管理员）：直接改写记忆内容。"""
+    _require_admin(request)
     try:
         entry = request.app.state.memory.update(memory_id, body.content)
     except ValueError as e:
@@ -684,6 +686,7 @@ async def update_memory(request: Request, memory_id: str, body: MemoryUpdateBody
 
 @router.delete("/api/v1/memories/{memory_id}")
 async def delete_memory(request: Request, memory_id: str) -> dict:
+    _require_admin(request)
     if not request.app.state.memory.delete(memory_id):
         raise HTTPException(status_code=404, detail=f"记忆不存在: {memory_id}")
     return {"deleted": memory_id}
@@ -693,7 +696,8 @@ async def delete_memory(request: Request, memory_id: str) -> dict:
 async def clear_memories(
     request: Request, scope: str | None = None, project: str | None = None
 ) -> dict:
-    """一键清空（F-8-6），可按维度/项目过滤。"""
+    """一键清空（F-8-6，仅管理员），可按维度/项目过滤。"""
+    _require_admin(request)
     return {"cleared": request.app.state.memory.clear(scope, project)}
 
 
@@ -2764,6 +2768,7 @@ async def reports_summary(
 
 @router.get("/api/v1/learning/rules")
 async def list_rules(request: Request, status: str | None = None, project: str | None = None) -> dict:
+    _require_admin(request)  # 学习规则页仅管理员可见；规则注入生成走服务端内部逻辑，不受影响
     return {"rules": [r.model_dump() for r in request.app.state.rules.list(status, project)]}
 
 
@@ -2774,7 +2779,8 @@ class LearningAnalyzeBody(BaseModel):
 
 @router.post("/api/v1/learning/analyze")
 async def analyze_learning(request: Request, body: LearningAnalyzeBody | None = None) -> dict:
-    """分析人工修改留痕，提炼规则候选（需求三十八）：候选须人工确认后才生效。"""
+    """分析人工修改留痕，提炼规则候选（需求三十八，仅管理员）：候选须人工确认后才生效。"""
+    _require_admin(request)
     from app.agents.quality import run_learning_analysis
     from app.learning import collect_samples
 
@@ -2804,6 +2810,7 @@ class RuleConfirmBody(BaseModel):
 @router.post("/api/v1/learning/rules/{rule_id}/confirm")
 async def confirm_rule(request: Request, rule_id: str, body: RuleConfirmBody) -> dict:
     """负责人确认候选生效（需求三十八：加入项目规则/团队规则），并指定适用范围（需求三十九）。"""
+    _require_admin(request)
     try:
         rule = request.app.state.rules.confirm(rule_id, body.scope, body.project, body.module)
     except KeyError as e:
@@ -2815,6 +2822,7 @@ async def confirm_rule(request: Request, rule_id: str, body: RuleConfirmBody) ->
 
 @router.post("/api/v1/learning/rules/{rule_id}/ignore")
 async def ignore_rule(request: Request, rule_id: str) -> dict:
+    _require_admin(request)
     try:
         return request.app.state.rules.ignore(rule_id).model_dump()
     except KeyError as e:
@@ -2827,6 +2835,7 @@ class RuleUpdateBody(BaseModel):
 
 @router.put("/api/v1/learning/rules/{rule_id}")
 async def update_rule(request: Request, rule_id: str, body: RuleUpdateBody) -> dict:
+    _require_admin(request)
     try:
         return request.app.state.rules.update(rule_id, body.content).model_dump()
     except KeyError as e:
@@ -2837,6 +2846,7 @@ async def update_rule(request: Request, rule_id: str, body: RuleUpdateBody) -> d
 
 @router.delete("/api/v1/learning/rules/{rule_id}")
 async def delete_rule(request: Request, rule_id: str) -> dict:
+    _require_admin(request)
     if not request.app.state.rules.delete(rule_id):
         raise HTTPException(status_code=404, detail=f"规则不存在: {rule_id}")
     return {"deleted": rule_id}
