@@ -62,6 +62,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="TestCase Agent", version="0.1.0", lifespan=lifespan)
 app.include_router(router)
 
+# 前端第三方库本地托管（kity / kityminder-core，MeterSphere 同款脑图内核）：内网部署无外部依赖
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+app.mount("/vendor", StaticFiles(directory=BASE_DIR / "app" / "web" / "vendor"), name="vendor")
+
 # 无需登录即可访问：登录接口、健康检查（Web 首页为静态壳，登录态由前端接口驱动）
 _PUBLIC_API_PATHS = {"/api/v1/auth/login", "/health"}
 

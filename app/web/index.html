@@ -144,28 +144,13 @@ input[type=checkbox] { accent-color:var(--primary); width:14px; height:14px; }
 
 /* ================= 表格 ================= */
 .tbl-wrap { overflow:auto; border:1px solid var(--line); border-radius:var(--radius-s); margin-top:10px; max-height:70vh; }
-/* 用例脑图视图（XMind 风格横向树，纯 CSS 连线，无外部依赖） */
-.mind { overflow:auto; padding:14px 8px 8px; }
-.mroot { display:flex; align-items:center; width:max-content; }
-.mind ul { display:flex; flex-direction:column; justify-content:center; padding:0; margin:0; }
-.mind li { display:flex; align-items:center; position:relative; padding:3px 0 3px 26px; list-style:none; }
-.mind li::before { content:""; position:absolute; left:0; top:50%; width:26px; border-top:1.5px solid var(--line); }
-.mind li::after { content:""; position:absolute; left:0; top:0; bottom:0; border-left:1.5px solid var(--line); }
-.mind li:first-child::after { top:50%; }
-.mind li:last-child::after { bottom:50%; }
-.mind li:only-child::after { display:none; }
-.mind li > ul, .mroot > ul { margin-left:20px; position:relative; }
-.mind li > ul::before, .mroot > ul::before { content:""; position:absolute; left:-20px; top:50%; width:20px; border-top:1.5px solid var(--line); }
-.mlabel { border:1px solid var(--line); border-radius:8px; padding:5px 11px; background:var(--card);
-  font-size:12.5px; flex:none; max-width:420px; box-shadow:var(--shadow); }
-.mrootlab { background:var(--primary); color:#fff; border-color:var(--primary-600); font-weight:650; }
-.mrootlab .hint { color:#cdd9f6; }
-.mmod { background:var(--primary-50); border-color:var(--primary-100); font-weight:650; }
-.mcase { cursor:pointer; display:flex; align-items:center; gap:7px; }
-.mcase:hover { border-color:var(--primary); box-shadow:0 0 0 1px var(--primary-100); }
-.mcase .mops { display:none; gap:2px; margin-left:2px; }
-.mcase:hover .mops { display:inline-flex; }
-.mstep { background:var(--well); font-size:12px; color:var(--ink-2); max-width:460px; }
+/* 用例脑图（MeterSphere 同款内核：kity + kityminder-core，SVG 渲染） */
+.minder-box { position:relative; height:calc(100vh - 330px); min-height:420px; border:1px solid var(--line);
+  border-radius:var(--radius-s); overflow:hidden; background:#fafbfc; margin-top:10px; }
+.minder-box .km-view { width:100%; height:100%; }
+.minder-bar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+.minder-bar .sep { width:1px; height:18px; background:var(--line); margin:0 4px; }
+#view-cases .minder-box { flex:1; height:auto; min-height:0; }
 /* 概览：生命周期进度带 / 下一步行动 / 双栏信息区 / 质量提示 */
 .pipe { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:12px; }
 .pipe .pstep { border:1px solid var(--line); border-radius:var(--radius-s); padding:9px 12px;
@@ -382,6 +367,9 @@ a { color:var(--primary); text-decoration:none; }
 a:hover { text-decoration:underline; }
 code { font-family:var(--mono); font-size:12px; background:var(--line-2); border-radius:4px; padding:1px 6px; }
 </style>
+<link rel="stylesheet" href="/vendor/kityminder.core.css">
+<script src="/vendor/kity.min.js"></script>
+<script src="/vendor/kityminder.core.min.js"></script>
 </head>
 <body>
 
@@ -1966,38 +1954,199 @@ function renderCases(t) {
     ${lastCaseDiff?renderCaseDiff(lastCaseDiff):''}`;
 }
 
-/* 用例脑图视图（XMind 风格）：来源 → 模块 → 用例 → 步骤；节点在线编辑/通过/驳回 */
+/* ==================== 用例脑图（kity + kityminder-core，MeterSphere 同款内核） ==================== */
+let _minder = null;
+
+function minderCaseNode(c, status) {
+  const res = [c.priority || 'P?'];
+  if (status) res.push({approved:'已通过', rejected:'已驳回', pending:'待审核'}[status] || '待审核');
+  return {
+    data: {text: c.title || c.case_id, uid: c.uid, kind: 'case', caseId: c.case_id,
+           taskId: c.task_id || null, resource: res, expandState: 'collapse'},
+    children: [
+      ...(c.precondition ? [{data: {text: c.precondition, kind: 'pre', resource: ['前置条件']}}] : []),
+      ...(c.steps || []).map(x => ({data: {text: x.action, kind: 'step'},
+        children: (x.expected ? [{data: {text: x.expected, kind: 'expected', resource: ['预期']}}] : [])})),
+    ],
+  };
+}
+
+function buildMinderJson(rootText, rows, {withProject = false, stateOf = null} = {}) {
+  const group = (arr, key) => arr.reduce((m, c) => ((m[c[key] || ''] = m[c[key] || ''] || []).push(c), m), {});
+  const moduleNodes = list => Object.entries(group(list, 'module')).map(([m, cs]) => ({
+    data: {text: m || '（未分模块）', kind: 'module'},
+    children: cs.map(c => minderCaseNode(c, stateOf ? stateOf(c) : c.review)),
+  }));
+  let children;
+  if (withProject) {
+    const pj = group(rows, 'project');
+    children = Object.keys(pj).length > 1
+      ? Object.entries(pj).map(([p, cs]) => ({data: {text: p, kind: 'project'}, children: moduleNodes(cs)}))
+      : moduleNodes(rows);
+  } else children = moduleNodes(rows);
+  return {root: {data: {text: `${rootText}（${rows.length} 条）`, kind: 'root'}, children},
+          template: 'right', theme: 'fresh-blue'};
+}
+
+function mountMinder(elId, json, {readonly = true} = {}) {
+  const el = $(elId);
+  if (!el) return;
+  if (typeof kityminder === 'undefined') {
+    el.innerHTML = '<div class="empty">脑图内核未加载（/vendor/kity*.js），请刷新页面</div>';
+    return;
+  }
+  el.innerHTML = '';
+  const minder = new kityminder.Minder({renderTo: el});
+  minder.importJson(json);
+  // 首次导入时文本测量尚未就绪会导致节点堆叠：布局收敛前用遮罩盖住，多轮 refresh→layout 后揭开
+  const veil = document.createElement('div');
+  veil.style.cssText = 'position:absolute;inset:0;background:#fafbfc;display:flex;align-items:center;justify-content:center;color:#8b95a5;font-size:13px;z-index:5';
+  veil.textContent = '脑图布局中…';
+  el.style.position = 'relative';
+  el.appendChild(veil);
+  (async () => {
+    await new Promise(r => setTimeout(r, 80));
+    for (let i = 0; i < 4; i++) {
+      try { minder.refresh(); } catch (e) {}
+      await new Promise(r => setTimeout(r, 340));
+      try { minder.layout(); } catch (e) {}
+      await new Promise(r => setTimeout(r, 320));
+    }
+    try { minder.execCommand('camera', minder.getRoot(), 100); } catch (e) {}
+    veil.remove();
+  })();
+  if (readonly) {
+    minder.on('dblclick', () => {
+      const n = minder.getSelectedNode();
+      const tid = n && n.getData('taskId');
+      if (tid) openTaskFromProject(tid, 'cases');
+    });
+  } else {
+    minder.on('dblclick', () => mEditText());
+  }
+  try { minder.execCommand('camera', minder.getRoot(), 100); } catch (e) {}
+  _minder = minder;
+}
+
+/* 可编辑脑图（任务详情 · 用例审核）：工具栏命令 + 保存回写既有评审接口 */
 function renderCaseMind(t, visible) {
   if (!visible.length) return '<div class="empty">该筛选下暂无用例</div>';
-  const mods = {};
-  visible.forEach(c => (mods[c.module] = mods[c.module] || []).push(c));
-  const stClr = {approved:'var(--s-ok)', rejected:'var(--s-rej)', pending:'var(--s-pend)'};
-  const caseNode = c => {
-    const s = caseState(t, c);
-    const open = expandedSteps.has(c.uid);
-    return `<li><div class="mlabel mcase" style="border-left:3px solid ${stClr[s.status]||'var(--s-pend)'}"
-        onclick="openEdit('${esc(c.case_id)}')" title="点击在线编辑（保存即人工定稿通过并记版本）">
-        <span class="cid">${esc(c.case_id)}</span><span class="hint">v${c.version||1}</span>
-        <span class="prio ${esc(c.priority)}">${esc(c.priority)}</span>
-        <span>${esc(c.title)}</span>
-        <span class="mops">
-          <button class="ibtn ok" title="通过（锁定）" onclick="event.stopPropagation();caseAct('${esc(c.case_id)}','approve')">${IC.check}</button>
-          <button class="ibtn bad" title="驳回" onclick="event.stopPropagation();caseReject('${esc(c.case_id)}')">${IC.x}</button>
-          <button class="ibtn" title="版本历史" onclick="event.stopPropagation();openVersions('case','${esc(c.uid)}','${esc(c.case_id)}')">${IC.clock}</button>
-        </span>
-        <button class="ibtn" style="margin-left:auto" title="${open?'收起步骤':'展开步骤'}"
-          onclick="event.stopPropagation();toggleSteps('${esc(c.uid)}')">${open?'▾':'▸'}</button></div>
-      ${open ? `<ul>${(c.steps||[]).map((x,i)=>`<li><div class="mlabel mstep"><b>${i+1}.</b> ${esc(x.action)}
-        <div class="hint">→ ${esc(x.expected)}</div></div></li>`).join('') || '<li><div class="mlabel mstep hint">无步骤</div></li>'}</ul>` : ''}
-    </li>`;
+  const json = buildMinderJson((t.sources||[])[0] || t.task_id, visible,
+    {stateOf: c => caseState(t, c).status});
+  setTimeout(() => mountMinder('caseMinder', json, {readonly: false}));
+  return `<div class="minder-bar">
+      <button class="btn ghost sm" onclick="mEditText()">编辑文本</button>
+      <button class="btn ghost sm" onclick="mAddChild()">＋ 子节点</button>
+      <button class="btn ghost sm" onclick="mAddSibling()">＋ 同级步骤</button>
+      <button class="btn ghost sm" onclick="mRemove()">删除节点</button>
+      <span class="sep"></span>
+      ${['P0','P1','P2','P3'].map(p=>`<button class="btn ghost sm" onclick="mPrio('${p}')">${p}</button>`).join('')}
+      <span class="sep"></span>
+      <button class="btn ghost sm" onclick="mZoom(1)">放大</button>
+      <button class="btn ghost sm" onclick="mZoom(-1)">缩小</button>
+      <button class="btn ghost sm" onclick="mExpand()">展开全部</button>
+      <span style="margin-left:auto"></span>
+      <button class="btn sm" onclick="mSave()">保存脑图修改</button>
+    </div>
+    <div class="minder-box" id="caseMinder"></div>
+    <div class="hint" style="margin-top:8px">结构：模块 → 用例（优先级/状态标签）→ 前置条件 / 步骤 → 预期。双击或「编辑文本」改内容，选中用例设优先级；
+      保存时逐条走乐观锁并记人工版本（定稿通过）。用例/模块的新增与删除请在表格视图操作（人工新增随 M4b 交付）</div>`;
+}
+
+function mNode() {
+  const n = _minder && _minder.getSelectedNode();
+  if (!n) { toast('请先选中一个节点', 'warn'); return null; }
+  return n;
+}
+async function mEditText() {
+  const n = mNode(); if (!n) return;
+  const kind = n.getData('kind');
+  if (kind === 'root' || kind === 'project' || !kind) return toast('该节点不可编辑', 'warn');
+  if (kind === 'module') return toast('模块名跟随用例，请在表格视图编辑用例的所属模块', 'warn');
+  const label = {case:'用例标题', pre:'前置条件', step:'步骤动作', expected:'预期结果'}[kind] || '文本';
+  const v = await askInput('编辑' + label, label, n.getText());
+  if (!v) return;
+  _minder.select(n, true);
+  _minder.execCommand('text', v);
+}
+function mAddChild() {
+  const n = mNode(); if (!n) return;
+  const kind = n.getData('kind');
+  if (kind === 'case') {
+    _minder.execCommand('AppendChildNode', '新步骤');
+    const c = _minder.getSelectedNode(); if (c) c.setData('kind', 'step');
+  } else if (kind === 'step') {
+    if ((n.getChildren() || []).length) return toast('该步骤已有预期结果节点', 'warn');
+    _minder.execCommand('AppendChildNode', '预期结果');
+    const c = _minder.getSelectedNode();
+    if (c) { c.setData('kind', 'expected'); c.setData('resource', ['预期']); _minder.refresh(); }
+  } else toast('只能在用例下加步骤、步骤下加预期', 'warn');
+}
+function mAddSibling() {
+  const n = mNode(); if (!n) return;
+  if (!['step','pre'].includes(n.getData('kind') || '')) return toast('只支持给步骤/前置添加同级步骤', 'warn');
+  _minder.execCommand('AppendSiblingNode', '新步骤');
+  const c = _minder.getSelectedNode(); if (c) c.setData('kind', 'step');
+}
+function mRemove() {
+  const n = mNode(); if (!n) return;
+  if (!['pre','step','expected'].includes(n.getData('kind') || ''))
+    return toast('用例/模块的删除请在表格视图操作（落回收站可恢复）', 'warn');
+  _minder.execCommand('RemoveNode');
+}
+function mPrio(p) {
+  const n = mNode(); if (!n) return;
+  if (n.getData('kind') !== 'case') return toast('优先级只能设在用例节点', 'warn');
+  const res = (n.getData('resource') || []).filter(x => !/^P\d$/.test(x));
+  res.unshift(p);
+  _minder.select(n, true);
+  _minder.execCommand('resource', res);
+}
+function mZoom(d) { try { _minder.execCommand(d > 0 ? 'zoomIn' : 'zoomOut'); } catch (e) {} }
+function mExpand() {
+  try { _minder.execCommand('ExpandToLevel', 9999); setTimeout(() => { _minder.refresh(); _minder.layout(); }, 60); } catch (e) {}
+}
+
+async function mSave() {
+  if (!_minder || !currentTask) return;
+  const t = currentTask;
+  const byUid = {};
+  (t.result.cases || []).forEach(c => byUid[c.uid] = c);
+  const items = [], skipped = [];
+  const walk = node => {
+    const d = node.data || {};
+    if (d.kind === 'case' && d.uid && byUid[d.uid]) {
+      const orig = byUid[d.uid];
+      let precondition = '';
+      const steps = [];
+      (node.children || []).forEach(ch => {
+        const cd = ch.data || {};
+        if (cd.kind === 'pre') { precondition = cd.text || ''; return; }
+        if (cd.kind === 'expected') return;
+        steps.push({action: cd.text || '',
+                    expected: (((ch.children || [])[0] || {}).data || {}).text || ''});
+      });
+      if (!steps.length) { skipped.push(orig.case_id + '（步骤为空）'); return; }
+      const prio = (d.resource || []).find(x => /^P\d$/.test(x)) || orig.priority;
+      const updated = {...orig, title: d.text || orig.title, priority: prio, precondition, steps};
+      const norm = c => JSON.stringify([c.title, c.priority, c.precondition,
+        (c.steps||[]).map(s => [s.action, s.expected])]);
+      if (norm(updated) !== norm(orig))
+        items.push({case_id: orig.case_id, action: 'modify', case: updated,
+                    base_version: orig.version, feedback: '脑图编辑'});
+    }
+    (node.children || []).forEach(walk);
   };
-  return `<div class="mind"><div class="mroot">
-      <div class="mlabel mrootlab">${esc((t.sources||[])[0]||t.task_id)}<div class="hint">${visible.length} 条用例</div></div>
-      <ul>${Object.entries(mods).map(([m, cs]) => `<li>
-        <div class="mlabel mmod">${esc(m)}<span class="cnt" style="margin-left:6px">${cs.length}</span></div>
-        <ul>${cs.map(caseNode).join('')}</ul></li>`).join('')}</ul>
-    </div></div>
-    <div class="hint">脑图与表格共享上方筛选；点击用例节点在线编辑，悬停节点可 通过 / 驳回 / 查版本，▸ 展开步骤与预期</div>`;
+  walk(_minder.exportJson().root);
+  if (!items.length)
+    return toast(skipped.length ? `无可保存改动（跳过 ${skipped.join('、')}）` : '脑图与当前用例一致，无改动');
+  if (!await uiConfirm('保存脑图修改',
+    `${items.length} 条用例将按脑图内容更新（人工定稿通过并记版本）${skipped.length ? `；跳过：${skipped.join('、')}` : ''}`)) return;
+  try {
+    await jpost(`/api/v1/tasks/${t.task_id}/review`, {items});
+    toast(`已保存 ${items.length} 条用例修改`, 'ok');
+    await openTask(t.task_id, true);
+  } catch (e) { toast('保存失败：' + e.message, 'err'); }
 }
 function toggleSteps(key) {
   if (expandedSteps.has(key)) expandedSteps.delete(key); else expandedSteps.add(key);
@@ -2547,42 +2696,15 @@ async function planUploadAtt(input) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-/* 只读脑图（测试用例页 / 项目用例库共用）：项目? → 模块 → 用例 → 步骤，点节点跳所属任务编辑 */
+/* 只读脑图（测试用例页 / 项目用例库共用）：kityminder 渲染，双击用例节点跳所属任务编辑 */
+let _mindSeq = 0;
 function mindFromRows(rows, rootLabel, withProject) {
   if (!rows.length) return '<div class="empty">没有符合条件的用例</div>';
-  const stClr = {approved:'var(--s-ok)', rejected:'var(--s-rej)', pending:'var(--s-pend)'};
-  const caseNode = c => {
-    const open = expandedSteps.has(c.uid);
-    return `<li><div class="mlabel mcase" style="border-left:3px solid ${stClr[c.review]||'var(--s-pend)'}"
-        onclick="openTaskFromProject('${c.task_id}','cases')" title="进入所属任务的用例审核在线编辑">
-        <span class="cid">${esc(c.case_id)}</span><span class="hint">v${c.version||1}</span>
-        <span class="prio ${esc(c.priority)}">${esc(c.priority)}</span><span>${esc(c.title)}</span>
-        <button class="ibtn" style="margin-left:auto" title="${open?'收起步骤':'展开步骤'}"
-          onclick="event.stopPropagation();toggleSteps('${esc(c.uid)}')">${open?'▾':'▸'}</button></div>
-      ${open?`<ul>${(c.steps||[]).map((x,i)=>`<li><div class="mlabel mstep"><b>${i+1}.</b> ${esc(x.action)}
-        <div class="hint">→ ${esc(x.expected)}</div></div></li>`).join('')||'<li><div class="mlabel mstep hint">无步骤</div></li>'}</ul>`:''}</li>`;
-  };
-  const moduleTree = cs => {
-    const mods = {};
-    cs.forEach(c => (mods[c.module] = mods[c.module] || []).push(c));
-    return Object.entries(mods).map(([m, list]) => `<li>
-      <div class="mlabel mmod">${esc(m)}<span class="cnt" style="margin-left:6px">${list.length}</span></div>
-      <ul>${list.map(caseNode).join('')}</ul></li>`).join('');
-  };
-  let inner;
-  if (withProject) {
-    const projs = {};
-    rows.forEach(c => (projs[c.project] = projs[c.project] || []).push(c));
-    inner = Object.keys(projs).length > 1
-      ? Object.entries(projs).map(([p, list]) => `<li>
-          <div class="mlabel mmod" style="background:var(--purple-bg);border-color:#e3d6f2">${esc(p)}<span class="cnt" style="margin-left:6px">${list.length}</span></div>
-          <ul>${moduleTree(list)}</ul></li>`).join('')
-      : moduleTree(rows);
-  } else inner = moduleTree(rows);
-  return `<div class="mind"><div class="mroot">
-      <div class="mlabel mrootlab">${esc(rootLabel)}<div class="hint">${rows.length} 条用例</div></div>
-      <ul>${inner}</ul></div>
-    <div class="hint" style="margin-top:6px">只读脑图：点击用例节点进入所属任务的用例审核在线编辑；▸ 展开步骤与预期</div></div>`;
+  const id = 'roMinder' + (++_mindSeq);
+  const json = buildMinderJson(rootLabel, rows, {withProject});
+  setTimeout(() => mountMinder(id, json, {readonly: true}));
+  return `<div class="minder-box" id="${id}" style="margin-top:4px"></div>
+    <div class="hint" style="margin-top:6px">只读脑图（MeterSphere 同款内核）：双击用例节点进入所属任务在线编辑；滚轮缩放、拖拽画布、节点可展开收起</div>`;
 }
 
 /* ---------- 测试用例视图：全库用例分页浏览（20/50/100/200，默认 20） ---------- */
