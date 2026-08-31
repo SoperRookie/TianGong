@@ -87,8 +87,12 @@ def test_point_review_reject_须带意见且连续驳回提示():
     modules = _modules()
     with pytest.raises(ValueError):
         apply_point_review(modules, [{"tp_id": "TP001", "action": "reject"}])
-    apply_point_review(modules, [{"tp_id": "TP001", "action": "reject", "comment": "颗粒度过粗"}])
-    out = apply_point_review(modules, [{"tp_id": "TP001", "action": "reject", "comment": "仍然过粗"}])
+    with pytest.raises(ValueError):  # 完整需求 6.4：驳回类型必填
+        apply_point_review(modules, [{"tp_id": "TP001", "action": "reject", "comment": "过粗"}])
+    apply_point_review(modules, [{"tp_id": "TP001", "action": "reject", "comment": "颗粒度过粗",
+                                  "reject_types": ["颗粒度过粗"]}])
+    out = apply_point_review(modules, [{"tp_id": "TP001", "action": "reject", "comment": "仍然过粗",
+                                        "reject_types": ["颗粒度过粗"]}])
     assert modules[0]["points"][0]["reject_count"] == 2
     assert out["hints"] and "TP001" in out["hints"][0]  # 需求三十五：连续驳回提示人工介入
 
@@ -99,7 +103,7 @@ def test_confirmable_points_只取通过项且驳回项永不进入():
     assert sum(len(e["points"]) for e in confirmable_points(modules)) == 2
     apply_point_review(modules, [
         {"tp_id": "TP001", "action": "approve"},
-        {"tp_id": "TP002", "action": "reject", "comment": "重复"},
+        {"tp_id": "TP002", "action": "reject", "comment": "重复", "reject_types": ["重复"]},
     ])
     confirmed = confirmable_points(modules)
     assert [p["point"] for e in confirmed for p in e["points"]] == ["正确账号密码登录成功"]
@@ -140,7 +144,8 @@ def test_apply_point_fixes_split与越权保护():
     from app.agents.quality import apply_point_fixes
 
     modules = _modules()
-    apply_point_review(modules, [{"tp_id": "TP002", "action": "reject", "comment": "颗粒度过粗"}])
+    apply_point_review(modules, [{"tp_id": "TP002", "action": "reject", "comment": "颗粒度过粗",
+                                  "reject_types": ["颗粒度过粗"]}])
     data = {"fixes": [
         {"tp_id": "TP002", "comment_type": "颗粒度过粗", "action": "split",
          "split_into": [{"point": "密码错误登录失败", "dimension": "异常流程"},
@@ -237,7 +242,8 @@ async def test_points_review_批量与驳回后定点修改(client):
     resp = await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [
         {"tp_id": "TP001", "action": "approve"},
         {"tp_id": "TP003", "action": "approve"},
-        {"tp_id": "TP002", "action": "reject", "comment": "测试点过大，需要拆分登录失败和账号锁定"},
+        {"tp_id": "TP002", "action": "reject", "comment": "测试点过大，需要拆分登录失败和账号锁定",
+         "reject_types": ["颗粒度过粗"]},
     ]})
     assert resp.status_code == 200
     assert resp.json()["counts"] == {"approve": 2, "reject": 1, "modify": 0, "delete": 0, "unlock": 0}
@@ -294,7 +300,8 @@ async def test_case_reject_then_fix_锁定保护(client):
     )
     resp = await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [
         {"case_id": "TC-登录-001", "action": "approve"},
-        {"case_id": "TC-登录-002", "action": "reject", "comment": "预期结果空泛不可验证"},
+        {"case_id": "TC-登录-002", "action": "reject", "comment": "预期结果空泛不可验证",
+         "reject_types": ["预期不可验证"]},
     ]})
     assert resp.status_code == 200
 

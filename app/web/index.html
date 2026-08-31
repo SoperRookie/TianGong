@@ -129,6 +129,8 @@ input[type=checkbox] { accent-color:var(--primary); width:14px; height:14px; }
 .chips span { background:var(--warn-bg); border:1px solid #f0dfc0; color:#7a5410;
   border-radius:6px; padding:2px 9px; font-size:12px; }
 .chips.plain span { background:var(--well); border-color:var(--line); color:var(--ink-2); }
+.chips.pick span { cursor:pointer; user-select:none; }
+.chips.pick span.on { background:var(--danger); border-color:var(--danger); color:#fff; }
 
 /* ================= 表格 ================= */
 .tbl-wrap { overflow:auto; border:1px solid var(--line); border-radius:var(--radius-s); margin-top:10px; max-height:70vh; }
@@ -527,6 +529,33 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<!-- 结构化驳回（完整需求 6.4/9.2）：类型多选 + 原因必填 + 修改要求 + 字段/步骤定位 + 范围 -->
+<dialog id="rejectDlg" style="width:580px">
+  <div class="dlg-h"><h3 id="rjTitle">驳回</h3><span class="meta hint" id="rjMeta"></span></div>
+  <div class="dlg-b">
+    <label class="f">驳回类型<span class="hint">（必选，可多选）</span></label>
+    <div class="chips plain pick" id="rjTypes"></div>
+    <label class="f">驳回原因<span class="hint">（必填，说明为什么不通过）</span></label>
+    <textarea id="rjReason" rows="2" placeholder="例：预期结果空泛不可验证"></textarea>
+    <label class="f">修改要求<span class="hint">（可选但强烈建议：告诉 AI 应该怎么改，优先级最高）</span></label>
+    <textarea id="rjRequest" rows="2" placeholder="例：预期结果写明可断言的具体文案"></textarea>
+    <div id="rjCaseOnly">
+      <label class="f">指定字段<span class="hint">（可选，字段级定位：AI 只允许修改选中字段）</span></label>
+      <div class="chips plain pick" id="rjFields"></div>
+      <label class="f">指定步骤<span class="hint" id="rjStepHint"></span></label>
+      <input type="text" id="rjSteps" placeholder="如 2,3">
+    </div>
+    <div style="display:flex;gap:10px;margin-top:4px">
+      <div style="flex:1"><label class="f">修改范围</label><select id="rjScope"></select></div>
+      <div style="flex:1"><label class="f">修改备注<span class="hint">（可选）</span></label><input type="text" id="rjNote"></div>
+    </div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="resolveReject(null)">取消</button>
+    <button class="btn danger" onclick="submitReject()">驳回</button>
+  </div>
+</dialog>
+
 <!-- 测试点：修改 / 新增 -->
 <dialog id="pointDlg">
   <div class="dlg-h"><h3 id="pdTitle">测试点</h3></div>
@@ -768,6 +797,61 @@ function submitComment() {
   resolveComment(v);
 }
 function resolveComment(v) { $('commentDlg').close(); const r=_cmResolve; _cmResolve=null; r && r(v); }
+
+/* ---- 结构化驳回（完整需求 6.4/9.2）---- */
+const REJECT_TYPES = ["内容错误","场景遗漏","颗粒度过粗","颗粒度过细","重复","步骤不可执行",
+  "预期不可验证","优先级错误","关键词错误","超出需求","需求理解错误",
+  "范围过大","范围不足","描述不清晰","不符合项目规范","其他"];
+const FIX_SCOPES = ["当前项","选中项","只补遗漏","当前项重生成","整批重生成"];
+const CASE_FIELD_LABELS = [["title","标题"],["precondition","前置条件"],["steps","操作步骤"],
+  ["expected","预期结果"],["priority","优先级"],["keywords","标签"],["module","模块"],["remark","备注"]];
+const FIELD_LABEL = Object.fromEntries(CASE_FIELD_LABELS);
+let _rjResolve = null, _rjStepMax = 0, _rjIsCase = false;
+function askReject(title, meta, {kind='point', stepMax=0, scope='当前项'}={}) {
+  return new Promise(res => {
+    _rjResolve = res; _rjStepMax = stepMax; _rjIsCase = kind === 'case';
+    $('rjTitle').textContent = title; $('rjMeta').textContent = meta || '';
+    $('rjTypes').innerHTML = REJECT_TYPES.map(t=>`<span data-v="${t}" onclick="this.classList.toggle('on')">${t}</span>`).join('');
+    $('rjReason').value = ''; $('rjRequest').value = ''; $('rjNote').value = '';
+    $('rjScope').innerHTML = FIX_SCOPES.map(s=>`<option ${s===scope?'selected':''}>${s}</option>`).join('');
+    $('rjCaseOnly').style.display = _rjIsCase ? '' : 'none';
+    if (_rjIsCase) {
+      $('rjFields').innerHTML = CASE_FIELD_LABELS.map(([v,l])=>`<span data-v="${v}" onclick="this.classList.toggle('on')">${l}</span>`).join('');
+      $('rjSteps').value = '';
+      $('rjSteps').disabled = !stepMax;
+      $('rjStepHint').textContent = stepMax ? `（可选，步骤级定位：只允许 AI 改第 N 步，1~${stepMax}，如 2,3）` : '（批量驳回不支持步骤级定位）';
+    }
+    $('rejectDlg').showModal(); $('rjReason').focus();
+  });
+}
+function submitReject() {
+  const types = [...document.querySelectorAll('#rjTypes span.on')].map(x=>x.dataset.v);
+  if (!types.length) return toast('请选择驳回类型（可多选）', 'warn');
+  const reason = $('rjReason').value.trim();
+  if (!reason) return toast('驳回原因不能为空', 'warn');
+  const out = {comment: reason, reject_types: types, fix_request: $('rjRequest').value.trim(),
+               fix_note: $('rjNote').value.trim(), fix_scope: $('rjScope').value};
+  if (_rjIsCase) {
+    out.fields = [...document.querySelectorAll('#rjFields span.on')].map(x=>x.dataset.v);
+    const raw = $('rjSteps').value.split(/[,，\s]+/).filter(Boolean);
+    const nums = raw.map(Number);
+    if (nums.some(n=>!Number.isInteger(n) || n<1 || n>_rjStepMax))
+      return toast(`指定步骤须为 1~${_rjStepMax} 的序号`, 'warn');
+    out.steps = nums;
+  }
+  resolveReject(out);
+}
+function resolveReject(v) { $('rejectDlg').close(); const r=_rjResolve; _rjResolve=null; r && r(v); }
+function rejectInfoLine(s) {
+  if (!s || !s.comment) return '';
+  const types = (s.reject_types||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join(' ');
+  const extra = [
+    s.fix_request ? `修改要求：${esc(s.fix_request)}` : '',
+    s.fields && s.fields.length ? `限改字段：${s.fields.map(f=>FIELD_LABEL[f]||f).join('、')}` : '',
+    s.steps && s.steps.length ? `限改第 ${s.steps.join(',')} 步` : '',
+  ].filter(Boolean).join(' · ');
+  return `<div class="hint" style="color:var(--danger)">${types} 原因：${esc(s.comment)}${extra?' · '+extra:''}</div>`;
+}
 let _pdResolve = null;
 function askPoint(title, {module=null, point='', dimension=''}={}) {
   return new Promise(res => {
@@ -1359,7 +1443,7 @@ function renderPointWorkbench(t) {
         <td style="width:70px"><span class="cid">${esc(p.tp_id)}</span></td>
         <td>${esc(p.point)}
           ${(p.warnings||[]).map(w=>`<div class="hint" style="color:var(--warn)">⚠ ${esc(w)}</div>`).join('')}
-          ${p.comment?`<div class="hint" style="color:var(--danger)">意见：${esc(p.comment)}</div>`:''}</td>
+          ${rejectInfoLine(p)}</td>
         <td style="width:84px">${p.dimension?`<span class="tag">${esc(p.dimension)}</span>`:'<span class="hint">—</span>'}</td>
         <td style="width:76px" class="hint">${srcText[p.source]||esc(p.source||'')}</td>
         <td style="width:92px"><span class="st ${p.status}">${pStatusText[p.status]||p.status}</span>
@@ -1453,8 +1537,8 @@ async function pointDelete(tp) {
   pointsReview([{tp_id:tp, action:'delete'}]);
 }
 async function pointReject(tp) {
-  const comment = await askComment('驳回测试点', tp);
-  if (comment) pointsReview([{tp_id:tp, action:'reject', comment}]);
+  const rj = await askReject('驳回测试点', tp, {kind:'point'});
+  if (rj) pointsReview([{tp_id:tp, action:'reject', ...rj}]);
 }
 async function pointModify(tp) {
   const p = allPoints(currentTask).find(x=>x.tp_id===tp);
@@ -1554,7 +1638,7 @@ function renderCases(t) {
       <td style="width:80px">${esc(c.module)}</td>
       <td style="min-width:180px">${esc(c.title)}
         ${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}
-        ${s.comment?`<div class="hint" style="color:var(--danger)">意见：${esc(s.comment)}</div>`:''}</td>
+        ${rejectInfoLine(s)}</td>
       <td style="width:44px"><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
       <td style="max-width:430px"><div class="stepbox ${long?'long':''} ${open?'open':''}" onclick="toggleSteps('${esc(c.uid)}')">${stepsText}</div></td>
       <td style="width:92px"><span class="st ${s.status}">${cStatusText[s.status]}</span>
@@ -1619,8 +1703,9 @@ async function caseDelete(cid) {
   casesReview([{case_id:cid, action:'delete'}]);
 }
 async function caseReject(cid) {
-  const comment = await askComment('驳回用例', cid);
-  if (comment) casesReview([{case_id:cid, action:'reject', comment}]);
+  const c = ((currentTask.result||{}).cases||[]).find(x=>x.case_id===cid);
+  const rj = await askReject('驳回用例', cid, {kind:'case', stepMax:(c&&c.steps?c.steps.length:0)});
+  if (rj) casesReview([{case_id:cid, action:'reject', ...rj}]);
 }
 async function fixCases() {
   const btn = $('fixCaseBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> AI 修改中'; }
@@ -1810,17 +1895,17 @@ async function batchGo(action) {
   const cs = checkedOf('.cck').map(c=>c.dataset.cid);
   if (pts.length) {
     if (action==='reject') {
-      const comment = await askComment('批量驳回测试点', `${pts.length} 条 · 统一审核意见`, '与已有测试点重复，请合并处理');
-      if (!comment) return;
-      return pointsReview(pts.map(tp=>({tp_id:tp, action:'reject', comment})));
+      const rj = await askReject('批量驳回测试点', `${pts.length} 条 · 统一驳回意见`, {kind:'point', scope:'选中项'});
+      if (!rj) return;
+      return pointsReview(pts.map(tp=>({tp_id:tp, action:'reject', ...rj})));
     }
     return pointsReview(pts.map(tp=>({tp_id:tp, action})));
   }
   if (cs.length) {
     if (action==='reject') {
-      const comment = await askComment('批量驳回用例', `${cs.length} 条 · 统一审核意见`, '与已有用例重复，请合并处理');
-      if (!comment) return;
-      return casesReview(cs.map(cid=>({case_id:cid, action:'reject', comment})));
+      const rj = await askReject('批量驳回用例', `${cs.length} 条 · 统一驳回意见`, {kind:'case', stepMax:0, scope:'选中项'});
+      if (!rj) return;
+      return casesReview(cs.map(cid=>({case_id:cid, action:'reject', ...rj})));
     }
     return casesReview(cs.map(cid=>({case_id:cid, action})));
   }

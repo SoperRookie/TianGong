@@ -28,6 +28,7 @@ from app.tasks.points import (
     COVERAGE_STATES,
     DIMENSIONS,
     add_points,
+    clear_reject_fields,
     coarse_warnings,
     find_point,
     new_uid,
@@ -133,10 +134,12 @@ async def run_dup_judge(
 async def run_point_fix(
     llm: LLMClient, requirement: str, modules: list[dict], rejected: list[dict], model: str | None
 ) -> dict:
-    """AI 只获取被驳回测试点 + 审核意见（需求三十一），返回修改与 Diff。"""
+    """AI 只获取被驳回测试点 + 结构化驳回信息（需求三十一 / 完整需求 7.1），返回修改与 Diff。"""
     payload = [
         {"tp_id": p["tp_id"], "module": p.get("module", ""), "point": p["point"],
-         "dimension": p.get("dimension", ""), "审核意见": p.get("comment", "")}
+         "dimension": p.get("dimension", ""),
+         "驳回类型": p.get("reject_types") or [], "驳回原因": p.get("comment", ""),
+         "修改要求": p.get("fix_request", ""), "修改范围": p.get("fix_scope", "") or "当前项"}
         for p in rejected
     ]
     data, result = await _chat_json(
@@ -206,7 +209,8 @@ def apply_point_fixes(modules: list[dict], data: dict, allowed: set[str]) -> dic
             point["point"] = text
             if str(fix.get("dimension", "")).strip():
                 point["dimension"] = str(fix["dimension"]).strip()
-            point["status"], point["locked"], point["comment"] = "pending", False, ""
+            point["status"], point["locked"] = "pending", False
+            clear_reject_fields(point)
             point["warnings"] = coarse_warnings(text)
             record["after"] = text
         diff.append(record)
@@ -238,7 +242,7 @@ async def run_case_fix(
     if not rejected:
         return {"diff": [], "cases": cases, "fixes": []}
     payload = [
-        dict(_strip_case(c), 审核意见=reviews[str(c.get("uid"))].get("comment", ""))
+        dict(_strip_case(c), **_fix_directives(reviews[str(c.get("uid"))]))
         for c in rejected
     ]
     system = CASE_FIX_SYSTEM.format(template_spec=template.prompt_spec())
@@ -266,6 +270,56 @@ async def run_case_fix(
 
 def _strip_case(c: dict) -> dict:
     return {k: v for k, v in c.items() if k != "uid"}
+
+
+def _fix_directives(review: dict) -> dict:
+    """结构化驳回信息 → AI 输入（完整需求 9.3：类型/原因/修改要求/指定字段/指定步骤/范围）。"""
+    directives = {
+        "驳回类型": review.get("reject_types") or [],
+        "驳回原因": review.get("comment", ""),
+        "修改要求": review.get("fix_request", ""),
+        "修改范围": review.get("fix_scope", "") or "当前项",
+    }
+    if review.get("fields"):
+        directives["指定字段"] = review["fields"]
+    if review.get("steps"):
+        directives["指定步骤"] = review["steps"]
+    return directives
+
+
+def _restrict_case_fix(origin: dict, new: dict, fields: list, step_nos: list) -> dict:
+    """字段/步骤最小修改原则的确定性兜底（完整需求 9.4）。
+
+    人工做了字段级/步骤级定位时，AI 对定位之外内容的改动一律还原为原值——
+    与锁定保护同理，不依赖模型自觉。
+    """
+    if not fields and not step_nos:
+        return new
+    restricted = dict(new)
+    for f in ("module", "title", "priority", "precondition", "keywords", "remark"):
+        if fields and f not in fields:
+            restricted[f] = origin.get(f, "")
+    o_steps = [dict(s) for s in origin.get("steps") or []]
+    n_steps = [dict(s) for s in new.get("steps") or []]
+    if fields and "steps" not in fields and "expected" not in fields and not step_nos:
+        restricted["steps"] = o_steps  # 定位不含步骤/预期：步骤整体不允许动
+        return restricted
+    if len(n_steps) != len(o_steps) and (step_nos or (fields and "steps" not in fields)):
+        # 做了步骤级定位（或只允许改预期）时模型却增删了步骤：越权，步骤整体还原
+        logger.warning("用例定点修改越权增删步骤（{} → {} 步），已还原", len(o_steps), len(n_steps))
+        restricted["steps"] = o_steps
+        return restricted
+    if len(n_steps) == len(o_steps):
+        merged = []
+        for i, (o, n) in enumerate(zip(o_steps, n_steps), start=1):
+            if step_nos and i not in step_nos:
+                merged.append(o)
+                continue
+            action = n.get("action", "") if (not fields or "steps" in fields) else o.get("action", "")
+            expected = n.get("expected", "") if (not fields or "expected" in fields) else o.get("expected", "")
+            merged.append({"action": action, "expected": expected})
+        restricted["steps"] = merged
+    return restricted
 
 
 _CASE_SEQ_RE = re.compile(r"^(.*?)(\d+)\s*$")
@@ -303,7 +357,11 @@ def merge_case_fix(
             reviews.pop(uid, None)
             continue
         if cid in changed and cid in allowed:
-            new = dict(changed.pop(cid))
+            review = reviews.get(uid, {})
+            new = _restrict_case_fix(
+                case, dict(changed.pop(cid)),
+                review.get("fields") or [], review.get("steps") or [],
+            )
             new["uid"] = uid or new_uid()
             diff.append({
                 "case_id": cid, "action": "modify",

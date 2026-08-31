@@ -21,14 +21,56 @@ COVERAGE_STATES = ("已覆盖", "未覆盖", "不适用", "待确认")
 # 测试点状态机：pending →(通过) approved+locked / →(驳回) rejected →(AI 定点修改) pending
 POINT_STATUSES = ("pending", "approved", "rejected")
 
-# 审核意见类型（需求三十二）：驳回后 AI 按类型采取不同修改方式
+# 审核意见类型（需求三十二 / 完整需求 6.4）：驳回类型多选，AI 按类型采取不同修改方式
 COMMENT_TYPES = [
     "内容错误", "场景遗漏", "颗粒度过粗", "颗粒度过细", "重复", "步骤不可执行",
-    "预期不可验证", "优先级错误", "关键词错误", "超出需求", "需求理解错误", "其他",
+    "预期不可验证", "优先级错误", "关键词错误", "超出需求", "需求理解错误",
+    "范围过大", "范围不足", "描述不清晰", "不符合项目规范", "其他",
 ]
+
+# 修改范围（完整需求 6.4）：约束 AI 定向修改的处理边界
+FIX_SCOPES = ("当前项", "选中项", "只补遗漏", "当前项重生成", "整批重生成")
+
+# 结构化驳回字段（完整需求 6.4）：类型多选必填 + 原因必填 + 修改要求/备注可选 + 范围
+REJECT_FIELDS = ("reject_types", "fix_request", "fix_note", "fix_scope")
 
 # 连续驳回提示阈值（需求三十五）：达到即提示检查需求歧义/人工直接修改
 REJECT_HINT_THRESHOLD = 2
+
+
+def clear_reject_fields(target: dict) -> None:
+    """清空结构化驳回字段（通过/修改/AI 修改回待审后调用）。"""
+    target["comment"] = ""
+    target["reject_types"] = []
+    target["fix_request"] = ""
+    target["fix_note"] = ""
+    target["fix_scope"] = ""
+
+
+def validate_rejection(item: dict, label: str) -> dict:
+    """校验结构化驳回输入（完整需求 6.4：类型必填多选、原因必填），返回规范化字段。
+
+    label 用于报错文案（如「测试点 TP001」「用例 TC-xx-001」）。
+    """
+    comment = str(item.get("comment", "")).strip()
+    if not comment:
+        raise PointReviewError(f"驳回{label} 必须填写驳回原因")
+    reject_types = [str(t).strip() for t in item.get("reject_types") or [] if str(t).strip()]
+    if not reject_types:
+        raise PointReviewError(f"驳回{label} 必须选择驳回类型（可多选）")
+    unknown = [t for t in reject_types if t not in COMMENT_TYPES]
+    if unknown:
+        raise PointReviewError(f"驳回{label} 的驳回类型不合法: {'、'.join(unknown)}")
+    fix_scope = str(item.get("fix_scope", "")).strip() or "当前项"
+    if fix_scope not in FIX_SCOPES:
+        raise PointReviewError(f"驳回{label} 的修改范围不合法: {fix_scope}（可用 {'/'.join(FIX_SCOPES)}）")
+    return {
+        "comment": comment,
+        "reject_types": reject_types,
+        "fix_request": str(item.get("fix_request", "")).strip(),
+        "fix_note": str(item.get("fix_note", "")).strip(),
+        "fix_scope": fix_scope,
+    }
 
 # 测试点过粗检测（需求五）：出现以下宽泛词即提示可能包含多个独立验证目标
 _COARSE_PATTERNS = re.compile(
@@ -59,7 +101,8 @@ def normalize_points(modules: list[dict]) -> list[dict]:
             elif isinstance(p, dict) and str(p.get("point", "")).strip():
                 item = {"point": str(p["point"]).strip(), "dimension": str(p.get("dimension", "")).strip()}
                 # 保留实体字段（已实体化的测试点二次归一化时不丢状态）
-                for key in ("tp_id", "status", "locked", "comment", "reject_count", "source", "warnings"):
+                for key in ("tp_id", "status", "locked", "comment", "reject_count", "source", "warnings",
+                            *REJECT_FIELDS):
                     if key in p:
                         item[key] = p[key]
                 points.append(item)
@@ -79,6 +122,10 @@ def assign_entities(modules: list[dict]) -> list[dict]:
             p.setdefault("status", "pending")
             p.setdefault("locked", False)
             p.setdefault("comment", "")
+            p.setdefault("reject_types", [])
+            p.setdefault("fix_request", "")
+            p.setdefault("fix_note", "")
+            p.setdefault("fix_scope", "")
             p.setdefault("reject_count", 0)
             p.setdefault("source", "ai")
             p["warnings"] = coarse_warnings(p["point"])
@@ -131,12 +178,13 @@ def apply_point_review(modules: list[dict], items: list[dict]) -> dict:
         entry, point = found
         record = {"tp_id": tp_id, "action": action, "comment": str(item.get("comment", ""))}
         if action == "approve":
-            point["status"], point["locked"], point["comment"] = "approved", True, ""
+            point["status"], point["locked"] = "approved", True
+            clear_reject_fields(point)
         elif action == "reject":
-            comment = str(item.get("comment", "")).strip()
-            if not comment:
-                raise PointReviewError(f"驳回测试点 {tp_id} 必须填写审核意见")
-            point["status"], point["locked"], point["comment"] = "rejected", False, comment
+            rejection = validate_rejection(item, f"测试点 {tp_id}")
+            point["status"], point["locked"] = "rejected", False
+            point.update(rejection)
+            record.update(rejection)
             point["reject_count"] = int(point.get("reject_count", 0)) + 1
             if point["reject_count"] >= REJECT_HINT_THRESHOLD:
                 hints.append(
@@ -152,6 +200,7 @@ def apply_point_review(modules: list[dict], items: list[dict]) -> dict:
             if item.get("dimension") is not None:
                 point["dimension"] = str(item.get("dimension", ""))
             point["status"], point["locked"] = "pending", False
+            clear_reject_fields(point)
             point["warnings"] = coarse_warnings(text)
         elif action == "delete":
             record["before"] = dict(point)

@@ -1229,12 +1229,23 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
     return response
 
 
+# 用例字段级驳回定位可选值（完整需求 9.2：标题/前置条件/操作步骤/预期结果/优先级/标签等）
+CASE_REJECT_FIELDS = ("title", "precondition", "steps", "expected", "priority", "keywords", "module", "remark")
+
+
 class ReviewItem(BaseModel):
     case_id: str
     action: str  # approve / reject / modify / delete / unlock（accept 为 approve 的兼容别名）
     case: dict | None = None  # modify 时提交修改后的完整用例
-    comment: str = ""  # reject 时的审核意见（AI 定点修改的输入）
+    comment: str = ""  # reject 时的驳回原因（AI 定点修改的输入）
     feedback: str = ""  # 一键反馈：问题类型或意见（学习语料）
+    # 结构化驳回（完整需求 6.4/9.2）
+    reject_types: list[str] = []  # 驳回类型，多选必填
+    fix_request: str = ""         # 修改要求（告诉 AI 应该怎么改）
+    fix_note: str = ""            # 修改备注
+    fix_scope: str = ""           # 修改范围：当前项/选中项/只补遗漏/当前项重生成/整批重生成
+    fields: list[str] = []        # 字段级定位：只允许 AI 修改这些字段
+    steps: list[int] = []         # 步骤级定位：只允许 AI 修改第 N 步（1 起）
 
 
 class ReviewBody(BaseModel):
@@ -1252,7 +1263,9 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
     """
     from app.agents import GenerationResult
     from app.agents.service import _renumber
-    from app.tasks.points import REJECT_HINT_THRESHOLD
+    from app.tasks.points import (
+        REJECT_HINT_THRESHOLD, PointReviewError, clear_reject_fields, validate_rejection,
+    )
     from app.templates import TestCase
 
     store = request.app.state.tasks
@@ -1280,12 +1293,34 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
         entry: dict = {"case_id": item.case_id, "action": action, "by": _operator(request),
                        "comment": item.comment, "feedback": item.feedback, "at": now}
         if action == "approve":
-            state.update(status="approved", locked=True, comment="")
+            state.update(status="approved", locked=True)
+            clear_reject_fields(state)
+            state.update(fields=[], steps=[])
         elif action == "reject":
-            comment = item.comment.strip() or item.feedback.strip()
-            if not comment:
-                raise HTTPException(status_code=400, detail=f"驳回用例 {item.case_id} 必须填写审核意见")
-            state.update(status="rejected", locked=False, comment=comment)
+            try:
+                rejection = validate_rejection(
+                    {**item.model_dump(), "comment": item.comment.strip() or item.feedback.strip()},
+                    f"用例 {item.case_id}",
+                )
+            except PointReviewError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            bad_fields = [f for f in item.fields if f not in CASE_REJECT_FIELDS]
+            if bad_fields:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"驳回用例 {item.case_id} 的指定字段不合法: {'、'.join(bad_fields)}"
+                           f"（可用 {'/'.join(CASE_REJECT_FIELDS)}）",
+                )
+            step_total = len(origin.get("steps") or [])
+            bad_steps = [n for n in item.steps if n < 1 or n > step_total]
+            if bad_steps:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"驳回用例 {item.case_id} 的指定步骤越界: {bad_steps}（共 {step_total} 步）",
+                )
+            state.update(status="rejected", locked=False, **rejection,
+                         fields=list(item.fields), steps=list(item.steps))
+            entry.update(rejection, fields=list(item.fields), steps=list(item.steps))
             state["reject_count"] = int(state.get("reject_count", 0)) + 1
             if state["reject_count"] >= REJECT_HINT_THRESHOLD:
                 hints.append(
@@ -1308,7 +1343,9 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
             cases[cases.index(origin)] = updated
             by_id[item.case_id] = updated
             # 人工定稿即通过并锁定（人工修改优于 AI 再改）
-            state.update(status="approved", locked=True, comment="")
+            state.update(status="approved", locked=True)
+            clear_reject_fields(state)
+            state.update(fields=[], steps=[])
         elif action == "unlock":
             state.update(status="pending", locked=False)
         else:
@@ -1341,7 +1378,12 @@ class PointReviewItem(BaseModel):
     action: str  # approve / reject / modify / delete / unlock
     point: str | None = None       # modify 时的新描述
     dimension: str | None = None
-    comment: str = ""              # reject 时的审核意见
+    comment: str = ""              # reject 时的驳回原因
+    # 结构化驳回（完整需求 6.4）
+    reject_types: list[str] = []   # 驳回类型，多选必填
+    fix_request: str = ""          # 修改要求
+    fix_note: str = ""             # 修改备注
+    fix_scope: str = ""            # 修改范围
 
 
 class PointReviewBody(BaseModel):
