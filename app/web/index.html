@@ -143,6 +143,28 @@ input[type=checkbox] { accent-color:var(--primary); width:14px; height:14px; }
 
 /* ================= 表格 ================= */
 .tbl-wrap { overflow:auto; border:1px solid var(--line); border-radius:var(--radius-s); margin-top:10px; max-height:70vh; }
+/* 用例脑图视图（XMind 风格横向树，纯 CSS 连线，无外部依赖） */
+.mind { overflow:auto; padding:14px 8px 8px; }
+.mroot { display:flex; align-items:center; width:max-content; }
+.mind ul { display:flex; flex-direction:column; justify-content:center; padding:0; margin:0; }
+.mind li { display:flex; align-items:center; position:relative; padding:3px 0 3px 26px; list-style:none; }
+.mind li::before { content:""; position:absolute; left:0; top:50%; width:26px; border-top:1.5px solid var(--line); }
+.mind li::after { content:""; position:absolute; left:0; top:0; bottom:0; border-left:1.5px solid var(--line); }
+.mind li:first-child::after { top:50%; }
+.mind li:last-child::after { bottom:50%; }
+.mind li:only-child::after { display:none; }
+.mind li > ul, .mroot > ul { margin-left:20px; position:relative; }
+.mind li > ul::before, .mroot > ul::before { content:""; position:absolute; left:-20px; top:50%; width:20px; border-top:1.5px solid var(--line); }
+.mlabel { border:1px solid var(--line); border-radius:8px; padding:5px 11px; background:var(--card);
+  font-size:12.5px; flex:none; max-width:420px; box-shadow:var(--shadow); }
+.mrootlab { background:var(--primary); color:#fff; border-color:var(--primary-600); font-weight:650; }
+.mrootlab .hint { color:#cdd9f6; }
+.mmod { background:var(--primary-50); border-color:var(--primary-100); font-weight:650; }
+.mcase { cursor:pointer; display:flex; align-items:center; gap:7px; }
+.mcase:hover { border-color:var(--primary); box-shadow:0 0 0 1px var(--primary-100); }
+.mcase .mops { display:none; gap:2px; margin-left:2px; }
+.mcase:hover .mops { display:inline-flex; }
+.mstep { background:var(--well); font-size:12px; color:var(--ink-2); max-width:460px; }
 /* 概览：生命周期进度带 / 下一步行动 / 双栏信息区 / 质量提示 */
 .pipe { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:12px; }
 .pipe .pstep { border:1px solid var(--line); border-radius:var(--radius-s); padding:9px 12px;
@@ -864,7 +886,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 const $ = id => document.getElementById(id);
 const DIMENSIONS = ["正常流程","异常流程","输入校验","边界值","状态转换","权限","数据","重复操作","中断","网络"];
 let currentTask = null, editingCase = null, currentView = 'board';
-let detailTab = 'overview', caseTab = 'all', caseModule = '';
+let detailTab = 'overview', caseTab = 'all', caseModule = '', caseView = 'table';
 let hiddenDupPairs = new Set(), lastPointDiff = null, lastCaseDiff = null, lastHints = [];
 let expandedSteps = new Set();
 
@@ -1926,17 +1948,55 @@ function renderCases(t) {
         <option value="">全部模块</option>
         ${modules.map(m=>`<option ${caseModule===m?'selected':''}>${esc(m)}</option>`).join('')}
       </select>
+      <div class="seg">
+        <button class="${caseView==='table'?'on':''}" onclick="caseView='table';renderDetail()">表格</button>
+        <button class="${caseView==='mind'?'on':''}" onclick="caseView='mind';renderDetail()">脑图</button>
+      </div>
       <div style="margin-left:auto">
         ${nRejected&&!(t.pending_fix&&t.pending_fix.kind==='cases')?`<button class="btn soft sm" onclick="fixCases()" id="fixCaseBtn">AI 修改驳回用例（${nRejected}）</button>`:''}
       </div></div>
     ${t.pending_fix&&t.pending_fix.kind==='cases'?renderFixProposals(t.pending_fix):''}
-    <div class="tbl-wrap"><table>
+    ${caseView==='mind' ? renderCaseMind(t, visible) : `<div class="tbl-wrap"><table>
       <tr><th><input type="checkbox" class="allck" onclick="document.querySelectorAll('.cck').forEach(c=>c.checked=this.checked)"></th>
       <th>编号 / 版本</th><th>模块</th><th>标题 / 关键词</th><th>优先级</th><th>操作步骤</th><th>预期结果</th><th>状态</th><th>操作</th></tr>
-      ${rows || `<tr><td colspan="9"><div class="empty">该筛选下暂无用例</div></td></tr>`}</table></div>
+      ${rows || `<tr><td colspan="9"><div class="empty">该筛选下暂无用例</div></td></tr>`}</table></div>`}
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
     <div class="hint" style="margin-top:10px">通过即锁定退出 AI 修改队列；驳回须填审核意见供 AI 定点修改；人工修改视为定稿直接通过</div>
     ${lastCaseDiff?renderCaseDiff(lastCaseDiff):''}`;
+}
+
+/* 用例脑图视图（XMind 风格）：来源 → 模块 → 用例 → 步骤；节点在线编辑/通过/驳回 */
+function renderCaseMind(t, visible) {
+  if (!visible.length) return '<div class="empty">该筛选下暂无用例</div>';
+  const mods = {};
+  visible.forEach(c => (mods[c.module] = mods[c.module] || []).push(c));
+  const stClr = {approved:'var(--s-ok)', rejected:'var(--s-rej)', pending:'var(--s-pend)'};
+  const caseNode = c => {
+    const s = caseState(t, c);
+    const open = expandedSteps.has(c.uid);
+    return `<li><div class="mlabel mcase" style="border-left:3px solid ${stClr[s.status]||'var(--s-pend)'}"
+        onclick="openEdit('${esc(c.case_id)}')" title="点击在线编辑（保存即人工定稿通过并记版本）">
+        <span class="cid">${esc(c.case_id)}</span><span class="hint">v${c.version||1}</span>
+        <span class="prio ${esc(c.priority)}">${esc(c.priority)}</span>
+        <span>${esc(c.title)}</span>
+        <span class="mops">
+          <button class="ibtn ok" title="通过（锁定）" onclick="event.stopPropagation();caseAct('${esc(c.case_id)}','approve')">${IC.check}</button>
+          <button class="ibtn bad" title="驳回" onclick="event.stopPropagation();caseReject('${esc(c.case_id)}')">${IC.x}</button>
+          <button class="ibtn" title="版本历史" onclick="event.stopPropagation();openVersions('case','${esc(c.uid)}','${esc(c.case_id)}')">${IC.clock}</button>
+        </span>
+        <button class="ibtn" style="margin-left:auto" title="${open?'收起步骤':'展开步骤'}"
+          onclick="event.stopPropagation();toggleSteps('${esc(c.uid)}')">${open?'▾':'▸'}</button></div>
+      ${open ? `<ul>${(c.steps||[]).map((x,i)=>`<li><div class="mlabel mstep"><b>${i+1}.</b> ${esc(x.action)}
+        <div class="hint">→ ${esc(x.expected)}</div></div></li>`).join('') || '<li><div class="mlabel mstep hint">无步骤</div></li>'}</ul>` : ''}
+    </li>`;
+  };
+  return `<div class="mind"><div class="mroot">
+      <div class="mlabel mrootlab">${esc((t.sources||[])[0]||t.task_id)}<div class="hint">${visible.length} 条用例</div></div>
+      <ul>${Object.entries(mods).map(([m, cs]) => `<li>
+        <div class="mlabel mmod">${esc(m)}<span class="cnt" style="margin-left:6px">${cs.length}</span></div>
+        <ul>${cs.map(caseNode).join('')}</ul></li>`).join('')}</ul>
+    </div></div>
+    <div class="hint">脑图与表格共享上方筛选；点击用例节点在线编辑，悬停节点可 通过 / 驳回 / 查版本，▸ 展开步骤与预期</div>`;
 }
 function toggleSteps(key) {
   if (expandedSteps.has(key)) expandedSteps.delete(key); else expandedSteps.add(key);
