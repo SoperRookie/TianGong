@@ -1493,6 +1493,7 @@ function renderPointWorkbench(t) {
         <td style="width:70px"><span class="cid">${esc(p.tp_id)}</span></td>
         <td>${esc(p.point)}
           ${(p.warnings||[]).map(w=>`<div class="hint" style="color:var(--warn)">⚠ ${esc(w)}</div>`).join('')}
+          ${editingHint('point', p.tp_id)}
           ${rejectInfoLine(p)}</td>
         <td style="width:84px">${p.dimension?`<span class="tag">${esc(p.dimension)}</span>`:'<span class="hint">—</span>'}</td>
         <td style="width:76px" class="hint">${srcText[p.source]||esc(p.source||'')}</td>
@@ -1594,8 +1595,13 @@ async function pointReject(tp) {
 }
 async function pointModify(tp) {
   const p = allPoints(currentTask).find(x=>x.tp_id===tp);
+  jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'start'})
+    .then(d => { if (d.holder) toast(`${d.holder.by} 正在编辑此测试点，注意保存冲突`, 'warn'); })
+    .catch(()=>{});
   const v = await askPoint('修改测试点 ' + tp, {point: p?p.point:'', dimension: p?p.dimension:''});
-  if (v) pointsReview([{tp_id:tp, action:'modify', point:v.point, dimension:v.dimension}]);
+  jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'stop'}).catch(()=>{});
+  if (v) pointsReview([{tp_id:tp, action:'modify', point:v.point, dimension:v.dimension,
+                        base_version: (p&&p.version)||1}]);
 }
 function toggleModule(mod, checked) {
   document.querySelectorAll(`.ptck[data-mod="${CSS.escape(mod)}"]`).forEach(c=>c.checked=checked);
@@ -1689,6 +1695,7 @@ function renderCases(t) {
       <td style="width:80px">${esc(c.module)}</td>
       <td style="min-width:180px">${esc(c.title)}
         ${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}
+        ${editingHint('case', c.uid)}
         ${rejectInfoLine(s)}</td>
       <td style="width:44px"><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
       <td style="max-width:430px"><div class="stepbox ${long?'long':''} ${open?'open':''}" onclick="toggleSteps('${esc(c.uid)}')">${stepsText}</div></td>
@@ -1812,6 +1819,11 @@ async function confirmFix(rejectAll) {
 function openEdit(caseId) {
   editingCase = currentTask.result.cases.find(c => c.case_id === caseId);
   const c = editingCase;
+  // 编辑占用登记（需求 11）：他人占用中则提示，不阻塞打开
+  jpost(`/api/v1/tasks/${currentTask.task_id}/editing`,
+        {kind:'case', entity_id:c.uid, action:'start'})
+    .then(d => { if (d.holder) toast(`${d.holder.by} 正在编辑此用例，注意保存冲突`, 'warn'); })
+    .catch(()=>{});
   $('editCaseId').textContent = caseId;
   $('eTitle').value = c.title; $('ePrio').value = c.priority;
   $('ePre').value = c.precondition; $('eRemark').value = c.remark || '';
@@ -1825,12 +1837,35 @@ function saveEdit() {
     const [action, expected=''] = l.split('=>');
     return {action: action.trim(), expected: expected.trim()};
   });
-  const item = {case_id: editingCase.case_id, action:'modify', feedback:$('eFeedback').value, case:{
+  const item = {case_id: editingCase.case_id, action:'modify', feedback:$('eFeedback').value,
+    base_version: editingCase.version || 1,  // 乐观锁：基于打开时的版本保存
+    case:{
     ...editingCase, title:$('eTitle').value, priority:$('ePrio').value,
     precondition:$('ePre').value, remark:$('eRemark').value, keywords:$('eKeywords').value, steps
   }};
   $('editDlg').close();
   casesReview([item]);
+}
+document.addEventListener('DOMContentLoaded', () => {
+  $('editDlg').addEventListener('close', () => {  // 关闭编辑即释放占用
+    if (editingCase && currentTask) jpost(`/api/v1/tasks/${currentTask.task_id}/editing`,
+      {kind:'case', entity_id:editingCase.uid, action:'stop'}).catch(()=>{});
+  });
+});
+function editingHint(kind, id) {
+  const t = currentTask || {};
+  const e = (t.editing||[]).find(x=>x.kind===kind && String(x.entity_id)===String(id));
+  if (!e || (curUser && e.by === curUser.username)) return '';
+  const canForce = curUser && curUser.role === 'admin';
+  return `<div class="hint" style="color:var(--warn)">✎ ${esc(e.by)} 正在编辑${
+    canForce?`　<a href="#" onclick="forceRelease('${kind}','${esc(id)}');return false">解除占用</a>`:''}</div>`;
+}
+async function forceRelease(kind, id) {
+  try {
+    await jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind, entity_id:id, action:'force_release'});
+    await openTask(currentTask.task_id, true);
+    toast('已解除编辑占用（版本冲突拦截仍然生效）', 'ok');
+  } catch (e) { toast('解除失败：' + e.message, 'err'); }
 }
 
 /* ==================== 用例执行 ==================== */

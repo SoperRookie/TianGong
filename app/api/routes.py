@@ -1254,6 +1254,7 @@ class ReviewItem(BaseModel):
     fix_scope: str = ""           # 修改范围：当前项/选中项/只补遗漏/当前项重生成/整批重生成
     fields: list[str] = []        # 字段级定位：只允许 AI 修改这些字段
     steps: list[int] = []         # 步骤级定位：只允许 AI 修改第 N 步（1 起）
+    base_version: int | None = None  # 乐观锁（完整需求 11 章）：modify 时基于的版本号，不一致则 409
 
 
 class ReviewBody(BaseModel):
@@ -1272,7 +1273,8 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
     from app.agents import GenerationResult
     from app.agents.service import _renumber
     from app.tasks.points import (
-        REJECT_HINT_THRESHOLD, PointReviewError, clear_reject_fields, validate_rejection,
+        REJECT_HINT_THRESHOLD, ConcurrencyError, PointReviewError, check_base_version,
+        clear_reject_fields, validate_rejection,
     )
     from app.templates import TestCase
 
@@ -1350,10 +1352,15 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
         elif action == "modify":
             if not item.case:
                 raise HTTPException(status_code=400, detail=f"修改操作需提交 case 字段: {item.case_id}")
+            try:  # 乐观锁（需求 11）：并发修改冲突拦截
+                check_base_version(item.model_dump(), origin.get("version", 1), f"用例 {item.case_id}")
+            except ConcurrencyError as e:
+                raise HTTPException(status_code=409, detail=str(e))
             try:
                 updated = TestCase.model_validate({**item.case, "uid": uid}).model_dump()
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"修改后的用例不合法: {e}")
+            updated["version"] = int(origin.get("version", 1)) + 1
             entry["before"], entry["after"] = origin, updated
             cases[cases.index(origin)] = updated
             by_id[item.case_id] = updated
@@ -1401,6 +1408,7 @@ class PointReviewItem(BaseModel):
     fix_request: str = ""          # 修改要求
     fix_note: str = ""             # 修改备注
     fix_scope: str = ""            # 修改范围
+    base_version: int | None = None  # 乐观锁（完整需求 11 章）：modify 时基于的版本号
 
 
 class PointReviewBody(BaseModel):
@@ -1423,7 +1431,7 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
 
     通过即锁定退出 AI 修改队列；驳回须带审核意见；连续驳回达阈值提示人工介入（需求三十五）。
     """
-    from app.tasks.points import PointReviewError, apply_point_review, find_point
+    from app.tasks.points import ConcurrencyError, PointReviewError, apply_point_review, find_point
     from app.versions import ensure_versions, point_entities, record_version
 
     store = request.app.state.tasks
@@ -1433,6 +1441,8 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
     ensure_versions(task_id, "point", point_entities(modules), by=record.created_by)
     try:
         outcome = apply_point_review(modules, [i.model_dump() for i in body.items])
+    except ConcurrencyError as e:  # 乐观锁冲突（需求 11）：不落任何改动
+        raise HTTPException(status_code=409, detail=str(e))
     except PointReviewError as e:
         raise HTTPException(status_code=400, detail=str(e))
     # 版本历史（需求 10.1）：人工修改记 manual，通过记 final
@@ -1765,6 +1775,7 @@ async def restore_entity_version(request: Request, task_id: str, body: VersionRe
         point["point"] = str(content.get("point", ""))
         point["dimension"] = str(content.get("dimension", ""))
         point["status"], point["locked"] = "pending", False
+        point["version"] = int(point.get("version", 1)) + 1
         clear_reject_fields(point)
         point["warnings"] = coarse_warnings(point["point"])
         version_no = record_version(task_id, "point", body.entity_id, "manual", dict(point),
@@ -1791,6 +1802,7 @@ async def restore_entity_version(request: Request, task_id: str, body: VersionRe
         restored = TestCase.model_validate({**restored, "uid": origin.get("uid")}).model_dump()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"历史版本内容不合法: {e}")
+    restored["version"] = int(origin.get("version", 1)) + 1
     cases[idx] = restored
     state = record.case_reviews.setdefault(
         body.entity_id, {"status": "pending", "comment": "", "reject_count": 0, "locked": False})
@@ -2354,7 +2366,73 @@ async def get_task(request: Request, task_id: str) -> dict:
     record = request.app.state.tasks.get(task_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-    return record.model_dump()
+    return {**record.model_dump(), "editing": _active_editing(request.app, task_id)}
+
+
+# ---- 编辑占用提示（完整需求 11 章）：内存瞬态状态，重启即清（占用本就随会话失效）----
+
+_EDITING_TTL_SECONDS = 300
+
+
+def _editing_registry(app) -> dict:
+    if not hasattr(app.state, "editing"):
+        app.state.editing = {}
+    return app.state.editing
+
+
+def _active_editing(app, task_id: str) -> list[dict]:
+    registry = _editing_registry(app)
+    cutoff = datetime.now(timezone.utc).timestamp() - _EDITING_TTL_SECONDS
+    stale = [k for k, v in registry.items() if v["ts"] < cutoff]
+    for k in stale:
+        registry.pop(k, None)
+    return [
+        {"kind": k[1], "entity_id": k[2], "by": v["by"], "at": v["at"]}
+        for k, v in registry.items() if k[0] == task_id
+    ]
+
+
+class EditingBody(BaseModel):
+    kind: str        # point / case
+    entity_id: str   # point: tp_id；case: uid
+    action: str      # start / stop / force_release
+
+
+@router.post("/api/v1/tasks/{task_id}/editing")
+async def task_editing(request: Request, task_id: str, body: EditingBody) -> dict:
+    """「某某正在编辑」占用提示（需求 11）：start 登记 / stop 释放 / force_release 管理员解除。
+
+    占用只用于提示与协作提醒，不阻塞保存——并发覆盖由乐观锁版本号拦截，解除占用不绕过版本冲突。
+    """
+    if request.app.state.tasks.get(task_id) is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if body.kind not in ("point", "case"):
+        raise HTTPException(status_code=400, detail="kind 须为 point 或 case")
+    registry = _editing_registry(request.app)
+    key = (task_id, body.kind, str(body.entity_id))
+    operator = _operator(request)
+    now = datetime.now(timezone.utc)
+    holder = registry.get(key)
+    if body.action == "start":
+        if holder is None or holder["by"] == operator:
+            registry[key] = {"by": operator, "at": now.isoformat(timespec="seconds"), "ts": now.timestamp()}
+            holder = None
+        # 他人占用中：不抢占，返回占用者供前端提示
+    elif body.action == "stop":
+        if holder and holder["by"] == operator:
+            registry.pop(key, None)
+        holder = None
+    elif body.action == "force_release":
+        user = getattr(request.state, "user", None)
+        if user is not None and user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="仅管理员可强制解除编辑占用")
+        registry.pop(key, None)
+        holder = None
+    else:
+        raise HTTPException(status_code=400, detail="action 须为 start/stop/force_release")
+    return {"task_id": task_id, "kind": body.kind, "entity_id": body.entity_id,
+            "holder": ({"by": holder["by"], "at": holder["at"]} if holder else None),
+            "editing": _active_editing(request.app, task_id)}
 
 
 _MEDIA_TYPES = {

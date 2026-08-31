@@ -38,6 +38,20 @@ REJECT_FIELDS = ("reject_types", "fix_request", "fix_note", "fix_scope")
 REJECT_HINT_THRESHOLD = 2
 
 
+class ConcurrencyError(ValueError):
+    """乐观锁冲突（完整需求 11 章）：保存时版本号已被他人推进。"""
+    pass
+
+
+def check_base_version(item: dict, current: int, label: str) -> None:
+    """保存前比对乐观锁版本：客户端提供 base_version 时必须与当前一致。"""
+    base = item.get("base_version")
+    if base is not None and int(base) != int(current):
+        raise ConcurrencyError(
+            f"{label} 已被其他用户修改（当前 v{current}，你基于 v{base}），请重新加载后再保存"
+        )
+
+
 def clear_reject_fields(target: dict) -> None:
     """清空结构化驳回字段（通过/修改/AI 修改回待审后调用）。"""
     target["comment"] = ""
@@ -102,7 +116,7 @@ def normalize_points(modules: list[dict]) -> list[dict]:
                 item = {"point": str(p["point"]).strip(), "dimension": str(p.get("dimension", "")).strip()}
                 # 保留实体字段（已实体化的测试点二次归一化时不丢状态）
                 for key in ("tp_id", "status", "locked", "comment", "reject_count", "source", "warnings",
-                            *REJECT_FIELDS):
+                            "version", *REJECT_FIELDS):
                     if key in p:
                         item[key] = p[key]
                 points.append(item)
@@ -128,6 +142,7 @@ def assign_entities(modules: list[dict]) -> list[dict]:
             p.setdefault("fix_scope", "")
             p.setdefault("reject_count", 0)
             p.setdefault("source", "ai")
+            p.setdefault("version", 1)
             p["warnings"] = coarse_warnings(p["point"])
     return modules
 
@@ -195,8 +210,10 @@ def apply_point_review(modules: list[dict], items: list[dict]) -> dict:
             text = str(item.get("point", "")).strip()
             if not text:
                 raise PointReviewError(f"修改测试点 {tp_id} 必须提供 point 内容")
+            check_base_version(item, point.get("version", 1), f"测试点 {tp_id}")  # 乐观锁（需求 11）
             record["before"], record["after"] = point["point"], text
             point["point"] = text
+            point["version"] = int(point.get("version", 1)) + 1
             if item.get("dimension") is not None:
                 point["dimension"] = str(item.get("dimension", ""))
             point["status"], point["locked"] = "pending", False
@@ -256,7 +273,8 @@ def add_points(modules: list[dict], additions: list[dict], source: str) -> list[
             "tp_id": f"TP{seq:03d}", "point": text,
             "dimension": str(item.get("dimension", "")).strip(),
             "status": "pending", "locked": False, "comment": "",
-            "reject_count": 0, "source": source, "warnings": coarse_warnings(text),
+            "reject_count": 0, "source": source, "version": 1,
+            "warnings": coarse_warnings(text),
         }
         entry = next((e for e in modules if e["module"] == module), None)
         if entry is None:

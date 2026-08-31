@@ -252,7 +252,7 @@ def apply_point_fixes(modules: list[dict], data: dict, allowed: set[str]) -> dic
                     "point": str(s["point"]).strip(),
                     "dimension": str(s.get("dimension", point.get("dimension", ""))).strip(),
                     "status": "pending", "locked": False, "comment": "",
-                    "reject_count": point.get("reject_count", 0), "source": "ai",
+                    "reject_count": point.get("reject_count", 0), "source": "ai", "version": 1,
                     "warnings": coarse_warnings(str(s["point"])),
                 })
             entry["points"][idx:idx] = new_points
@@ -265,6 +265,7 @@ def apply_point_fixes(modules: list[dict], data: dict, allowed: set[str]) -> dic
             if not text:
                 continue
             point["point"] = text
+            point["version"] = int(point.get("version", 1)) + 1
             if str(fix.get("dimension", "")).strip():
                 point["dimension"] = str(fix["dimension"]).strip()
             point["status"], point["locked"] = "pending", False
@@ -492,6 +493,7 @@ def merge_case_fix(
                 review.get("fields") or [], review.get("steps") or [],
             )
             new["uid"] = uid or new_uid()
+            new["version"] = int(case.get("version", 1)) + 1  # 乐观锁版本推进（需求 11）
             diff.append({
                 "case_id": cid, "action": "modify",
                 "changes": _case_field_changes(case, new),
