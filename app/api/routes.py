@@ -2087,6 +2087,11 @@ def _exec_task(store, task_id: str):
     record = store.get(task_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if record.exec_migrated_to:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该任务的执行已迁移至测试计划（{record.exec_migrated_to}），请在测试计划中执行",
+        )
     if record.status != "completed" or not (record.result or {}).get("cases"):
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可执行的用例")
     return record
@@ -2202,6 +2207,434 @@ async def finish_execution_run(request: Request, task_id: str, run_id: str) -> d
     summary = _run_summary(record, run)
     logger.info("任务 {} 轮次 {} 已结束：{}", task_id, run_id, summary)
     return {"run_id": run_id, "finished_at": run["finished_at"], "summary": summary}
+
+
+# ---- 测试计划（完整需求 12/13 章 · M4）：计划实体 + 用例快照 + 分配 + 计划执行 ----
+
+
+def _plan_or_404(request: Request, plan_id: str) -> dict:
+    plan = request.app.state.plans.get(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"测试计划不存在: {plan_id}")
+    return plan
+
+
+def _approved_cases(record) -> list[dict]:
+    """任务中「已通过」的用例（12.2：计划只能加入评审通过的正式用例）。"""
+    return [
+        c for c in (record.result or {}).get("cases", [])
+        if (record.case_reviews.get(str(c.get("uid") or "")) or {}).get("status") == "approved"
+    ]
+
+
+def _plan_view(plan: dict) -> dict:
+    from app.plans import PLAN_STATUSES, plan_summary, run_summary
+
+    return {
+        **plan,
+        "status_label": PLAN_STATUSES.get(plan["status"], plan["status"]),
+        "summary": plan_summary(plan),
+        "runs": [{**r, "summary": run_summary(plan, r)} for r in plan["runs"]],
+    }
+
+
+@router.get("/api/v1/plans")
+async def list_plans(request: Request, project: str | None = None, mine: bool = False) -> dict:
+    """计划列表（可按项目过滤）；mine=true 只看分配给我的（我的执行任务）。"""
+    from app.plans import PLAN_STATUSES, plan_summary
+
+    me = _operator(request)
+    out = []
+    for plan in request.app.state.plans.list(project=project):
+        my_items = [i for i in plan["items"] if i.get("assignee") == me]
+        if mine and (not my_items or plan["status"] == "archived"):
+            continue
+        latest = plan["runs"][-1] if plan["runs"] else None
+        out.append({
+            **{k: plan[k] for k in ("plan_id", "name", "project", "owner",
+                                    "start_date", "end_date", "status",
+                                    "created_by", "created_at")},
+            "status_label": PLAN_STATUSES.get(plan["status"], plan["status"]),
+            "summary": plan_summary(plan),
+            "my_pending": sum(
+                1 for i in my_items
+                if not latest or latest.get("finished_at")
+                or i["item_id"] not in latest["results"]
+            ) if my_items else 0,
+            "my_items": len(my_items),
+        })
+    return {"plans": out}
+
+
+class PlanBody(BaseModel):
+    name: str
+    project: str
+    owner: str = ""
+    start_date: str = ""
+    end_date: str = ""
+
+
+@router.post("/api/v1/plans")
+async def create_plan(request: Request, body: PlanBody) -> dict:
+    from app.plans import PlanError
+
+    try:
+        plan = request.app.state.plans.create(
+            body.name, body.project, owner=body.owner,
+            start_date=body.start_date, end_date=body.end_date,
+            created_by=_operator(request),
+        )
+    except PlanError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    request.app.state.projects.ensure([plan["project"]], created_by=_operator(request))
+    logger.info("测试计划已创建：{}（{} / {}）", plan["plan_id"], plan["name"], plan["project"])
+    return _plan_view(plan)
+
+
+@router.get("/api/v1/plans/{plan_id}")
+async def get_plan(request: Request, plan_id: str) -> dict:
+    return _plan_view(_plan_or_404(request, plan_id))
+
+
+class PlanUpdateBody(BaseModel):
+    name: str | None = None
+    owner: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    status: str | None = None
+
+
+@router.put("/api/v1/plans/{plan_id}")
+async def update_plan(request: Request, plan_id: str, body: PlanUpdateBody) -> dict:
+    from app.plans import PlanError
+
+    try:
+        plan = request.app.state.plans.update(plan_id, body.model_dump(exclude_none=True))
+    except PlanError as e:
+        code = 404 if "不存在" in str(e) else 400
+        raise HTTPException(status_code=code, detail=str(e))
+    return _plan_view(plan)
+
+
+@router.delete("/api/v1/plans/{plan_id}")
+async def delete_plan(request: Request, plan_id: str) -> dict:
+    from app.plans import PlanError
+
+    plan = _plan_or_404(request, plan_id)
+    user = _current_user(request)
+    if user["role"] != "admin" and user["username"] not in (plan["created_by"], plan["owner"]):
+        raise HTTPException(status_code=403, detail="仅计划创建人/负责人或管理员可删除计划")
+    try:
+        request.app.state.plans.delete(plan_id)
+    except PlanError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    logger.info("测试计划已删除：{}（{}）", plan_id, plan["name"])
+    return {"deleted": plan_id}
+
+
+@router.get("/api/v1/plans/{plan_id}/candidates")
+async def plan_candidates(
+    request: Request, plan_id: str, task_id: str | None = None,
+    module: str = "", priority: str = "", keyword: str = "",
+) -> dict:
+    """可加入计划的用例池：不带 task_id 列出本项目下有已通过用例的任务；带则列用例（含筛选）。"""
+    from app.plans import match_case
+
+    plan = _plan_or_404(request, plan_id)
+    store = request.app.state.tasks
+    if not task_id:
+        tasks = []
+        for r in store.list(limit=100000):
+            if ((r.context or {}).get("project") or "（未指定）") != plan["project"]:
+                continue
+            approved = _approved_cases(r)
+            if approved:
+                tasks.append({
+                    "task_id": r.task_id,
+                    "source": r.sources[0] if r.sources else r.task_id,
+                    "created_at": r.created_at, "approved": len(approved),
+                })
+        return {"tasks": tasks}
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    added = {(i["task_id"], i["uid"]) for i in plan["items"]}
+    cases = []
+    for c in _approved_cases(record):
+        if not match_case(c, module=module, priority=priority, keyword=keyword):
+            continue
+        cases.append({
+            "uid": str(c.get("uid") or ""), "case_id": c.get("case_id", ""),
+            "title": c.get("title", ""), "module": c.get("module", ""),
+            "priority": c.get("priority", ""), "keywords": c.get("keywords", ""),
+            "added": (task_id, str(c.get("uid") or "")) in added,
+        })
+    modules = sorted({c.get("module", "") for c in _approved_cases(record)})
+    return {"cases": cases, "modules": modules}
+
+
+class PlanCasesBody(BaseModel):
+    task_id: str
+    uids: list[str] = []   # 指定加入；为空时按筛选条件全量加入
+    module: str = ""
+    priority: str = ""
+    keyword: str = ""
+
+
+@router.post("/api/v1/plans/{plan_id}/cases")
+async def add_plan_cases(request: Request, plan_id: str, body: PlanCasesBody) -> dict:
+    """加入计划即快照（M3 冻结约定「快照引用方式」）：正式用例后续修改不影响计划。"""
+    from app.plans import match_case, snapshot_item
+    from app.versions import case_entities, ensure_versions, latest_version_no
+
+    plan = _plan_or_404(request, plan_id)
+    if plan["status"] == "archived":
+        raise HTTPException(status_code=409, detail="计划已归档，不可再加入用例")
+    record = request.app.state.tasks.get(body.task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {body.task_id}")
+    approved = {str(c.get("uid") or ""): c for c in _approved_cases(record)}
+    if body.uids:
+        pool = []
+        for uid in body.uids:
+            case = approved.get(uid)
+            if case is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"用例 {uid} 不是「已通过」状态，只有评审通过的用例才能加入计划",
+                )
+            pool.append(case)
+    else:
+        pool = [
+            c for c in approved.values()
+            if match_case(c, module=body.module, priority=body.priority, keyword=body.keyword)
+        ]
+    operator = _operator(request)
+    # 存量任务打底：无版本记录的用例先补记首版，保证快照有版本可引用
+    ensure_versions(record.task_id, "case", case_entities(list(approved.values())),
+                    by=record.created_by)
+    added_keys = {(i["task_id"], i["uid"]) for i in plan["items"]}
+    added = []
+    for case in pool:
+        uid = str(case.get("uid") or "")
+        if (record.task_id, uid) in added_keys:
+            continue
+        item = snapshot_item(
+            record.task_id, case, latest_version_no(record.task_id, "case", uid), by=operator
+        )
+        plan["items"].append(item)
+        added.append(item)
+    request.app.state.plans.save(plan)
+    logger.info("计划 {} 加入用例 {} 条（任务 {}）", plan_id, len(added), body.task_id)
+    return {"added": len(added), "skipped": len(pool) - len(added), "plan": _plan_view(plan)}
+
+
+@router.delete("/api/v1/plans/{plan_id}/cases/{item_id}")
+async def remove_plan_case(request: Request, plan_id: str, item_id: str) -> dict:
+    plan = _plan_or_404(request, plan_id)
+    item = next((i for i in plan["items"] if i["item_id"] == item_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"用例不在计划中: {item_id}")
+    if any(item_id in r["results"] for r in plan["runs"]):
+        raise HTTPException(status_code=409, detail="该用例已有执行记录，不可从计划移除")
+    plan["items"].remove(item)
+    request.app.state.plans.save(plan)
+    return {"removed": item_id, "plan": _plan_view(plan)}
+
+
+class PlanAssignBody(BaseModel):
+    assignee: str
+    item_ids: list[str] = []  # 按用例分配
+    module: str = ""          # 按模块分配（item_ids 为空时生效）
+
+
+@router.post("/api/v1/plans/{plan_id}/assign")
+async def assign_plan_cases(request: Request, plan_id: str, body: PlanAssignBody) -> dict:
+    """任务分配（13 章）：按用例 / 按模块，重新分配留痕原执行人、新执行人与操作人。
+
+    M4 先基于现有用户体系（admin/member）分配；M1 项目成员落地后收紧为仅项目成员。
+    """
+    from app.plans import PlanError, assign_items
+
+    plan = _plan_or_404(request, plan_id)
+    if plan["status"] == "archived":
+        raise HTTPException(status_code=409, detail="计划已归档，不可再分配")
+    assignee = body.assignee.strip()
+    known = {u["username"] for u in request.app.state.auth.list_users()}
+    if known and assignee not in known:
+        raise HTTPException(status_code=400, detail=f"执行人不存在: {assignee}")
+    item_ids = body.item_ids or [
+        i["item_id"] for i in plan["items"] if not body.module or i["module"] == body.module
+    ]
+    if not item_ids:
+        raise HTTPException(status_code=400, detail="没有可分配的用例（检查模块名或选中项）")
+    try:
+        changed = assign_items(plan, item_ids, assignee, by=_operator(request))
+    except PlanError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    request.app.state.plans.save(plan)
+    logger.info("计划 {} 分配 {} 条用例给 {}（操作人 {}）",
+                plan_id, len(changed), assignee, _operator(request))
+    return {"assigned": len(changed), "plan": _plan_view(plan)}
+
+
+# ---- 计划执行（执行轮次挂计划）与执行附件 ----
+
+# 附件类型白名单（13.4：图片/视频/日志/压缩包）
+_ATTACHMENT_SUFFIXES = {
+    "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"},
+    "video": {".mp4", ".mov", ".avi", ".mkv", ".webm"},
+    "log": {".log", ".txt", ".json", ".xml", ".har"},
+    "archive": {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"},
+}
+
+
+class PlanRunBody(BaseModel):
+    name: str = ""
+
+
+@router.post("/api/v1/plans/{plan_id}/runs")
+async def create_plan_run(request: Request, plan_id: str, body: PlanRunBody | None = None) -> dict:
+    from app.plans import PlanError, new_run, run_summary
+
+    plan = _plan_or_404(request, plan_id)
+    if plan["status"] == "archived":
+        raise HTTPException(status_code=409, detail="计划已归档，不可再执行")
+    try:
+        run = new_run(plan, (body.name if body else ""), by=_operator(request))
+    except PlanError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    request.app.state.plans.save(plan)
+    logger.info("计划 {} 新建执行轮次 {}（{}）", plan_id, run["run_id"], run["name"])
+    return {**run, "summary": run_summary(plan, run)}
+
+
+def _plan_run(plan: dict, run_id: str) -> dict:
+    from app.plans import get_run
+
+    run = get_run(plan, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"执行轮次不存在: {run_id}")
+    return run
+
+
+class PlanExecItem(BaseModel):
+    item_id: str
+    status: str  # pass / fail / blocked / skipped
+    note: str = ""
+
+
+class PlanExecBody(BaseModel):
+    items: list[PlanExecItem]
+
+
+@router.post("/api/v1/plans/{plan_id}/runs/{run_id}/results")
+async def record_plan_results(
+    request: Request, plan_id: str, run_id: str, body: PlanExecBody
+) -> dict:
+    from app.plans import EXEC_STATUSES as PLAN_EXEC_STATUSES
+    from app.plans import run_summary
+
+    plan = _plan_or_404(request, plan_id)
+    run = _plan_run(plan, run_id)
+    if run.get("finished_at"):
+        raise HTTPException(status_code=409, detail="该执行轮次已结束，如需继续执行请新建轮次")
+    by_id = {i["item_id"]: i for i in plan["items"]}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    operator = _operator(request)
+    for entry in body.items:
+        item = by_id.get(entry.item_id)
+        if item is None:
+            raise HTTPException(status_code=400, detail=f"用例不在计划中: {entry.item_id}")
+        if entry.status not in PLAN_EXEC_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"未知执行状态: {entry.status}（可用 {'/'.join(PLAN_EXEC_STATUSES)}）",
+            )
+        if entry.status in ("fail", "blocked") and not entry.note.strip():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{item['case_id']} 标记{'失败' if entry.status == 'fail' else '阻塞'}须填写原因/缺陷号",
+            )
+        prev = run["results"].get(entry.item_id)
+        run["results"][entry.item_id] = {
+            "case_id": item["case_id"], "title": item["title"],
+            "status": entry.status, "note": entry.note.strip(),
+            "by": operator, "at": now,
+            "history": (prev.get("history", []) + [
+                {k: prev[k] for k in ("status", "note", "by", "at")}
+            ]) if prev else [],
+        }
+    request.app.state.plans.save(plan)
+    summary = run_summary(plan, run)
+    logger.info("计划 {} 轮次 {} 记录执行 {} 条（{}）", plan_id, run_id, len(body.items), summary)
+    return {"run_id": run_id, "summary": summary, "results": run["results"]}
+
+
+@router.post("/api/v1/plans/{plan_id}/runs/{run_id}/finish")
+async def finish_plan_run(request: Request, plan_id: str, run_id: str) -> dict:
+    from app.plans import run_summary
+
+    plan = _plan_or_404(request, plan_id)
+    run = _plan_run(plan, run_id)
+    if run.get("finished_at"):
+        raise HTTPException(status_code=409, detail="该执行轮次已结束")
+    run["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    request.app.state.plans.save(plan)
+    summary = run_summary(plan, run)
+    logger.info("计划 {} 轮次 {} 已结束：{}", plan_id, run_id, summary)
+    return {"run_id": run_id, "finished_at": run["finished_at"], "summary": summary}
+
+
+@router.post("/api/v1/plans/{plan_id}/runs/{run_id}/attachments")
+async def upload_plan_attachment(
+    request: Request, plan_id: str, run_id: str,
+    file: UploadFile = File(...), item_id: str = Form(""),
+) -> dict:
+    """执行附件（13.4）：图片/视频/日志/压缩包，记录上传人、时间与关联执行记录。"""
+    import uuid as _uuid
+
+    plan = _plan_or_404(request, plan_id)
+    run = _plan_run(plan, run_id)
+    suffix = Path(file.filename or "").suffix.lower()
+    kind = next((k for k, s in _ATTACHMENT_SUFFIXES.items() if suffix in s), None)
+    if kind is None:
+        allowed = "、".join(sorted(s for v in _ATTACHMENT_SUFFIXES.values() for s in v))
+        raise HTTPException(status_code=400, detail=f"不支持的附件类型 {suffix or '（无后缀）'}（可用 {allowed}）")
+    if item_id and not any(i["item_id"] == item_id for i in plan["items"]):
+        raise HTTPException(status_code=400, detail=f"用例不在计划中: {item_id}")
+    att_id = _uuid.uuid4().hex[:12]
+    dest_dir = get_settings().outputs_dir / "attachments" / plan_id / run_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{att_id}{suffix}"
+    content = await file.read()
+    dest.write_bytes(content)
+    att = {
+        "att_id": att_id, "item_id": item_id or None, "kind": kind,
+        "filename": file.filename, "stored": str(dest),
+        "content_type": file.content_type, "size": len(content),
+        "by": _operator(request),
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    run["attachments"].append(att)
+    request.app.state.plans.save(plan)
+    logger.info("计划 {} 轮次 {} 上传附件 {}（{}，{} 字节）",
+                plan_id, run_id, file.filename, kind, len(content))
+    return att
+
+
+@router.get("/api/v1/plans/{plan_id}/attachments/{att_id}")
+async def download_plan_attachment(request: Request, plan_id: str, att_id: str) -> FileResponse:
+    plan = _plan_or_404(request, plan_id)
+    for run in plan["runs"]:
+        for att in run.get("attachments", []):
+            if att["att_id"] == att_id:
+                path = Path(att["stored"])
+                if not path.exists():
+                    raise HTTPException(status_code=404, detail="附件文件已不存在")
+                return FileResponse(path, media_type=att.get("content_type"),
+                                    filename=att.get("filename"))
+    raise HTTPException(status_code=404, detail=f"附件不存在: {att_id}")
 
 
 # ---- 项目视角（项目管理信息架构）----

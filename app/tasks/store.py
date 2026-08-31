@@ -44,7 +44,8 @@ class TaskRecord(BaseModel):
     requirement_diff: dict | None = Field(default=None, description="需求变更差异分析（需求四十~四十五）：变化类型与受影响资产")
     quality: dict | None = Field(default=None, description="AI 自检评分（需求五十八）：仅作参考，不自动通过")
     rules: list[dict] = Field(default_factory=list, description="规则快照（需求三十九）：本次生成注入的团队/项目规则")
-    executions: list[dict] = Field(default_factory=list, description="用例执行轮次与逐条执行记录（执行留痕）")
+    executions: list[dict] = Field(default_factory=list, description="用例执行轮次与逐条执行记录（执行留痕；M4 起挂测试计划，此字段仅存迁移前历史）")
+    exec_migrated_to: str | None = Field(default=None, description="M4 执行迁移去向：历史执行轮次搬入的测试计划 plan_id")
     pending_fix: dict | None = Field(default=None, description="待确认的 AI 修改提案（完整需求 7.3/9.4 确认流）：接受/拒绝前不落地")
 
 

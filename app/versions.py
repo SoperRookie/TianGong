@@ -90,6 +90,19 @@ def ensure_versions(
     return added
 
 
+def latest_version_no(task_id: str, kind: str, entity_id: str) -> int:
+    """实体当前最新版本号（无版本记录时为 0）；测试计划快照以此建立版本引用。"""
+    with get_engine().begin() as conn:
+        current = conn.execute(
+            select(func.max(entity_versions.c.version_no)).where(
+                entity_versions.c.task_id == task_id,
+                entity_versions.c.kind == kind,
+                entity_versions.c.entity_id == str(entity_id),
+            )
+        ).scalar()
+    return int(current or 0)
+
+
 def list_versions(task_id: str, kind: str, entity_id: str) -> list[dict]:
     """某实体的完整版本链（升序），附相邻版本差异。"""
     with get_engine().begin() as conn:

@@ -37,6 +37,12 @@ async def lifespan(app: FastAPI):
     from app.projects import ProjectStore
 
     app.state.projects = ProjectStore(storage_path=settings.data_dir / "projects.json")
+    from app.plans import PlanStore, migrate_task_executions
+
+    app.state.plans = PlanStore()
+    migrated = migrate_task_executions(app.state.tasks, app.state.plans)
+    if migrated:
+        logger.info("M4 执行迁移：{} 个任务的历史执行轮次已搬入测试计划", migrated)
     app.state.auth = AuthStore(
         storage_path=settings.data_dir / "auth.json",
         session_ttl_hours=settings.session_ttl_hours,

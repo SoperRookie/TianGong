@@ -332,6 +332,9 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <button id="nav-board" onclick="switchView('board')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>
       任务列表</button>
+    <button id="nav-plans" onclick="switchView('plans')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 3v4M16 3v4M4 11h16M9 15.5l2 2 4-4"/></svg>
+      测试计划</button>
     <button id="nav-reports" onclick="switchView('reports')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/></svg>
       报表</button>
@@ -371,6 +374,11 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <!-- 工作台视图：任务列表页 ⇄ 任务详情页 -->
 <div class="layout" id="view-board">
   <div class="page" id="detail"></div>
+</div>
+
+<!-- 测试计划视图：计划列表 ⇄ 计划详情（M4） -->
+<div class="layout" id="view-plans" style="display:none">
+  <div class="page" style="max-width:1420px" id="plansArea"></div>
 </div>
 
 <!-- 报表视图 -->
@@ -728,6 +736,42 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 </dialog>
 
 <!-- 用例编辑 -->
+<dialog id="planDlg">
+  <div class="dlg-h"><h3>新建测试计划</h3></div>
+  <div class="dlg-b">
+    <label class="f">计划名称</label><input type="text" id="plName" placeholder="如：V1.0 冒烟计划">
+    <label class="f">所属项目</label><select id="plProject"></select>
+    <label class="f">负责人<span class="hint">（默认当前用户）</span></label><input type="text" id="plOwner">
+    <label class="f">周期<span class="hint">（可选）</span></label>
+    <div style="display:flex;gap:8px;align-items:center"><input type="date" id="plStart"><span class="hint">至</span><input type="date" id="plEnd"></div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('planDlg').close()">取消</button>
+    <button class="btn" onclick="savePlanDlg()">创建</button>
+  </div>
+</dialog>
+
+<dialog id="planCaseDlg" style="width:860px;max-width:96vw">
+  <div class="dlg-h"><h3>加入用例（加入即快照定格）</h3></div>
+  <div class="dlg-b">
+    <div class="filters" style="margin:0 0 10px">
+      <select id="pcTask" style="width:260px" onchange="pcLoadCases()"></select>
+      <select id="pcModule" style="width:130px" onchange="pcLoadCases()"></select>
+      <select id="pcPriority" style="width:100px" onchange="pcLoadCases()">
+        <option value="">全部优先级</option><option>P0</option><option>P1</option><option>P2</option><option>P3</option>
+      </select>
+      <input type="text" id="pcKeyword" placeholder="标题 / 标签关键词" style="width:170px" onchange="pcLoadCases()">
+    </div>
+    <div id="pcList" style="max-height:380px;overflow:auto"><div class="empty">加载中…</div></div>
+    <div class="hint" style="margin-top:8px">只能加入「已通过」评审的正式用例；加入后正式用例的修改不影响计划内快照</div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('planCaseDlg').close()">关闭</button>
+    <button class="btn ghost" onclick="pcAdd(true)">按当前筛选全部加入</button>
+    <button class="btn" onclick="pcAdd(false)">加入选中</button>
+  </div>
+</dialog>
+
 <dialog id="editDlg" style="width:640px">
   <div class="dlg-h"><h3>修改用例</h3><span class="meta"><code id="editCaseId"></code></span></div>
   <div class="dlg-b">
@@ -1006,7 +1050,7 @@ async function boot() {
 }
 
 /* ---------- 视图切换与面包屑 ---------- */
-const VIEW_LABELS = {projects:'项目', board:'任务列表', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
+const VIEW_LABELS = {projects:'项目', board:'任务列表', plans:'测试计划', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
 function setCrumb(html) { $('crumb').innerHTML = html; }
 function crumbForBoard() {
   if (currentTask) {
@@ -1015,14 +1059,16 @@ function crumbForBoard() {
 }
 function switchView(v) {
   currentView = v;
-  for (const k of ['projects','board','reports','rules','memory','models','users']) {
+  for (const k of ['projects','board','plans','reports','rules','memory','models','users']) {
     $('view-'+k).style.display = k===v ? '' : 'none';
     $('nav-'+k).classList.toggle('on', k===v);
   }
   if (v==='board') crumbForBoard();
   else if (v==='projects') crumbForProjects();
+  else if (v==='plans') crumbForPlans();
   else setCrumb(VIEW_LABELS[v]);
   if (v==='projects') renderProjects();
+  if (v==='plans') renderPlans();
   if (v==='reports') renderReports();
   if (v==='rules') refreshRules();
   if (v==='memory') refreshMemories();
@@ -1922,6 +1968,8 @@ function curExecRun(t) {
   return runs.find(r => r.run_id === execRunId) || runs[runs.length - 1];
 }
 function renderExec(t) {
+  if (t.exec_migrated_to) return `<div class="empty">该任务的历史执行轮次已迁移至测试计划（M4：执行统一挂计划）。
+    <div style="margin-top:10px"><button class="btn sm" onclick="openPlan('${esc(t.exec_migrated_to)}')">前往测试计划</button></div></div>`;
   const runs = t.executions || [];
   const run = curExecRun(t);
   const cases = t.result.cases;
@@ -2034,6 +2082,324 @@ async function execFinish() {
     await api(`/api/v1/tasks/${currentTask.task_id}/executions/${run.run_id}/finish`, {method:'POST'});
     await openTask(currentTask.task_id, true);
     toast('执行轮次已结束', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---------- 测试计划视图（M4：计划实体 + 快照 + 分配 + 计划执行与附件） ---------- */
+let curPlan = null, planRunId = null, plansMine = false, plansProject = '';
+let _planDetail = null;
+const PLAN_ST = {not_started:['未开始','pending'], in_progress:['进行中','candidate'], done:['已完成','approved'], archived:['已归档','pending']};
+
+function crumbForPlans() {
+  if (curPlan && _planDetail) setCrumb(`<a onclick="backToPlans()">测试计划</a><span class="sep">/</span>${esc(_planDetail.name)}`);
+  else setCrumb('测试计划');
+}
+function backToPlans() { curPlan = null; _planDetail = null; planRunId = null; renderPlans(); }
+function openPlan(pid) { curPlan = pid; planRunId = null; switchView('plans'); }
+
+async function renderPlans() {
+  if (curPlan) return renderPlanDetail();
+  crumbForPlans();
+  let data;
+  const q = new URLSearchParams();
+  if (plansProject) q.set('project', plansProject);
+  if (plansMine) q.set('mine', 'true');
+  try { data = await api('/api/v1/plans' + (q.toString() ? '?' + q : '')); }
+  catch (e) { return toast(e.message, 'err'); }
+  let projects = [];
+  try { projects = (await api('/api/v1/projects')).projects.filter(p => !p.builtin); } catch (e) {}
+  const rows = data.plans.map(p => {
+    const lr = p.summary.latest_run;
+    const st = PLAN_ST[p.status] || [p.status, 'pending'];
+    return `<tr class="rowlink" onclick="openPlan('${p.plan_id}')">
+      <td><b>${esc(p.name)}</b><div class="hint">${esc(p.project)}</div></td>
+      <td>${esc(p.owner || '—')}</td>
+      <td class="hint">${p.start_date || p.end_date ? esc(p.start_date + ' ~ ' + p.end_date) : '—'}</td>
+      <td><span class="st ${st[1]}">${st[0]}</span></td>
+      <td>${p.summary.cases}<span class="hint"> 条 / 已分配 ${p.summary.assigned}</span></td>
+      <td>${lr ? `${lr.executed}/${lr.total}${lr.pass_rate != null ? ` · 通过率 <b>${(lr.pass_rate*100).toFixed(1)}%</b>` : ''}<div class="hint">${esc(lr.name)}${lr.finished_at ? ' · 已结束' : ' · 进行中'}</div>` : '<span class="hint">未执行</span>'}</td>
+      <td>${p.my_items ? `${p.my_items} 条${p.my_pending ? ` <span class="st rejected">待执行 ${p.my_pending}</span>` : ''}` : '<span class="hint">—</span>'}</td>
+    </tr>`;
+  }).join('');
+  $('plansArea').innerHTML = `<div class="card">
+    <div class="card-h"><h3>测试计划</h3>
+      <span class="meta">只能加入已通过评审的正式用例 · 加入即快照 · 执行与附件挂计划</span>
+      <div class="grow">
+        <label class="check">只看我的执行任务
+          <span class="switch"><input type="checkbox" ${plansMine?'checked':''} onchange="plansMine=this.checked;renderPlans()"><i></i></span></label>
+        <select style="width:160px" onchange="plansProject=this.value;renderPlans()">
+          <option value="">全部项目</option>
+          ${projects.map(p => `<option value="${esc(p.project)}" ${plansProject===p.project?'selected':''}>${esc(p.project)}</option>`).join('')}
+        </select>
+        <button class="btn" onclick="openPlanDlg()">＋ 新建计划</button>
+      </div></div>
+    <div class="card-b">${data.plans.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
+      <tr><th>计划 / 项目</th><th style="width:90px">负责人</th><th style="width:180px">周期</th><th style="width:80px">状态</th><th style="width:150px">用例</th><th style="width:210px">最近执行</th><th style="width:130px">我的任务</th></tr>
+      ${rows}</table></div>` : '<div class="empty">暂无测试计划。点击「＋ 新建计划」创建，并从项目的已通过用例中加入快照</div>'}</div>
+  </div>`;
+}
+
+async function openPlanDlg() {
+  let projects = [];
+  try { projects = (await api('/api/v1/projects')).projects.filter(p => !p.builtin); } catch (e) {}
+  $('plProject').innerHTML = projects.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
+  if (plansProject) $('plProject').value = plansProject;
+  $('plName').value = ''; $('plOwner').value = curUser ? curUser.username : '';
+  $('plStart').value = ''; $('plEnd').value = '';
+  $('planDlg').showModal();
+}
+async function savePlanDlg() {
+  const name = $('plName').value.trim();
+  if (!name) return toast('计划名称不能为空', 'warn');
+  if (!$('plProject').value) return toast('请先创建项目', 'warn');
+  try {
+    const plan = await jpost('/api/v1/plans', {
+      name, project: $('plProject').value, owner: $('plOwner').value.trim(),
+      start_date: $('plStart').value, end_date: $('plEnd').value,
+    });
+    $('planDlg').close(); toast('计划已创建', 'ok');
+    openPlan(plan.plan_id);
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+function curPlanRun(p) {
+  if (planRunId) { const r = p.runs.find(x => x.run_id === planRunId); if (r) return r; }
+  return p.runs.length ? p.runs[p.runs.length - 1] : null;
+}
+
+async function renderPlanDetail() {
+  let p;
+  try { p = await api('/api/v1/plans/' + curPlan); }
+  catch (e) { toast(e.message, 'err'); return backToPlans(); }
+  _planDetail = p;
+  crumbForPlans();
+  const st = PLAN_ST[p.status] || [p.status, 'pending'];
+  const run = curPlanRun(p);
+  const active = run && !run.finished_at;
+  const results = run ? run.results : {};
+  const editable = p.status !== 'archived';
+
+  const info = `<div class="card"><div class="card-h">
+    <h3>${esc(p.name)} <span class="st ${st[1]}" style="margin-left:6px">${st[0]}</span></h3>
+    <span class="meta">${esc(p.project)} · 负责人 ${esc(p.owner || '—')}${p.start_date || p.end_date ? ` · ${esc(p.start_date)} ~ ${esc(p.end_date)}` : ''} · 创建人 ${esc(p.created_by || '—')}</span>
+    <div class="grow">
+      <select style="width:110px" onchange="planSetStatus(this.value)">
+        ${Object.entries(PLAN_ST).map(([k, v]) => `<option value="${k}" ${p.status===k?'selected':''}>${v[0]}</option>`).join('')}
+      </select>
+      <button class="btn ghost sm" onclick="deletePlan()">删除</button>
+    </div></div></div>`;
+
+  const rows = p.items.map(it => {
+    const r = results[it.item_id];
+    const c = it.snapshot;
+    const stepsText = (c.steps || []).map((x, i) => `${i+1}. ${esc(x.action)}\n   → ${esc(x.expected)}`).join('\n');
+    const long = (c.steps || []).length > 2, open = expandedSteps.has(it.item_id);
+    return `<tr>
+      <td style="width:30px">${editable ? `<input type="checkbox" class="plck" data-iid="${it.item_id}">` : ''}</td>
+      <td style="width:104px"><span class="cid">${esc(it.case_id)}</span><div class="hint">v${it.version_no}</div></td>
+      <td style="min-width:170px">${esc(it.title)}${c.keywords ? `<div class="kw">${esc(c.keywords)}</div>` : ''}</td>
+      <td style="width:80px">${esc(it.module)}</td>
+      <td style="width:44px"><span class="prio ${esc(it.priority)}">${esc(it.priority)}</span></td>
+      <td style="max-width:360px"><div class="stepbox ${long?'long':''} ${open?'open':''}" onclick="toggleSteps('${it.item_id}')">${stepsText}</div></td>
+      <td style="width:110px">${it.assignee ? `<b>${esc(it.assignee)}</b>` : '<span class="hint">未分配</span>'}
+        ${(it.assign_log || []).length > 1 ? `<div class="hint" title="${esc(it.assign_log.map(x => `${x.prev || '—'} → ${x.assignee}（${x.by}）`).join('\n'))}">已改派 ${it.assign_log.length - 1} 次</div>` : ''}</td>
+      <td style="width:118px">${r ? `<span class="st ${EXEC_CLS[r.status]}">${EXEC_LABEL[r.status]}</span>
+          ${r.note ? `<div class="hint" style="color:var(--danger)">${esc(r.note)}</div>` : ''}
+          <div class="hint">${(r.history||[]).length ? `第 ${r.history.length+1} 次 · ` : ''}${esc(r.by)}</div>`
+        : '<span class="hint">未执行</span>'}</td>
+      <td style="width:170px"><div class="rowops">
+        ${active ? `
+        <button class="ibtn ok" title="通过" onclick="planExecAct('${it.item_id}','pass')">${IC.check}</button>
+        <button class="ibtn bad" title="失败（填写原因/缺陷号）" onclick="planExecAct('${it.item_id}','fail')">${IC.x}</button>
+        <button class="ibtn" title="阻塞" onclick="planExecAct('${it.item_id}','blocked')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg></button>
+        <button class="ibtn" title="跳过" onclick="planExecAct('${it.item_id}','skipped')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:15px;height:15px"><path d="M5 4l10 8-10 8M19 4v16"/></svg></button>` : ''}
+        ${editable ? `<button class="ibtn" title="从计划移除（有执行记录的不可移除）" onclick="planRemoveItem('${it.item_id}')">${IC.trash || '✕'}</button>` : ''}
+      </div></td>
+    </tr>`;
+  }).join('');
+
+  const itemsCard = `<div class="card" style="margin-top:14px"><div class="card-h">
+    <h3>用例快照<span class="cnt" style="margin-left:6px">${p.items.length}</span></h3>
+    <span class="meta">已分配 ${p.summary.assigned}/${p.summary.cases} · 快照引用版本记录，正式用例修改不影响此处</span>
+    <div class="grow">
+      ${editable ? `<button class="btn ghost sm" onclick="planAssignChecked()">分配选中</button>
+      <button class="btn ghost sm" onclick="planAssignModule()">按模块分配</button>
+      <button class="btn sm" onclick="openPlanCaseDlg()">＋ 加入用例</button>` : ''}
+    </div></div>
+    <div class="card-b">${p.items.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
+      <tr><th></th><th>编号 / 版本</th><th>标题</th><th>模块</th><th>优先级</th><th>步骤 → 预期</th><th>执行人</th><th>执行状态</th><th>操作</th></tr>
+      ${rows}</table></div>` : '<div class="empty">尚未加入用例。点击「＋ 加入用例」从本项目已通过的正式用例中挑选</div>'}</div></div>`;
+
+  const atts = run ? (run.attachments || []) : [];
+  const attRows = atts.map(a => {
+    const item = p.items.find(i => i.item_id === a.item_id);
+    return `<tr>
+      <td><a href="/api/v1/plans/${p.plan_id}/attachments/${a.att_id}?token=${encodeURIComponent(authToken)}" target="_blank">${esc(a.filename)}</a></td>
+      <td>${({image:'图片',video:'视频',log:'日志',archive:'压缩包'})[a.kind] || a.kind}</td>
+      <td class="hint">${(a.size/1024).toFixed(1)} KB</td>
+      <td>${item ? `<span class="cid">${esc(item.case_id)}</span>` : '<span class="hint">整轮</span>'}</td>
+      <td class="hint">${esc(a.by)} · ${esc((a.at||'').replace('T',' ').slice(0,16))}</td>
+    </tr>`;
+  }).join('');
+  const runsCard = `<div class="card" style="margin-top:14px"><div class="card-h">
+    <h3>计划执行</h3>
+    <span class="meta">执行轮次挂计划 · 失败/阻塞须填原因 · 附件支持图片/视频/日志/压缩包</span>
+    <div class="grow">
+      ${p.runs.length ? `<select style="width:220px" onchange="planRunId=this.value;renderPlanDetail()">
+        ${p.runs.map(r => `<option value="${r.run_id}" ${run && r.run_id===run.run_id?'selected':''}>${esc(r.name)} · ${r.finished_at?'已结束':'进行中'}</option>`).join('')}
+      </select>` : ''}
+      ${run ? `<button class="btn ghost sm" onclick="$('planAttFile').click()">＋ 上传附件</button>` : ''}
+      ${active ? `<button class="btn ghost sm" onclick="planFinishRun()">结束本轮</button>` : ''}
+      ${editable ? `<button class="btn sm" onclick="planNewRun()">＋ 新建执行轮次</button>` : ''}
+    </div></div>
+    <div class="card-b">
+      ${run ? `<div class="leg" style="margin-top:0">
+        <span><i style="background:var(--s-ok)"></i>通过 <b>${run.summary.pass}</b></span>
+        <span><i style="background:var(--s-rej)"></i>失败 <b>${run.summary.fail}</b></span>
+        <span><i style="background:var(--warn)"></i>阻塞 <b>${run.summary.blocked}</b></span>
+        <span><i style="background:var(--s-pend)"></i>跳过 <b>${run.summary.skipped}</b></span>
+        <span style="margin-left:auto">进度 <b>${run.summary.executed}/${run.summary.total}</b>${run.summary.pass_rate != null ? ` · 通过率 <b>${(run.summary.pass_rate*100).toFixed(1)}%</b>` : ''} · 执行人在上方表格逐条记录</span>
+      </div>` : '<div class="empty">尚未开始执行。加入用例并分配后，点击「＋ 新建执行轮次」</div>'}
+      ${atts.length ? `<div class="section-t">本轮附件</div><div class="tbl-wrap" style="margin-top:4px"><table>
+        <tr><th>文件</th><th style="width:70px">类型</th><th style="width:90px">大小</th><th style="width:110px">关联用例</th><th style="width:200px">上传人 / 时间</th></tr>
+        ${attRows}</table></div>` : ''}
+    </div></div>
+    <input type="file" id="planAttFile" style="display:none" onchange="planUploadAtt(this)">`;
+
+  $('plansArea').innerHTML = info + itemsCard + runsCard;
+}
+
+async function planSetStatus(status) {
+  try { await api('/api/v1/plans/' + curPlan, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({status})}); renderPlanDetail(); }
+  catch (e) { toast(e.message, 'err'); renderPlanDetail(); }
+}
+async function deletePlan() {
+  if (!await uiConfirm('删除计划', `确定删除「${_planDetail.name}」？已有执行记录的计划不可删除（请归档）。`, true)) return;
+  try { await api('/api/v1/plans/' + curPlan, {method:'DELETE'}); toast('计划已删除', 'ok'); backToPlans(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- 加入用例（快照） ---- */
+async function openPlanCaseDlg() {
+  let data;
+  try { data = await api(`/api/v1/plans/${curPlan}/candidates`); }
+  catch (e) { return toast(e.message, 'err'); }
+  if (!data.tasks.length) return toast('本项目下还没有「已通过」的用例，请先在任务中完成评审', 'warn');
+  $('pcTask').innerHTML = data.tasks.map(t =>
+    `<option value="${t.task_id}">${esc(t.source)} · 已通过 ${t.approved} 条</option>`).join('');
+  $('pcModule').innerHTML = '<option value="">全部模块</option>';
+  $('pcPriority').value = ''; $('pcKeyword').value = '';
+  $('planCaseDlg').showModal();
+  pcLoadCases();
+}
+async function pcLoadCases() {
+  const q = new URLSearchParams({task_id: $('pcTask').value, module: $('pcModule').value,
+    priority: $('pcPriority').value, keyword: $('pcKeyword').value.trim()});
+  let data;
+  try { data = await api(`/api/v1/plans/${curPlan}/candidates?` + q); }
+  catch (e) { return toast(e.message, 'err'); }
+  const cur = $('pcModule').value;
+  $('pcModule').innerHTML = '<option value="">全部模块</option>'
+    + data.modules.map(m => `<option value="${esc(m)}" ${m===cur?'selected':''}>${esc(m)}</option>`).join('');
+  $('pcList').innerHTML = data.cases.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
+    <tr><th style="width:26px"></th><th style="width:110px">编号</th><th>标题</th><th style="width:90px">模块</th><th style="width:50px">优先级</th><th style="width:70px">状态</th></tr>
+    ${data.cases.map(c => `<tr>
+      <td>${c.added ? '' : `<input type="checkbox" class="pcck" data-uid="${esc(c.uid)}">`}</td>
+      <td><span class="cid">${esc(c.case_id)}</span></td>
+      <td>${esc(c.title)}${c.keywords ? `<div class="kw">${esc(c.keywords)}</div>` : ''}</td>
+      <td>${esc(c.module)}</td>
+      <td><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
+      <td>${c.added ? '<span class="st approved">已在计划</span>' : '<span class="hint">可加入</span>'}</td>
+    </tr>`).join('')}</table></div>` : '<div class="empty">该筛选条件下没有可加入的已通过用例</div>';
+}
+async function pcAdd(all) {
+  const body = {task_id: $('pcTask').value};
+  if (all) {
+    body.module = $('pcModule').value; body.priority = $('pcPriority').value;
+    body.keyword = $('pcKeyword').value.trim();
+  } else {
+    const uids = [...document.querySelectorAll('.pcck:checked')].map(x => x.dataset.uid);
+    if (!uids.length) return toast('请先勾选要加入的用例', 'warn');
+    body.uids = uids;
+  }
+  try {
+    const r = await jpost(`/api/v1/plans/${curPlan}/cases`, body);
+    toast(`已加入 ${r.added} 条${r.skipped ? `（跳过已在计划 ${r.skipped} 条）` : ''}`, 'ok');
+    pcLoadCases(); renderPlanDetail();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- 分配（13 章：按用例 / 按模块，重新分配留痕） ---- */
+async function planAssign(payload) {
+  const assignee = await askInput('分配执行人', '登录用户名');
+  if (!assignee) return;
+  try {
+    const r = await jpost(`/api/v1/plans/${curPlan}/assign`, {...payload, assignee});
+    toast(`已分配 ${r.assigned} 条给 ${assignee}`, 'ok');
+    renderPlanDetail();
+  } catch (e) { toast(e.message, 'err'); }
+}
+function planAssignChecked() {
+  const ids = [...document.querySelectorAll('.plck:checked')].map(x => x.dataset.iid);
+  if (!ids.length) return toast('请先勾选要分配的用例', 'warn');
+  planAssign({item_ids: ids});
+}
+async function planAssignModule() {
+  const modules = [...new Set(_planDetail.items.map(i => i.module))];
+  const mod = await askInput('按模块分配', `模块名（${modules.join(' / ')}）`, modules[0] || '');
+  if (!mod) return;
+  planAssign({module: mod});
+}
+async function planRemoveItem(itemId) {
+  if (!await uiConfirm('移出计划', '将该用例快照移出计划？有执行记录的用例不可移出。', true)) return;
+  try { await api(`/api/v1/plans/${curPlan}/cases/${itemId}`, {method:'DELETE'}); renderPlanDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- 计划执行与附件 ---- */
+async function planNewRun() {
+  const name = await askInput('新建执行轮次', '轮次名称', `第 ${_planDetail.runs.length + 1} 轮执行`);
+  if (!name) return;
+  try {
+    const run = await jpost(`/api/v1/plans/${curPlan}/runs`, {name});
+    planRunId = run.run_id;
+    renderPlanDetail();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function planExecAct(itemId, status) {
+  let note = '';
+  if (status === 'fail' || status === 'blocked') {
+    const item = _planDetail.items.find(i => i.item_id === itemId);
+    note = await askComment(status === 'fail' ? '执行失败' : '执行阻塞', (item ? item.case_id : '') + ' · 原因 / 缺陷号');
+    if (!note) return;
+  }
+  const run = curPlanRun(_planDetail);
+  try {
+    await jpost(`/api/v1/plans/${curPlan}/runs/${run.run_id}/results`,
+      {items: [{item_id: itemId, status, note}]});
+    renderPlanDetail();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function planFinishRun() {
+  const run = curPlanRun(_planDetail);
+  if (!await uiConfirm('结束执行轮次', `结束「${run.name}」？结束后记录定格，继续执行需新建轮次。`)) return;
+  try {
+    await api(`/api/v1/plans/${curPlan}/runs/${run.run_id}/finish`, {method:'POST'});
+    toast('执行轮次已结束', 'ok');
+    renderPlanDetail();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function planUploadAtt(input) {
+  const file = input.files[0];
+  input.value = '';
+  if (!file) return;
+  const run = curPlanRun(_planDetail);
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    await api(`/api/v1/plans/${curPlan}/runs/${run.run_id}/attachments`, {method:'POST', body: fd});
+    toast('附件已上传', 'ok');
+    renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
 }
 
