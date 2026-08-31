@@ -72,3 +72,42 @@ async def test_all_cases_pagination(client):
     assert over["page"] == 2 and len(over["cases"]) == 5
     big = (await client.get("/api/v1/cases", params={"page_size": 50})).json()
     assert big["pages"] == 1 and len(big["cases"]) == 25
+
+
+async def test_exec_count_and_report_execution(client):
+    """测试用例页展示被执行次数；报表含用例执行情况统计（计划口径）。"""
+    task_id = await _task(
+        client, make_case(), make_case(case_id="TC-登录-002", title="验证密码错误提示"))
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [
+        {"case_id": "TC-登录-001", "action": "accept"},
+        {"case_id": "TC-登录-002", "action": "accept"}]})
+    plan = (await client.post("/api/v1/plans", json={"name": "执行统计", "project": "全库"})).json()
+    pid = plan["plan_id"]
+    await client.post(f"/api/v1/plans/{pid}/cases", json={"task_id": task_id})
+    items = (await client.get(f"/api/v1/plans/{pid}")).json()["items"]
+    i0 = next(i["item_id"] for i in items if i["case_id"] == "TC-登录-001")
+    i1 = next(i["item_id"] for i in items if i["case_id"] == "TC-登录-002")
+    rid = (await client.post(f"/api/v1/plans/{pid}/runs", json={})).json()["run_id"]
+    await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results", json={"items": [
+        {"item_id": i0, "status": "fail", "note": "第 1 步走不通", "reason": "用例步骤有误"},
+        {"item_id": i1, "status": "pass"}]})
+    await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results", json={"items": [
+        {"item_id": i1, "status": "pass"}]})  # 复测：次数累计
+
+    rows = (await client.get("/api/v1/cases")).json()["cases"]
+    by_id = {r["case_id"]: r for r in rows}
+    assert by_id["TC-登录-001"]["exec_count"] == 1
+    assert by_id["TC-登录-001"]["exec"]["status"] == "fail"
+    assert by_id["TC-登录-001"]["exec"]["reason"] == "用例步骤有误"
+    assert by_id["TC-登录-002"]["exec_count"] == 2
+    assert by_id["TC-登录-002"]["exec"]["status"] == "pass"
+
+    ex = (await client.get("/api/v1/reports/summary?days=0")).json()["execution"]
+    assert ex["plans"] == 1 and ex["runs"] == 1
+    assert ex["executed_cases"] == 2 and ex["executions"] == 3
+    assert ex["status"]["pass"] == 1 and ex["status"]["fail"] == 1
+    assert ex["pass_rate"] == 0.5
+    assert ex["fail_reasons"] == [{"reason": "用例步骤有误", "count": 1}]
+    # 项目过滤：其他项目为空
+    ex_other = (await client.get("/api/v1/reports/summary?days=0&project=别的")).json()["execution"]
+    assert ex_other["executed_cases"] == 0 and ex_other["fail_reasons"] == []

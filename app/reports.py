@@ -25,7 +25,7 @@ UNASSIGNED = "（未指定）"
 
 
 def _case_exec(record: TaskRecord, uid: str) -> dict | None:
-    """用例最新执行结果：从最近轮次向前找第一条记录。"""
+    """用例最新执行结果（旧任务级轮次，仅剩未迁移的存量数据）。"""
     for run in reversed(record.executions):
         result = run["results"].get(uid)
         if result:
@@ -34,6 +34,39 @@ def _case_exec(record: TaskRecord, uid: str) -> dict | None:
                 "run": run.get("name", ""), "at": result.get("at", ""), "by": result.get("by", ""),
             }
     return None
+
+
+def _legacy_exec_count(record: TaskRecord, uid: str) -> int:
+    return sum(
+        1 + len(r.get("history") or [])
+        for run in record.executions for u, r in (run.get("results") or {}).items() if u == uid
+    )
+
+
+def plan_exec_index(plans_list: list[dict]) -> dict[tuple[str, str], dict]:
+    """(task_id, uid) -> {count, latest}：来自测试计划执行（M4 起执行统一挂计划）。
+
+    count 为被执行总次数（同轮复测按 history 计入）；latest 为最近一次结果。
+    """
+    idx: dict[tuple[str, str], dict] = {}
+    for plan in plans_list:
+        by_item = {i["item_id"]: i for i in plan["items"]}
+        for run in plan["runs"]:
+            for item_id, res in (run.get("results") or {}).items():
+                item = by_item.get(item_id)
+                if item is None:
+                    continue
+                key = (item["task_id"], item["uid"])
+                slot = idx.setdefault(key, {"count": 0, "latest": None})
+                slot["count"] += 1 + len(res.get("history") or [])
+                entry = {
+                    "status": res["status"], "note": res.get("note", ""),
+                    "reason": res.get("reason", ""), "run": run.get("name", ""),
+                    "plan": plan.get("name", ""), "at": res.get("at", ""), "by": res.get("by", ""),
+                }
+                if slot["latest"] is None or entry["at"] >= slot["latest"]["at"]:
+                    slot["latest"] = entry
+    return idx
 
 
 def project_rollup(records: list[TaskRecord]) -> list[dict]:
@@ -62,12 +95,15 @@ def project_rollup(records: list[TaskRecord]) -> list[dict]:
     return sorted(projects.values(), key=lambda x: x["last_activity"], reverse=True)
 
 
-def project_cases(records: list[TaskRecord], project: str | None) -> list[dict]:
-    """用例库：跨任务聚合全部用例，标注生命周期阶段与最新执行结果（project=None 为全库）。
+def project_cases(
+    records: list[TaskRecord], project: str | None, plans: list[dict] | None = None
+) -> list[dict]:
+    """用例库：跨任务聚合全部用例，标注生命周期阶段与执行情况（project=None 为全库）。
 
     生命周期：待审核（AI 生成/修改后）→ 已驳回（待定点修改）→ 正式（通过锁定）；
-    正式用例进入执行（通过/失败/阻塞/跳过），需求变更创建新版本后回到待审核。
+    执行情况来自测试计划（exec 最新结果 + exec_count 被执行总次数），兼容旧任务级轮次。
     """
+    exec_idx = plan_exec_index(plans) if plans else {}
     rows: list[dict] = []
     for r in sorted(records, key=lambda x: x.created_at or "", reverse=True):
         name = (r.context or {}).get("project") or UNASSIGNED
@@ -76,6 +112,7 @@ def project_cases(records: list[TaskRecord], project: str | None) -> list[dict]:
         for c in (r.result or {}).get("cases", []):
             uid = str(c.get("uid") or "")
             state = r.case_reviews.get(uid) or {}
+            planned = exec_idx.get((r.task_id, uid))
             rows.append({
                 "task_id": r.task_id, "project": name,
                 "case_id": c.get("case_id"), "uid": uid,
@@ -86,15 +123,60 @@ def project_cases(records: list[TaskRecord], project: str | None) -> list[dict]:
                 "review": state.get("status", "pending"),
                 "locked": bool(state.get("locked")),
                 "review_comment": state.get("comment", ""),
-                "exec": _case_exec(r, uid),
+                "exec": (planned or {}).get("latest") or _case_exec(r, uid),
+                "exec_count": (planned or {}).get("count", 0) + _legacy_exec_count(r, uid),
                 "created_at": r.created_at,
                 "created_by": r.created_by,
             })
     return rows
 
 
+def _execution_summary(
+    plans_list: list[dict], project: str | None, since: str | None
+) -> dict:
+    """用例执行情况统计（测试计划口径）：轮次/已执行用例/总次数/结果分布/失败分类。"""
+    status: Counter = Counter({s: 0 for s in ("pass", "fail", "blocked", "skipped")})
+    fail_reasons: Counter = Counter()
+    executed: set[tuple[str, str]] = set()
+    runs = 0
+    executions = 0
+    plans_hit: set[str] = set()
+    for plan in plans_list:
+        if project is not None and plan.get("project") != project:
+            continue
+        by_item = {i["item_id"]: i for i in plan["items"]}
+        for run in plan["runs"]:
+            if not since or (run.get("started_at") or "") >= since:
+                runs += 1
+                plans_hit.add(plan["plan_id"])
+            for item_id, res in (run.get("results") or {}).items():
+                if since and (res.get("at") or "") < since:
+                    continue
+                plans_hit.add(plan["plan_id"])
+                status[res["status"]] += 1
+                executions += 1 + len(res.get("history") or [])
+                item = by_item.get(item_id)
+                executed.add((item["task_id"], item["uid"]) if item else (plan["plan_id"], item_id))
+                if res["status"] == "fail" and res.get("reason"):
+                    fail_reasons[res["reason"]] += 1
+    total = sum(status.values())
+    return {
+        "plans": len(plans_hit),
+        "runs": runs,
+        "executed_cases": len(executed),
+        "executions": executions,
+        "status": dict(status),
+        "pass_rate": round(status["pass"] / total, 3) if total else None,
+        "fail_reasons": sorted(
+            ({"reason": k, "count": v} for k, v in fail_reasons.items()),
+            key=lambda x: -x["count"],
+        ),
+    }
+
+
 def summarize(
-    records: list[TaskRecord], days: int = 30, project: str | None = None
+    records: list[TaskRecord], days: int = 30, project: str | None = None,
+    plans: list[dict] | None = None,
 ) -> dict:
     """聚合报表数据。days=0 表示全部历史；project 过滤指定项目。"""
     since = None
@@ -184,4 +266,5 @@ def summarize(
             ({"user": u, **v} for u, v in creators.items()),
             key=lambda x: -x["tasks"],
         )[:10],
+        "execution": _execution_summary(plans or [], project, since),
     }

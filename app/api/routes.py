@@ -2763,7 +2763,8 @@ async def list_project_cases(request: Request, project: str) -> dict:
     from app.reports import project_cases
 
     records = request.app.state.tasks.list(limit=100000)
-    return {"project": project, "cases": project_cases(records, project)}
+    return {"project": project,
+            "cases": project_cases(records, project, plans=request.app.state.plans.list())}
 
 
 CASE_PAGE_SIZES = (20, 50, 100, 200)
@@ -2783,7 +2784,7 @@ async def list_all_cases(
             detail=f"page_size 仅支持 {'/'.join(map(str, CASE_PAGE_SIZES))}",
         )
     records = request.app.state.tasks.list(limit=100000)
-    rows = project_cases(records, project or None)
+    rows = project_cases(records, project or None, plans=request.app.state.plans.list())
     modules = sorted({r["module"] for r in rows if r["module"]})
     if module:
         rows = [r for r in rows if r["module"] == module]
@@ -2822,7 +2823,8 @@ async def reports_summary(
     from app.reports import summarize
 
     records = request.app.state.tasks.list(limit=100000)
-    data = summarize(records, days=max(0, days), project=project)
+    data = summarize(records, days=max(0, days), project=project,
+                     plans=request.app.state.plans.list())
     rules = request.app.state.rules
     data["rules"] = {
         "candidates": len(rules.list("candidate")),
