@@ -2213,6 +2213,7 @@ async function renderPlanDetail() {
         <button class="ibtn bad" title="失败（填写原因/缺陷号）" onclick="planExecAct('${it.item_id}','fail')">${IC.x}</button>
         <button class="ibtn" title="阻塞" onclick="planExecAct('${it.item_id}','blocked')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg></button>
         <button class="ibtn" title="跳过" onclick="planExecAct('${it.item_id}','skipped')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:15px;height:15px"><path d="M5 4l10 8-10 8M19 4v16"/></svg></button>` : ''}
+        ${run ? `<button class="ibtn" title="上传附件并关联此用例（失败截图/日志等）" onclick="planPickAtt('${it.item_id}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:15px;height:15px"><path d="M21 12.5l-8.5 8.5a6 6 0 01-8.5-8.5L12.5 4a4 4 0 015.7 5.7L9.7 18.2a2 2 0 01-2.9-2.9l8-8"/></svg></button>` : ''}
         ${editable ? `<button class="ibtn" title="从计划移除（有执行记录的不可移除）" onclick="planRemoveItem('${it.item_id}')">${IC.trash || '✕'}</button>` : ''}
       </div></td>
     </tr>`;
@@ -2248,7 +2249,7 @@ async function renderPlanDetail() {
       ${p.runs.length ? `<select style="width:220px" onchange="planRunId=this.value;renderPlanDetail()">
         ${p.runs.map(r => `<option value="${r.run_id}" ${run && r.run_id===run.run_id?'selected':''}>${esc(r.name)} · ${r.finished_at?'已结束':'进行中'}</option>`).join('')}
       </select>` : ''}
-      ${run ? `<button class="btn ghost sm" onclick="$('planAttFile').click()">＋ 上传附件</button>` : ''}
+      ${run ? `<button class="btn ghost sm" title="不关联具体用例的整轮附件；关联用例请用表格行内的回形针按钮" onclick="planPickAtt(null)">＋ 整轮附件</button>` : ''}
       ${active ? `<button class="btn ghost sm" onclick="planFinishRun()">结束本轮</button>` : ''}
       ${editable ? `<button class="btn sm" onclick="planNewRun()">＋ 新建执行轮次</button>` : ''}
     </div></div>
@@ -2389,16 +2390,21 @@ async function planFinishRun() {
     renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
 }
+let _attItemId = null;  // 附件关联的用例：行内按钮设置，整轮上传为空
+function planPickAtt(itemId) { _attItemId = itemId || null; $('planAttFile').click(); }
 async function planUploadAtt(input) {
   const file = input.files[0];
-  input.value = '';
+  const itemId = _attItemId;
+  input.value = ''; _attItemId = null;
   if (!file) return;
   const run = curPlanRun(_planDetail);
   const fd = new FormData();
   fd.append('file', file);
+  if (itemId) fd.append('item_id', itemId);
   try {
     await api(`/api/v1/plans/${curPlan}/runs/${run.run_id}/attachments`, {method:'POST', body: fd});
-    toast('附件已上传', 'ok');
+    const item = itemId && _planDetail.items.find(i => i.item_id === itemId);
+    toast(item ? `附件已上传并关联 ${item.case_id}` : '附件已上传（整轮）', 'ok');
     renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
 }
