@@ -1,11 +1,10 @@
 """任务记录与异步执行（F-6-1/2）。
 
-M4-W1 实现：记录 JSON 落盘（重启可恢复）+ 进程内 asyncio 后台执行与进度状态。
-分布式部署时执行层替换为 Celery + Redis（PRD 选型），记录层接口不变。
+记录入库（MySQL kv_docs，按任务一行；重启可恢复）+ 进程内 asyncio 后台执行与进度状态。
+旧 outputs/tasks.json 首启自动迁移。分布式部署时执行层替换为 Celery + Redis，记录层接口不变。
 """
 
 import asyncio
-import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,33 +49,36 @@ class TaskRecord(BaseModel):
 
 class TaskStore:
     def __init__(self, output_dir: Path):
+        from app.db import DocStore
+
         self.output_dir = output_dir
-        self._records_path = output_dir / "tasks.json"
+        self._records_path = output_dir / "tasks.json"  # 旧文件：仅用于首启迁移
+        self._doc = DocStore("tasks")
         self._records: dict[str, TaskRecord] = self._load()
         self._jobs: dict[str, asyncio.Task] = {}
 
     def _load(self) -> dict[str, TaskRecord]:
-        if not self._records_path.exists():
-            return {}
-        try:
-            raw = json.loads(self._records_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
+        from app.db import load_with_migration
+
+        docs = load_with_migration(
+            self._doc, self._records_path,
+            lambda raw: {item["task_id"]: item for item in raw if item.get("task_id")},
+        )
         records = {}
-        for item in raw:
+        for item in docs.values():
             record = TaskRecord.model_validate(item)
             # 重启恢复：进行中的任务已随进程丢失，显式标记失败（Celery 接入后由队列重投）
             if record.status in ("queued", "running"):
                 record.status = "failed"
                 record.error = "服务重启导致任务中断，请重新提交"
+                record.progress = None
+                self._doc.put(record.task_id, record.model_dump())
             record.progress = None  # 进度是进程内状态，重启后一律清除
             records[record.task_id] = record
         return records
 
-    def _persist(self) -> None:
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        data = [r.model_dump() for r in self._records.values()]
-        self._records_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    def _persist(self, record: TaskRecord) -> None:
+        self._doc.put(record.task_id, record.model_dump())
 
     def new_task_dir(self) -> tuple[str, Path]:
         task_id = uuid.uuid4().hex[:12]
@@ -86,7 +88,7 @@ class TaskStore:
 
     def save(self, record: TaskRecord) -> None:
         self._records[record.task_id] = record
-        self._persist()
+        self._persist(record)
 
     def get(self, task_id: str) -> TaskRecord | None:
         return self._records.get(task_id)
@@ -104,7 +106,7 @@ class TaskStore:
         if status:
             record.status = status
         record.progress = progress
-        self._persist()
+        self._persist(record)
 
     # ---- 异步执行（F-6-2）：进程内后台任务，Celery 落地时替换此层 ----
 
@@ -122,7 +124,7 @@ class TaskStore:
         record.status = "failed"
         record.error = "任务已被用户取消"
         record.progress = None
-        self._persist()
+        self._persist(record)
         logger.info("任务 {} 已被用户取消", task_id)
         return True
 

@@ -1,7 +1,8 @@
 """登录认证与用户管理（账号体系 v1）。
 
-- 用户存储：data/auth.json（用户名 + PBKDF2 口令哈希 + 角色），首启自动创建管理员；
-- 会话：登录签发随机 Bearer Token，固定有效期，落盘可跨重启；
+- 用户存储：入库（kv_docs，用户名 + PBKDF2 口令哈希 + 角色），旧 auth.json 首启自动迁移，
+  无任何用户时自动创建管理员；
+- 会话：登录签发随机 Bearer Token，固定有效期，入库可跨重启；
 - 角色：admin（用户管理 / 模型配置）与 member（平台使用）。
 多用户项目权限隔离（F-8-8）后续在此基础上扩展。
 """
@@ -9,7 +10,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,7 +42,10 @@ class OtpRequired(Exception):
 
 class AuthStore:
     def __init__(self, storage_path: Path, session_ttl_hours: int = 72):
-        self._path = storage_path
+        from app.db import DocStore
+
+        self._path = storage_path  # 旧文件：仅用于首启迁移
+        self._doc = DocStore("auth")
         self._ttl = timedelta(hours=session_ttl_hours)
         self._users: dict[str, dict] = {}
         self._sessions: dict[str, dict] = {}
@@ -50,12 +53,12 @@ class AuthStore:
         self._load()
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return
+        from app.db import load_with_migration
+
+        raw = load_with_migration(
+            self._doc, self._path,
+            lambda data: {k: data.get(k, {}) for k in ("users", "sessions", "settings")},
+        )
         self._users = raw.get("users", {})
         self._settings.update(raw.get("settings", {}))
         now = _now().isoformat()
@@ -64,13 +67,8 @@ class AuthStore:
         }
 
     def _persist(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(
-                {"users": self._users, "sessions": self._sessions, "settings": self._settings},
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
+        self._doc.replace_all(
+            {"users": self._users, "sessions": self._sessions, "settings": self._settings}
         )
 
     # ---- 安全设置（系统级开关）----

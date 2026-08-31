@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # 任务队列
     redis_url: str = "redis://localhost:6379/0"
 
+    # 数据库（所有业务数据入库）：生产 MySQL；测试经 TIANGONG_DB_URL 指向 SQLite 隔离
+    db_url: str = "mysql+pymysql://root@127.0.0.1:3306/tiangong?charset=utf8mb4"
+
     # 持久化目录：任务产物与应用数据（模板/记忆）；测试经环境变量指向临时目录隔离
     outputs_dir: Path = BASE_DIR / "outputs"
     data_dir: Path = BASE_DIR / "data"

@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from datetime import datetime, timezone
@@ -60,21 +59,19 @@ class MemoryStore:
         self._load()
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return
+        from app.db import DocStore, load_with_migration
+
+        self._doc = DocStore("memories")
+        raw = load_with_migration(self._doc, self._path, lambda data: {"doc": data}).get("doc") or {}
         for item in raw.get("memories", []):
             entry = MemoryEntry.model_validate(item)
             self._entries[entry.memory_id] = entry
         self._usage = raw.get("usage", {})
 
     def _persist(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"memories": [e.model_dump() for e in self._entries.values()], "usage": self._usage}
-        self._path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        self._doc.put("doc", {
+            "memories": [e.model_dump() for e in self._entries.values()], "usage": self._usage,
+        })
 
     # ---- 可见可控（F-8-6）----
 

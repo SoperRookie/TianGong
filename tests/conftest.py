@@ -19,9 +19,27 @@ for _env, _sub in [
 # 业务接口测试默认免登录；登录鉴权行为由 test_auth.py 显式开启后单独覆盖
 os.environ["TIANGONG_AUTH_ENABLED"] = "false"
 
+# 数据库隔离：测试用临时 SQLite（持久化层同一套 SQLAlchemy 代码，生产为 MySQL）
+os.environ["TIANGONG_DB_URL"] = f"sqlite:///{_TEST_STORAGE / 'test.db'}"
+
 from app.config import get_settings  # noqa: E402
 
 get_settings.cache_clear()
+
+from app.db import reset_engine_cache  # noqa: E402
+
+reset_engine_cache()
+
+
+@pytest.fixture(autouse=True)
+def _db_isolation(tmp_path, monkeypatch):
+    """每个测试独立数据库（与旧文件时代 tmp_path 隔离等价），避免状态跨测试泄漏。"""
+    monkeypatch.setenv("TIANGONG_DB_URL", f"sqlite:///{tmp_path / 'db.sqlite'}")
+    get_settings.cache_clear()
+    reset_engine_cache()
+    yield
+    get_settings.cache_clear()
+    reset_engine_cache()
 
 from app.llm.registry import ModelRegistry  # noqa: E402
 from app.llm.schemas import ModelConfig  # noqa: E402

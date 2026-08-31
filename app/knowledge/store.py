@@ -3,7 +3,6 @@
 文档台账（KnowledgeDoc）落 JSON 文件，向量与切片正文存 Qdrant payload。
 """
 
-import json
 import uuid
 from pathlib import Path
 
@@ -57,18 +56,21 @@ class KnowledgeStore:
     # ---- 文档台账 ----
 
     def _load_docs(self) -> dict[str, KnowledgeDoc]:
-        if self._docs_path is None or not self._docs_path.exists():
+        if self._docs_path is None:  # :memory:（测试）：不入库，进程内即可
             return {}
-        raw = json.loads(self._docs_path.read_text(encoding="utf-8"))
-        return {d["doc_id"]: KnowledgeDoc.model_validate(d) for d in raw}
+        from app.db import DocStore, load_with_migration
+
+        self._doc_table = DocStore("knowledge_docs")
+        raw = load_with_migration(
+            self._doc_table, self._docs_path,
+            lambda data: {d["doc_id"]: d for d in data},
+        )
+        return {k: KnowledgeDoc.model_validate(d) for k, d in raw.items()}
 
     def _save_docs(self) -> None:
         if self._docs_path is None:
             return
-        data = [d.model_dump() for d in self._docs.values()]
-        self._docs_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        self._doc_table.replace_all({d.doc_id: d.model_dump() for d in self._docs.values()})
 
     def list_docs(self, space: str | None = None, category: str | None = None) -> list[KnowledgeDoc]:
         docs = list(self._docs.values())

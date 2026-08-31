@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from datetime import datetime, timezone
@@ -51,20 +50,16 @@ class RuleStore:
         self._load()
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return
+        from app.db import DocStore, load_with_migration
+
+        self._doc = DocStore("rules")
+        raw = load_with_migration(self._doc, self._path, lambda data: {"doc": data}).get("doc") or {}
         for item in raw.get("rules", []):
             rule = Rule.model_validate(item)
             self._rules[rule.rule_id] = rule
 
     def _persist(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"rules": [r.model_dump() for r in self._rules.values()]}
-        self._path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        self._doc.put("doc", {"rules": [r.model_dump() for r in self._rules.values()]})
 
     def add_candidates(self, candidates: list[dict], project: str | None = None) -> list[Rule]:
         """入库规则候选，按归一化内容去重（已存在的仅更新依据与次数）。"""

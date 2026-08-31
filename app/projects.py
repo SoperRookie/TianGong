@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,25 +20,23 @@ def _now() -> str:
 
 class ProjectStore:
     def __init__(self, storage_path: Path):
-        self._path = storage_path
+        from app.db import DocStore
+
+        self._path = storage_path  # 旧文件：仅用于首启迁移
+        self._doc = DocStore("projects")
         self._projects: dict[str, dict] = {}
         self._load()
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return
-        self._projects = {p["name"]: p for p in raw.get("projects", [])}
+        from app.db import load_with_migration
+
+        self._projects = load_with_migration(
+            self._doc, self._path,
+            lambda raw: {p["name"]: p for p in raw.get("projects", [])},
+        )
 
     def _persist(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps({"projects": list(self._projects.values())}, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        self._doc.replace_all(self._projects)
 
     def list(self) -> list[dict]:
         return list(self._projects.values())
