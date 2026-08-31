@@ -181,6 +181,42 @@ async def test_assign_by_case_and_module_with_trace(client):
     assert all(x["by"] for x in item["assign_log"])
 
 
+async def test_concurrent_assignment_conflict(client):
+    """多人同时分配：不同用例互不影响；同一用例他人先行分配时不覆盖、返回冲突。"""
+    task_id = await _task_with_approved(
+        client, make_case(), make_case(case_id="TC-登录-002", title="验证密码错误提示"),
+    )
+    plan = await _plan(client)
+    pid = plan["plan_id"]
+    await client.post(f"/api/v1/plans/{pid}/cases", json={"task_id": task_id})
+    items = (await client.get(f"/api/v1/plans/{pid}")).json()["items"]
+    i0, i1 = items[0]["item_id"], items[1]["item_id"]
+    app.state.auth.add_user("tester", "pw123456")
+
+    # 甲乙同时打开页面（都看到两条未分配）；乙先提交：i0 → tester
+    resp = await client.post(f"/api/v1/plans/{pid}/assign",
+                             json={"assignee": "tester", "item_ids": [i0],
+                                   "expected": {i0: None}})
+    assert resp.json()["assigned"] == 1 and resp.json()["conflicts"] == []
+    # 甲基于旧快照提交 i0+i1 → admin：i0 冲突跳过不覆盖，i1 正常生效
+    resp = await client.post(f"/api/v1/plans/{pid}/assign",
+                             json={"assignee": "admin", "item_ids": [i0, i1],
+                                   "expected": {i0: None, i1: None}})
+    data = resp.json()
+    assert data["assigned"] == 1
+    assert [c["item_id"] for c in data["conflicts"]] == [i0]
+    assert data["conflicts"][0]["assignee"] == "tester"
+    by_id = {i["item_id"]: i for i in data["plan"]["items"]}
+    assert by_id[i0]["assignee"] == "tester" and by_id[i1]["assignee"] == "admin"
+    # 甲确认后改派：不带 expected 即明确覆盖，留痕完整
+    resp = await client.post(f"/api/v1/plans/{pid}/assign",
+                             json={"assignee": "admin", "item_ids": [i0]})
+    assert resp.json()["assigned"] == 1
+    item = next(i for i in resp.json()["plan"]["items"] if i["item_id"] == i0)
+    assert [(x["prev"], x["assignee"]) for x in item["assign_log"]] == [
+        (None, "tester"), ("tester", "admin")]
+
+
 async def test_my_executions(client):
     task_id = await _task_with_approved(client, make_case())
     plan = await _plan(client)

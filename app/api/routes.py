@@ -2462,12 +2462,15 @@ class PlanAssignBody(BaseModel):
     assignee: str
     item_ids: list[str] = []  # 按用例分配
     module: str = ""          # 按模块分配（item_ids 为空时生效）
+    expected: dict[str, str | None] | None = None  # 页面快照 item_id -> 当时执行人：多人同时分配的冲突拦截依据
 
 
 @router.post("/api/v1/plans/{plan_id}/assign")
 async def assign_plan_cases(request: Request, plan_id: str, body: PlanAssignBody) -> dict:
     """任务分配（13 章）：按用例 / 按模块，重新分配留痕原执行人、新执行人与操作人。
 
+    多人同时分配：不同用例的并发分配互不影响；同一用例被他人先行分配时不覆盖，
+    以 conflicts 返回由操作人确认后再改派（重新提交时不带 expected 即为明确改派）。
     M4 先基于现有用户体系（admin/member）分配；M1 项目成员落地后收紧为仅项目成员。
     """
     from app.plans import PlanError, assign_items
@@ -2485,13 +2488,16 @@ async def assign_plan_cases(request: Request, plan_id: str, body: PlanAssignBody
     if not item_ids:
         raise HTTPException(status_code=400, detail="没有可分配的用例（检查模块名或选中项）")
     try:
-        changed = assign_items(plan, item_ids, assignee, by=_operator(request))
+        changed, conflicts = assign_items(
+            plan, item_ids, assignee, by=_operator(request), expected=body.expected
+        )
     except PlanError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    request.app.state.plans.save(plan)
-    logger.info("计划 {} 分配 {} 条用例给 {}（操作人 {}）",
-                plan_id, len(changed), assignee, _operator(request))
-    return {"assigned": len(changed), "plan": _plan_view(plan)}
+    if changed:
+        request.app.state.plans.save(plan)
+    logger.info("计划 {} 分配 {} 条用例给 {}（操作人 {}，冲突跳过 {} 条）",
+                plan_id, len(changed), assignee, _operator(request), len(conflicts))
+    return {"assigned": len(changed), "conflicts": conflicts, "plan": _plan_view(plan)}
 
 
 # ---- 计划执行（执行轮次挂计划）与执行附件 ----

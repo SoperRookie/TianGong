@@ -146,24 +146,39 @@ def match_case(case: dict, module: str = "", priority: str = "", keyword: str = 
     return True
 
 
-def assign_items(plan: dict, item_ids: list[str], assignee: str, by: str) -> list[dict]:
-    """分配 / 重新分配（13 章）：留痕原执行人 → 新执行人 + 操作人。"""
+def assign_items(
+    plan: dict, item_ids: list[str], assignee: str, by: str,
+    expected: dict[str, str | None] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """分配 / 重新分配（13 章）：留痕原执行人 → 新执行人 + 操作人。
+
+    多人同时分配（条目级乐观锁，沿 M3 约定）：expected 为调用方页面上看到的
+    各条执行人快照；实际执行人已变（他人先行分配）的条目不覆盖，作为冲突返回，
+    其余条目正常生效——不同用例的并发分配互不干扰。
+    """
     by_id = {i["item_id"]: i for i in plan["items"]}
     missing = [x for x in item_ids if x not in by_id]
     if missing:
         raise PlanError(f"用例不在计划中: {'、'.join(missing)}")
-    changed = []
+    changed: list[dict] = []
+    conflicts: list[dict] = []
     now = _now()
     for item_id in item_ids:
         item = by_id[item_id]
-        if item.get("assignee") == assignee:
+        current = item.get("assignee")
+        if expected is not None and item_id in expected and current != expected[item_id]:
+            last = item["assign_log"][-1] if item["assign_log"] else {}
+            conflicts.append({
+                "item_id": item_id, "case_id": item["case_id"], "title": item["title"],
+                "assignee": current, "by": last.get("by"), "at": last.get("at"),
+            })
             continue
-        item["assign_log"].append(
-            {"prev": item.get("assignee"), "assignee": assignee, "by": by, "at": now}
-        )
+        if current == assignee:
+            continue
+        item["assign_log"].append({"prev": current, "assignee": assignee, "by": by, "at": now})
         item["assignee"] = assignee
         changed.append(item)
-    return changed
+    return changed, conflicts
 
 
 # ---- 计划执行（执行轮次挂计划；结果按 item_id 记录）----

@@ -2247,26 +2247,40 @@ async function pcAdd(all) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-/* ---- 分配（13 章：按用例 / 按模块，重新分配留痕） ---- */
-async function planAssign(payload) {
-  const assignee = await askInput('分配执行人', '登录用户名');
+/* ---- 分配（13 章：按用例 / 按模块，重新分配留痕；多人同时分配条目级冲突拦截） ---- */
+async function planAssign(itemIds, assignee) {
+  assignee = assignee || await askInput('分配执行人', '登录用户名');
   if (!assignee) return;
+  // 页面快照：当前看到的各条执行人——他人先行分配的条目服务端不覆盖、返回冲突
+  const expected = {};
+  for (const it of _planDetail.items) if (itemIds.includes(it.item_id)) expected[it.item_id] = it.assignee;
   try {
-    const r = await jpost(`/api/v1/plans/${curPlan}/assign`, {...payload, assignee});
-    toast(`已分配 ${r.assigned} 条给 ${assignee}`, 'ok');
+    const r = await jpost(`/api/v1/plans/${curPlan}/assign`, {item_ids: itemIds, assignee, expected});
+    if (r.assigned) toast(`已分配 ${r.assigned} 条给 ${assignee}`, 'ok');
+    if (r.conflicts && r.conflicts.length) {
+      const detail = r.conflicts.map(c => `${c.case_id} 已由 ${c.by || '他人'} 分配给 ${c.assignee || '（未分配）'}`).join('\n');
+      await renderPlanDetail();
+      if (await uiConfirm('分配冲突', `${r.conflicts.length} 条用例刚被他人分配，已跳过：\n${detail}\n\n仍要改派给 ${assignee} 吗？`, true)) {
+        const rr = await jpost(`/api/v1/plans/${curPlan}/assign`,
+          {item_ids: r.conflicts.map(c => c.item_id), assignee});  // 不带 expected = 明确改派
+        toast(`已改派 ${rr.assigned} 条给 ${assignee}`, 'ok');
+      }
+    }
     renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
 }
 function planAssignChecked() {
   const ids = [...document.querySelectorAll('.plck:checked')].map(x => x.dataset.iid);
   if (!ids.length) return toast('请先勾选要分配的用例', 'warn');
-  planAssign({item_ids: ids});
+  planAssign(ids);
 }
 async function planAssignModule() {
   const modules = [...new Set(_planDetail.items.map(i => i.module))];
   const mod = await askInput('按模块分配', `模块名（${modules.join(' / ')}）`, modules[0] || '');
   if (!mod) return;
-  planAssign({module: mod});
+  const ids = _planDetail.items.filter(i => i.module === mod).map(i => i.item_id);
+  if (!ids.length) return toast('该模块下没有用例', 'warn');
+  planAssign(ids);
 }
 async function planRemoveItem(itemId) {
   if (!await uiConfirm('移出计划', '将该用例快照移出计划？有执行记录的用例不可移出。', true)) return;
