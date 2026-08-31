@@ -256,6 +256,12 @@ async def test_points_review_批量与驳回后定点修改(client):
     ], "additions": []}, ensure_ascii=False)])
     resp = await client.post(f"/api/v1/tasks/{task_id}/points/fix")
     assert resp.status_code == 200
+    pending = resp.json()["pending_fix"]
+    assert pending["kind"] == "points" and len(pending["proposals"]) == 1
+    assert pending["proposals"][0]["action"] == "split"
+    # 确认流（完整需求 7.3）：接受后才落地
+    resp = await client.post(f"/api/v1/tasks/{task_id}/fix/confirm", json={"accept_all": True})
+    assert resp.status_code == 200
     fixed = resp.json()
     assert fixed["diff"][0]["comment_type"] == "颗粒度过粗"
     tp_ids = [p["tp_id"] for p in fixed["test_points"][0]["points"]]
@@ -313,11 +319,14 @@ async def test_case_reject_then_fix_锁定保护(client):
     }, ensure_ascii=False)])
     resp = await client.post(f"/api/v1/tasks/{task_id}/cases/fix")
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["fixes"][0]["comment_type"] == "预期不可验证"
+    pending = resp.json()["pending_fix"]
+    assert pending["proposals"][0]["comment_type"] == "预期不可验证"
     # 修改仅发送被驳回用例（需求三十一）
     sent = app.state.llm.calls[0]["messages"][1]["content"]
     assert "TC-登录-002" in sent and "TC-登录-001" not in sent
+    # 确认流（完整需求 9.4）：接受后才落地
+    resp = await client.post(f"/api/v1/tasks/{task_id}/fix/confirm", json={"accept_all": True})
+    assert resp.status_code == 200
 
     task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
     titles = {c["case_id"]: c for c in task["result"]["cases"]}

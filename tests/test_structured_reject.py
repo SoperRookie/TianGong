@@ -205,3 +205,54 @@ async def test_case_reject_结构化入库并透传AI(client):
     assert "驳回类型" in sent and "预期不可验证" in sent
     assert "修改要求" in sent and "预期写明可断言的结果" in sent
     assert "指定步骤" in sent and "指定字段" in sent
+
+
+# ---- AI 修改确认流（完整需求 7.3/9.4）----
+
+
+async def test_fix确认流_逐项接受拒绝与再优化(client):
+    task_id = await _completed_task(
+        client, _two_step_case(),
+        _two_step_case(case_id="TC-登录-002", title="验证密码错误提示"))
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [
+        {"case_id": "TC-登录-001", "action": "reject", "comment": "预期空泛", "reject_types": ["预期不可验证"]},
+        {"case_id": "TC-登录-002", "action": "reject", "comment": "标题不清晰", "reject_types": ["描述不清晰"]},
+    ]})
+    fixed1 = _two_step_case()
+    fixed1["steps"][1]["expected"] = "跳转首页并生成有效登录态"
+    fixed2 = _two_step_case(case_id="TC-登录-002", title="验证密码错误时提示剩余尝试次数")
+    app.state.llm = StubLLM([json.dumps({
+        "fixes": [], "cases": [fixed1, fixed2], "deleted": [],
+    }, ensure_ascii=False)])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/cases/fix")
+    pending = resp.json()["pending_fix"]
+    assert len(pending["proposals"]) == 2
+    # 提案未确认前不落地
+    task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert all("登录态" not in c["steps"][1]["expected"] for c in task["result"]["cases"])
+    # 提案存在时禁止再次发起
+    assert (await client.post(f"/api/v1/tasks/{task_id}/cases/fix")).status_code == 409
+
+    # 接受 P1、拒绝 P2
+    pid1 = next(p["proposal_id"] for p in pending["proposals"] if p["case_id"] == "TC-登录-001")
+    pid2 = next(p["proposal_id"] for p in pending["proposals"] if p["case_id"] == "TC-登录-002")
+    resp = await client.post(f"/api/v1/tasks/{task_id}/fix/confirm", json={"decisions": [
+        {"proposal_id": pid1, "decision": "accept"}, {"proposal_id": pid2, "decision": "reject"},
+    ]})
+    assert resp.status_code == 200
+    assert resp.json()["applied"] == 1 and resp.json()["rejected"] == 1
+    task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    cases = {c["case_id"]: c for c in task["result"]["cases"]}
+    assert "登录态" in cases["TC-登录-001"]["steps"][1]["expected"]  # 接受项已应用
+    assert cases["TC-登录-002"]["title"] == "验证密码错误提示"        # 拒绝项原样
+    reviews = task["case_reviews"]
+    uid1 = cases["TC-登录-001"]["uid"]
+    uid2 = cases["TC-登录-002"]["uid"]
+    assert reviews[uid1]["status"] == "pending"   # 接受后重新提交评审
+    assert reviews[uid2]["status"] == "rejected"  # 拒绝项保持驳回，可继续 AI 优化
+    # 继续 AI 优化：再次发起 fix 只处理仍驳回的 TC-登录-002
+    app.state.llm = StubLLM([json.dumps({"fixes": [], "cases": [], "deleted": []}, ensure_ascii=False)])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/cases/fix")
+    assert resp.status_code == 200
+    sent = app.state.llm.calls[0]["messages"][1]["content"]
+    assert "TC-登录-002" in sent and "TC-登录-001" not in sent

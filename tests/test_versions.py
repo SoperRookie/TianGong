@@ -86,6 +86,8 @@ async def test_AI定点修改记ai_fix版本(client):
     }, ensure_ascii=False)])
     resp = await client.post(f"/api/v1/tasks/{task_id}/cases/fix")
     assert resp.status_code == 200
+    resp = await client.post(f"/api/v1/tasks/{task_id}/fix/confirm", json={"accept_all": True})
+    assert resp.status_code == 200
     versions = await _versions(client, task_id, "case", uid)
     assert versions[-1]["source"] == "ai_fix"
     assert "登录态" in versions[-1]["content"]["steps"][0]["expected"]

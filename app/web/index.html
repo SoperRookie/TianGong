@@ -1526,8 +1526,9 @@ function renderPointWorkbench(t) {
       <tr><th></th><th>编号</th><th>测试点</th><th>维度</th><th>来源</th><th>状态</th><th>操作</th></tr>
       ${rows}
     </table></div>
-    ${rejected&&confirmable?`<div class="toolbar"><button class="btn soft sm" onclick="fixPoints()" id="fixPtBtn">AI 修改驳回项（${rejected}）</button>
-      <span class="hint">只输入被驳回项与审核意见，先识别意见类型再定点修改</span></div>`:''}
+    ${t.pending_fix&&t.pending_fix.kind==='points'?renderFixProposals(t.pending_fix)
+      :rejected&&confirmable?`<div class="toolbar"><button class="btn soft sm" onclick="fixPoints()" id="fixPtBtn">AI 修改驳回项（${rejected}）</button>
+      <span class="hint">只输入被驳回项与结构化驳回信息；产出修改提案，逐项确认后落地</span></div>`:''}
     ${lastPointDiff?renderPointDiff(lastPointDiff):''}
     ${confirmable?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
       <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">确认并生成用例${approved?`（仅已通过的 ${approved} 条）`:'（全部未驳回项）'}</button>
@@ -1604,9 +1605,8 @@ async function fixPoints() {
   const btn = $('fixPtBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> AI 修改中'; }
   try {
     const data = await api(`/api/v1/tasks/${currentTask.task_id}/points/fix`, {method:'POST'});
-    lastPointDiff = data;
     await openTask(currentTask.task_id, true);
-    toast(`定点修改完成：改动 ${data.diff.length} 处`, 'ok');
+    toast(data.pending_fix ? `AI 产出 ${data.pending_fix.proposals.length} 条修改提案，请逐项确认` : (data.message||'无提案'), data.pending_fix?'ok':'warn');
   } catch (e) { toast('修改失败：' + e.message, 'err'); renderDetail(); }
 }
 async function gapCheck() {
@@ -1716,8 +1716,9 @@ function renderCases(t) {
         ${modules.map(m=>`<option ${caseModule===m?'selected':''}>${esc(m)}</option>`).join('')}
       </select>
       <div style="margin-left:auto">
-        ${nRejected?`<button class="btn soft sm" onclick="fixCases()" id="fixCaseBtn">AI 修改驳回用例（${nRejected}）</button>`:''}
+        ${nRejected&&!(t.pending_fix&&t.pending_fix.kind==='cases')?`<button class="btn soft sm" onclick="fixCases()" id="fixCaseBtn">AI 修改驳回用例（${nRejected}）</button>`:''}
       </div></div>
+    ${t.pending_fix&&t.pending_fix.kind==='cases'?renderFixProposals(t.pending_fix):''}
     <div class="tbl-wrap"><table>
       <tr><th><input type="checkbox" class="allck" onclick="document.querySelectorAll('.cck').forEach(c=>c.checked=this.checked)"></th>
       <th>编号</th><th>模块</th><th>标题 / 关键词</th><th>优先级</th><th>步骤 → 预期</th><th>状态</th><th>操作</th></tr>
@@ -1763,10 +1764,50 @@ async function fixCases() {
   const btn = $('fixCaseBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> AI 修改中'; }
   try {
     const data = await api(`/api/v1/tasks/${currentTask.task_id}/cases/fix`, {method:'POST'});
-    lastCaseDiff = data;
     await openTask(currentTask.task_id, true);
-    toast(`定点修改完成：Diff ${data.diff.length} 条`, 'ok');
+    toast(data.pending_fix ? `AI 产出 ${data.pending_fix.proposals.length} 条修改提案，请逐项确认` : (data.message||'无提案'), data.pending_fix?'ok':'warn');
   } catch (e) { toast('修改失败：' + e.message, 'err'); renderDetail(); }
+}
+
+/* ---- AI 修改确认流（完整需求 7.3/9.4）：提案面板 ---- */
+function renderFixProposals(pf) {
+  const rows = pf.proposals.map(p => {
+    const label = p.tp_id || p.case_id || '新增';
+    let body;
+    if (pf.kind === 'points') {
+      body = p.action==='split' ? `<div class="del">${esc(p.before)}</div>${(p.after||[]).map(x=>`<div class="add">拆分 → ${esc(x)}</div>`).join('')}`
+        : p.action==='delete' ? `<div class="del">${esc(p.before)}（建议删除）</div>`
+        : p.action==='add' ? `<div class="add">新增：${esc(p.after)}${p.module?`（${esc(p.module)}）`:''}</div>`
+        : `<div><span class="del">${esc(p.before)}</span> → <span class="add">${esc(p.after)}</span></div>`;
+    } else {
+      body = p.action==='delete' ? `<div class="del">建议删除该用例</div>`
+        : p.action==='add' ? `<div class="add">新增：${esc((p.after||{}).title||'')}</div>`
+        : (p.changes||[]).map(c=>`<div><b>${esc(c.field)}</b>：<span class="del">${esc(c.before)}</span> → <span class="add">${esc(c.after)}</span></div>`).join('');
+    }
+    return `<div class="box"><label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer">
+      <input type="checkbox" class="fpck" data-pid="${esc(p.proposal_id)}" checked style="margin-top:3px">
+      <div style="flex:1"><div style="margin-bottom:4px"><span class="cid">${esc(label)}</span>
+        <span class="tag">${esc(p.comment_type||'')}</span> <span class="hint">${esc(p.note||'')}</span></div>${body}</div>
+    </label></div>`;
+  }).join('');
+  return `<div class="section-t">AI 修改提案 · 待确认（${pf.proposals.length} 条）</div>
+    <div class="hint">AI 修改不直接覆盖：勾选要接受的提案，接受项生成新版本并回到待评审；未勾选项视为拒绝（驳回状态保留，可继续 AI 优化或人工编辑）</div>
+    ${rows}
+    <div class="toolbar">
+      <button class="btn" onclick="confirmFix(false)">应用所选</button>
+      <button class="btn ghost" onclick="confirmFix(true)">全部拒绝</button>
+    </div>`;
+}
+async function confirmFix(rejectAll) {
+  const decisions = rejectAll ? [] :
+    [...document.querySelectorAll('.fpck')].map(c=>({proposal_id:c.dataset.pid, decision:c.checked?'accept':'reject'}));
+  try {
+    const data = await jpost(`/api/v1/tasks/${currentTask.task_id}/fix/confirm`, {decisions});
+    if (data.test_points) lastPointDiff = {diff: data.diff||[], added: data.added||[]};
+    else if (data.diff) lastCaseDiff = {diff: data.diff, fixes: []};
+    await openTask(currentTask.task_id, true);
+    toast(`提案确认完成：应用 ${data.applied||0} 条 / 拒绝 ${data.rejected||0} 条`, 'ok');
+  } catch (e) { toast('确认失败：' + e.message, 'err'); }
 }
 function openEdit(caseId) {
   editingCase = currentTask.result.cases.find(c => c.case_id === caseId);

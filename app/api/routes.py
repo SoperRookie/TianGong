@@ -1463,17 +1463,19 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
 
 @router.post("/api/v1/tasks/{task_id}/points/fix")
 async def fix_points(request: Request, task_id: str) -> dict:
-    """AI 定点修改被驳回测试点（需求三十~三十四）。
+    """AI 定点修改被驳回测试点（需求三十~三十四 / 完整需求 7.3）。
 
-    只输入被驳回项+审核意见+关联需求；先识别意见类型再修改；输出修改前后 Diff；
-    修改后的测试点回到待审核状态（局部修改 → 再审核）。
+    只输入被驳回项+结构化驳回信息+关联需求；产出**修改提案**（不直接覆盖）：
+    经 /fix/confirm 逐项接受/拒绝后才落地并回到待审核。
     """
     from app.agents.quality import run_point_fix
-    from app.tasks.points import find_point, rejected_points
-    from app.versions import ensure_versions, point_entities, record_version
+    from app.tasks.points import rejected_points
+    from app.versions import ensure_versions, point_entities
 
     store = request.app.state.tasks
     record, modules = _points_record(store, task_id)
+    if record.pending_fix:
+        raise HTTPException(status_code=409, detail="存在待确认的 AI 修改提案，请先接受/拒绝后再发起新修改")
     rejected = rejected_points(modules)
     if not rejected:
         raise HTTPException(status_code=409, detail="没有被驳回的测试点，无需修改")
@@ -1486,21 +1488,14 @@ async def fix_points(request: Request, task_id: str) -> dict:
         )
     except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
-    # 版本历史：AI 定点修改记 ai_fix；拆分/新增的新点以 ai_fix 入册首版
-    for d in outcome["diff"]:
-        if d.get("action") == "modify":
-            found = find_point(modules, d["tp_id"])
-            if found is not None:
-                record_version(task_id, "point", d["tp_id"], "ai_fix", dict(found[1]),
-                               by=operator, reason=d.get("comment") or "AI 定点修改")
-    ensure_versions(task_id, "point", point_entities(modules),
-                    by=operator, source="ai_fix", reason="AI 拆分/新增")
+    if not outcome["proposals"]:
+        return {"task_id": task_id, "pending_fix": None, "message": "AI 未产出有效修改提案"}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    record.fix_log.append({"kind": "points", "at": now, "by": operator,
-                           "diff": outcome["diff"], "added": outcome["added"]})
+    record.pending_fix = {"kind": "points", "at": now, "by": operator,
+                          "proposals": outcome["proposals"], "model_name": outcome.get("model_name")}
     store.save(record)
-    logger.info("任务 {} 测试点定点修改：改动 {} 条 / 新增 {} 条", task_id, len(outcome["diff"]), len(outcome["added"]))
-    return {"task_id": task_id, "diff": outcome["diff"], "added": outcome["added"], "test_points": modules}
+    logger.info("任务 {} 测试点定点修改：产出提案 {} 条（待确认）", task_id, len(outcome["proposals"]))
+    return {"task_id": task_id, "pending_fix": record.pending_fix}
 
 
 class PointAddBody(BaseModel):
@@ -1595,9 +1590,10 @@ async def dup_check_points(request: Request, task_id: str) -> dict:
 
 @router.post("/api/v1/tasks/{task_id}/cases/fix")
 async def fix_cases(request: Request, task_id: str) -> dict:
-    """AI 定点修改被驳回用例：只输入被驳回用例+审核意见；锁定用例确定性保护；输出 Diff。"""
-    from app.agents import GenerationResult
+    """AI 定点修改被驳回用例（完整需求 9.4）：只输入被驳回用例+结构化驳回信息；
+    锁定用例确定性保护；产出**修改提案**，经 /fix/confirm 接受后才落地。"""
     from app.agents.quality import run_case_fix
+    from app.versions import case_entities, ensure_versions
 
     store = request.app.state.tasks
     record = store.get(task_id)
@@ -1605,10 +1601,10 @@ async def fix_cases(request: Request, task_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
     if record.status != "completed" or not (record.result or {}).get("cases"):
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可修改的用例结果")
+    if record.pending_fix:
+        raise HTTPException(status_code=409, detail="存在待确认的 AI 修改提案，请先接受/拒绝后再发起新修改")
     if not any(s.get("status") == "rejected" for s in record.case_reviews.values()):
         raise HTTPException(status_code=409, detail="没有被驳回的用例，无需修改")
-    from app.versions import case_entities, ensure_versions, record_version
-
     operator = _operator(request)
     ensure_versions(task_id, "case", case_entities(record.result["cases"]),
                     by=record.created_by)  # 存量打底
@@ -1625,23 +1621,97 @@ async def fix_cases(request: Request, task_id: str) -> dict:
         )
     except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
-    # 版本历史：AI 定点修改记 ai_fix；新增用例随 _finalize_task 的首版补记入册
-    modified = {d["case_id"] for d in outcome["diff"] if d.get("action") == "modify"}
-    for c in outcome["cases"]:
-        if str(c.get("case_id")) in modified and c.get("uid"):
+    if not outcome["proposals"]:
+        return {"task_id": task_id, "pending_fix": None, "invalid": outcome.get("invalid", []),
+                "message": "AI 未产出有效修改提案"}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record.pending_fix = {"kind": "cases", "at": now, "by": operator,
+                          "proposals": outcome["proposals"], "invalid": outcome.get("invalid", []),
+                          "model_name": outcome.get("model_name")}
+    store.save(record)
+    logger.info("任务 {} 用例定点修改：产出提案 {} 条（待确认）", task_id, len(outcome["proposals"]))
+    return {"task_id": task_id, "pending_fix": record.pending_fix}
+
+
+class FixDecision(BaseModel):
+    proposal_id: str
+    decision: str  # accept / reject
+
+
+class FixConfirmBody(BaseModel):
+    decisions: list[FixDecision] = []
+    accept_all: bool = False
+
+
+@router.post("/api/v1/tasks/{task_id}/fix/confirm")
+async def confirm_fix(request: Request, task_id: str, body: FixConfirmBody) -> dict:
+    """确认 AI 修改提案（完整需求 7.3/9.4 确认流）。
+
+    接受项落地：记 ai_fix 版本、实体回待评审重新提交；未接受项一律视为拒绝丢弃
+    （被驳回状态保留，可继续 AI 优化或人工编辑）。
+    """
+    from app.agents import GenerationResult
+    from app.agents.quality import apply_case_proposals, apply_point_proposals
+    from app.tasks.points import find_point
+    from app.versions import ensure_versions, point_entities, record_version
+
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    pf = record.pending_fix
+    if not pf:
+        raise HTTPException(status_code=409, detail="没有待确认的 AI 修改提案")
+    decided = {d.proposal_id: d.decision for d in body.decisions}
+    accepted = [p for p in pf["proposals"]
+                if body.accept_all or decided.get(p["proposal_id"]) == "accept"]
+    rejected_count = len(pf["proposals"]) - len(accepted)
+    operator = _operator(request)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record.pending_fix = None
+
+    if not accepted:
+        record.fix_log.append({"kind": pf["kind"], "at": now, "by": operator, "diff": [],
+                               "rejected_proposals": rejected_count})
+        store.save(record)
+        logger.info("任务 {} AI 修改提案全部拒绝（{} 条）", task_id, rejected_count)
+        return {"task_id": task_id, "applied": 0, "rejected": rejected_count}
+
+    if pf["kind"] == "points":
+        modules = (record.analysis or {}).get("test_points")
+        if not modules:
+            raise HTTPException(status_code=409, detail="任务无测试点拆解结果")
+        outcome = apply_point_proposals(modules, accepted)
+        # 版本历史：接受的修改记 ai_fix；拆分/新增的新点以 ai_fix 入册首版
+        for d in outcome["diff"]:
+            if d.get("action") == "modify":
+                found = find_point(modules, d["tp_id"])
+                if found is not None:
+                    record_version(task_id, "point", d["tp_id"], "ai_fix", dict(found[1]),
+                                   by=operator, reason=d.get("comment") or "AI 定点修改")
+        ensure_versions(task_id, "point", point_entities(modules),
+                        by=operator, source="ai_fix", reason="AI 拆分/新增")
+        record.fix_log.append({"kind": "points", "at": now, "by": operator, "diff": outcome["diff"],
+                               "added": outcome["added"], "rejected_proposals": rejected_count})
+        store.save(record)
+        logger.info("任务 {} 测试点提案确认：应用 {} 条 / 拒绝 {} 条", task_id, len(accepted), rejected_count)
+        return {"task_id": task_id, "applied": len(accepted), "rejected": rejected_count,
+                "diff": outcome["diff"], "added": outcome["added"], "test_points": modules}
+
+    # kind == cases
+    merged = apply_case_proposals(list(record.result["cases"]), accepted, record.case_reviews)
+    modified_ids = {p["case_id"] for p in accepted if p["action"] == "modify"}
+    for c in merged["cases"]:
+        if str(c.get("case_id")) in modified_ids and c.get("uid"):
             record_version(task_id, "case", str(c["uid"]), "ai_fix", dict(c),
                            by=operator, reason="AI 定点修改")
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    record.fix_log.append({
-        "kind": "cases", "at": now, "by": operator, "diff": outcome["diff"],
-        "fixes": outcome.get("fixes", []), "invalid": outcome.get("invalid", []),
-    })
-    result = GenerationResult.model_validate({**record.result, "cases": outcome["cases"]})
-    task_dir = store.output_dir / task_id
-    response = _finalize_task(store, task_id, task_dir, record.sources, result, template)
-    response["diff"] = outcome["diff"]
-    response["fixes"] = outcome.get("fixes", [])
-    logger.info("任务 {} 用例定点修改：Diff {} 条", task_id, len(outcome["diff"]))
+    record.fix_log.append({"kind": "cases", "at": now, "by": operator, "diff": merged["diff"],
+                           "rejected_proposals": rejected_count})
+    result = GenerationResult.model_validate({**record.result, "cases": merged["cases"]})
+    template = request.app.state.templates.get((record.context or {}).get("template_id"))
+    response = _finalize_task(store, task_id, store.output_dir / task_id, record.sources, result, template)
+    response.update(applied=len(accepted), rejected=rejected_count, diff=merged["diff"])
+    logger.info("任务 {} 用例提案确认：应用 {} 条 / 拒绝 {} 条", task_id, len(accepted), rejected_count)
     return response
 
 

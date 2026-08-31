@@ -134,7 +134,11 @@ async def run_dup_judge(
 async def run_point_fix(
     llm: LLMClient, requirement: str, modules: list[dict], rejected: list[dict], model: str | None
 ) -> dict:
-    """AI 只获取被驳回测试点 + 结构化驳回信息（需求三十一 / 完整需求 7.1），返回修改与 Diff。"""
+    """AI 只获取被驳回测试点 + 结构化驳回信息（需求三十一 / 完整需求 7.1）。
+
+    返回修改**提案**（完整需求 7.3 确认流）：不直接应用，逐项接受/拒绝后经
+    apply_point_proposals 落地。
+    """
     payload = [
         {"tp_id": p["tp_id"], "module": p.get("module", ""), "point": p["point"],
          "dimension": p.get("dimension", ""),
@@ -153,9 +157,63 @@ async def run_point_fix(
         ],
         model,
     )
-    diff = apply_point_fixes(modules, data, allowed={p["tp_id"] for p in rejected})
-    diff["model_name"] = result.model_name
-    return diff
+    proposals = build_point_proposals(modules, data, allowed={p["tp_id"] for p in rejected})
+    return {"proposals": proposals, "model_name": result.model_name}
+
+
+def build_point_proposals(modules: list[dict], data: dict, allowed: set[str]) -> list[dict]:
+    """AI 输出 → 修改提案列表（越权项在此过滤；不改动 modules）。"""
+    proposals: list[dict] = []
+    seq = 0
+    for fix in data.get("fixes", []):
+        tp_id = str(fix.get("tp_id", ""))
+        if tp_id not in allowed:  # 模型越权改动非驳回项：直接丢弃
+            logger.warning("测试点定点修改越权改动 {}（非驳回项），已忽略", tp_id)
+            continue
+        found = find_point(modules, tp_id)
+        if found is None:
+            continue
+        _, point = found
+        action = str(fix.get("action", "modify"))
+        entry = {
+            "proposal_id": f"P{(seq := seq + 1)}", "tp_id": tp_id, "action": action,
+            "comment_type": str(fix.get("comment_type", "其他")),
+            "comment": point.get("comment", ""), "note": str(fix.get("note", "")),
+            "before": point.get("point", ""), "raw": fix,
+        }
+        if action == "split":
+            split_into = [s for s in fix.get("split_into", [])
+                          if isinstance(s, dict) and str(s.get("point", "")).strip()]
+            if not split_into:
+                continue
+            entry["after"] = [str(s["point"]).strip() for s in split_into]
+        elif action == "delete":
+            entry["after"] = None
+        else:
+            text = str(fix.get("point", "")).strip()
+            if not text:
+                continue
+            entry["after"] = text
+        proposals.append(entry)
+    for a in data.get("additions", []):
+        if not (isinstance(a, dict) and str(a.get("point", "")).strip()):
+            continue
+        proposals.append({
+            "proposal_id": f"P{(seq := seq + 1)}", "tp_id": None, "action": "add",
+            "comment_type": "场景遗漏", "note": str(a.get("reason", "")),
+            "before": None, "after": str(a["point"]).strip(),
+            "module": str(a.get("module", "")).strip(), "raw": a,
+        })
+    return proposals
+
+
+def apply_point_proposals(modules: list[dict], accepted: list[dict]) -> dict:
+    """确认流落地：只应用被接受的提案（复用 apply_point_fixes 的确定性合并）。"""
+    data = {
+        "fixes": [p["raw"] for p in accepted if p.get("action") != "add"],
+        "additions": [p["raw"] for p in accepted if p.get("action") == "add"],
+    }
+    return apply_point_fixes(modules, data, allowed={p["tp_id"] for p in accepted if p.get("tp_id")})
 
 
 def apply_point_fixes(modules: list[dict], data: dict, allowed: set[str]) -> dict:
@@ -233,14 +291,18 @@ async def run_case_fix(
     template: CustomTemplate | None,
     model: str | None,
 ) -> dict:
-    """AI 只获取被驳回用例 + 审核意见；锁定用例确定性保护，输出字段级 Diff。"""
+    """AI 只获取被驳回用例 + 结构化驳回信息；锁定用例确定性保护。
+
+    返回修改**提案**（完整需求 9.4 确认流）：不直接应用，逐项接受/拒绝后经
+    apply_case_proposals 落地。
+    """
     template = template or builtin_default_template()
     rejected = [
         c for c in cases
         if reviews.get(str(c.get("uid") or ""), {}).get("status") == "rejected"
     ]
     if not rejected:
-        return {"diff": [], "cases": cases, "fixes": []}
+        return {"proposals": [], "invalid": [], "model_name": None}
     payload = [
         dict(_strip_case(c), **_fix_directives(reviews[str(c.get("uid"))]))
         for c in rejected
@@ -258,14 +320,81 @@ async def run_case_fix(
         model,
     )
     allowed = {str(c.get("case_id")) for c in rejected}
-    merged = merge_case_fix(cases, data, allowed, reviews)
-    merged["fixes"] = [
-        {"case_id": str(f.get("case_id", "")), "comment_type": str(f.get("comment_type", "其他")),
-         "note": str(f.get("note", ""))}
-        for f in data.get("fixes", []) if isinstance(f, dict)
-    ]
-    merged["model_name"] = result.model_name
-    return merged
+    outcome = build_case_proposals(cases, data, allowed, reviews)
+    outcome["model_name"] = result.model_name
+    return outcome
+
+
+def build_case_proposals(
+    cases: list[dict], data: dict, allowed: set[str], reviews: dict[str, dict]
+) -> dict:
+    """AI 输出 → 用例修改提案列表（越权过滤 + 字段/步骤定位兜底预先应用；不改动 cases）。"""
+    by_id = {str(c.get("case_id")): c for c in cases}
+    meta = {str(f.get("case_id", "")): f for f in data.get("fixes", []) if isinstance(f, dict)}
+    proposals: list[dict] = []
+    invalid: list[dict] = []
+    seq = 0
+    for raw in data.get("cases", []):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            TestCase.model_validate({**raw, "uid": ""})
+        except ValidationError as e:
+            invalid.append({"case_id": str(raw.get("case_id", "")), "problem": str(e)})
+            continue
+        cid = str(raw.get("case_id"))
+        origin = by_id.get(cid)
+        m = meta.get(cid, {})
+        if origin is None:  # 新增用例（拆分/场景遗漏）
+            seq += 1
+            proposals.append({
+                "proposal_id": f"P{seq}", "case_id": cid, "uid": None, "action": "add",
+                "comment_type": str(m.get("comment_type", "其他")), "note": str(m.get("note", "")),
+                "before": None, "after": _strip_case(raw), "changes": [], "raw": raw,
+            })
+            continue
+        if cid not in allowed:  # 越权修改锁定/未驳回用例：丢弃改动
+            logger.warning("用例定点修改越权改动 {}（非驳回项），已忽略", cid)
+            continue
+        uid = str(origin.get("uid") or "")
+        review = reviews.get(uid, {})
+        restricted = _restrict_case_fix(
+            origin, dict(raw), review.get("fields") or [], review.get("steps") or [])
+        changes = _case_field_changes(origin, restricted)
+        if not changes:
+            continue
+        seq += 1
+        proposals.append({
+            "proposal_id": f"P{seq}", "case_id": cid, "uid": uid, "action": "modify",
+            "comment_type": str(m.get("comment_type", "其他")), "note": str(m.get("note", "")),
+            "before": _strip_case(origin), "after": _strip_case(restricted),
+            "changes": changes, "raw": restricted,
+        })
+    for cid in data.get("deleted", []):
+        cid = str(cid)
+        if cid not in allowed or cid not in by_id:
+            continue
+        m = meta.get(cid, {})
+        seq += 1
+        proposals.append({
+            "proposal_id": f"P{seq}", "case_id": cid, "uid": str(by_id[cid].get("uid") or ""),
+            "action": "delete", "comment_type": str(m.get("comment_type", "其他")),
+            "note": str(m.get("note", "")), "before": _strip_case(by_id[cid]),
+            "after": None, "changes": [], "raw": None,
+        })
+    return {"proposals": proposals, "invalid": invalid}
+
+
+def apply_case_proposals(
+    cases: list[dict], accepted: list[dict], reviews: dict[str, dict]
+) -> dict:
+    """确认流落地：只应用被接受的提案（复用 merge_case_fix 的确定性合并与编号顺延）。"""
+    data = {
+        "cases": [p["raw"] for p in accepted if p["action"] in ("modify", "add")],
+        "deleted": [p["case_id"] for p in accepted if p["action"] == "delete"],
+    }
+    allowed = {p["case_id"] for p in accepted if p["action"] in ("modify", "delete")}
+    return merge_case_fix(cases, data, allowed, reviews)
 
 
 def _strip_case(c: dict) -> dict:
