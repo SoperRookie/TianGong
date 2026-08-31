@@ -62,8 +62,8 @@ def project_rollup(records: list[TaskRecord]) -> list[dict]:
     return sorted(projects.values(), key=lambda x: x["last_activity"], reverse=True)
 
 
-def project_cases(records: list[TaskRecord], project: str) -> list[dict]:
-    """项目用例库：跨任务聚合全部用例，标注生命周期阶段与最新执行结果。
+def project_cases(records: list[TaskRecord], project: str | None) -> list[dict]:
+    """用例库：跨任务聚合全部用例，标注生命周期阶段与最新执行结果（project=None 为全库）。
 
     生命周期：待审核（AI 生成/修改后）→ 已驳回（待定点修改）→ 正式（通过锁定）；
     正式用例进入执行（通过/失败/阻塞/跳过），需求变更创建新版本后回到待审核。
@@ -71,13 +71,13 @@ def project_cases(records: list[TaskRecord], project: str) -> list[dict]:
     rows: list[dict] = []
     for r in sorted(records, key=lambda x: x.created_at or "", reverse=True):
         name = (r.context or {}).get("project") or UNASSIGNED
-        if name != project:
+        if project is not None and name != project:
             continue
         for c in (r.result or {}).get("cases", []):
             uid = str(c.get("uid") or "")
             state = r.case_reviews.get(uid) or {}
             rows.append({
-                "task_id": r.task_id,
+                "task_id": r.task_id, "project": name,
                 "case_id": c.get("case_id"), "uid": uid,
                 "module": c.get("module", ""), "title": c.get("title", ""),
                 "priority": c.get("priority", ""), "keywords": c.get("keywords", ""),

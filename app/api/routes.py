@@ -2740,6 +2740,48 @@ async def list_project_cases(request: Request, project: str) -> dict:
     return {"project": project, "cases": project_cases(records, project)}
 
 
+CASE_PAGE_SIZES = (20, 50, 100, 200)
+
+
+@router.get("/api/v1/cases")
+async def list_all_cases(
+    request: Request, project: str | None = None, module: str = "", priority: str = "",
+    review: str = "", keyword: str = "", page: int = 1, page_size: int = 20,
+) -> dict:
+    """全库用例列表（测试用例页）：跨项目/任务聚合，支持筛选与分页（20/50/100/200，默认 20）。"""
+    from app.reports import project_cases
+
+    if page_size not in CASE_PAGE_SIZES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"page_size 仅支持 {'/'.join(map(str, CASE_PAGE_SIZES))}",
+        )
+    records = request.app.state.tasks.list(limit=100000)
+    rows = project_cases(records, project or None)
+    modules = sorted({r["module"] for r in rows if r["module"]})
+    if module:
+        rows = [r for r in rows if r["module"] == module]
+    if priority:
+        rows = [r for r in rows if r["priority"] == priority]
+    if review:
+        rows = [r for r in rows if r["review"] == review]
+    if keyword:
+        kw = keyword.lower()
+        rows = [
+            r for r in rows
+            if kw in f"{r['title']} {r['case_id']} {r['keywords']} {r['module']}".lower()
+        ]
+    total = len(rows)
+    pages = max(1, -(-total // page_size))
+    page = min(max(1, page), pages)
+    start = (page - 1) * page_size
+    return {
+        "cases": rows[start:start + page_size],
+        "total": total, "page": page, "page_size": page_size, "pages": pages,
+        "modules": modules,
+    }
+
+
 # ---- 报表 ----
 
 

@@ -335,6 +335,9 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <button id="nav-plans" onclick="switchView('plans')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 3v4M16 3v4M4 11h16M9 15.5l2 2 4-4"/></svg>
       测试计划</button>
+    <button id="nav-cases" onclick="switchView('cases')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6a2 2 0 012 2v14a2 2 0 01-2 2H9a2 2 0 01-2-2V5a2 2 0 012-2z"/><path d="M9 3v18M13 8h2M13 12h2M13 16h2"/></svg>
+      测试用例</button>
     <button id="nav-reports" onclick="switchView('reports')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/></svg>
       报表</button>
@@ -381,6 +384,11 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <!-- 测试计划视图：计划列表 ⇄ 计划详情（M4） -->
 <div class="layout" id="view-plans" style="display:none">
   <div class="page" style="max-width:1420px" id="plansArea"></div>
+</div>
+
+<!-- 测试用例视图：全库用例分页浏览 -->
+<div class="layout" id="view-cases" style="display:none">
+  <div class="page" style="max-width:1420px" id="casesArea"></div>
 </div>
 
 <!-- 报表视图 -->
@@ -1053,7 +1061,7 @@ async function boot() {
 }
 
 /* ---------- 视图切换与面包屑 ---------- */
-const VIEW_LABELS = {projects:'项目', board:'任务列表', plans:'测试计划', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
+const VIEW_LABELS = {projects:'项目', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
 function setCrumb(html) { $('crumb').innerHTML = html; }
 function crumbForBoard() {
   if (currentTask) {
@@ -1067,7 +1075,7 @@ function switchView(v) {
     v = 'projects';
   }
   currentView = v;
-  for (const k of ['projects','board','plans','reports','rules','memory','models','users']) {
+  for (const k of ['projects','board','plans','cases','reports','rules','memory','models','users']) {
     $('view-'+k).style.display = k===v ? '' : 'none';
     $('nav-'+k).classList.toggle('on', k===v);
   }
@@ -1077,6 +1085,7 @@ function switchView(v) {
   else setCrumb(VIEW_LABELS[v]);
   if (v==='projects') renderProjects();
   if (v==='plans') renderPlans();
+  if (v==='cases') renderAllCases();
   if (v==='reports') renderReports();
   if (v==='rules') refreshRules();
   if (v==='memory') refreshMemories();
@@ -2415,6 +2424,100 @@ async function planUploadAtt(input) {
     toast(item ? `附件已上传并关联 ${item.case_id}` : '附件已上传（整轮）', 'ok');
     renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---------- 测试用例视图：全库用例分页浏览（20/50/100/200，默认 20） ---------- */
+const CASE_PAGE_SIZES = [20, 50, 100, 200];
+let acPage = 1, acSize = 20, acProject = '', acModule = '', acPriority = '', acReview = '', acKeyword = '';
+
+function acSet(field, value) {
+  if (field === 'acSize') acSize = value;
+  else if (field === 'acProject') acProject = value;
+  else if (field === 'acModule') acModule = value;
+  else if (field === 'acPriority') acPriority = value;
+  else if (field === 'acReview') acReview = value;
+  else if (field === 'acKeyword') acKeyword = value;
+  acPage = 1;  // 任何筛选/页大小变化回到第一页
+  renderAllCases();
+}
+
+async function renderAllCases() {
+  const q = new URLSearchParams({page: acPage, page_size: acSize});
+  if (acProject) q.set('project', acProject);
+  if (acModule) q.set('module', acModule);
+  if (acPriority) q.set('priority', acPriority);
+  if (acReview) q.set('review', acReview);
+  if (acKeyword) q.set('keyword', acKeyword);
+  let data;
+  try { data = await api('/api/v1/cases?' + q); }
+  catch (e) { return toast(e.message, 'err'); }
+  acPage = data.page;  // 后端已按总页数收敛
+  let projects = [];
+  try { projects = (await api('/api/v1/projects')).projects; } catch (e) {}
+
+  const rows = data.cases.map(c => {
+    const [label, cls] = REVIEW_STAGE[c.review] || REVIEW_STAGE.pending;
+    return `<tr class="rowlink" onclick="openTaskFromProject('${c.task_id}','cases')">
+      <td><span class="cid">${esc(c.case_id)}</span></td>
+      <td>${esc(c.project)}</td>
+      <td>${esc(c.module)}</td>
+      <td>${esc(c.title)}${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}</td>
+      <td><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
+      <td><span class="st ${cls}">${label}</span></td>
+      <td>${c.exec ? `<span class="st ${EXEC_CLS[c.exec.status]}">${EXEC_LABEL[c.exec.status]}</span>` : '<span class="hint">未执行</span>'}</td>
+      <td class="hint">${esc(c.created_by || '—')}<div>${esc((c.created_at||'').slice(0,10))}</div></td>
+    </tr>`;
+  }).join('');
+
+  const first = data.total ? (data.page - 1) * data.page_size + 1 : 0;
+  const last = Math.min(data.page * data.page_size, data.total);
+  const pager = `<div class="filters" style="margin-top:10px;justify-content:flex-end;align-items:center">
+    <span class="hint">共 ${data.total} 条 · 第 ${data.page}/${data.pages} 页（${first}-${last}）</span>
+    <label class="check">每页
+      <select style="width:70px" onchange="acSet('acSize', parseInt(this.value))">
+        ${CASE_PAGE_SIZES.map(s => `<option value="${s}" ${acSize===s?'selected':''}>${s}</option>`).join('')}
+      </select></label>
+    <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="acPage=1;renderAllCases()">«</button>
+    <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="acPage--;renderAllCases()">上一页</button>
+    <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="acPage++;renderAllCases()">下一页</button>
+    <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="acPage=${data.pages};renderAllCases()">»</button>
+  </div>`;
+
+  $('casesArea').innerHTML = `<div class="card">
+    <div class="card-h"><h3>测试用例</h3>
+      <span class="meta">全库用例 · 跨项目/任务聚合 · 点击行进入所属任务的用例审核</span>
+      <div class="grow">
+        <select style="width:150px" onchange="acModule='';acSet('acProject', this.value)">
+          <option value="">全部项目</option>
+          ${projects.map(p => `<option value="${esc(p.project)}" ${acProject===p.project?'selected':''}>${esc(p.project)}</option>`).join('')}
+        </select>
+        <select style="width:130px" onchange="acSet('acModule', this.value)">
+          <option value="">全部模块</option>
+          ${data.modules.map(m => `<option value="${esc(m)}" ${acModule===m?'selected':''}>${esc(m)}</option>`).join('')}
+        </select>
+        <select style="width:100px" onchange="acSet('acPriority', this.value)">
+          <option value="">全部优先级</option>
+          ${['P0','P1','P2','P3'].map(p => `<option ${acPriority===p?'selected':''}>${p}</option>`).join('')}
+        </select>
+        <select style="width:100px" onchange="acSet('acReview', this.value)">
+          <option value="">全部阶段</option>
+          <option value="pending" ${acReview==='pending'?'selected':''}>待审核</option>
+          <option value="rejected" ${acReview==='rejected'?'selected':''}>已驳回</option>
+          <option value="approved" ${acReview==='approved'?'selected':''}>正式</option>
+        </select>
+        <div class="search" style="width:190px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="text" placeholder="搜索标题/编号/标签…" value="${esc(acKeyword)}"
+            oninput="acKeyword=this.value" onchange="acSet('acKeyword', this.value)">
+        </div></div></div>
+    <div class="card-b">
+      ${data.total ? `<div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 300px)"><table>
+        <thead><tr><th style="width:104px">编号</th><th style="width:110px">项目</th><th style="width:90px">模块</th>
+        <th>标题 / 标签</th><th style="width:44px">优先级</th><th style="width:80px">生命周期</th>
+        <th style="width:90px">最新执行</th><th style="width:110px">创建人 / 时间</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>${pager}`
+      : '<div class="empty">没有符合条件的用例</div>'}
+    </div></div>`;
 }
 
 /* ---------- 批量操作浮动条 ---------- */
