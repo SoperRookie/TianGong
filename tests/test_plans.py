@@ -213,15 +213,28 @@ async def test_plan_run_flow_and_attachments(client, tmp_path):
 
     detail = (await client.get(f"/api/v1/plans/{pid}")).json()
     item_id = detail["items"][0]["item_id"]
-    # fail 必须带原因
+    # fail 必须带原因说明与失败分类（直接标失败，无需先驳回）
     resp = await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results",
                              json={"items": [{"item_id": item_id, "status": "fail"}]})
     assert resp.status_code == 400
+    resp = await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results",
+                             json={"items": [{"item_id": item_id, "status": "fail", "note": "BUG-1"}]})
+    assert resp.status_code == 400 and "失败分类" in resp.json()["detail"]
     resp = await client.post(
         f"/api/v1/plans/{pid}/runs/{rid}/results",
-        json={"items": [{"item_id": item_id, "status": "fail", "note": "BUG-1"}]},
+        json={"items": [{"item_id": item_id, "status": "fail", "note": "第 1 步按钮不存在",
+                         "reason": "用例步骤有误"}]},
     )
     assert resp.json()["summary"]["fail"] == 1
+    assert resp.json()["results"][item_id]["reason"] == "用例步骤有误"
+    # 用例问题类失败进入学习语料（提示词优化信号）；改判通过后不再入料
+    from app.learning.service import collect_samples
+    samples = collect_samples(app.state.tasks, plans=app.state.plans)
+    exec_samples = [s for s in samples if s["来源"] == "执行失败（用例问题）"]
+    assert len(exec_samples) == 1
+    assert exec_samples[0]["失败分类"] == "用例步骤有误"
+    assert exec_samples[0]["失败原因"] == "第 1 步按钮不存在"
+    assert exec_samples[0]["用例"]["标题"] == "验证正确账号密码登录成功"
     # 复测覆盖并留 history
     resp = await client.post(
         f"/api/v1/plans/{pid}/runs/{rid}/results",

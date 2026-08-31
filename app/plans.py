@@ -170,6 +170,10 @@ def assign_items(plan: dict, item_ids: list[str], assignee: str, by: str) -> lis
 
 EXEC_STATUSES = ("pass", "fail", "blocked", "skipped")
 
+# 执行失败分类（必选）：前两类是「用例本身的问题」，作为提示词优化的学习语料来源
+FAIL_REASONS = ("用例步骤有误", "用例预期有误", "系统缺陷", "环境问题", "测试数据问题", "其他")
+CASE_PROBLEM_REASONS = FAIL_REASONS[:2]
+
 
 def get_run(plan: dict, run_id: str) -> dict | None:
     return next((r for r in plan["runs"] if r["run_id"] == run_id), None)

@@ -1,7 +1,8 @@
 """学习语料收集（需求三十六）：从任务留痕中提取「AI 生成 → 人工修改」样本。
 
 学习来源优先级（PRD 锁定）：审核通过后的人工修改（在线评审 review_log、
-离线终稿 diff、定点修改 Diff）；用户修订指令作为补充信号。
+离线终稿 diff、定点修改 Diff）；用户修订指令作为补充信号；
+计划执行中标记为「用例问题」的失败（步骤有误/预期有误）作为提示词优化信号。
 """
 
 from app.tasks.store import TaskStore
@@ -10,8 +11,12 @@ from app.tasks.store import TaskStore
 _MAX_SAMPLES = 80
 
 
-def collect_samples(store: TaskStore, project: str | None = None, limit: int = 30) -> list[dict]:
+def collect_samples(
+    store: TaskStore, project: str | None = None, limit: int = 30, plans=None
+) -> list[dict]:
     samples: list[dict] = []
+    if plans is not None:
+        samples.extend(_exec_failure_samples(plans, project))
     for record in store.list(limit=limit):
         ctx = record.context or {}
         if project and ctx.get("project") != project:
@@ -54,6 +59,33 @@ def collect_samples(store: TaskStore, project: str | None = None, limit: int = 3
         if len(samples) >= _MAX_SAMPLES:
             break
     return samples[:_MAX_SAMPLES]
+
+
+def _exec_failure_samples(plans, project: str | None) -> list[dict]:
+    """计划执行失败且分类为「用例问题」的样本：用例快照 + 失败分类 + 原因说明。
+
+    这类失败说明 AI 生成的用例本身不可执行/预期错误，是提示词优化的直接信号；
+    系统缺陷/环境/数据类失败与生成质量无关，不入语料。
+    """
+    from app.plans import CASE_PROBLEM_REASONS
+
+    samples: list[dict] = []
+    for plan in plans.list(project=project):
+        by_item = {i["item_id"]: i for i in plan["items"]}
+        for run in plan["runs"]:
+            for item_id, result in run.get("results", {}).items():
+                if result.get("status") != "fail":
+                    continue
+                if result.get("reason") not in CASE_PROBLEM_REASONS:
+                    continue
+                item = by_item.get(item_id)
+                samples.append({
+                    "来源": "执行失败（用例问题）", "项目": plan.get("project", ""),
+                    "用例": _case_brief(item["snapshot"]) if item else result.get("title", ""),
+                    "失败分类": result.get("reason", ""),
+                    "失败原因": result.get("note", ""),
+                })
+    return samples
 
 
 def _case_brief(case: dict) -> dict:

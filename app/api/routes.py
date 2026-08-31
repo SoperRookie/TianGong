@@ -2526,6 +2526,7 @@ class PlanExecItem(BaseModel):
     item_id: str
     status: str  # pass / fail / blocked / skipped
     note: str = ""
+    reason: str = ""  # 失败分类（status=fail 必选）：用例问题类失败进入提示词优化学习语料
 
 
 class PlanExecBody(BaseModel):
@@ -2537,7 +2538,7 @@ async def record_plan_results(
     request: Request, plan_id: str, run_id: str, body: PlanExecBody
 ) -> dict:
     from app.plans import EXEC_STATUSES as PLAN_EXEC_STATUSES
-    from app.plans import run_summary
+    from app.plans import FAIL_REASONS, run_summary
 
     plan = _plan_or_404(request, plan_id)
     run = _plan_run(plan, run_id)
@@ -2560,13 +2561,19 @@ async def record_plan_results(
                 status_code=400,
                 detail=f"{item['case_id']} 标记{'失败' if entry.status == 'fail' else '阻塞'}须填写原因/缺陷号",
             )
+        if entry.status == "fail" and entry.reason not in FAIL_REASONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{item['case_id']} 标记失败须选择失败分类（可用 {'/'.join(FAIL_REASONS)}）",
+            )
         prev = run["results"].get(entry.item_id)
         run["results"][entry.item_id] = {
             "case_id": item["case_id"], "title": item["title"],
             "status": entry.status, "note": entry.note.strip(),
+            "reason": entry.reason if entry.status == "fail" else "",
             "by": operator, "at": now,
             "history": (prev.get("history", []) + [
-                {k: prev[k] for k in ("status", "note", "by", "at")}
+                {k: prev.get(k, "") for k in ("status", "note", "reason", "by", "at")}
             ]) if prev else [],
         }
     request.app.state.plans.save(plan)
@@ -2827,7 +2834,8 @@ async def analyze_learning(request: Request, body: LearningAnalyzeBody | None = 
     from app.learning import collect_samples
 
     body = body or LearningAnalyzeBody()
-    samples = collect_samples(request.app.state.tasks, project=body.project)
+    samples = collect_samples(request.app.state.tasks, project=body.project,
+                              plans=request.app.state.plans)
     if not samples:
         return {"candidates": [], "samples": 0, "message": "暂无人工修改留痕可供学习"}
     try:

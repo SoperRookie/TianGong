@@ -770,6 +770,21 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<dialog id="failDlg">
+  <div class="dlg-h"><h3>标记执行失败</h3></div>
+  <div class="dlg-b">
+    <div class="hint" id="fdMeta" style="margin-bottom:8px"></div>
+    <label class="f">失败分类<span class="hint">（「用例步骤有误 / 用例预期有误」会进入学习语料，用于后续优化生成提示词）</span></label>
+    <select id="fdReason"></select>
+    <label class="f">原因说明 / 缺陷号</label>
+    <textarea id="fdNote" rows="3" placeholder="失败现象、缺陷号；用例问题请说明第几步/哪个预期有误"></textarea>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="resolveFail(null)">取消</button>
+    <button class="btn danger" onclick="submitFail()">标记失败</button>
+  </div>
+</dialog>
+
 <dialog id="planCaseDlg" style="width:860px;max-width:96vw">
   <div class="dlg-h"><h3>加入用例（加入即快照定格）</h3></div>
   <div class="dlg-b">
@@ -2230,7 +2245,7 @@ async function renderPlanDetail() {
       <td style="width:110px">${it.assignee ? `<b>${esc(it.assignee)}</b>` : '<span class="hint">未分配</span>'}
         ${(it.assign_log || []).length > 1 ? `<div class="hint" title="${esc(it.assign_log.map(x => `${x.prev || '—'} → ${x.assignee}（${x.by}）`).join('\n'))}">已改派 ${it.assign_log.length - 1} 次</div>` : ''}</td>
       <td style="width:118px">${r ? `<span class="st ${EXEC_CLS[r.status]}">${EXEC_LABEL[r.status]}</span>
-          ${r.note ? `<div class="hint" style="color:var(--danger)">${esc(r.note)}</div>` : ''}
+          ${r.note || r.reason ? `<div class="hint" style="color:var(--danger)">${r.reason?`【${esc(r.reason)}】`:''}${esc(r.note)}</div>` : ''}
           <div class="hint">${(r.history||[]).length ? `第 ${r.history.length+1} 次 · ` : ''}${esc(r.by)}</div>`
         : '<span class="hint">未执行</span>'}</td>
       <td style="width:170px"><div class="rowops">
@@ -2393,17 +2408,41 @@ async function planNewRun() {
     renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
 }
+/* 执行失败可直接标记（无需先驳回）：失败分类必选 + 原因必填，用例问题类进入学习语料 */
+const FAIL_REASONS = ['用例步骤有误', '用例预期有误', '系统缺陷', '环境问题', '测试数据问题', '其他'];
+let _fdResolve = null;
+function askFailReason(meta) {
+  return new Promise(res => {
+    _fdResolve = res;
+    $('fdMeta').textContent = meta || '';
+    $('fdReason').innerHTML = FAIL_REASONS.map(r => `<option>${r}</option>`).join('');
+    $('fdReason').value = '系统缺陷';
+    $('fdNote').value = '';
+    $('failDlg').showModal(); $('fdNote').focus();
+  });
+}
+function submitFail() {
+  const note = $('fdNote').value.trim();
+  if (!note) return toast('原因说明不能为空', 'warn');
+  resolveFail({reason: $('fdReason').value, note});
+}
+function resolveFail(v) { $('failDlg').close(); const r=_fdResolve; _fdResolve=null; r && r(v); }
+
 async function planExecAct(itemId, status) {
-  let note = '';
-  if (status === 'fail' || status === 'blocked') {
-    const item = _planDetail.items.find(i => i.item_id === itemId);
-    note = await askComment(status === 'fail' ? '执行失败' : '执行阻塞', (item ? item.case_id : '') + ' · 原因 / 缺陷号');
+  let note = '', reason = '';
+  const item = _planDetail.items.find(i => i.item_id === itemId);
+  if (status === 'fail') {
+    const fail = await askFailReason(item ? `${item.case_id} ${item.title}` : '');
+    if (!fail) return;
+    ({reason, note} = fail);
+  } else if (status === 'blocked') {
+    note = await askComment('执行阻塞', (item ? item.case_id : '') + ' · 原因 / 缺陷号');
     if (!note) return;
   }
   const run = curPlanRun(_planDetail);
   try {
     await jpost(`/api/v1/plans/${curPlan}/runs/${run.run_id}/results`,
-      {items: [{item_id: itemId, status, note}]});
+      {items: [{item_id: itemId, status, note, reason}]});
     renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
 }
