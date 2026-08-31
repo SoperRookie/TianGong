@@ -56,12 +56,14 @@ body { margin:0; font:13.5px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",
 /* ================= 布局 ================= */
 .layout { display:flex; gap:16px; padding:16px 22px 80px; align-items:flex-start; }
 .page { margin:0 auto; width:100%; }
-/* 测试用例页：铺满视口（topbar 50px 之外无上下留白），表格区弹性占满、分页条固定卡片底部 */
-#view-cases { padding:12px 22px; height:calc(100vh - 50px); box-sizing:border-box; align-items:stretch; }
-#view-cases .page { height:100%; }
-#view-cases .card { height:100%; display:flex; flex-direction:column; }
-#view-cases .card-b { flex:1; display:flex; flex-direction:column; min-height:0; }
-#view-cases .tbl-wrap { flex:1; max-height:none; margin-top:0; }
+/* 测试用例页：通栏页面表格——无卡片外壳、无留白，筛选栏贴顶、表格占满、分页条贴底 */
+#view-cases { padding:0; gap:0; height:calc(100vh - 50px); box-sizing:border-box; align-items:stretch; }
+#view-cases .page { height:100%; max-width:none; display:flex; flex-direction:column; }
+#view-cases .card { height:100%; display:flex; flex-direction:column; border:none; border-radius:0; box-shadow:none; }
+#view-cases .card-h { padding:9px 16px; }
+#view-cases .card-b { flex:1; display:flex; flex-direction:column; min-height:0; padding:0; }
+#view-cases .tbl-wrap { flex:1; max-height:none; margin-top:0; border:none; border-radius:0; }
+#view-cases .filters { margin:0; padding:8px 16px; border-top:1px solid var(--line-2); }
 #view-cases .empty { flex:1; display:flex; align-items:center; justify-content:center; }
 
 /* ================= 卡片 ================= */
@@ -393,9 +395,9 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="page" style="max-width:1420px" id="plansArea"></div>
 </div>
 
-<!-- 测试用例视图：全库用例分页浏览 -->
+<!-- 测试用例视图：全库用例分页浏览（通栏页面表格，无卡片留白） -->
 <div class="layout" id="view-cases" style="display:none">
-  <div class="page" style="max-width:1420px" id="casesArea"></div>
+  <div class="page" id="casesArea"></div>
 </div>
 
 <!-- 报表视图 -->
@@ -2478,7 +2480,7 @@ async function renderAllCases() {
 
   const first = data.total ? (data.page - 1) * data.page_size + 1 : 0;
   const last = Math.min(data.page * data.page_size, data.total);
-  const pager = `<div class="filters" style="margin-top:10px;justify-content:flex-end;align-items:center">
+  const pager = `<div class="filters" style="justify-content:flex-end;align-items:center">
     <span class="hint">共 ${data.total} 条 · 第 ${data.page}/${data.pages} 页（${first}-${last}）</span>
     <label class="check">每页
       <select style="width:70px" onchange="acSet('acSize', parseInt(this.value))">
