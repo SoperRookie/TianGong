@@ -143,6 +143,33 @@ input[type=checkbox] { accent-color:var(--primary); width:14px; height:14px; }
 
 /* ================= 表格 ================= */
 .tbl-wrap { overflow:auto; border:1px solid var(--line); border-radius:var(--radius-s); margin-top:10px; max-height:70vh; }
+/* 概览：生命周期进度带 / 下一步行动 / 双栏信息区 / 质量提示 */
+.pipe { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:12px; }
+.pipe .pstep { border:1px solid var(--line); border-radius:var(--radius-s); padding:9px 12px;
+  background:var(--card); display:flex; gap:10px; align-items:center; min-width:0; }
+.pipe .dot { width:22px; height:22px; flex:none; border-radius:50%; display:grid; place-items:center;
+  font-size:11px; font-weight:700; background:var(--line-2); color:var(--ink-3); }
+.pipe .pstep.done { background:var(--ok-bg); border-color:#cfe6d8; }
+.pipe .pstep.done .dot { background:var(--s-ok); color:#fff; }
+.pipe .pstep.act { background:var(--primary-50); border-color:var(--primary-100); }
+.pipe .pstep.act .dot { background:var(--primary); color:#fff; }
+.pipe .pstep.fail { background:var(--danger-bg); border-color:#f0cbc7; }
+.pipe .pstep.fail .dot { background:var(--danger); color:#fff; }
+.pipe .pt { font-size:12.5px; font-weight:650; color:var(--ink); white-space:nowrap; }
+.pipe .ps { font-size:11.5px; color:var(--ink-3); margin-top:1px; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; }
+.nextbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:4px; }
+.nextbar .nx { display:inline-flex; gap:10px; align-items:center; border:1px solid var(--line);
+  border-radius:999px; padding:4px 6px 4px 13px; font-size:12.5px; background:var(--card); }
+.nextbar .nx.warn { border-color:#ecd9b6; background:var(--warn-bg); }
+.nextbar .nx.ok { border-color:#cfe6d8; background:var(--ok-bg); }
+.nextbar .nx .btn { border-radius:999px; }
+.ov-grid { display:grid; grid-template-columns:minmax(320px,5fr) minmax(300px,4fr); gap:0 28px; }
+@media (max-width:1100px){ .ov-grid { grid-template-columns:1fr; } }
+.qlist .qi { display:flex; gap:9px; padding:7px 0; border-bottom:1px dashed var(--line-2);
+  font-size:12.5px; align-items:baseline; color:var(--ink-2); }
+.qlist .qi:last-child { border-bottom:none; }
+.qlist .qi .tag { flex:none; }
 /* 概览内折叠区（需求变更 / 修订与终稿并入概览） */
 details.fold { margin-top:14px; border:1px solid var(--line); border-radius:var(--radius-s); background:var(--card); }
 details.fold summary { cursor:pointer; padding:9px 12px; font-weight:650; font-size:13px; color:var(--ink-2); user-select:none; }
@@ -1490,16 +1517,39 @@ function renderProgress(t) {
 function renderOverview(t) {
   const ctx = t.context || {};
   const r = t.result;
-  const hasCases = r && r.cases && r.cases.length;
+  const hasCases = !!(r && r.cases && r.cases.length);
+  const cases = hasCases ? r.cases : [];
+  const pts = allPoints(t);
+  const total = cases.length;
+  const running = ['queued','running'].includes(t.status);
+
+  const pc = {P0:0,P1:0,P2:0,P3:0};
+  cases.forEach(c => { if (pc[c.priority]!=null) pc[c.priority]++; });
+  const sc = {approved:0, pending:0, rejected:0};
+  cases.forEach(c => { const s = caseState(t, c).status; sc[s]!=null ? sc[s]++ : sc.pending++; });
+  const ptc = {approved:0, rejected:0, pending:0};
+  pts.forEach(p => { ptc[p.status]!=null ? ptc[p.status]++ : ptc.pending++; });
+
+  // ---- 生命周期进度带：需求生成 → 测试点审核 → 用例审核 → 计划执行 ----
+  const step = (cls, no, title, sub, id) => `<div class="pstep ${cls}" ${id?`id="${id}"`:''}>
+    <div class="dot">${cls==='done'?'✓':no}</div>
+    <div style="min-width:0"><div class="pt">${title}</div><div class="ps">${sub}</div></div></div>`;
+  const s1 = t.status==='failed' ? step('fail','1','需求生成','生成失败')
+    : running ? step('act','1','需求生成','生成中…')
+    : t.status==='awaiting_confirmation' ? step('act','1','需求生成','测试点拆解待确认')
+    : step('done','1','需求生成',`${(t.sources||[]).length||1} 个来源 · ${total} 条用例`);
+  const s2 = !pts.length ? step('','2','测试点审核','无独立测试点环节')
+    : (ptc.pending||ptc.rejected) ? step('act','2','测试点审核',`待审 ${ptc.pending} · 驳回 ${ptc.rejected}`)
+    : step('done','2','测试点审核',`${pts.length} 条全部通过`);
+  const s3 = !hasCases ? step('','3','用例审核','等待生成')
+    : sc.approved===total ? step('done','3','用例审核',`${total} 条全部通过`)
+    : step('act','3','用例审核',`通过 ${sc.approved} · 待审 ${sc.pending} · 驳回 ${sc.rejected}`);
+  const s4 = step('','4','计划执行', hasCases && !running ? '统计中…' : '等待用例通过', 'pipePlans');
+  if (hasCases && !running) loadOvPlans(t.task_id);
+
+  // ---- 指标卡 ----
   let stats = '';
   if (hasCases) {
-    const cases = r.cases;
-    const pc = {P0:0,P1:0,P2:0,P3:0};
-    cases.forEach(c => { if (pc[c.priority]!=null) pc[c.priority]++; });
-    const states = cases.map(c => caseState(t, c).status);
-    const sc = {approved:0, pending:0, rejected:0};
-    states.forEach(s => sc[s]!=null ? sc[s]++ : sc.pending++);
-    const total = cases.length;
     const PRIO_COLOR = {P0:'var(--p0)',P1:'var(--p1)',P2:'var(--p2)',P3:'var(--p3)'};
     const prioBar = ['P0','P1','P2','P3'].filter(p=>pc[p]).map(p =>
       `<i style="flex:${pc[p]};background:${PRIO_COLOR[p]}" title="${p} · ${pc[p]} 条"></i>`).join('');
@@ -1526,36 +1576,101 @@ function renderOverview(t) {
         <div class="sub">${r.passed?'评审通过':'含未通过项'}${r.chunks>1?` · ${r.chunks} 分片`:''} · 重复风险 ${esc((t.quality||{})['重复风险']||'—')}</div></div>
     </div>`;
   }
-  const pts = allPoints(t);
-  const dupCount = ((t.quality||{})['疑似重复用例对']||[]).length;
-  return `${stats}
-    <div class="section-t">任务信息</div>
-    <dl class="meta-grid">
-      <div><dt>来源</dt><dd>${(t.sources||[]).map(esc).join('、')||'-'}</dd></div>
-      <div><dt>创建人</dt><dd>${esc(t.created_by||'—')}</dd></div>
-      <div><dt>项目</dt><dd>${esc(ctx.project||'—')}</dd></div>
-      <div><dt>生成模型</dt><dd>${esc(ctx.model||'默认')}</dd></div>
-      <div><dt>模板</dt><dd>${esc(ctx.template_id||'—')}</dd></div>
-      <div><dt>测试点</dt><dd>${pts.length||'—'}</dd></div>
-      <div><dt>创建时间</dt><dd>${esc((t.created_at||'').replace('T',' ').replace('+00:00',' UTC'))}</dd></div>
-    </dl>
-    ${hasCases ? `<div class="section-t">导出下载</div><div class="toolbar" style="margin-top:4px">
-      ${Object.keys(t.files||{}).map(f=>`<a class="btn ghost sm" href="/api/v1/tasks/${t.task_id}/files/${f}?token=${authToken}">${f}</a>`).join('')}</div>` : ''}
-    ${dupCount ? `<div class="section-t">AI 自检 · 疑似重复用例</div>${((t.quality||{})['疑似重复用例对']||[]).map(p=>
-      `<div class="hint">${esc(p.a)}「${esc(p.a_title)}」≈ ${esc(p.b)}「${esc(p.b_title)}」（${p.similarity}）</div>`).join('')}
-      <div class="hint" style="margin-top:2px">评分仅供参考，不作为自动通过依据</div>` : ''}
-    ${r && r.unresolved && r.unresolved.length ? `<div class="section-t">未解决评审问题</div>${r.unresolved.map(u=>
-      `<div class="hint" style="color:var(--warn)">⚠ ${esc(u.case_id)}：${esc(u.problem)}</div>`).join('')}` : ''}
-    ${(t.analysis&&t.analysis.blind_spots&&t.analysis.blind_spots.length)?
-      `<div class="section-t">疑似需求盲区</div><div class="chips">${t.analysis.blind_spots.map(b=>'<span>'+esc(b)+'</span>').join('')}</div>`:''}
-    ${(t.memories&&t.memories.length)||(t.rules&&t.rules.length) ? `<div class="section-t">本次注入</div><div class="chips plain">
-      ${(t.memories||[]).map(m=>'<span>记忆：'+esc(m.content)+'</span>').join('')}
-      ${(t.rules||[]).map(x=>'<span>规则：'+esc(x.content)+'</span>').join('')}</div>` : ''}
+
+  // ---- 下一步行动：按状态给出待办入口 ----
+  const acts = [];
+  const act = (cls, label, btn, fn) => acts.push(`<span class="nx ${cls}">${label}
+    <button class="btn ghost sm" onclick="${fn}">${btn}</button></span>`);
+  if (t.status==='awaiting_confirmation') act('warn','测试点拆解待确认','去确认',"setTab('points')");
+  if (ptc.pending||ptc.rejected) act('warn',`${ptc.pending+ptc.rejected} 个测试点待处理`,'去审核',"setTab('points')");
+  if (t.pending_fix) act('warn',`AI 修改提案待确认（${t.pending_fix.kind==='cases'?'用例':'测试点'}）`,'去确认',
+    t.pending_fix.kind==='cases'?"setTab('cases')":"setTab('points')");
+  if (sc.rejected && !t.pending_fix) act('warn',`${sc.rejected} 条用例已驳回，可让 AI 定点修改`,'去处理',"setTab('cases')");
+  if (sc.pending) act('',`${sc.pending} 条用例待审核`,'去审核',"setTab('cases')");
+  if (hasCases && total && sc.approved===total) act('ok','全部用例已通过，可加入测试计划安排执行','去测试计划',"switchView('plans')");
+  const nextbar = acts.length && !running
+    ? `<div class="section-t">下一步</div><div class="nextbar">${acts.join('')}</div>` : '';
+
+  // ---- 质量提示（右栏聚合）----
+  const qi = [];
+  (r && r.unresolved || []).forEach(u =>
+    qi.push(`<div class="qi"><span class="tag" style="color:var(--warn)">评审</span><span><b>${esc(u.case_id)}</b> ${esc(u.problem)}</span></div>`));
+  ((t.quality||{})['疑似重复用例对']||[]).forEach(p =>
+    qi.push(`<div class="qi"><span class="tag">重复</span><span>${esc(p.a)}「${esc(p.a_title)}」≈ ${esc(p.b)}「${esc(p.b_title)}」（${p.similarity}）</span></div>`));
+  ((t.analysis||{}).blind_spots||[]).forEach(b =>
+    qi.push(`<div class="qi"><span class="tag" style="color:var(--purple)">盲区</span><span>${esc(b)}</span></div>`));
+  (t.memories||[]).forEach(m =>
+    qi.push(`<div class="qi"><span class="tag">记忆</span><span>${esc(m.content)}</span></div>`));
+  (t.rules||[]).forEach(x =>
+    qi.push(`<div class="qi"><span class="tag">规则</span><span>${esc(x.content)}</span></div>`));
+
+  return `<div class="pipe">${s1}${s2}${s3}${s4}</div>
+    ${stats}
+    ${nextbar}
+    <div class="ov-grid">
+      <div>
+        <div class="section-t">任务信息</div>
+        <dl class="meta-grid">
+          <div><dt>来源</dt><dd>${(t.sources||[]).map(esc).join('、')||'-'}</dd></div>
+          <div><dt>创建人</dt><dd>${esc(t.created_by||'—')}</dd></div>
+          <div><dt>项目</dt><dd>${esc(ctx.project||'—')}</dd></div>
+          <div><dt>生成模型</dt><dd>${esc(ctx.model||'默认')}</dd></div>
+          <div><dt>模板</dt><dd>${esc(ctx.template_id||'—')}</dd></div>
+          <div><dt>测试点</dt><dd>${pts.length||'—'}</dd></div>
+          <div><dt>创建时间</dt><dd>${esc((t.created_at||'').replace('T',' ').replace('+00:00',' UTC'))}</dd></div>
+        </dl>
+        ${hasCases ? `<div class="section-t">导出下载</div><div class="toolbar" style="margin-top:4px">
+          ${Object.keys(t.files||{}).map(f=>`<a class="btn ghost sm" href="/api/v1/tasks/${t.task_id}/files/${f}?token=${authToken}">${f}</a>`).join('')}</div>` : ''}
+      </div>
+      <div>
+        <div class="section-t">质量提示与注入<span class="hint">（AI 自检仅供参考，不作为自动通过依据）</span></div>
+        <div class="qlist">${qi.join('') || '<div class="hint" style="padding:6px 0">暂无质量提示；本次生成未注入记忆/规则</div>'}</div>
+      </div>
+    </div>
+    ${hasCases && !running ? `<div class="section-t">关联测试计划</div>
+      <div id="ovPlans"><div class="hint">加载中…</div></div>` : ''}
     ${hasCases ? `
     <details class="fold" ${t.requirement_diff?'open':''}><summary>需求变更差异分析</summary>
       <div class="fold-b">${renderChange(t)}</div></details>
     <details class="fold" ${(t.revisions||[]).length||t.offline_review?'open':''}><summary>修订与终稿留痕</summary>
       <div class="fold-b">${renderHistory(t)}</div></details>` : ''}`;
+}
+
+/* 概览 · 关联测试计划（异步）：引用本任务快照的计划 + 进度带第 4 步状态 */
+async function loadOvPlans(taskId) {
+  let data;
+  try { data = await api('/api/v1/plans?task_id=' + taskId); }
+  catch (e) { const el = $('ovPlans'); if (el) el.innerHTML = `<div class="hint">加载失败：${esc(e.message)}</div>`; return; }
+  if (!currentTask || currentTask.task_id !== taskId) return;  // 已切走
+  const plans = data.plans;
+  const pipeEl = $('pipePlans');
+  if (pipeEl) {
+    const executed = plans.filter(p => p.summary.latest_run);
+    const cls = !plans.length ? '' : executed.length ? 'done' : 'act';
+    pipeEl.className = 'pstep ' + cls;
+    pipeEl.innerHTML = `<div class="dot">${cls==='done'?'✓':'4'}</div><div style="min-width:0"><div class="pt">计划执行</div>
+      <div class="ps">${!plans.length ? '未加入计划' : `${plans.length} 个计划${executed.length?` · ${executed.length} 个已执行`:' · 未开始执行'}`}</div></div>`;
+  }
+  const el = $('ovPlans');
+  if (!el) return;
+  if (!plans.length) {
+    el.innerHTML = `<div class="hint">该任务的用例尚未加入任何测试计划。
+      <button class="btn ghost sm" onclick="switchView('plans')" style="margin-left:6px">去创建计划</button></div>`;
+    return;
+  }
+  el.innerHTML = `<div class="tbl-wrap" style="margin-top:4px"><table>
+    <tr><th>计划</th><th style="width:80px">状态</th><th style="width:100px">本任务用例</th><th style="width:220px">最新执行</th><th style="width:90px">负责人</th></tr>
+    ${plans.map(p => {
+      const lr = p.summary.latest_run;
+      const st = PLAN_ST[p.status] || [p.status,'pending'];
+      return `<tr class="rowlink" onclick="openPlan('${p.plan_id}')">
+        <td><b>${esc(p.name)}</b><div class="hint">${esc(p.project)}</div></td>
+        <td><span class="st ${st[1]}">${st[0]}</span></td>
+        <td>${p.task_cases} / ${p.summary.cases} 条</td>
+        <td>${lr ? `${lr.executed}/${lr.total}${lr.pass_rate!=null?` · 通过率 <b>${(lr.pass_rate*100).toFixed(1)}%</b>`:''}<div class="hint">${esc(lr.name)}${lr.finished_at?' · 已结束':' · 进行中'}</div>` : '<span class="hint">未执行</span>'}</td>
+        <td class="hint">${esc(p.owner||'—')}</td>
+      </tr>`;}).join('')}
+  </table></div>`;
 }
 
 /* ==================== 测试点审核 ==================== */

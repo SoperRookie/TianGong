@@ -2255,18 +2255,25 @@ def _plan_view(plan: dict) -> dict:
 
 
 @router.get("/api/v1/plans")
-async def list_plans(request: Request, project: str | None = None, mine: bool = False) -> dict:
-    """计划列表（可按项目过滤）；mine=true 只看分配给我的（我的执行任务）。"""
+async def list_plans(
+    request: Request, project: str | None = None, mine: bool = False,
+    task_id: str | None = None,
+) -> dict:
+    """计划列表（可按项目过滤）；mine=true 只看分配给我的；task_id 只看引用该任务快照的计划。"""
     from app.plans import PLAN_STATUSES, plan_summary
 
     me = _operator(request)
     out = []
     for plan in request.app.state.plans.list(project=project):
+        task_items = [i for i in plan["items"] if i["task_id"] == task_id] if task_id else []
+        if task_id and not task_items:
+            continue
         my_items = [i for i in plan["items"] if i.get("assignee") == me]
         if mine and (not my_items or plan["status"] == "archived"):
             continue
         latest = plan["runs"][-1] if plan["runs"] else None
         out.append({
+            "task_cases": len(task_items),
             **{k: plan[k] for k in ("plan_id", "name", "project", "owner",
                                     "start_date", "end_date", "status",
                                     "created_by", "created_at")},

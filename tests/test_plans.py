@@ -181,6 +181,18 @@ async def test_assign_by_case_and_module_with_trace(client):
     assert all(x["by"] for x in item["assign_log"])
 
 
+async def test_list_plans_by_task(client):
+    """概览「关联测试计划」：task_id 过滤只返回引用该任务快照的计划，并给出本任务用例数。"""
+    task_id = await _task_with_approved(client, make_case())
+    plan = await _plan(client)
+    await client.post(f"/api/v1/plans/{plan['plan_id']}/cases", json={"task_id": task_id})
+    await _plan(client, name="无关计划")
+    plans = (await client.get("/api/v1/plans", params={"task_id": task_id})).json()["plans"]
+    assert [p["plan_id"] for p in plans] == [plan["plan_id"]]
+    assert plans[0]["task_cases"] == 1
+    assert (await client.get("/api/v1/plans", params={"task_id": "没有的任务"})).json()["plans"] == []
+
+
 async def test_concurrent_assignment_conflict(client):
     """多人同时分配：不同用例互不影响；同一用例他人先行分配时不覆盖、返回冲突。"""
     task_id = await _task_with_approved(
