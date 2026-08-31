@@ -556,6 +556,13 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<!-- 版本历史（完整需求 10 章）：AI 原始/人工/AI 修改/终稿 + 字段差异 + 恢复 -->
+<dialog id="versionDlg" style="width:640px">
+  <div class="dlg-h"><h3 id="verTitle">版本历史</h3></div>
+  <div class="dlg-b" id="verBody" style="max-height:62vh;overflow-y:auto"></div>
+  <div class="dlg-f"><button class="btn ghost" onclick="$('versionDlg').close()">关闭</button></div>
+</dialog>
+
 <!-- 测试点：修改 / 新增 -->
 <dialog id="pointDlg">
   <div class="dlg-h"><h3 id="pdTitle">测试点</h3></div>
@@ -842,6 +849,48 @@ function submitReject() {
   resolveReject(out);
 }
 function resolveReject(v) { $('rejectDlg').close(); const r=_rjResolve; _rjResolve=null; r && r(v); }
+
+/* ---- 版本历史与恢复（完整需求 10 章）---- */
+let _verCtx = null;
+async function openVersions(kind, entityId, label) {
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/versions?kind=${kind}&entity_id=${encodeURIComponent(entityId)}`);
+    _verCtx = {kind, entityId};
+    $('verTitle').textContent = `版本历史 · ${label}`;
+    const vs = data.versions || [];
+    $('verBody').innerHTML = vs.length
+      ? vs.slice().reverse().map(v=>renderVersion(v, kind, vs.length)).join('')
+      : '<div class="empty">暂无版本记录（存量任务自首次评审/修改起开始记录）</div>';
+    $('versionDlg').showModal();
+  } catch (e) { toast('获取版本失败：' + e.message, 'err'); }
+}
+function renderVersion(v, kind, total) {
+  const c = v.content || {};
+  const body = kind === 'point'
+    ? `<div style="margin-top:6px">${esc(c.point||'')} ${c.dimension?`<span class="tag">${esc(c.dimension)}</span>`:''}</div>`
+    : `<div style="margin-top:6px"><b>${esc(c.title||'')}</b> <span class="prio ${esc(c.priority||'')}">${esc(c.priority||'')}</span></div>
+       <div class="hint">${(c.steps||[]).map((s,i)=>`${i+1}. ${esc(s.action||'')} → ${esc(s.expected||'')}`).join('<br>')}</div>`;
+  const changes = (v.changes||[]).map(ch =>
+    `<div class="hint"><b>${esc(ch.field)}</b>：<span class="del">${esc(ch.before)}</span> → <span class="add">${esc(ch.after)}</span></div>`).join('');
+  return `<div class="box">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <b>v${v.version_no}</b><span class="tag">${esc(v.source_label||v.source)}</span>
+      <span class="hint">${esc(v.created_by||'')} · ${esc((v.created_at||'').replace('T',' ').slice(0,16))}</span>
+      ${v.reason?`<span class="hint">· ${esc(v.reason)}</span>`:''}
+      ${v.version_no<total?`<button class="btn ghost sm" style="margin-left:auto" onclick="restoreVersion(${v.version_no})">恢复此版</button>`:''}
+    </div>${body}${changes}</div>`;
+}
+async function restoreVersion(versionNo) {
+  if (!await uiConfirm('恢复历史版本',
+      `确定恢复到 v${versionNo}？将基于该版追加一条人工新版并回到待评审，历史不会被覆盖。`)) return;
+  try {
+    await jpost(`/api/v1/tasks/${currentTask.task_id}/versions/restore`,
+                {kind:_verCtx.kind, entity_id:_verCtx.entityId, version_no:versionNo});
+    $('versionDlg').close();
+    await openTask(currentTask.task_id, true);
+    toast(`已恢复到 v${versionNo}（追加新版，待重新评审）`, 'ok');
+  } catch (e) { toast('恢复失败：' + e.message, 'err'); }
+}
 function rejectInfoLine(s) {
   if (!s || !s.comment) return '';
   const types = (s.reject_types||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join(' ');
@@ -895,6 +944,7 @@ const IC = {
   edit:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4z"/></svg>',
   trash:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/></svg>',
   unlock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 019.9-1"/></svg>',
+  clock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
 };
 
 /* ---------- 登录认证 ---------- */
@@ -1450,6 +1500,7 @@ function renderPointWorkbench(t) {
           ${p.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${p.reject_count} 次</div>`:''}</td>
         <td style="width:132px">${p.legacy?'<span class="hint">旧版任务只读</span>':`<div class="rowops">
           <button class="ibtn ok" title="通过（锁定）" onclick="pointAct('${esc(p.tp_id)}','approve')">${IC.check}</button>
+          <button class="ibtn" title="版本历史" onclick="openVersions('point','${esc(p.tp_id)}','${esc(p.tp_id)}')">${IC.clock}</button>
           <button class="ibtn" title="修改" onclick="pointModify('${esc(p.tp_id)}')">${IC.edit}</button>
           <button class="ibtn bad" title="驳回" onclick="pointReject('${esc(p.tp_id)}')">${IC.x}</button>
           <button class="ibtn bad" title="删除" onclick="pointDelete('${esc(p.tp_id)}')">${IC.trash}</button>
@@ -1645,6 +1696,7 @@ function renderCases(t) {
         ${s.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${s.reject_count} 次</div>`:''}</td>
       <td style="width:132px"><div class="rowops">
         <button class="ibtn ok" title="通过（锁定）" onclick="caseAct('${esc(c.case_id)}','approve')">${IC.check}</button>
+        <button class="ibtn" title="版本历史" onclick="openVersions('case','${esc(c.uid)}','${esc(c.case_id)}')">${IC.clock}</button>
         <button class="ibtn" title="修改" onclick="openEdit('${esc(c.case_id)}')">${IC.edit}</button>
         <button class="ibtn bad" title="驳回" onclick="caseReject('${esc(c.case_id)}')">${IC.x}</button>
         <button class="ibtn bad" title="删除" onclick="caseDelete('${esc(c.case_id)}')">${IC.trash}</button>

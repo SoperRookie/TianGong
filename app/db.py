@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Callable
 
 from loguru import logger
-from sqlalchemy import Column, MetaData, String, Table, Text, create_engine, delete, insert, select
+from sqlalchemy import (
+    Column, Index, Integer, MetaData, String, Table, Text, create_engine, delete, insert, select,
+)
 from sqlalchemy.dialects.mysql import LONGTEXT
 
 from app.config import get_settings
@@ -28,6 +30,23 @@ kv_docs = Table(
     Column("store", String(64), primary_key=True),
     Column("k", String(191), primary_key=True),
     Column("payload", Text().with_variant(LONGTEXT, "mysql"), nullable=False),
+)
+
+# 测试点/用例版本历史（完整需求 10 章）：内容快照按版本追加，恢复即基于历史版本再生一版
+entity_versions = Table(
+    "entity_versions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("task_id", String(32), nullable=False),
+    Column("kind", String(16), nullable=False),       # point / case
+    Column("entity_id", String(64), nullable=False),  # 测试点 tp_id / 用例 uid
+    Column("version_no", Integer, nullable=False),
+    Column("source", String(16), nullable=False),     # ai_original / manual / ai_fix / final / import
+    Column("reason", String(500), nullable=False, default=""),
+    Column("created_by", String(64)),
+    Column("created_at", String(32), nullable=False),
+    Column("payload", Text().with_variant(LONGTEXT, "mysql"), nullable=False),
+    Index("ix_ev_entity", "task_id", "kind", "entity_id"),
 )
 
 

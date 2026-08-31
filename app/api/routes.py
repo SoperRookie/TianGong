@@ -889,6 +889,11 @@ async def create_task(
             await _run_point_quality_checks(request.app, task_id, requirement, model)
             store.set_progress(task_id, progress=None)
             record = store.get(task_id)
+            # 版本历史（完整需求 10 章）：拆解产出即记 AI 原始版本（查漏新增的点一并入册）
+            from app.versions import ensure_versions, point_entities
+            ensure_versions(task_id, "point",
+                            point_entities((record.analysis or {}).get("test_points", [])),
+                            by=record.created_by)
             return {
                 "task_id": task_id,
                 "status": record.status,
@@ -1021,6 +1026,9 @@ def _finalize_task(
     if rules is not None:
         record.rules = rules
     store.save(record)
+    # 版本历史（完整需求 10 章）：为尚无版本的用例补记首版（生成产出 / 存量任务打底）
+    from app.versions import case_entities, ensure_versions
+    ensure_versions(task_id, "case", case_entities(record.result["cases"]), by=record.created_by)
     return {
         "task_id": task_id,
         "status": record.status,
@@ -1275,8 +1283,13 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
     if record.status != "completed" or not (record.result or {}).get("cases"):
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可评审的用例结果")
 
+    from app.versions import case_entities, ensure_versions, record_version
+
     cases: list[dict] = list(record.result["cases"])
     by_id = {str(c.get("case_id")): c for c in cases}
+    operator = _operator(request)
+    # 存量任务打底：改动前先以当前内容补记首版（新任务已在生成时记录，此处幂等跳过）
+    ensure_versions(task_id, "case", case_entities(cases), by=record.created_by)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     counts = {"approve": 0, "reject": 0, "modify": 0, "delete": 0, "unlock": 0}
     hints: list[str] = []
@@ -1296,6 +1309,8 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
             state.update(status="approved", locked=True)
             clear_reject_fields(state)
             state.update(fields=[], steps=[])
+            # 版本历史：评审通过即记终稿版本（需求 10.1）
+            record_version(task_id, "case", uid, "final", origin, by=operator, reason="评审通过")
         elif action == "reject":
             try:
                 rejection = validate_rejection(
@@ -1342,6 +1357,8 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
             entry["before"], entry["after"] = origin, updated
             cases[cases.index(origin)] = updated
             by_id[item.case_id] = updated
+            record_version(task_id, "case", uid, "manual", updated, by=operator,
+                           reason=item.feedback.strip() or item.comment.strip() or "人工修改")
             # 人工定稿即通过并锁定（人工修改优于 AI 再改）
             state.update(status="approved", locked=True)
             clear_reject_fields(state)
@@ -1406,16 +1423,34 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
 
     通过即锁定退出 AI 修改队列；驳回须带审核意见；连续驳回达阈值提示人工介入（需求三十五）。
     """
-    from app.tasks.points import PointReviewError, apply_point_review
+    from app.tasks.points import PointReviewError, apply_point_review, find_point
+    from app.versions import ensure_versions, point_entities, record_version
 
     store = request.app.state.tasks
     record, modules = _points_record(store, task_id)
+    operator = _operator(request)
+    # 存量任务打底：改动前补记首版（新任务已在拆解时记录，幂等跳过）
+    ensure_versions(task_id, "point", point_entities(modules), by=record.created_by)
     try:
         outcome = apply_point_review(modules, [i.model_dump() for i in body.items])
     except PointReviewError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # 版本历史（需求 10.1）：人工修改记 manual，通过记 final
+    for entry in outcome["log"]:
+        if entry["action"] not in ("modify", "approve"):
+            continue
+        found = find_point(modules, entry["tp_id"])
+        if found is None:
+            continue
+        _, point = found
+        if entry["action"] == "modify":
+            record_version(task_id, "point", entry["tp_id"], "manual", dict(point),
+                           by=operator, reason=entry.get("comment") or "人工修改")
+        else:
+            record_version(task_id, "point", entry["tp_id"], "final", dict(point),
+                           by=operator, reason="评审通过")
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    record.point_review_log.extend(dict(e, at=now, by=_operator(request)) for e in outcome["log"])
+    record.point_review_log.extend(dict(e, at=now, by=operator) for e in outcome["log"])
     store.save(record)
     logger.info("任务 {} 测试点审核：{}", task_id, outcome["counts"])
     return {
@@ -1434,13 +1469,16 @@ async def fix_points(request: Request, task_id: str) -> dict:
     修改后的测试点回到待审核状态（局部修改 → 再审核）。
     """
     from app.agents.quality import run_point_fix
-    from app.tasks.points import rejected_points
+    from app.tasks.points import find_point, rejected_points
+    from app.versions import ensure_versions, point_entities, record_version
 
     store = request.app.state.tasks
     record, modules = _points_record(store, task_id)
     rejected = rejected_points(modules)
     if not rejected:
         raise HTTPException(status_code=409, detail="没有被驳回的测试点，无需修改")
+    operator = _operator(request)
+    ensure_versions(task_id, "point", point_entities(modules), by=record.created_by)  # 存量打底
     ctx = record.context or {}
     try:
         outcome = await run_point_fix(
@@ -1448,8 +1486,17 @@ async def fix_points(request: Request, task_id: str) -> dict:
         )
     except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
+    # 版本历史：AI 定点修改记 ai_fix；拆分/新增的新点以 ai_fix 入册首版
+    for d in outcome["diff"]:
+        if d.get("action") == "modify":
+            found = find_point(modules, d["tp_id"])
+            if found is not None:
+                record_version(task_id, "point", d["tp_id"], "ai_fix", dict(found[1]),
+                               by=operator, reason=d.get("comment") or "AI 定点修改")
+    ensure_versions(task_id, "point", point_entities(modules),
+                    by=operator, source="ai_fix", reason="AI 拆分/新增")
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    record.fix_log.append({"kind": "points", "at": now, "by": _operator(request),
+    record.fix_log.append({"kind": "points", "at": now, "by": operator,
                            "diff": outcome["diff"], "added": outcome["added"]})
     store.save(record)
     logger.info("任务 {} 测试点定点修改：改动 {} 条 / 新增 {} 条", task_id, len(outcome["diff"]), len(outcome["added"]))
@@ -1560,6 +1607,11 @@ async def fix_cases(request: Request, task_id: str) -> dict:
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可修改的用例结果")
     if not any(s.get("status") == "rejected" for s in record.case_reviews.values()):
         raise HTTPException(status_code=409, detail="没有被驳回的用例，无需修改")
+    from app.versions import case_entities, ensure_versions, record_version
+
+    operator = _operator(request)
+    ensure_versions(task_id, "case", case_entities(record.result["cases"]),
+                    by=record.created_by)  # 存量打底
     ctx = record.context or {}
     template = request.app.state.templates.get(ctx.get("template_id"))
     try:
@@ -1573,9 +1625,15 @@ async def fix_cases(request: Request, task_id: str) -> dict:
         )
     except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
+    # 版本历史：AI 定点修改记 ai_fix；新增用例随 _finalize_task 的首版补记入册
+    modified = {d["case_id"] for d in outcome["diff"] if d.get("action") == "modify"}
+    for c in outcome["cases"]:
+        if str(c.get("case_id")) in modified and c.get("uid"):
+            record_version(task_id, "case", str(c["uid"]), "ai_fix", dict(c),
+                           by=operator, reason="AI 定点修改")
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     record.fix_log.append({
-        "kind": "cases", "at": now, "by": _operator(request), "diff": outcome["diff"],
+        "kind": "cases", "at": now, "by": operator, "diff": outcome["diff"],
         "fixes": outcome.get("fixes", []), "invalid": outcome.get("invalid", []),
     })
     result = GenerationResult.model_validate({**record.result, "cases": outcome["cases"]})
@@ -1584,6 +1642,100 @@ async def fix_cases(request: Request, task_id: str) -> dict:
     response["diff"] = outcome["diff"]
     response["fixes"] = outcome.get("fixes", [])
     logger.info("任务 {} 用例定点修改：Diff {} 条", task_id, len(outcome["diff"]))
+    return response
+
+
+# ---- 版本历史与恢复（完整需求 10 章）----
+
+
+@router.get("/api/v1/tasks/{task_id}/versions")
+async def entity_version_chain(request: Request, task_id: str, kind: str, entity_id: str) -> dict:
+    """某测试点/用例的完整版本链：版本、来源、修改人、时间、原因、字段差异。"""
+    from app.versions import list_versions
+
+    if kind not in ("point", "case"):
+        raise HTTPException(status_code=400, detail="kind 须为 point 或 case")
+    if request.app.state.tasks.get(task_id) is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    return {"task_id": task_id, "kind": kind, "entity_id": entity_id,
+            "versions": list_versions(task_id, kind, entity_id)}
+
+
+class VersionRestoreBody(BaseModel):
+    kind: str        # point / case
+    entity_id: str   # point: tp_id；case: uid
+    version_no: int
+
+
+@router.post("/api/v1/tasks/{task_id}/versions/restore")
+async def restore_entity_version(request: Request, task_id: str, body: VersionRestoreBody) -> dict:
+    """恢复历史版本（需求 10.1）：不覆盖历史——基于所选版本追加 manual 新版，实体回到待评审。"""
+    from app.agents import GenerationResult
+    from app.tasks.points import clear_reject_fields, coarse_warnings, find_point
+    from app.templates import TestCase
+    from app.versions import get_version, record_version
+
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    content = get_version(task_id, body.kind, body.entity_id, body.version_no)
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"版本不存在: {body.kind} {body.entity_id} v{body.version_no}")
+    operator = _operator(request)
+    reason = f"恢复自 v{body.version_no}"
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    if body.kind == "point":
+        modules = (record.analysis or {}).get("test_points") or []
+        found = find_point(modules, body.entity_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail=f"测试点不存在: {body.entity_id}")
+        _, point = found
+        point["point"] = str(content.get("point", ""))
+        point["dimension"] = str(content.get("dimension", ""))
+        point["status"], point["locked"] = "pending", False
+        clear_reject_fields(point)
+        point["warnings"] = coarse_warnings(point["point"])
+        version_no = record_version(task_id, "point", body.entity_id, "manual", dict(point),
+                                    by=operator, reason=reason)
+        record.point_review_log.append(
+            {"tp_id": body.entity_id, "action": "restore", "comment": reason, "at": now, "by": operator})
+        store.save(record)
+        logger.info("任务 {} 测试点 {} 恢复自 v{}（新版本 v{}）", task_id, body.entity_id, body.version_no, version_no)
+        return {"task_id": task_id, "kind": "point", "entity_id": body.entity_id,
+                "version_no": version_no, "test_points": modules}
+
+    if body.kind != "case":
+        raise HTTPException(status_code=400, detail="kind 须为 point 或 case")
+    cases = list((record.result or {}).get("cases") or [])
+    idx = next((i for i, c in enumerate(cases) if str(c.get("uid")) == body.entity_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"用例不存在: {body.entity_id}")
+    origin = cases[idx]
+    restored = dict(origin)
+    for field in ("module", "title", "priority", "precondition", "steps", "keywords", "remark", "extras"):
+        if field in content:
+            restored[field] = content[field]
+    try:  # 历史内容按当前用例规范校验（case_id/uid 保持现值，编号不回退）
+        restored = TestCase.model_validate({**restored, "uid": origin.get("uid")}).model_dump()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"历史版本内容不合法: {e}")
+    cases[idx] = restored
+    state = record.case_reviews.setdefault(
+        body.entity_id, {"status": "pending", "comment": "", "reject_count": 0, "locked": False})
+    state.update(status="pending", locked=False)
+    clear_reject_fields(state)
+    state.update(fields=[], steps=[])
+    version_no = record_version(task_id, "case", body.entity_id, "manual", restored,
+                                by=operator, reason=reason)
+    record.review_log.append(
+        {"case_id": restored.get("case_id"), "action": "restore", "comment": reason, "at": now, "by": operator})
+    result = GenerationResult.model_validate({**record.result, "cases": cases})
+    response = _finalize_task(store, task_id, store.output_dir / task_id, record.sources, result,
+                              request.app.state.templates.get((record.context or {}).get("template_id")))
+    response["restored"] = {"kind": "case", "entity_id": body.entity_id, "version_no": version_no}
+    logger.info("任务 {} 用例 {} 恢复自 v{}（新版本 v{}）", task_id, restored.get("case_id"), body.version_no, version_no)
     return response
 
 
