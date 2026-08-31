@@ -1943,6 +1943,18 @@ async def recycle_bin_restore(request: Request, task_id: str, body: RecycleResto
     return response
 
 
+@router.get("/api/v1/recycle-bin")
+async def recycle_bin_by_project(request: Request, project: str) -> dict:
+    """项目回收站：聚合项目下全部任务的逻辑删除条目（恢复/永久删除仍走任务级接口）。"""
+    from app.recycle import list_bin_for_tasks
+
+    task_ids = [
+        r.task_id for r in request.app.state.tasks.list(limit=100000)
+        if ((r.context or {}).get("project") or "（未指定）") == project
+    ]
+    return {"project": project, "items": list_bin_for_tasks(task_ids)}
+
+
 @router.delete("/api/v1/tasks/{task_id}/recycle-bin/{item_id}")
 async def recycle_bin_purge(request: Request, task_id: str, item_id: int) -> dict:
     """管理员永久删除：从回收站抹掉快照（版本历史仍留档）。"""

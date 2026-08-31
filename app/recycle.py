@@ -34,6 +34,21 @@ def list_bin(task_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_bin_for_tasks(task_ids: list[str]) -> list[dict]:
+    """跨任务聚合（项目回收站视角）：项目下全部任务的回收站条目，新删的在前。"""
+    if not task_ids:
+        return []
+    with get_engine().begin() as conn:
+        rows = conn.execute(
+            select(recycle_bin.c.id, recycle_bin.c.task_id, recycle_bin.c.kind,
+                   recycle_bin.c.entity_id, recycle_bin.c.label,
+                   recycle_bin.c.deleted_by, recycle_bin.c.deleted_at)
+            .where(recycle_bin.c.task_id.in_(task_ids))
+            .order_by(recycle_bin.c.id.desc())
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
 def get_item(task_id: str, item_id: int) -> dict | None:
     with get_engine().begin() as conn:
         row = conn.execute(

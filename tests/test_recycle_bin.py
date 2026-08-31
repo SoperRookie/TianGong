@@ -92,3 +92,18 @@ async def test_永久删除后不可恢复(client):
     resp = await client.post(f"/api/v1/tasks/{task_id}/recycle-bin/restore",
                              json={"item_id": items[0]["id"]})
     assert resp.status_code == 404
+
+
+async def test_项目回收站聚合(client):
+    """任务详情拆分：回收站上移项目工作区，按项目跨任务聚合。"""
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求", "project": "拆分项目"})
+    task_id = resp.json()["task_id"]
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [
+        {"case_id": "TC-登录-001", "action": "delete"},
+    ]})
+    items = (await client.get("/api/v1/recycle-bin", params={"project": "拆分项目"})).json()["items"]
+    assert len(items) == 1 and items[0]["task_id"] == task_id and items[0]["kind"] == "case"
+    # 其他项目视角看不到
+    other = (await client.get("/api/v1/recycle-bin", params={"project": "别的项目"})).json()["items"]
+    assert other == []
