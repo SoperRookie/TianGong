@@ -4,6 +4,7 @@ POST /api/v1/tasks：上传需求（文件/文本）→ 解析 → 三角色编�
 M1 为同步执行；M4 接入 Celery 异步队列与任务进度。
 """
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1346,6 +1347,10 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
                 )
         elif action == "delete":
             entry["before"] = origin
+            # 逻辑删除（需求 14.4）：完整快照移入回收站，可恢复；管理员永久删除才抹掉
+            from app.recycle import add_to_bin
+            add_to_bin(task_id, "case", uid, f"{item.case_id} {origin.get('title', '')}",
+                       {"case": origin, "review": dict(state)}, by=operator)
             cases.remove(origin)
             record.case_reviews.pop(uid, None)
             deleted_any = True
@@ -1445,8 +1450,14 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
         raise HTTPException(status_code=409, detail=str(e))
     except PointReviewError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # 版本历史（需求 10.1）：人工修改记 manual，通过记 final
+    # 版本历史（需求 10.1）：人工修改记 manual，通过记 final；删除移入回收站（需求 14.4）
+    from app.recycle import add_to_bin
+
     for entry in outcome["log"]:
+        if entry["action"] == "delete":
+            add_to_bin(task_id, "point", entry["tp_id"], str(entry["before"].get("point", "")),
+                       {"point": entry["before"], "module": entry.get("module", "")}, by=operator)
+            continue
         if entry["action"] not in ("modify", "approve"):
             continue
         found = find_point(modules, entry["tp_id"])
@@ -1687,10 +1698,20 @@ async def confirm_fix(request: Request, task_id: str, body: FixConfirmBody) -> d
         logger.info("任务 {} AI 修改提案全部拒绝（{} 条）", task_id, rejected_count)
         return {"task_id": task_id, "applied": 0, "rejected": rejected_count}
 
+    from app.recycle import add_to_bin
+
     if pf["kind"] == "points":
         modules = (record.analysis or {}).get("test_points")
         if not modules:
             raise HTTPException(status_code=409, detail="任务无测试点拆解结果")
+        # 接受的删除提案：应用前把完整快照移入回收站（需求 14.4）
+        for p in accepted:
+            if p.get("action") == "delete" and p.get("tp_id"):
+                found = find_point(modules, p["tp_id"])
+                if found is not None:
+                    add_to_bin(task_id, "point", p["tp_id"], str(found[1].get("point", "")),
+                               {"point": dict(found[1]), "module": found[0].get("module", "")},
+                               by=operator)
         outcome = apply_point_proposals(modules, accepted)
         # 版本历史：接受的修改记 ai_fix；拆分/新增的新点以 ai_fix 入册首版
         for d in outcome["diff"]:
@@ -1709,6 +1730,13 @@ async def confirm_fix(request: Request, task_id: str, body: FixConfirmBody) -> d
                 "diff": outcome["diff"], "added": outcome["added"], "test_points": modules}
 
     # kind == cases
+    for p in accepted:  # 接受的删除提案：快照入回收站（需求 14.4）
+        if p.get("action") == "delete" and p.get("uid"):
+            add_to_bin(task_id, "case", p["uid"],
+                       f"{p.get('case_id', '')} {(p.get('before') or {}).get('title', '')}",
+                       {"case": {**(p.get("before") or {}), "uid": p["uid"]},
+                        "review": dict(record.case_reviews.get(p["uid"]) or {})},
+                       by=operator)
     merged = apply_case_proposals(list(record.result["cases"]), accepted, record.case_reviews)
     modified_ids = {p["case_id"] for p in accepted if p["action"] == "modify"}
     for c in merged["cases"]:
@@ -1819,6 +1847,112 @@ async def restore_entity_version(request: Request, task_id: str, body: VersionRe
     response["restored"] = {"kind": "case", "entity_id": body.entity_id, "version_no": version_no}
     logger.info("任务 {} 用例 {} 恢复自 v{}（新版本 v{}）", task_id, restored.get("case_id"), body.version_no, version_no)
     return response
+
+
+# ---- 回收站（完整需求 14.4）----
+
+
+@router.get("/api/v1/tasks/{task_id}/recycle-bin")
+async def recycle_bin_list(request: Request, task_id: str) -> dict:
+    """任务回收站：被删除的测试点/用例（deleted_by / deleted_at 留痕）。"""
+    from app.recycle import list_bin
+
+    if request.app.state.tasks.get(task_id) is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    return {"task_id": task_id, "items": list_bin(task_id)}
+
+
+class RecycleRestoreBody(BaseModel):
+    item_id: int
+
+
+@router.post("/api/v1/tasks/{task_id}/recycle-bin/restore")
+async def recycle_bin_restore(request: Request, task_id: str, body: RecycleRestoreBody) -> dict:
+    """从回收站恢复：放回原任务并回到待评审，记 manual 版本；回收站条目移除。"""
+    from app.agents import GenerationResult
+    from app.recycle import get_item, purge
+    from app.tasks.points import find_point
+    from app.versions import record_version
+
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    item = get_item(task_id, body.item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"回收站条目不存在: {body.item_id}")
+    operator = _operator(request)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    if item["kind"] == "point":
+        modules = (record.analysis or {}).get("test_points")
+        if modules is None:
+            raise HTTPException(status_code=409, detail="任务无测试点拆解结果")
+        if find_point(modules, item["entity_id"]) is not None:
+            raise HTTPException(status_code=409, detail=f"测试点 {item['entity_id']} 已存在，无法恢复")
+        point = dict(item["payload"]["point"])
+        point.update(status="pending", locked=False,
+                     version=int(point.get("version", 1)) + 1)
+        module = item["payload"].get("module") or "未分组"
+        entry = next((e for e in modules if e["module"] == module), None)
+        if entry is None:
+            entry = {"module": module, "points": []}
+            modules.append(entry)
+        entry["points"].append(point)
+        record_version(task_id, "point", item["entity_id"], "manual", dict(point),
+                       by=operator, reason="从回收站恢复")
+        record.point_review_log.append(
+            {"tp_id": item["entity_id"], "action": "restore_bin", "comment": "从回收站恢复",
+             "at": now, "by": operator})
+        store.save(record)
+        purge(task_id, body.item_id)
+        return {"task_id": task_id, "restored": item["entity_id"], "test_points": modules}
+
+    # kind == case
+    cases = list((record.result or {}).get("cases") or [])
+    if any(str(c.get("uid")) == item["entity_id"] for c in cases):
+        raise HTTPException(status_code=409, detail="该用例已存在，无法恢复")
+    case = dict(item["payload"]["case"])
+    case["uid"] = item["entity_id"]
+    if any(str(c.get("case_id")) == str(case.get("case_id")) for c in cases):
+        # 编号已被复用（删除后重排）：按所在模块顺延新编号
+        module = str(case.get("module", ""))
+        seqs = [int(m.group(2)) for c in cases
+                if (m := re.match(r"^(.*?)(\d+)\s*$", str(c.get("case_id", ""))))
+                and str(c.get("module", "")) == module]
+        prefix = re.match(r"^(.*?)(\d+)\s*$", str(case.get("case_id", "")))
+        case["case_id"] = f"{prefix.group(1) if prefix else f'TC-{module}-'}{(max(seqs) if seqs else 0) + 1:03d}"
+    case["version"] = int(case.get("version", 1)) + 1
+    cases.append(case)
+    record.case_reviews[item["entity_id"]] = {
+        "status": "pending", "comment": "", "reject_count": 0, "locked": False}
+    record_version(task_id, "case", item["entity_id"], "manual", case,
+                   by=operator, reason="从回收站恢复")
+    record.review_log.append(
+        {"case_id": case.get("case_id"), "action": "restore_bin", "comment": "从回收站恢复",
+         "at": now, "by": operator})
+    result = GenerationResult.model_validate({**record.result, "cases": cases})
+    response = _finalize_task(store, task_id, store.output_dir / task_id, record.sources, result,
+                              request.app.state.templates.get((record.context or {}).get("template_id")))
+    purge(task_id, body.item_id)
+    response["restored"] = case.get("case_id")
+    return response
+
+
+@router.delete("/api/v1/tasks/{task_id}/recycle-bin/{item_id}")
+async def recycle_bin_purge(request: Request, task_id: str, item_id: int) -> dict:
+    """管理员永久删除：从回收站抹掉快照（版本历史仍留档）。"""
+    from app.recycle import purge
+
+    user = getattr(request.state, "user", None)
+    if user is not None and user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可永久删除")
+    if request.app.state.tasks.get(task_id) is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    if not purge(task_id, item_id):
+        raise HTTPException(status_code=404, detail=f"回收站条目不存在: {item_id}")
+    logger.info("任务 {} 回收站条目 {} 已被 {} 永久删除", task_id, item_id, _operator(request))
+    return {"task_id": task_id, "purged": item_id}
 
 
 # ---- 需求变更差异分析（需求四十~四十五）----

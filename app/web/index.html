@@ -1343,6 +1343,7 @@ function renderDetail() {
     ...(hasCases ? [['exec', '用例执行', (t.executions||[]).length?`<span class="cnt">${t.executions.length} 轮</span>`:'']] : []),
     ...(hasCases ? [['change', '需求变更', '']] : []),
     ...(hasCases ? [['history', '修订与终稿', '']] : []),
+    ...(pts.length||hasCases ? [['recycle', '回收站', '']] : []),
   ];
   if (!tabs.some(x => x[0]===detailTab)) detailTab = tabs[0][0];
 
@@ -1353,6 +1354,7 @@ function renderDetail() {
   else if (detailTab==='exec') body = renderExec(t);
   else if (detailTab==='change') body = renderChange(t);
   else if (detailTab==='history') body = renderHistory(t);
+  else if (detailTab==='recycle') body = renderRecycle(t);
 
   $('detail').innerHTML = `<div class="card">
     <div class="card-h" style="border-bottom:none">
@@ -1586,7 +1588,7 @@ async function pointsReview(items) {
 }
 const pointAct = (tp, action) => pointsReview([{tp_id:tp, action}]);
 async function pointDelete(tp) {
-  if (!await uiConfirm('删除测试点', `确定删除 ${tp}？删除后不进入生成，也不可恢复。`, true)) return;
+  if (!await uiConfirm('删除测试点', `确定删除 ${tp}？将移入回收站，可在「回收站」页签恢复。`, true)) return;
   pointsReview([{tp_id:tp, action:'delete'}]);
 }
 async function pointReject(tp) {
@@ -1759,7 +1761,7 @@ async function casesReview(items) {
 }
 const caseAct = (cid, action) => casesReview([{case_id:cid, action}]);
 async function caseDelete(cid) {
-  if (!await uiConfirm('删除用例', `确定删除 ${cid}？删除后重排编号，不可恢复。`, true)) return;
+  if (!await uiConfirm('删除用例', `确定删除 ${cid}？将移入回收站（可恢复），删除后重排编号。`, true)) return;
   casesReview([{case_id:cid, action:'delete'}]);
 }
 async function caseReject(cid) {
@@ -1866,6 +1868,49 @@ async function forceRelease(kind, id) {
     await openTask(currentTask.task_id, true);
     toast('已解除编辑占用（版本冲突拦截仍然生效）', 'ok');
   } catch (e) { toast('解除失败：' + e.message, 'err'); }
+}
+
+/* ---- 回收站（完整需求 14.4）---- */
+function renderRecycle() {
+  loadRecycle();
+  return `<div id="recycleBody"><div class="empty">加载中…</div></div>`;
+}
+async function loadRecycle() {
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/recycle-bin`);
+    const el = $('recycleBody'); if (!el) return;
+    const items = data.items || [];
+    if (!items.length) { el.innerHTML = '<div class="empty">回收站为空（删除的测试点/用例会移入这里，可恢复）</div>'; return; }
+    const isAdmin = !curUser || curUser.role === 'admin';
+    el.innerHTML = `<div class="hint" style="margin-bottom:8px">删除默认为逻辑删除：条目可恢复（回到待评审）；永久删除仅管理员可用，版本历史仍留档</div>
+      <div class="tbl-wrap"><table>
+      <tr><th>类型</th><th>内容</th><th>删除人</th><th>删除时间</th><th>操作</th></tr>
+      ${items.map(i=>`<tr>
+        <td style="width:70px"><span class="tag">${i.kind==='point'?'测试点':'用例'}</span></td>
+        <td>${esc(i.label)}</td>
+        <td style="width:90px" class="hint">${esc(i.deleted_by||'')}</td>
+        <td style="width:130px" class="hint">${esc((i.deleted_at||'').replace('T',' ').slice(0,16))}</td>
+        <td style="width:150px"><div class="rowops">
+          <button class="btn ghost sm" onclick="recycleRestore(${i.id})">恢复</button>
+          ${isAdmin?`<button class="btn ghost sm" style="color:var(--danger)" onclick="recyclePurge(${i.id})">永久删除</button>`:''}
+        </div></td></tr>`).join('')}
+      </table></div>`;
+  } catch (e) { const el = $('recycleBody'); if (el) el.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+}
+async function recycleRestore(itemId) {
+  try {
+    await jpost(`/api/v1/tasks/${currentTask.task_id}/recycle-bin/restore`, {item_id: itemId});
+    await openTask(currentTask.task_id, true);
+    toast('已恢复（回到待评审）', 'ok');
+  } catch (e) { toast('恢复失败：' + e.message, 'err'); }
+}
+async function recyclePurge(itemId) {
+  if (!await uiConfirm('永久删除', '确定永久删除该条目？此操作不可恢复（版本历史仍留档）。', true)) return;
+  try {
+    await api(`/api/v1/tasks/${currentTask.task_id}/recycle-bin/${itemId}`, {method:'DELETE'});
+    loadRecycle();
+    toast('已永久删除', 'ok');
+  } catch (e) { toast('删除失败：' + e.message, 'err'); }
 }
 
 /* ==================== 用例执行 ==================== */

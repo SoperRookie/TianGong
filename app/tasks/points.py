@@ -221,6 +221,7 @@ def apply_point_review(modules: list[dict], items: list[dict]) -> dict:
             point["warnings"] = coarse_warnings(text)
         elif action == "delete":
             record["before"] = dict(point)
+            record["module"] = entry["module"]  # 回收站恢复所需上下文
             entry["points"].remove(point)
         elif action == "unlock":
             point["status"], point["locked"] = "pending", False

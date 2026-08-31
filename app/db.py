@@ -49,6 +49,21 @@ entity_versions = Table(
     Index("ix_ev_entity", "task_id", "kind", "entity_id"),
 )
 
+# 回收站（完整需求 14.4）：核心数据默认逻辑删除——删除即移入此表，可恢复；管理员永久删除才落地
+recycle_bin = Table(
+    "recycle_bin",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("task_id", String(32), nullable=False),
+    Column("kind", String(16), nullable=False),       # point / case
+    Column("entity_id", String(64), nullable=False),  # tp_id / uid
+    Column("label", String(500), nullable=False, default=""),
+    Column("payload", Text().with_variant(LONGTEXT, "mysql"), nullable=False),
+    Column("deleted_by", String(64)),
+    Column("deleted_at", String(32), nullable=False),
+    Index("ix_rb_task", "task_id"),
+)
+
 
 @lru_cache
 def get_engine():
