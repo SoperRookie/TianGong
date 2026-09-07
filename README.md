@@ -50,8 +50,8 @@ pip install -e ".[dev]"
 echo 'DEEPSEEK_API_KEY=sk-xxxx' > .env
 # 模型清单见 config/models.yaml，新增厂商/私有化模型只需追加条目
 
-# 3. 启动服务
-uvicorn app.main:app --reload
+# 3. 启动服务（自动拉起本地 MySQL，再启动 uvicorn；参数透传 uvicorn）
+bash scripts/dev.sh
 
 # 4. 打开 Web 界面
 open http://localhost:8000/
@@ -103,7 +103,7 @@ app/
 └── web/         # Web 界面（单页）
 config/models.yaml   # 模型清单（密钥走 .env）
 docs/                # 需求文档、排期计划、架构图
-scripts/             # Prompt / Vision / Embedding 评测脚本
+scripts/             # dev.sh 一键启动、mysql_dev.sh 本地库、评测脚本
 tests/               # 121 项测试（LLM 桩件隔离）
 ```
 
