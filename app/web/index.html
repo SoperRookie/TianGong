@@ -52,6 +52,35 @@ body { margin:0; font:13.5px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",
 .crumb a:hover { color:var(--primary); text-decoration:none; }
 .crumb .sep { color:var(--ink-3); font-weight:400; }
 .topbar .right { margin-left:auto; color:var(--ink-3); font-size:12px; }
+/* 当前项目（3.2：页面顶部持续显示当前项目，降低跨项目误操作） */
+.cur-proj { position:relative; display:flex; align-items:center; gap:8px; padding-right:14px; margin-right:4px;
+  border-right:1px solid var(--line); }
+.cur-proj .lab { font-size:11.5px; color:var(--ink-3); }
+.cp-btn { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--line); background:var(--primary-100);
+  color:var(--primary); border-radius:8px; padding:3px 10px; font:inherit; font-size:13px; cursor:pointer; max-width:260px; }
+.cp-btn b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cp-btn .caret { font-size:11px; opacity:.7; }
+.cp-menu { position:absolute; top:34px; left:60px; z-index:60; width:300px; background:#fff; border:1px solid var(--line);
+  border-radius:10px; box-shadow:0 12px 32px rgba(15,23,42,.14); padding:8px; }
+.cp-menu input { width:100%; box-sizing:border-box; margin-bottom:6px; }
+.cp-menu .grp { font-size:11px; color:var(--ink-3); font-weight:650; padding:6px 8px 2px; letter-spacing:.3px; }
+.cp-menu .it { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:6px; cursor:pointer; font-size:13px; }
+.cp-menu .it:hover, .cp-menu .it.on { background:var(--line-2); }
+.cp-menu .it .star { color:#f5b301; font-size:13px; width:14px; text-align:center; }
+.cp-menu .it .role { margin-left:auto; font-size:11px; color:var(--ink-3); }
+.cp-menu .list { max-height:320px; overflow:auto; }
+.star-btn { border:none; background:transparent; cursor:pointer; font-size:15px; color:#c9cfd9; padding:0 4px; line-height:1; }
+.star-btn.on { color:#f5b301; }
+.role-tag { display:inline-block; padding:0 7px; border-radius:5px; font-size:11.5px; background:var(--primary-100); color:var(--primary); }
+.tree { list-style:none; margin:0; padding:0; }
+.tree ul { list-style:none; margin:0; padding-left:22px; border-left:1px dashed var(--line); margin-left:9px; }
+.tree li { margin:2px 0; }
+.tree .node { display:flex; align-items:center; gap:6px; padding:4px 8px; border-radius:6px; }
+.tree .node:hover { background:var(--line-2); }
+.tree .node:hover .rowops { visibility:visible; }
+.tree .node .rowops { visibility:hidden; margin-left:auto; }
+.tree .node .nm { font-weight:550; }
+.tree .node .desc { color:var(--ink-3); font-size:12px; }
 
 /* ================= 布局 ================= */
 .layout { display:flex; gap:16px; padding:16px 22px 80px; align-items:flex-start; }
@@ -378,36 +407,42 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="s-logo"><span class="mark">天</span>
     <div>天工<div class="sub">AI 测试用例平台</div></div></div>
   <nav class="menu">
-    <div class="grp">工作台</div>
+    <div class="grp">工作台 · 项目</div>
     <button id="nav-projects" class="on" onclick="switchView('projects')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
       项目管理</button>
+    <div class="grp">测试点 · 用例库</div>
     <button id="nav-board" onclick="switchView('board')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>
       任务列表</button>
-    <button id="nav-plans" onclick="switchView('plans')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 3v4M16 3v4M4 11h16M9 15.5l2 2 4-4"/></svg>
-      测试计划</button>
     <button id="nav-cases" onclick="switchView('cases')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6a2 2 0 012 2v14a2 2 0 01-2 2H9a2 2 0 01-2-2V5a2 2 0 012-2z"/><path d="M9 3v18M13 8h2M13 12h2M13 16h2"/></svg>
       测试用例</button>
+    <div class="grp">测试计划 · 执行</div>
+    <button id="nav-plans" onclick="switchView('plans')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 3v4M16 3v4M4 11h16M9 15.5l2 2 4-4"/></svg>
+      测试计划</button>
+    <button id="nav-mytasks" onclick="plansMine=true;curPlan=null;switchView('plans')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20c.8-3.4 3.4-5 6.5-5s5.7 1.6 6.5 5"/><path d="M16 4l2 2 3-3"/></svg>
+      我的执行任务</button>
+    <div class="grp">数据统计</div>
     <button id="nav-reports" onclick="switchView('reports')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/></svg>
       报表</button>
     <div id="sedimentMenu" style="display:none">
-    <div class="grp">沉淀与反哺</div>
+    <div class="grp">AI 中心</div>
     <button id="nav-rules" onclick="switchView('rules')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.6L20 10l-6.1 1.4L12 17l-1.9-5.6L4 10l6.1-1.4z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></svg>
       学习规则</button>
     <button id="nav-memory" onclick="switchView('memory')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5.5" rx="8" ry="2.8"/><path d="M4 5.5V18c0 1.6 3.6 2.9 8 2.9s8-1.3 8-2.9V5.5M4 12c0 1.6 3.6 2.9 8 2.9s8-1.3 8-2.9"/></svg>
       记忆</button>
-    </div>
-    <div id="adminMenu" style="display:none">
-      <div class="grp">系统设置</div>
       <button id="nav-models" onclick="switchView('models')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><circle cx="8" cy="7.5" r=".8" fill="currentColor"/><circle cx="8" cy="16.5" r=".8" fill="currentColor"/></svg>
         模型配置</button>
+    </div>
+    <div id="adminMenu" style="display:none">
+      <div class="grp">系统管理</div>
       <button id="nav-users" onclick="switchView('users')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.4 3.4-5 6.5-5s5.7 1.6 6.5 5"/><path d="M16.5 4.6a3.5 3.5 0 010 6.8M18.5 15.2c1.9.7 2.8 2 3 4.8"/></svg>
         用户管理</button>
@@ -420,6 +455,11 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 
 <div class="content">
 <div class="topbar">
+  <div class="cur-proj" id="curProjBox" title="当前项目：所有列表与新建任务默认落在该项目下">
+    <span class="lab">当前项目</span>
+    <button class="cp-btn" id="curProjBtn" onclick="toggleProjMenu(event)"><b id="curProjName">全部项目</b><span class="caret">▾</span></button>
+    <div class="cp-menu" id="curProjMenu" style="display:none"></div>
+  </div>
   <div class="crumb" id="crumb">任务列表</div>
   <div class="right" id="topbarRight"></div>
 </div>
@@ -688,10 +728,19 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <dialog id="projDlg">
   <div class="dlg-h"><h3 id="pjTitle">新建项目</h3></div>
   <div class="dlg-b">
-    <label class="f">项目名</label><input type="text" id="pjName" placeholder="如：斗地主赛季玩法">
+    <div style="display:flex;gap:10px">
+      <div style="flex:2"><label class="f">项目名</label><input type="text" id="pjName" placeholder="如：斗地主赛季玩法"></div>
+      <div style="flex:1"><label class="f">编码<span class="hint">（接口识别，可选）</span></label><input type="text" id="pjCode" placeholder="如 DDZ"></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">负责人<span class="hint">（登录用户名，自动成为项目管理员）</span></label><input type="text" id="pjOwner" list="userNames" placeholder="用户名"></div>
+      <div style="flex:1"><label class="f">状态</label>
+        <select id="pjStatus"><option value="active">进行中</option><option value="paused">暂停</option><option value="archived">已归档</option></select></div>
+    </div>
+    <datalist id="userNames"></datalist>
     <label class="f">描述<span class="hint">（可选）</span></label>
     <textarea id="pjDesc" rows="3" placeholder="项目背景 / 范围说明"></textarea>
-    <div class="hint" id="pjRenameHint" style="display:none;margin-top:8px">改名将联动更新该项目下所有任务的归属</div>
+    <div class="hint" id="pjRenameHint" style="display:none;margin-top:8px">改名将联动更新该项目下所有任务、计划、版本与模块的归属</div>
   </div>
   <div class="dlg-f">
     <button class="btn ghost" onclick="$('projDlg').close()">取消</button>
@@ -742,8 +791,18 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <dialog id="editUserDlg">
   <div class="dlg-h"><h3>编辑用户</h3><span class="meta"><code id="euName"></code></span></div>
   <div class="dlg-b">
-    <label class="f">角色</label>
-    <select id="euRole"><option value="member">member（平台使用）</option><option value="admin">admin（含系统设置）</option></select>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">姓名</label><input type="text" id="euRealName"></div>
+      <div style="flex:1"><label class="f">邮箱</label><input type="text" id="euEmail"></div>
+      <div style="flex:1"><label class="f">手机号</label><input type="text" id="euPhone"></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">系统角色</label>
+        <select id="euRole"><option value="member">member（平台使用）</option><option value="admin">admin（系统管理员）</option></select></div>
+      <div style="flex:1"><label class="f">状态<span class="hint">（禁用即会话失效、拒绝登录）</span></label>
+        <select id="euStatus"><option value="active">正常</option><option value="disabled">禁用</option></select></div>
+    </div>
+    <div id="euProjects" class="hint" style="margin-top:8px"></div>
     <label class="f">重置密码<span class="hint">（留空则不修改；至少 6 位，重置后该用户需重新登录）</span></label>
     <input type="text" id="euPwd" placeholder="留空不修改" autocomplete="off">
     <label class="check" id="euTotpWrap" style="margin-top:12px;display:none">
@@ -755,14 +814,106 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<!-- 项目成员 -->
+<dialog id="memberDlg">
+  <div class="dlg-h"><h3 id="mbTitle">添加成员</h3></div>
+  <div class="dlg-b">
+    <label class="f">用户名</label><input type="text" id="mbUser" list="userNames" placeholder="登录用户名">
+    <label class="f">项目角色</label>
+    <select id="mbRole">
+      <option value="project_admin">项目管理员 · 当前项目全部管理权限</option>
+      <option value="test_lead">测试负责人 · 设计、评审、计划、分配、统计</option>
+      <option value="tester" selected>测试人员 · 编写、AI 生成、修改授权内容、执行</option>
+      <option value="viewer">只读人员 · 仅查看</option>
+    </select>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('memberDlg').close()">取消</button>
+    <button class="btn" onclick="saveMember()">保存</button>
+  </div>
+</dialog>
+
+<!-- 项目版本 -->
+<dialog id="versionDlg" style="width:560px">
+  <div class="dlg-h"><h3 id="vsTitle">新建版本</h3></div>
+  <div class="dlg-b">
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">版本名称</label><input type="text" id="vsName" placeholder="如 4.2.0"></div>
+      <div style="flex:1"><label class="f">编码<span class="hint">（可选）</span></label><input type="text" id="vsCode" placeholder="如 v420"></div>
+      <div style="flex:1"><label class="f">状态</label>
+        <select id="vsStatus"><option value="not_started">未开始</option><option value="in_progress">进行中</option><option value="done">已完成</option><option value="archived">已归档</option></select></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">开始日期</label><input type="date" id="vsStart"></div>
+      <div style="flex:1"><label class="f">计划结束</label><input type="date" id="vsPlanned"></div>
+      <div style="flex:1"><label class="f">实际结束</label><input type="date" id="vsActual"></div>
+    </div>
+    <label class="f">版本描述<span class="hint">（本版本范围说明）</span></label>
+    <textarea id="vsDesc" rows="3"></textarea>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('versionDlg').close()">取消</button>
+    <button class="btn" onclick="saveVersion()">保存</button>
+  </div>
+</dialog>
+
+<!-- 项目模块 -->
+<dialog id="moduleDlg">
+  <div class="dlg-h"><h3 id="mdlTitle">新建模块</h3></div>
+  <div class="dlg-b">
+    <label class="f">父级模块</label><select id="mdlParent"></select>
+    <label class="f">模块名称<span class="hint">（同级唯一，不含 /）</span></label><input type="text" id="mdlName">
+    <label class="f">说明<span class="hint">（可选）</span></label><input type="text" id="mdlDesc">
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('moduleDlg').close()">取消</button>
+    <button class="btn" onclick="saveModule()">保存</button>
+  </div>
+</dialog>
+
+<!-- 个人资料（自助） -->
+<dialog id="profileDlg">
+  <div class="dlg-h"><h3>个人资料</h3><span class="meta"><code id="pfUser"></code></span></div>
+  <div class="dlg-b">
+    <div style="display:flex;gap:14px;align-items:flex-start">
+      <div style="text-align:center">
+        <div id="pfAvatarPreview" style="width:64px;height:64px;border-radius:50%;background:var(--line-2);display:grid;place-items:center;font-size:24px;overflow:hidden;color:var(--ink-3)"></div>
+        <label class="btn ghost sm" style="margin-top:6px;cursor:pointer">更换头像<input type="file" accept="image/*" style="display:none" onchange="pickAvatar(this)"></label>
+      </div>
+      <div style="flex:1">
+        <label class="f">姓名</label><input type="text" id="pfName">
+        <div style="display:flex;gap:10px">
+          <div style="flex:1"><label class="f">邮箱</label><input type="text" id="pfEmail"></div>
+          <div style="flex:1"><label class="f">手机号</label><input type="text" id="pfPhone"></div>
+        </div>
+      </div>
+    </div>
+    <div class="hint" id="pfMeta" style="margin-top:10px"></div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('profileDlg').close()">取消</button>
+    <button class="btn" onclick="saveProfile()">保存</button>
+  </div>
+</dialog>
+
 <!-- 用户新增 -->
 <dialog id="userDlg">
   <div class="dlg-h"><h3>添加用户</h3></div>
   <div class="dlg-b">
-    <label class="f">用户名</label><input type="text" id="nuName">
-    <label class="f">初始密码<span class="hint">（至少 6 位）</span></label><input type="text" id="nuPwd">
-    <label class="f">角色</label>
-    <select id="nuRole"><option value="member">member（平台使用）</option><option value="admin">admin（含系统设置）</option></select>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">用户名<span class="hint">（登录账号）</span></label><input type="text" id="nuName"></div>
+      <div style="flex:1"><label class="f">姓名</label><input type="text" id="nuRealName"></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">邮箱</label><input type="text" id="nuEmail" placeholder="可选"></div>
+      <div style="flex:1"><label class="f">手机号</label><input type="text" id="nuPhone" placeholder="可选"></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">初始密码<span class="hint">（至少 6 位）</span></label><input type="text" id="nuPwd"></div>
+      <div style="flex:1"><label class="f">系统角色</label>
+        <select id="nuRole"><option value="member">member（平台使用）</option><option value="admin">admin（系统管理员）</option></select></div>
+    </div>
+    <div class="hint" style="margin-top:8px">项目访问权限在「项目管理 → 成员」中按项目分配</div>
   </div>
   <div class="dlg-f">
     <button class="btn ghost" onclick="$('userDlg').close()">取消</button>
@@ -1102,10 +1253,46 @@ async function doLogout() {
   authToken = ''; localStorage.removeItem('tg_token');
   showLogin();
 }
+let _pfAvatar = null;
+function openProfileDlg() {
+  _pfAvatar = null;
+  $('pfUser').textContent = curUser.username;
+  $('pfName').value = curUser.name || ''; $('pfEmail').value = curUser.email || ''; $('pfPhone').value = curUser.phone || '';
+  renderAvatarPreview(curUser.avatar);
+  const fmt = t => (t||'').replace('T',' ').replace('+00:00','').slice(0,16);
+  $('pfMeta').innerHTML = `系统角色 ${esc(curUser.role)} · 最后登录 ${esc(fmt(curUser.last_login_at)||'—')}${curUser.last_login_ip?` · IP ${esc(curUser.last_login_ip)}`:''}<br>
+    所属项目：${(curUser.projects||[]).length ? curUser.projects.map(p => `<span class="tag">${esc(p.project)} · ${esc(PROJECT_ROLES[p.role]||p.role)}</span>`).join(' ') : '—'}`;
+  $('profileDlg').showModal();
+}
+function renderAvatarPreview(src) {
+  $('pfAvatarPreview').innerHTML = src ? `<img src="${esc(src)}" style="width:100%;height:100%;object-fit:cover">` : esc((curUser.name || curUser.username || '?').slice(0, 1));
+}
+function pickAvatar(input) {
+  const f = input.files && input.files[0]; if (!f) return;
+  const img = new Image(); const url = URL.createObjectURL(f);
+  img.onload = () => {  // 客户端压到 96px 方图，控制体积（后端上限 150KB）
+    const c = document.createElement('canvas'); c.width = c.height = 96;
+    const side = Math.min(img.width, img.height);
+    c.getContext('2d').drawImage(img, (img.width-side)/2, (img.height-side)/2, side, side, 0, 0, 96, 96);
+    _pfAvatar = c.toDataURL('image/jpeg', 0.85); renderAvatarPreview(_pfAvatar); URL.revokeObjectURL(url);
+  };
+  img.src = url;
+}
+async function saveProfile() {
+  const body = {name: $('pfName').value, email: $('pfEmail').value, phone: $('pfPhone').value};
+  if (_pfAvatar) body.avatar = _pfAvatar;
+  try {
+    curUser = await api('/api/v1/auth/me', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    $('profileDlg').close(); toast('资料已保存', 'ok'); renderUserBox();
+  } catch (e) { toast(e.message, 'err'); }
+}
 function renderUserBox() {
   if (!curUser) return;
-  $('userBox').innerHTML = `<b style="color:#c6cede">${esc(curUser.username)}</b>
-    <span class="tag" style="background:#222c42;color:#7484a0">${esc(curUser.role)}</span><br>
+  $('userBox').innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+    ${curUser.avatar?`<img src="${esc(curUser.avatar)}" style="width:26px;height:26px;border-radius:50%;object-fit:cover">`:''}
+    <div><b style="color:#c6cede">${esc(curUser.name||curUser.username)}</b>${curUser.name?`<span class="hint" style="color:#5d6b84"> ${esc(curUser.username)}</span>`:''}
+    <span class="tag" style="background:#222c42;color:#7484a0">${esc(curUser.role)}</span></div></div>
+    <a onclick="openProfileDlg()" style="color:#7484a0;cursor:pointer">个人资料</a> ·
     <a onclick="$('pwOld').value='';$('pwNew').value='';$('pwdDlg').showModal()" style="color:#7484a0;cursor:pointer">修改密码</a> ·
     ${(window._authSettings||{}).totp_enabled !== false ? `<a onclick="openTotpDlg()" style="color:#7484a0;cursor:pointer">两步验证${curUser.totp_enabled?' ✓':''}</a> · ` : ''}
     <a onclick="doLogout()" style="color:#7484a0;cursor:pointer">退出登录</a>`;
@@ -1127,6 +1314,86 @@ async function boot() {
   catch (e) { /* 401 已由 api() 转入登录页 */ }
 }
 
+/* ---------- 项目级权限（与后端 app/permissions.py 同一矩阵，仅用于界面显隐；后端为准） ---------- */
+const PROJECT_ROLES = {project_admin:'项目管理员', test_lead:'测试负责人', tester:'测试人员', viewer:'只读人员'};
+const _ALL_ACTIONS = ['project.view','project.edit','project.members','version.view','version.manage',
+  'requirement.view','requirement.edit','requirement.ai','point.view','point.edit','point.review','point.ai',
+  'case.view','case.edit','case.review','case.ai','case.export','plan.view','plan.manage','plan.assign',
+  'exec.view','exec.run','exec.attach','log.view'];
+const _VIEW_ACTIONS = _ALL_ACTIONS.filter(a => a.endsWith('.view'));
+const ROLE_ACTIONS = {
+  project_admin: _ALL_ACTIONS,
+  test_lead: _ALL_ACTIONS.filter(a => !['project.edit','project.members'].includes(a)),
+  tester: [..._VIEW_ACTIONS, 'point.edit','point.ai','case.edit','case.ai','case.export','exec.run','exec.attach'],
+  viewer: _VIEW_ACTIONS,
+};
+const isSysAdmin = () => !curUser || curUser.role === 'admin';
+function myRole(project) {
+  if (isSysAdmin()) return 'project_admin';
+  if (!project || project === '（未指定）') return null;  // 遗留未指定项目：仅系统管理员
+  const m = (curUser.projects || []).find(p => p.project === project);
+  return m ? m.role : null;
+}
+function can(project, action) {
+  const r = myRole(project);
+  return !!r && ROLE_ACTIONS[r].includes(action);
+}
+async function reloadMe() { try { curUser = await api('/api/v1/auth/me'); } catch (e) {} renderUserBox(); }
+
+/* ---------- 当前项目（3.2：顶部常显、收藏、最近访问、快速切换） ---------- */
+let curProjectName = localStorage.getItem('tg_project') || '';
+function renderCurProj() {
+  $('curProjName').textContent = curProjectName || '全部项目';
+  $('curProjBtn').classList.toggle('none', !curProjectName);
+}
+function setCurrentProject(name, opts = {}) {
+  curProjectName = name || '';
+  localStorage.setItem('tg_project', curProjectName);
+  renderCurProj();
+  $('curProjMenu').style.display = 'none';
+  // 各列表筛选与新建任务默认项目同步（未指定项目的历史任务在"全部项目"下可见）
+  listProject = curProjectName; plansProject = curProjectName; acProject = curProjectName; acModule = '';
+  repProject = curProjectName;
+  if ($('projectInput') && [...$('projectInput').options].some(o => o.value === curProjectName)) $('projectInput').value = curProjectName;
+  if (opts.silent) return;
+  if (currentView === 'projects') { if (curProjectName) openProject(curProjectName); else { curProject = null; renderProjects(); } }
+  else if (currentView === 'board') { if (currentTask) backToList(); else renderTaskListRows(); }
+  else if (currentView === 'plans') { curPlan = null; renderPlans(); }
+  else if (currentView === 'cases') { acPage = 1; renderAllCases(); }
+  else if (currentView === 'reports') renderReports();
+}
+function toggleProjMenu(ev) {
+  ev.stopPropagation();
+  const menu = $('curProjMenu');
+  if (menu.style.display !== 'none') { menu.style.display = 'none'; return; }
+  renderProjMenu('');
+  menu.style.display = '';
+  setTimeout(() => $('cpSearch').focus(), 30);
+}
+function renderProjMenu(q) {
+  const prefs = (curUser && curUser.prefs) || {favorites: [], recent: []};
+  const all = _projectsCache.filter(p => !p.builtin);
+  const kw = (q || '').trim().toLowerCase();
+  const match = p => !kw || p.project.toLowerCase().includes(kw) || (p.code || '').toLowerCase().includes(kw);
+  const item = p => `<div class="it ${p.project===curProjectName?'on':''}" onclick="setCurrentProject('${esc(p.project)}')">
+    <span class="star" title="${p.favorite?'已收藏':''}">${p.favorite?'★':''}</span><span>${esc(p.project)}</span>
+    ${p.status!=='active'?`<span class="tag">${esc(p.status_label)}</span>`:''}
+    <span class="role">${esc(PROJECT_ROLES[p.my_role] || '')}</span></div>`;
+  const favs = all.filter(p => p.favorite && match(p));
+  const recentNames = prefs.recent.map(r => r.project);
+  const recents = recentNames.map(n => all.find(p => p.project === n)).filter(p => p && !p.favorite && match(p)).slice(0, 5);
+  const rest = all.filter(p => !p.favorite && !recents.includes(p) && match(p));
+  $('curProjMenu').innerHTML = `<input type="text" id="cpSearch" placeholder="搜索项目名 / 编码" value="${esc(q||'')}" oninput="renderProjMenu(this.value)" onclick="event.stopPropagation()">
+    <div class="list">
+      <div class="it ${!curProjectName?'on':''}" onclick="setCurrentProject('')"><span class="star"></span><span>全部项目</span><span class="role">不限定</span></div>
+      ${favs.length?`<div class="grp">收藏</div>${favs.map(item).join('')}`:''}
+      ${recents.length?`<div class="grp">最近访问</div>${recents.map(item).join('')}`:''}
+      ${rest.length?`<div class="grp">${favs.length||recents.length?'其他项目':'项目'}</div>${rest.map(item).join('')}`:''}
+      ${!all.length?'<div class="empty" style="padding:14px">暂无可访问的项目</div>':''}
+    </div>`;
+}
+document.addEventListener('click', () => { const m = $('curProjMenu'); if (m) m.style.display = 'none'; });
+
 /* ---------- 视图切换与面包屑 ---------- */
 const VIEW_LABELS = {projects:'项目管理', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
 function setCrumb(html) { $('crumb').innerHTML = html; }
@@ -1144,8 +1411,10 @@ function switchView(v) {
   currentView = v;
   for (const k of ['projects','board','plans','cases','reports','rules','memory','models','users']) {
     $('view-'+k).style.display = k===v ? '' : 'none';
-    $('nav-'+k).classList.toggle('on', k===v);
+    $('nav-'+k).classList.toggle('on', k===v && !(k==='plans' && plansMine));
   }
+  $('nav-mytasks').classList.toggle('on', v==='plans' && plansMine);
+  if (v !== 'plans') plansMine = false;
   if (v==='board') crumbForBoard();
   else if (v==='projects') crumbForProjects();
   else if (v==='plans') crumbForPlans();
@@ -1182,6 +1451,8 @@ async function init() {
   try { window._authSettings = await api('/api/v1/auth/settings'); } catch (e) { window._authSettings = {totp_enabled: true}; }
   await refreshMemories(true);
   await fillProjectSelect('');
+  if (curProjectName && !_projectsCache.some(p => p.project === curProjectName)) curProjectName = '';
+  setCurrentProject(curProjectName, {silent: true});
   refreshList();
   if (!window._pollStarted) {  // 定时器与全局监听只注册一次：重新登录不叠加轮询
     window._pollStarted = true;
@@ -2377,22 +2648,23 @@ async function renderPlans() {
       <span class="meta">只能加入已通过评审的正式用例 · 加入即快照 · 执行与附件挂计划</span>
       <div class="grow">
         <label class="check">只看我的执行任务
-          <span class="switch"><input type="checkbox" ${plansMine?'checked':''} onchange="plansMine=this.checked;renderPlans()"><i></i></span></label>
+          <span class="switch"><input type="checkbox" ${plansMine?'checked':''} onchange="plansMine=this.checked;switchView('plans')"><i></i></span></label>
         <select style="width:160px" onchange="plansProject=this.value;renderPlans()">
           <option value="">全部项目</option>
           ${projects.map(p => `<option value="${esc(p.project)}" ${plansProject===p.project?'selected':''}>${esc(p.project)}</option>`).join('')}
         </select>
-        <button class="btn" onclick="openPlanDlg()">＋ 新建计划</button>
+        ${(curUser&&curUser.projects||[]).some(p=>can(p.project,'plan.manage'))||isSysAdmin()?`<button class="btn" onclick="openPlanDlg()">＋ 新建计划</button>`:''}
       </div></div>
     <div class="card-b">${data.plans.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
       <tr><th>计划 / 项目</th><th style="width:90px">负责人</th><th style="width:180px">周期</th><th style="width:80px">状态</th><th style="width:150px">用例</th><th style="width:210px">最近执行</th><th style="width:130px">我的任务</th></tr>
-      ${rows}</table></div>` : '<div class="empty">暂无测试计划。点击「＋ 新建计划」创建，并从项目的已通过用例中加入快照</div>'}</div>
+      ${rows}</table></div>` : `<div class="empty">${(curUser&&curUser.projects||[]).some(p=>can(p.project,'plan.manage'))||isSysAdmin()?'暂无测试计划。点击「＋ 新建计划」创建，并从项目的已通过用例中加入快照':'暂无测试计划（创建计划需要测试负责人及以上项目角色）'}</div>`}</div>
   </div>`;
 }
 
 async function openPlanDlg() {
   let projects = [];
-  try { projects = (await api('/api/v1/projects')).projects.filter(p => !p.builtin); } catch (e) {}
+  try { projects = (await api('/api/v1/projects')).projects.filter(p => !p.builtin && p.status !== 'archived' && can(p.project, 'plan.manage')); } catch (e) {}
+  if (!projects.length) return toast('没有可创建计划的项目（需要测试负责人及以上项目角色）', 'warn');
   $('plProject').innerHTML = projects.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
   if (plansProject) $('plProject').value = plansProject;
   $('plName').value = ''; $('plOwner').value = curUser ? curUser.username : '';
@@ -2938,10 +3210,11 @@ async function fillProjectSelect(keep) {
   try { _projectsCache = (await api('/api/v1/projects')).projects; } catch (e) { return; }
   const sel = $('projectInput');
   const cur = keep !== undefined ? keep : sel.value;
-  sel.innerHTML = '<option value="">（不指定项目）</option>'
-    + _projectsCache.filter(p => !p.builtin).map(p =>
-      `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('')
-    + '<option value="__new__">＋ 新建项目…</option>';
+  const allowed = _projectsCache.filter(p => !p.builtin && p.status !== 'archived' && can(p.project, 'point.ai'));
+  sel.innerHTML = (isSysAdmin() ? '<option value="">（不指定项目）</option>' : '<option value="">请选择项目</option>')
+    + allowed.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('')
+    + (isSysAdmin() ? '<option value="__new__">＋ 新建项目…</option>' : '');
+  if (!cur && curProjectName && allowed.some(p => p.project === curProjectName)) { sel.value = curProjectName; return; }
   if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
 }
 async function drawerNewProject() {
@@ -2954,46 +3227,78 @@ async function drawerNewProject() {
     toast('项目已创建', 'ok');
   } catch (e) { toast(e.message, 'err'); }
 }
+let curProject = null, projTab = 'overview';
+let _projectsCache = [], _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
+const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved']};
 let _editingProject = null;
+async function fillUserNames() {
+  if (!isSysAdmin() && !(curUser && curUser.projects && curUser.projects.some(p => p.role === 'project_admin'))) return;
+  try {
+    const users = isSysAdmin() ? (await api('/api/v1/auth/users')).users : [];
+    $('userNames').innerHTML = users.map(u => `<option value="${esc(u.username)}">${esc(u.name||'')}</option>`).join('');
+  } catch (e) {}
+}
 function openProjDlg(name) {
   _editingProject = name || null;
   const p = name ? _projectsCache.find(x => x.project === name) : null;
   $('pjTitle').textContent = name ? '编辑项目 ' + name : '新建项目';
   $('pjName').value = name || '';
+  $('pjCode').value = p ? (p.code || '') : '';
+  $('pjOwner').value = p ? (p.owner || '') : (curUser ? curUser.username : '');
+  $('pjStatus').value = p ? (p.status || 'active') : 'active';
+  $('pjStatus').parentElement.style.display = name ? '' : 'none';
   $('pjDesc').value = p ? (p.description || '') : '';
   $('pjRenameHint').style.display = name ? '' : 'none';
+  fillUserNames();
   $('projDlg').showModal();
 }
 async function saveProjDlg() {
   const name = $('pjName').value.trim(), description = $('pjDesc').value.trim();
+  const code = $('pjCode').value.trim(), owner = $('pjOwner').value.trim();
   if (!name) return toast('项目名不能为空', 'warn');
   try {
     if (_editingProject) {
       await api('/api/v1/projects/' + encodeURIComponent(_editingProject),
         {method:'PUT', headers:{'Content-Type':'application/json'},
-         body: JSON.stringify({name, description})});
+         body: JSON.stringify({name, description, code, owner, status: $('pjStatus').value})});
       if (curProject === _editingProject) curProject = name;
+      if (curProjectName === _editingProject) { curProjectName = name; localStorage.setItem('tg_project', name); renderCurProj(); }
     } else {
-      await jpost('/api/v1/projects', {name, description});
+      await jpost('/api/v1/projects', {name, description, code, owner});
     }
     $('projDlg').close(); toast('已保存', 'ok');
-    await fillProjectSelect();
+    await fillProjectSelect(); await reloadMe();
     renderProjects(); refreshList();
   } catch (e) { toast(e.message, 'err'); }
 }
+async function setProjectStatus(name, status) {
+  const label = {active:'恢复为进行中', paused:'暂停', archived:'归档'}[status];
+  if (status === 'archived' && !await uiConfirm('归档项目', `确定归档项目「${name}」？归档后项目数据只读，可随时恢复。`)) return;
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(name),
+      {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({status})});
+    toast(`已${label}`, 'ok'); await fillProjectSelect(); renderProjects();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function toggleFavorite(name) {
+  try {
+    const r = await jpost('/api/v1/projects/' + encodeURIComponent(name) + '/favorite', {});
+    toast(r.favorite ? '已收藏' : '已取消收藏', 'ok');
+    await fillProjectSelect(); await reloadMe(); renderProjects();
+  } catch (e) { toast(e.message, 'err'); }
+}
 async function deleteProject(name) {
-  if (!await uiConfirm('删除项目', `确定删除项目「${name}」？仅允许删除没有任务的空项目。`, true)) return;
+  if (!await uiConfirm('删除项目', `确定删除项目「${name}」？仅允许删除没有任务与计划的空项目。`, true)) return;
   try {
     await api('/api/v1/projects/' + encodeURIComponent(name), {method:'DELETE'});
     toast('项目已删除', 'ok');
+    if (curProjectName === name) setCurrentProject('', {silent: true});
     await fillProjectSelect();
     renderProjects();
   } catch (e) { toast(e.message, 'err'); }
 }
-let curProject = null, projTab = 'overview';
-let _projectsCache = [], _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
-const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved']};
 
+let projListStatus = '', projListKw = '';
 function crumbForProjects() {
   if (curProject) {
     setCrumb(`<a onclick="backToProjects()">项目管理</a><span class="sep">/</span>${esc(curProject)}`);
@@ -3005,13 +3310,22 @@ async function renderProjects() {
   crumbForProjects();
   if (curProject) return renderProjectWorkspace();
   try { _projectsCache = (await api('/api/v1/projects')).projects; } catch (e) { return toast(e.message, 'err'); }
-  const rows = _projectsCache.map(p => {
+  const kw = projListKw.trim().toLowerCase();
+  const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus)
+    && (!kw || p.project.toLowerCase().includes(kw) || (p.code||'').toLowerCase().includes(kw) || (p.owner||'').toLowerCase().includes(kw)));
+  const STATUS_CLS = {active:'approved', paused:'candidate', archived:'pending'};
+  const rows = shown.map(p => {
     const reviewed = p.approved + p.rejected + p.pending;
+    const canEdit = !p.builtin && can(p.project, 'project.edit');
     return `<tr class="rowlink" onclick="openProject('${esc(p.project)}')">
-      <td><b>${esc(p.project)}</b>${p.description?`<div class="hint">${esc(p.description)}</div>`:''}</td>
+      <td onclick="event.stopPropagation()" style="width:26px;padding-right:0">${p.builtin?'':`<button class="star-btn ${p.favorite?'on':''}" title="${p.favorite?'取消收藏':'收藏'}" onclick="toggleFavorite('${esc(p.project)}')">${p.favorite?'★':'☆'}</button>`}</td>
+      <td><b>${esc(p.project)}</b>${p.code?` <code class="hint">${esc(p.code)}</code>`:''}${p.description?`<div class="hint">${esc(p.description)}</div>`:''}</td>
+      <td>${p.owner?`<span class="tag">${esc(p.owner)}</span>`:'<span class="hint">—</span>'}</td>
+      <td><span class="st ${STATUS_CLS[p.status]||'pending'}">${esc(p.status_label||'')}</span></td>
+      <td>${p.my_role?`<span class="role-tag">${esc(PROJECT_ROLES[p.my_role]||p.my_role)}</span>`:'<span class="hint">—</span>'}<div class="hint">${p.member_count||0} 名成员</div></td>
       <td>${p.tasks}</td>
       <td><b>${p.cases}</b> 条</td>
-      <td style="min-width:170px">${reviewed ? `
+      <td style="min-width:150px">${reviewed ? `
         <div class="segbar" style="margin:2px 0 4px">${[
           ['正式',p.approved,'var(--s-ok)'],['待审核',p.pending,'var(--s-pend)'],['已驳回',p.rejected,'var(--s-rej)']]
           .filter(e=>e[1]).map(e=>`<i style="flex:${e[1]};background:${e[2]}" title="${e[0]} · ${e[1]}"></i>`).join('')}</div>
@@ -3019,21 +3333,28 @@ async function renderProjects() {
       <td>${p.executed ? `已执行 ${p.executed}<div class="hint">通过率 ${(p.exec_pass/p.executed*100).toFixed(0)}%</div>` : '<span class="hint">未执行</span>'}</td>
       <td class="hint">${relTime(p.last_activity)||'—'}</td>
       <td onclick="event.stopPropagation()">${p.builtin?'':`<div class="rowops">
-        <button class="ibtn" title="编辑" onclick="openProjDlg('${esc(p.project)}')">${IC.edit}</button>
-        <button class="ibtn bad" title="删除（仅空项目）" onclick="deleteProject('${esc(p.project)}')">${IC.trash}</button>
+        ${canEdit?`<button class="ibtn" title="编辑" onclick="openProjDlg('${esc(p.project)}')">${IC.edit}</button>`:''}
+        ${p.status==='archived'&&myRole(p.project)==='project_admin'?`<button class="ibtn ok" title="恢复" onclick="setProjectStatus('${esc(p.project)}','active')">${IC.unlock}</button>`:''}
+        ${isSysAdmin()?`<button class="ibtn bad" title="删除（仅空项目）" onclick="deleteProject('${esc(p.project)}')">${IC.trash}</button>`:''}
       </div>`}</td>
     </tr>`;
   }).join('');
   $('projArea').innerHTML = `<div class="card">
-    <div class="card-h"><h3>项目管理</h3><span class="meta">共 ${_projectsCache.length} 个 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
+    <div class="card-h"><h3>项目管理</h3><span class="meta">共 ${_projectsCache.filter(p=>!p.builtin).length} 个 · 收藏置顶 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
       <div class="grow">
-        <button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>
+        <input type="text" placeholder="搜索名称 / 编码 / 负责人" value="${esc(projListKw)}" style="width:190px" oninput="projListKw=this.value;renderProjects()">
+        <select style="width:120px" onchange="projListStatus=this.value;renderProjects()">
+          <option value="">全部状态</option>
+          ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>`<option value="${v}" ${projListStatus===v?'selected':''}>${l}</option>`).join('')}
+        </select>
+        ${isSysAdmin()?`<button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>`:''}
         <button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
     <div class="card-b">
       <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
-        <thead><tr><th>项目</th><th style="width:70px">任务</th><th style="width:90px">用例</th>
-        <th>用例生命周期</th><th style="width:120px">执行</th><th style="width:100px">最近活动</th><th style="width:80px">操作</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="7"><div class="empty">暂无项目，点击「新建项目」创建</div></td></tr>'}</tbody>
+        <thead><tr><th style="width:26px"></th><th>项目</th><th style="width:90px">负责人</th><th style="width:70px">状态</th><th style="width:110px">我的角色</th>
+        <th style="width:56px">任务</th><th style="width:80px">用例</th>
+        <th>用例生命周期</th><th style="width:110px">执行</th><th style="width:90px">最近活动</th><th style="width:90px">操作</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="11"><div class="empty">${_projectsCache.length?'没有符合筛选的项目':(isSysAdmin()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
       </table></div>
     </div></div>`;
 }
@@ -3041,34 +3362,258 @@ async function renderProjects() {
 function openProject(name) {
   curProject = name; projTab = 'overview';
   projStage = 'all'; projExec = 'all'; projModule = ''; projQuery = '';
+  if (name !== '（未指定）') api('/api/v1/projects/' + encodeURIComponent(name)).then(d => { _projDetail = d; }).catch(()=>{});
   renderProjects();
 }
+let _projDetail = null;
 function setProjTab(tab) { projTab = tab; renderProjectWorkspace(); }
 
 async function renderProjectWorkspace() {
   crumbForProjects();
   const p = _projectsCache.find(x => x.project === curProject) ||
     {project: curProject, tasks:0, cases:0, pending:0, rejected:0, approved:0, executed:0, exec_pass:0};
+  const legacy = curProject === '（未指定）';
   let body = '';
   if (projTab === 'overview') body = await projOverviewHtml(p);
   else if (projTab === 'tasks') body = projTasksHtml();
   else if (projTab === 'cases') body = await projCasesHtml();
+  else if (projTab === 'members') body = await projMembersHtml();
+  else if (projTab === 'versions') body = await projVersionsHtml();
+  else if (projTab === 'modules') body = await projModulesHtml();
   else if (projTab === 'recycle') body = await projRecycleHtml();
+  const STATUS_CLS = {active:'approved', paused:'candidate', archived:'pending'};
   $('projArea').innerHTML = `<div class="card">
     <div class="card-h" style="border-bottom:none">
       <button class="btn ghost sm" onclick="backToProjects()">← 项目管理</button>
+      ${legacy?'':`<button class="star-btn ${p.favorite?'on':''}" title="${p.favorite?'取消收藏':'收藏'}" onclick="toggleFavorite('${esc(p.project)}')">${p.favorite?'★':'☆'}</button>`}
       <h3>${esc(curProject)}</h3>
-      <span class="meta">${p.tasks} 个任务 · ${p.cases} 条用例</span>
-      <div class="grow"><button class="btn sm" onclick="$('projectInput').value=curProject==='（未指定）'?'':curProject;openDrawer()">＋ 新建任务</button></div>
+      ${p.code?`<code class="hint">${esc(p.code)}</code>`:''}
+      ${legacy?'':`<span class="st ${STATUS_CLS[p.status]||'pending'}">${esc(p.status_label||'')}</span>`}
+      ${p.my_role?`<span class="role-tag">${esc(PROJECT_ROLES[p.my_role]||p.my_role)}</span>`:''}
+      <span class="meta">${p.tasks} 个任务 · ${p.cases} 条用例${p.owner?` · 负责人 ${esc(p.owner)}`:''}</span>
+      <div class="grow">
+        ${curProjectName!==curProject&&!legacy?`<button class="btn ghost sm" onclick="setCurrentProject('${esc(curProject)}',{silent:true});renderProjectWorkspace()">设为当前项目</button>`:''}
+        ${!legacy&&can(curProject,'project.edit')?`<button class="btn ghost sm" onclick="openProjDlg('${esc(curProject)}')">编辑项目</button>`:''}
+        ${!legacy&&p.status!=='archived'&&myRole(curProject)==='project_admin'?`<button class="btn ghost sm" onclick="setProjectStatus('${esc(curProject)}','archived')">归档</button>`:''}
+        ${!legacy&&p.status==='archived'&&myRole(curProject)==='project_admin'?`<button class="btn ghost sm" onclick="setProjectStatus('${esc(curProject)}','active')">恢复</button>`:''}
+        ${can(curProject,'point.ai')&&p.status!=='archived'?`<button class="btn sm" onclick="$('projectInput').value=curProject==='（未指定）'?'':curProject;openDrawer()">＋ 新建任务</button>`:''}</div>
     </div>
     <div class="dtabs">
       <button class="${projTab==='overview'?'on':''}" onclick="setProjTab('overview')">概览</button>
       <button class="${projTab==='tasks'?'on':''}" onclick="setProjTab('tasks')">任务<span class="cnt">${p.tasks}</span></button>
       <button class="${projTab==='cases'?'on':''}" onclick="setProjTab('cases')">用例库<span class="cnt">${p.cases}</span></button>
+      ${legacy?'':`<button class="${projTab==='members'?'on':''}" onclick="setProjTab('members')">成员<span class="cnt">${p.member_count||0}</span></button>
+      <button class="${projTab==='versions'?'on':''}" onclick="setProjTab('versions')">版本</button>
+      <button class="${projTab==='modules'?'on':''}" onclick="setProjTab('modules')">模块</button>`}
       <button class="${projTab==='recycle'?'on':''}" onclick="setProjTab('recycle')">回收站</button>
       <button onclick="repProject=curProject==='（未指定）'?'':curProject;switchView('reports')">报表 ↗</button>
     </div>
     <div class="card-b">${body}</div></div>`;
+}
+
+/* ---- 成员（3.4） ---- */
+let _memberEditing = null;
+async function projMembersHtml() {
+  let data;
+  try { data = await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/members'); }
+  catch (e) { return `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+  const manage = can(curProject, 'project.members');
+  const ROLE_DESC = {project_admin:'当前项目全部管理权限', test_lead:'测试设计、评审、计划、分配、统计', tester:'编写、AI 生成、修改授权内容、执行测试', viewer:'仅查看授权项目数据'};
+  return `<div class="section-t" style="display:flex;align-items:center">项目成员与角色
+      <span class="hint" style="margin-left:8px;font-weight:400">系统级角色与项目级角色分离；同一用户在不同项目可拥有不同角色</span>
+      ${manage?`<button class="btn ghost sm" style="margin-left:auto" onclick="openMemberDlg()">＋ 添加成员</button>`:''}</div>
+    <div class="tbl-wrap" style="margin-top:8px"><table>
+      <thead><tr><th style="width:140px">用户名</th><th style="width:110px">姓名</th><th style="width:120px">项目角色</th><th>权限说明</th><th style="width:90px">系统角色</th><th style="width:80px">状态</th><th style="width:80px">操作</th></tr></thead>
+      <tbody>${data.members.map(m => `<tr>
+        <td><b>${esc(m.username)}</b>${curUser&&m.username===curUser.username?' <span class="tag">我</span>':''}</td>
+        <td>${esc(m.name||'')||'<span class="hint">—</span>'}</td>
+        <td><span class="role-tag">${esc(m.role_label)}</span></td>
+        <td class="hint">${esc(ROLE_DESC[m.role]||'')}</td>
+        <td>${m.system_role?`<span class="st ${m.system_role==='admin'?'approved':'pending'}">${esc(m.system_role)}</span>`:'<span class="hint">—</span>'}</td>
+        <td>${m.status==='disabled'?'<span class="st rejected">已禁用</span>':m.status==='unknown'?'<span class="hint">账号不存在</span>':'<span class="st approved">正常</span>'}</td>
+        <td>${manage?`<div class="rowops">
+          <button class="ibtn" title="修改角色" onclick="openMemberDlg('${esc(m.username)}','${esc(m.role)}')">${IC.edit}</button>
+          <button class="ibtn bad" title="移出项目" onclick="removeMember('${esc(m.username)}')">${IC.trash}</button></div>`:''}</td>
+      </tr>`).join('') || '<tr><td colspan="7"><div class="empty">暂无成员</div></td></tr>'}</tbody>
+    </table></div>`;
+}
+function openMemberDlg(username, role) {
+  _memberEditing = username || null;
+  $('mbTitle').textContent = username ? `修改角色 · ${username}` : '添加成员';
+  $('mbUser').value = username || ''; $('mbUser').disabled = !!username;
+  $('mbRole').value = role || 'tester';
+  fillUserNames();
+  $('memberDlg').showModal();
+}
+async function saveMember() {
+  const username = $('mbUser').value.trim();
+  if (!username) return toast('请输入用户名', 'warn');
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/members',
+      {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username, role: $('mbRole').value})});
+    $('memberDlg').close(); toast('已保存', 'ok');
+    await fillProjectSelect(); await reloadMe(); renderProjectWorkspace();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function removeMember(username) {
+  if (!await uiConfirm('移出成员', `确定将「${username}」移出项目「${curProject}」？其将无法再访问本项目数据。`, true)) return;
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/members/' + encodeURIComponent(username), {method:'DELETE'});
+    toast('已移出', 'ok'); await fillProjectSelect(); await reloadMe(); renderProjectWorkspace();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- 版本（4.1） ---- */
+let _versionEditing = null, _versionsCache = [];
+async function projVersionsHtml() {
+  let data;
+  try { data = await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/versions'); }
+  catch (e) { return `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+  _versionsCache = data.versions;
+  const manage = can(curProject, 'version.manage');
+  const CLS = {not_started:'pending', in_progress:'candidate', done:'approved', archived:'pending'};
+  return `<div class="section-t" style="display:flex;align-items:center">项目版本
+      <span class="hint" style="margin-left:8px;font-weight:400">版本名称/编码、范围说明、开始 / 计划结束 / 实际结束、状态</span>
+      ${manage?`<button class="btn ghost sm" style="margin-left:auto" onclick="openVersionDlg()">＋ 新建版本</button>`:''}</div>
+    <div class="tbl-wrap" style="margin-top:8px"><table>
+      <thead><tr><th style="width:120px">版本</th><th style="width:90px">编码</th><th>描述</th><th style="width:110px">开始</th><th style="width:110px">计划结束</th><th style="width:110px">实际结束</th><th style="width:80px">状态</th><th style="width:110px">创建</th><th style="width:70px">操作</th></tr></thead>
+      <tbody>${data.versions.map(v => `<tr>
+        <td><b>${esc(v.name)}</b></td><td class="hint">${esc(v.code||'')||'—'}</td>
+        <td class="hint">${esc(v.description||'')||'—'}</td>
+        <td class="hint">${esc(v.start_date||'')||'—'}</td><td class="hint">${esc(v.planned_end||'')||'—'}</td><td class="hint">${esc(v.actual_end||'')||'—'}</td>
+        <td><span class="st ${CLS[v.status]||'pending'}">${esc(data.statuses[v.status]||v.status)}</span></td>
+        <td class="hint">${esc(v.created_by||'')}<div>${relTime(v.created_at)}</div></td>
+        <td>${manage?`<div class="rowops">
+          <button class="ibtn" title="编辑" onclick="openVersionDlg('${v.version_id}')">${IC.edit}</button>
+          <button class="ibtn bad" title="删除" onclick="deleteVersion('${v.version_id}','${esc(v.name)}')">${IC.trash}</button></div>`:''}</td>
+      </tr>`).join('') || '<tr><td colspan="9"><div class="empty">暂无版本</div></td></tr>'}</tbody>
+    </table></div>`;
+}
+function openVersionDlg(id) {
+  _versionEditing = id || null;
+  const v = id ? _versionsCache.find(x => x.version_id === id) : null;
+  $('vsTitle').textContent = v ? `编辑版本 ${v.name}` : '新建版本';
+  $('vsName').value = v ? v.name : ''; $('vsCode').value = v ? v.code : '';
+  $('vsStatus').value = v ? v.status : 'not_started';
+  $('vsStart').value = v ? v.start_date : ''; $('vsPlanned').value = v ? v.planned_end : ''; $('vsActual').value = v ? v.actual_end : '';
+  $('vsDesc').value = v ? v.description : '';
+  $('versionDlg').showModal();
+}
+async function saveVersion() {
+  const body = {name: $('vsName').value.trim(), code: $('vsCode').value.trim(), status: $('vsStatus').value,
+    start_date: $('vsStart').value, planned_end: $('vsPlanned').value, actual_end: $('vsActual').value, description: $('vsDesc').value.trim()};
+  if (!body.name) return toast('版本名称不能为空', 'warn');
+  const base = '/api/v1/projects/' + encodeURIComponent(curProject) + '/versions';
+  try {
+    if (_versionEditing) await api(base + '/' + _versionEditing, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    else await jpost(base, body);
+    $('versionDlg').close(); toast('已保存', 'ok'); renderProjectWorkspace();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function deleteVersion(id, name) {
+  if (!await uiConfirm('删除版本', `确定删除版本「${name}」？`, true)) return;
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/versions/' + id, {method:'DELETE'});
+    toast('已删除', 'ok'); renderProjectWorkspace();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- 模块树（4.2） ---- */
+let _moduleEditing = null, _moduleTree = [], _moduleFlat = [], _modShowDeleted = false;
+function _flattenModules(nodes, out = []) { for (const n of nodes) { out.push(n); _flattenModules(n.children || [], out); } return out; }
+async function projModulesHtml() {
+  let data;
+  try { data = await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/modules' + (_modShowDeleted ? '?include_deleted=true' : '')); }
+  catch (e) { return `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+  _moduleTree = data.tree; _moduleFlat = _flattenModules(data.tree);
+  const manage = can(curProject, 'version.manage');
+  const isPA = myRole(curProject) === 'project_admin';
+  const node = (n, siblings) => {
+    const idx = siblings.indexOf(n);
+    return `<li><div class="node">
+      <span class="nm">${esc(n.name)}</span>${n.description?`<span class="desc">${esc(n.description)}</span>`:''}
+      ${n.children.length?`<span class="tag">${n.children.length} 子模块</span>`:''}
+      ${manage?`<div class="rowops">
+        ${n.depth<data.max_depth?`<button class="ibtn" title="新建子模块" onclick="openModuleDlg(null,'${n.module_id}')">＋</button>`:''}
+        <button class="ibtn" title="上移" ${idx===0?'disabled':''} onclick="moveModule('${n.module_id}',-1)">↑</button>
+        <button class="ibtn" title="下移" ${idx===siblings.length-1?'disabled':''} onclick="moveModule('${n.module_id}',1)">↓</button>
+        <button class="ibtn" title="编辑 / 移动" onclick="openModuleDlg('${n.module_id}')">${IC.edit}</button>
+        <button class="ibtn bad" title="删除（逻辑删除，可恢复）" onclick="deleteModule('${n.module_id}','${esc(n.path)}')">${IC.trash}</button>
+      </div>`:''}
+    </div>${n.children.length?`<ul>${n.children.map(c => node(c, n.children)).join('')}</ul>`:''}</li>`;
+  };
+  return `<div class="section-t" style="display:flex;align-items:center">模块树
+      <span class="hint" style="margin-left:8px;font-weight:400">每个项目独立维护，最多 ${data.max_depth} 级；被用例引用的模块不可物理删除</span>
+      <label class="check" style="margin-left:auto">显示回收站 <input type="checkbox" ${_modShowDeleted?'checked':''} onchange="_modShowDeleted=this.checked;renderProjectWorkspace()"></label>
+      ${manage?`<button class="btn ghost sm" style="margin-left:8px" onclick="openModuleDlg()">＋ 新建一级模块</button>`:''}</div>
+    ${data.tree.length?`<ul class="tree" style="margin-top:8px">${data.tree.map(n => node(n, data.tree)).join('')}</ul>`
+      :'<div class="empty" style="margin-top:8px">暂无模块，新建后可在用例中按模块归类</div>'}
+    ${_modShowDeleted?`<div class="section-t" style="margin-top:16px">回收站</div>
+      <div class="tbl-wrap"><table><thead><tr><th>模块路径</th><th style="width:90px">删除人</th><th style="width:130px">删除时间</th><th style="width:100px">用例引用</th><th style="width:150px">操作</th></tr></thead>
+      <tbody>${data.deleted.map(m => `<tr><td>${esc(m.path)}</td><td class="hint">${esc(m.deleted_by||'')}</td>
+        <td class="hint">${esc((m.deleted_at||'').replace('T',' ').slice(0,16))}</td>
+        <td>${m.referenced?'<span class="st candidate">有引用</span>':'<span class="hint">无</span>'}</td>
+        <td><div class="rowops">${manage?`<button class="btn ghost sm" onclick="restoreModule('${m.module_id}')">恢复</button>`:''}
+          ${isPA&&!m.referenced?`<button class="btn ghost sm" style="color:var(--danger)" onclick="purgeModule('${m.module_id}','${esc(m.path)}')">永久删除</button>`:''}</div></td></tr>`).join('')
+        || '<tr><td colspan="5"><div class="empty">回收站为空</div></td></tr>'}</tbody></table></div>`:''}`;
+}
+function openModuleDlg(id, parentId) {
+  _moduleEditing = id || null;
+  const m = id ? _moduleFlat.find(x => x.module_id === id) : null;
+  const excluded = new Set(id ? [id, ..._flattenModules(m.children).map(x => x.module_id)] : []);
+  $('mdlTitle').textContent = m ? `编辑模块 ${m.path}` : '新建模块';
+  $('mdlParent').innerHTML = '<option value="">（一级模块）</option>' + _moduleFlat
+    .filter(x => !excluded.has(x.module_id) && x.depth < 5)
+    .map(x => `<option value="${x.module_id}">${'　'.repeat(x.depth-1)}${esc(x.path)}</option>`).join('');
+  $('mdlParent').value = m ? (m.parent_id || '') : (parentId || '');
+  $('mdlName').value = m ? m.name : ''; $('mdlDesc').value = m ? (m.description || '') : '';
+  $('moduleDlg').showModal();
+}
+async function saveModule() {
+  const name = $('mdlName').value.trim(), description = $('mdlDesc').value.trim(), parent_id = $('mdlParent').value || null;
+  if (!name) return toast('模块名称不能为空', 'warn');
+  const base = '/api/v1/projects/' + encodeURIComponent(curProject) + '/modules';
+  try {
+    if (_moduleEditing) {
+      const m = _moduleFlat.find(x => x.module_id === _moduleEditing);
+      const body = {name, description};
+      if ((m.parent_id || null) !== parent_id) { body.move = true; body.parent_id = parent_id; }
+      await api(base + '/' + _moduleEditing, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    } else await jpost(base, {name, description, parent_id});
+    $('moduleDlg').close(); toast('已保存', 'ok'); renderProjectWorkspace();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function moveModule(id, delta) {
+  const m = _moduleFlat.find(x => x.module_id === id);
+  const parent = m.parent_id ? _moduleFlat.find(x => x.module_id === m.parent_id) : null;
+  const siblings = (parent ? parent.children : _moduleTree).map(x => x.module_id);
+  const i = siblings.indexOf(id), j = i + delta;
+  if (j < 0 || j >= siblings.length) return;
+  [siblings[i], siblings[j]] = [siblings[j], siblings[i]];
+  try {
+    await jpost('/api/v1/projects/' + encodeURIComponent(curProject) + '/modules/reorder', {parent_id: m.parent_id || null, ordered_ids: siblings});
+    renderProjectWorkspace();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function deleteModule(id, path) {
+  if (!await uiConfirm('删除模块', `确定删除模块「${path}」及其子模块？进入回收站，可恢复。`, true)) return;
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/modules/' + id, {method:'DELETE'});
+    toast('已移入回收站', 'ok'); renderProjectWorkspace();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function restoreModule(id) {
+  try {
+    await jpost('/api/v1/projects/' + encodeURIComponent(curProject) + '/modules/' + id + '/restore', {});
+    toast('已恢复', 'ok'); renderProjectWorkspace();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function purgeModule(id, path) {
+  if (!await uiConfirm('永久删除', `永久删除模块「${path}」及其子模块，不可恢复。确定？`, true)) return;
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/modules/' + id + '?permanent=true', {method:'DELETE'});
+    toast('已永久删除', 'ok'); renderProjectWorkspace();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 async function projOverviewHtml(p) {
@@ -3416,25 +3961,45 @@ async function refreshUsers() {
     window._authSettings = await api('/api/v1/auth/settings').catch(()=>window._authSettings);
     if ($('totpPolicySwitch')) $('totpPolicySwitch').checked = (window._authSettings||{}).totp_enabled !== false;
     const data = await api('/api/v1/auth/users');
+    _usersCache = data.users;
+    const fmt = t => esc((t||'').replace('T',' ').replace('+00:00','').slice(0,16));
     $('usersList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
-      <tr><th>用户名</th><th>角色</th><th>两步验证</th><th>创建时间</th><th style="width:80px">操作</th></tr>
-      ${data.users.map(u => `<tr>
-        <td><b>${esc(u.username)}</b>${curUser&&u.username===curUser.username?' <span class="tag">当前</span>':''}</td>
+      <tr><th>用户名</th><th>姓名</th><th>邮箱 / 手机</th><th>系统角色</th><th>状态</th><th>所属项目</th><th>两步验证</th><th>最后登录</th><th>创建时间</th><th style="width:110px">操作</th></tr>
+      ${data.users.map(u => `<tr style="${u.status==='disabled'?'opacity:.6':''}">
+        <td>${u.avatar?`<img src="${esc(u.avatar)}" style="width:22px;height:22px;border-radius:50%;vertical-align:middle;margin-right:6px;object-fit:cover">`:''}<b>${esc(u.username)}</b>${curUser&&u.username===curUser.username?' <span class="tag">当前</span>':''}</td>
+        <td>${esc(u.name||'')||'<span class="hint">—</span>'}</td>
+        <td class="hint">${esc(u.email||'')||'—'}<div>${esc(u.phone||'')}</div></td>
         <td><span class="st ${u.role==='admin'?'approved':'pending'}">${esc(u.role)}</span></td>
+        <td>${u.status==='disabled'?'<span class="st rejected">已禁用</span>':'<span class="st approved">正常</span>'}</td>
+        <td>${(u.projects||[]).length?u.projects.map(p=>`<span class="tag" title="${esc(PROJECT_ROLES[p.role]||p.role)}">${esc(p.project)}</span>`).join(' '):'<span class="hint">—</span>'}</td>
         <td>${u.totp_enabled?'<span class="st approved">已绑定</span>':'<span class="hint">未绑定</span>'}</td>
-        <td class="hint">${esc((u.created_at||'').replace('T',' ').replace('+00:00',''))}</td>
+        <td class="hint">${u.last_login_at?`${fmt(u.last_login_at)}<div>${esc(u.last_login_ip||'')}</div>`:'—'}</td>
+        <td class="hint">${fmt(u.created_at)}</td>
         <td><div class="rowops">
-          <button class="ibtn" title="编辑（改角色 / 重置密码 / 重置两步验证）" onclick="openUserEdit('${esc(u.username)}','${esc(u.role)}',${u.totp_enabled?1:0})">${IC.edit}</button>
+          <button class="ibtn" title="编辑资料 / 角色 / 状态 / 重置密码" onclick="openUserEdit('${esc(u.username)}')">${IC.edit}</button>
+          ${curUser&&u.username===curUser.username?'':`<button class="ibtn ${u.status==='disabled'?'ok':''}" title="${u.status==='disabled'?'启用':'禁用'}" onclick="toggleUserStatus('${esc(u.username)}','${u.status==='disabled'?'active':'disabled'}')">${u.status==='disabled'?IC.check:IC.x}</button>`}
           ${curUser&&u.username===curUser.username?'':`<button class="ibtn bad" title="删除" onclick="deleteUser('${esc(u.username)}')">${IC.trash}</button>`}
         </div></td></tr>`).join('')}
     </table></div>`;
   } catch (e) { toast(e.message, 'err'); }
 }
-function openUserDlg() { $('nuName').value=''; $('nuPwd').value=''; $('nuRole').value='member'; $('userDlg').showModal(); }
+let _usersCache = [];
+function openUserDlg() {
+  for (const id of ['nuName','nuPwd','nuRealName','nuEmail','nuPhone']) $(id).value = '';
+  $('nuRole').value='member'; $('userDlg').showModal();
+}
+async function toggleUserStatus(username, status) {
+  if (status === 'disabled' && !await uiConfirm('禁用用户', `确定禁用「${username}」？其现有会话立即失效，且无法登录。`, true)) return;
+  try {
+    await api('/api/v1/auth/users/' + encodeURIComponent(username), {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({status})});
+    toast(status === 'disabled' ? '已禁用' : '已启用', 'ok'); refreshUsers();
+  } catch (e) { toast(e.message, 'err'); }
+}
 async function addUser() {
   try {
     await api('/api/v1/auth/users', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({username: $('nuName').value, password: $('nuPwd').value, role: $('nuRole').value})});
+      body: JSON.stringify({username: $('nuName').value, password: $('nuPwd').value, role: $('nuRole').value,
+        name: $('nuRealName').value, email: $('nuEmail').value, phone: $('nuPhone').value})});
     $('userDlg').close(); toast('用户已创建', 'ok'); refreshUsers();
   } catch (e) { toast(e.message, 'err'); }
 }
@@ -3498,17 +4063,25 @@ async function totpUnbind() {
 }
 
 let _editingUser = null;
-function openUserEdit(username, role, totpEnabled) {
+function openUserEdit(username) {
+  const u = _usersCache.find(x => x.username === username) || {};
   _editingUser = username;
   $('euName').textContent = username;
-  $('euRole').value = role;
+  $('euRole').value = u.role || 'member';
+  $('euStatus').value = u.status || 'active';
+  $('euStatus').disabled = curUser && username === curUser.username;
+  $('euRealName').value = u.name || ''; $('euEmail').value = u.email || ''; $('euPhone').value = u.phone || '';
+  $('euProjects').innerHTML = (u.projects||[]).length
+    ? '所属项目：' + u.projects.map(p => `<span class="tag">${esc(p.project)} · ${esc(PROJECT_ROLES[p.role]||p.role)}</span>`).join(' ')
+    : '尚未加入任何项目（在项目管理 → 成员 中添加）';
   $('euPwd').value = '';
-  $('euTotpWrap').style.display = totpEnabled ? '' : 'none';
+  $('euTotpWrap').style.display = u.totp_enabled ? '' : 'none';
   $('euResetTotp').checked = false;
   $('editUserDlg').showModal();
 }
 async function saveUserEdit() {
-  const body = {role: $('euRole').value};
+  const body = {role: $('euRole').value, name: $('euRealName').value, email: $('euEmail').value, phone: $('euPhone').value};
+  if (!$('euStatus').disabled) body.status = $('euStatus').value;
   const pwd = $('euPwd').value.trim();
   if (pwd) body.new_password = pwd;
   if ($('euResetTotp').checked) body.reset_totp = true;

@@ -9,7 +9,7 @@ SOCK="/tmp/tiangong-mysql.sock"
 PORT=3306
 
 if mysqladmin --socket="$SOCK" -u root ping >/dev/null 2>&1; then
-  echo "MySQL 已在运行（$SOCK）"
+  echo "MySQL 已在运行（${SOCK}）"
 else
   if [ ! -d "$DATADIR/mysql" ]; then
     echo "初始化 MySQL 数据目录：$DATADIR"

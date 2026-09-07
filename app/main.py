@@ -34,9 +34,12 @@ async def lifespan(app: FastAPI):
         revision_threshold=settings.memory_revision_threshold,
     )
     app.state.rules = RuleStore(storage_path=settings.data_dir / "rules.json")
-    from app.projects import ProjectStore
+    from app.projects import ModuleStore, ProjectStore, UserPrefStore, VersionStore
 
     app.state.projects = ProjectStore(storage_path=settings.data_dir / "projects.json")
+    app.state.user_prefs = UserPrefStore()
+    app.state.versions = VersionStore()
+    app.state.modules = ModuleStore()
     from app.plans import PlanStore, migrate_task_executions
 
     app.state.plans = PlanStore()
@@ -84,7 +87,7 @@ async def auth_middleware(request: Request, call_next):
         token = header.removeprefix("Bearer ").strip() or request.query_params.get("token")
         user = request.app.state.auth.verify(token)
         if user is None:
-            return JSONResponse({"detail": "未登录或会话已过期，请重新登录"}, status_code=401)
+            return JSONResponse({"detail": "未登录、会话已过期或账号已禁用，请重新登录"}, status_code=401)
         request.state.user = user
     return await call_next(request)
 

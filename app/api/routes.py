@@ -81,6 +81,95 @@ def _require_admin(request: Request) -> dict:
     return user
 
 
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("X-Forwarded-For", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
+# ---- 项目级权限与数据隔离（完整需求 3.3 / 3.4 / 3.5）----
+#
+# 每个业务接口按 (所属项目, 动作) 校验：系统管理员视同任一项目的项目管理员；
+# 其他用户必须是该项目成员且项目角色具备该动作；未加入项目 → 403，杜绝跨项目 ID 访问。
+# 历史遗留的「未指定项目」任务不属于任何项目：仅系统管理员可见可操作（M2 需求实体化后迁移归属）。
+
+
+def _is_admin(request: Request) -> bool:
+    return _current_user(request)["role"] == "admin"
+
+
+def _project_role(request: Request, project: str | None) -> str | None:
+    if _is_admin(request):
+        return "project_admin"
+    return request.app.state.projects.role_of(project, _operator(request))
+
+
+def _require_project(request: Request, project: str | None, action: str) -> dict | None:
+    """校验当前用户对项目的动作权限；返回项目实体（未指定项目返回 None）。"""
+    from app.permissions import is_write_action, role_allows
+    from app.reports import UNASSIGNED
+
+    if not project or project == UNASSIGNED:
+        if not _is_admin(request):
+            raise HTTPException(status_code=403, detail="该数据未归属任何项目，仅系统管理员可访问")
+        return None
+    entity = request.app.state.projects.get(project)
+    if entity is None:
+        if _is_admin(request):
+            return None  # 管理员访问尚未注册的历史项目名：按遗留数据放行
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    role = _project_role(request, project)
+    if role is None:
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    if not role_allows(role, action):
+        raise HTTPException(status_code=403, detail=f"当前项目角色「{_role_label(role)}」无此权限")
+    if entity["status"] == "archived" and is_write_action(action):
+        raise HTTPException(status_code=409, detail="项目已归档，恢复后才能修改")
+    return entity
+
+
+def _role_label(role: str) -> str:
+    from app.permissions import PROJECT_ROLES
+
+    return PROJECT_ROLES.get(role, role)
+
+
+def _visible_projects(request: Request) -> set[str] | None:
+    """当前用户可见的项目集合；None 表示不限（系统管理员）。"""
+    if _is_admin(request):
+        return None
+    return {p["project"] for p in request.app.state.projects.projects_of(_operator(request))}
+
+
+def _record_visible(request: Request, project: str | None) -> bool:
+    from app.reports import UNASSIGNED
+
+    visible = _visible_projects(request)
+    if visible is None:
+        return True
+    if not project or project == UNASSIGNED:
+        return False
+    return project in visible
+
+
+def _task(request: Request, task_id: str, action: str) -> TaskRecord:
+    """取任务并校验其所属项目权限（404 优先于 403，避免探测存在性；同项目内按动作细分）。"""
+    record = request.app.state.tasks.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    _require_project(request, (record.context or {}).get("project"), action)
+    return record
+
+
+def _plan(request: Request, plan_id: str, action: str) -> dict:
+    plan = request.app.state.plans.get(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"测试计划不存在: {plan_id}")
+    _require_project(request, plan.get("project"), action)
+    return plan
+
+
 class LoginBody(BaseModel):
     username: str
     password: str
@@ -93,14 +182,16 @@ async def auth_login(request: Request, body: LoginBody) -> dict:
     from app.auth.store import OtpRequired
 
     try:
-        token, user = request.app.state.auth.login(body.username, body.password, otp=body.otp)
+        token, user = request.app.state.auth.login(
+            body.username, body.password, otp=body.otp, ip=_client_ip(request)
+        )
     except OtpRequired:
         # 口令正确但需动态码：不签发会话，前端展示验证码输入后重新提交
         return {"otp_required": True}
     except AuthError as e:
         raise HTTPException(status_code=401, detail=str(e))
-    logger.info("用户 {} 登录成功", user["username"])
-    return {"token": token, "user": user}
+    logger.info("用户 {} 登录成功（IP {}）", user["username"], user.get("last_login_ip") or "-")
+    return {"token": token, "user": _with_memberships(request, user)}
 
 
 # ---- 安全设置（系统级开关）----
@@ -186,9 +277,41 @@ async def auth_logout(request: Request) -> dict:
     return {"ok": True}
 
 
+def _with_memberships(request: Request, user: dict) -> dict:
+    """用户信息附加：所属项目与项目角色（3.4）、收藏/最近访问（3.2）。"""
+    projects = request.app.state.projects.projects_of(user["username"]) if user["role"] != "admin" \
+        else [{"project": p["name"], "role": "project_admin", "status": p["status"]}
+              for p in request.app.state.projects.list()]
+    return {**user, "projects": projects, "prefs": request.app.state.user_prefs.get(user["username"])}
+
+
 @router.get("/api/v1/auth/me")
 async def auth_me(request: Request) -> dict:
-    return _current_user(request)
+    return _with_memberships(request, _current_user(request))
+
+
+class ProfileBody(BaseModel):
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    avatar: str | None = None  # 内联 data URL 或图片地址（≤150KB）
+
+
+@router.put("/api/v1/auth/me")
+async def auth_update_me(request: Request, body: ProfileBody) -> dict:
+    """用户自助维护资料（3.1）。免登模式下无真实账号，直接返回。"""
+    from app.auth import AuthError
+
+    user = _current_user(request)
+    if not request.app.state.auth.exists(user["username"]):
+        return _with_memberships(request, user)
+    try:
+        updated = request.app.state.auth.update_profile(
+            user["username"], **body.model_dump(exclude_none=True)
+        )
+    except AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _with_memberships(request, updated)
 
 
 class PasswordBody(BaseModel):
@@ -212,12 +335,20 @@ class UserBody(BaseModel):
     username: str
     password: str
     role: str = "member"
+    name: str = ""
+    email: str = ""
+    phone: str = ""
 
 
 @router.get("/api/v1/auth/users")
 async def auth_list_users(request: Request) -> dict:
+    """用户列表（管理员）：含资料/状态/最后登录，并附所属项目与项目角色（3.1「查看所属项目」）。"""
     _require_admin(request)
-    return {"users": request.app.state.auth.list_users()}
+    pstore = request.app.state.projects
+    users = request.app.state.auth.list_users()
+    for u in users:
+        u["projects"] = pstore.projects_of(u["username"])
+    return {"users": users}
 
 
 @router.post("/api/v1/auth/users")
@@ -226,7 +357,10 @@ async def auth_add_user(request: Request, body: UserBody) -> dict:
 
     _require_admin(request)
     try:
-        return request.app.state.auth.add_user(body.username, body.password, body.role)
+        return request.app.state.auth.add_user(
+            body.username, body.password, body.role,
+            name=body.name, email=body.email, phone=body.phone,
+        )
     except AuthError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -235,6 +369,11 @@ class UserUpdateBody(BaseModel):
     role: str | None = None          # 修改角色（admin/member）
     new_password: str | None = None  # 重置密码（无需原密码，重置后该用户需重新登录）
     reset_totp: bool = False         # 重置两步验证（手机丢失等场景解绑，用户可重新绑定）
+    status: str | None = None        # active / disabled（禁用即会话失效）
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    avatar: str | None = None
 
 
 @router.put("/api/v1/auth/users/{username}")
@@ -242,17 +381,21 @@ async def auth_update_user(request: Request, username: str, body: UserUpdateBody
     """管理员管理用户（重置密码 / 修改角色 / 重置两步验证）。"""
     from app.auth import AuthError
 
-    _require_admin(request)
-    if not body.role and not body.new_password and not body.reset_totp:
-        raise HTTPException(status_code=400, detail="请提供要修改的角色、新密码或重置两步验证")
+    operator = _require_admin(request)
+    fields = body.model_dump(exclude_none=True)
+    fields.pop("reset_totp", None)
+    if not fields and not body.reset_totp:
+        raise HTTPException(status_code=400, detail="请提供要修改的角色、资料、状态、新密码或重置两步验证")
     try:
         user = request.app.state.auth.admin_update(
-            username, role=body.role, new_password=body.new_password, reset_totp=body.reset_totp
+            username, reset_totp=body.reset_totp, operator=operator["username"], **fields
         )
     except AuthError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    logger.info("管理员更新用户 {}：角色={} 重置密码={} 重置两步验证={}",
-                username, body.role or "-", bool(body.new_password), body.reset_totp)
+    logger.info("管理员更新用户 {}：角色={} 状态={} 重置密码={} 重置两步验证={} 资料字段={}",
+                username, body.role or "-", body.status or "-", bool(body.new_password),
+                body.reset_totp, [k for k in fields if k in ("name", "email", "phone", "avatar")])
+    user["projects"] = request.app.state.projects.projects_of(username)
     return user
 
 
@@ -265,6 +408,7 @@ async def auth_delete_user(request: Request, username: str) -> dict:
         request.app.state.auth.delete_user(username, operator=operator["username"])
     except AuthError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    request.app.state.projects.remove_user_everywhere(username)
     return {"deleted": username}
 
 
@@ -839,8 +983,12 @@ async def create_task(
     )
     sources = [doc.source for doc in docs]
     requirement = _merge_docs(docs)
-    if project:  # 项目实体自动注册（下拉之外的直传名称也兼容）
+    project = (project or "").strip() or None
+    if project is None and not _is_admin(request):
+        raise HTTPException(status_code=400, detail="请选择任务所属项目")
+    if project and _is_admin(request):  # 管理员直传的新项目名自动注册
         request.app.state.projects.ensure([project], created_by=_operator(request))
+    _require_project(request, project, "point.ai")
     # 使用习惯沉淀（F-8-2）：直接生成与拆解确认两条路径统一在此记录模板/模型使用
     request.app.state.memory.record_usage("template", template.template_id)
     if model:
@@ -1079,9 +1227,7 @@ class ConfirmBody(BaseModel):
 async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None = None) -> dict:
     """确认（或修改后确认）测试点，继续生成（F-3-3 第二阶段）。多模块按模块并行生成。"""
     store = request.app.state.tasks
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "point.review")
     if record.status != "awaiting_confirmation":
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无待确认的拆解结果")
 
@@ -1165,9 +1311,7 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
     from app.agents import run_revision
 
     store = request.app.state.tasks
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "case.ai")
     if record.status != "completed" or not (record.result or {}).get("cases"):
         raise HTTPException(
             status_code=409, detail=f"任务状态为 {record.status}，无可修订的用例结果"
@@ -1284,9 +1428,7 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
     from app.templates import TestCase
 
     store = request.app.state.tasks
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "case.review")
     if record.status != "completed" or not (record.result or {}).get("cases"):
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可评审的用例结果")
 
@@ -1424,10 +1566,8 @@ class PointReviewBody(BaseModel):
     items: list[PointReviewItem]
 
 
-def _points_record(store, task_id: str):
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+def _points_record(request: Request, task_id: str, action: str):
+    record = _task(request, task_id, action)
     modules = (record.analysis or {}).get("test_points")
     if not modules:
         raise HTTPException(status_code=409, detail="任务无测试点拆解结果")
@@ -1444,7 +1584,7 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
     from app.versions import ensure_versions, point_entities, record_version
 
     store = request.app.state.tasks
-    record, modules = _points_record(store, task_id)
+    record, modules = _points_record(request, task_id, "point.review")
     operator = _operator(request)
     # 存量任务打底：改动前补记首版（新任务已在拆解时记录，幂等跳过）
     ensure_versions(task_id, "point", point_entities(modules), by=record.created_by)
@@ -1498,7 +1638,7 @@ async def fix_points(request: Request, task_id: str) -> dict:
     from app.versions import ensure_versions, point_entities
 
     store = request.app.state.tasks
-    record, modules = _points_record(store, task_id)
+    record, modules = _points_record(request, task_id, "point.ai")
     if record.pending_fix:
         raise HTTPException(status_code=409, detail="存在待确认的 AI 修改提案，请先接受/拒绝后再发起新修改")
     rejected = rejected_points(modules)
@@ -1536,7 +1676,7 @@ async def add_task_points(request: Request, task_id: str, body: PointAddBody) ->
     from app.tasks.points import add_points
 
     store = request.app.state.tasks
-    record, modules = _points_record(store, task_id)
+    record, modules = _points_record(request, task_id, "point.edit")
     if body.points:
         added = add_points(modules, body.points, source="manual")
     elif body.instruction and body.instruction.strip():
@@ -1575,7 +1715,7 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
     from app.tasks.points import add_points
 
     store = request.app.state.tasks
-    record, modules = _points_record(store, task_id)
+    record, modules = _points_record(request, task_id, "point.ai")
     ctx = record.context or {}
     try:
         gap = await run_gap_check(
@@ -1601,7 +1741,7 @@ async def dup_check_points(request: Request, task_id: str) -> dict:
     from app.tasks.points import duplicate_candidates
 
     store = request.app.state.tasks
-    record, modules = _points_record(store, task_id)
+    record, modules = _points_record(request, task_id, "point.ai")
     ctx = record.context or {}
     pairs = duplicate_candidates(modules)
     judged = await run_dup_judge(request.app.state.llm, ctx.get("requirement", ""), pairs, ctx.get("model"))
@@ -1621,9 +1761,7 @@ async def fix_cases(request: Request, task_id: str) -> dict:
     from app.versions import case_entities, ensure_versions
 
     store = request.app.state.tasks
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "case.ai")
     if record.status != "completed" or not (record.result or {}).get("cases"):
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可修改的用例结果")
     if record.pending_fix:
@@ -1681,9 +1819,7 @@ async def confirm_fix(request: Request, task_id: str, body: FixConfirmBody) -> d
     from app.versions import ensure_versions, point_entities, record_version
 
     store = request.app.state.tasks
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "case.edit")
     pf = record.pending_fix
     if not pf:
         raise HTTPException(status_code=409, detail="没有待确认的 AI 修改提案")
@@ -1767,8 +1903,7 @@ async def entity_version_chain(request: Request, task_id: str, kind: str, entity
 
     if kind not in ("point", "case"):
         raise HTTPException(status_code=400, detail="kind 须为 point 或 case")
-    if request.app.state.tasks.get(task_id) is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    _task(request, task_id, "case.view")
     return {"task_id": task_id, "kind": kind, "entity_id": entity_id,
             "versions": list_versions(task_id, kind, entity_id)}
 
@@ -1788,9 +1923,7 @@ async def restore_entity_version(request: Request, task_id: str, body: VersionRe
     from app.versions import get_version, record_version
 
     store = request.app.state.tasks
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "case.edit")
     content = get_version(task_id, body.kind, body.entity_id, body.version_no)
     if content is None:
         raise HTTPException(status_code=404, detail=f"版本不存在: {body.kind} {body.entity_id} v{body.version_no}")
@@ -1861,8 +1994,7 @@ async def recycle_bin_list(request: Request, task_id: str) -> dict:
     """任务回收站：被删除的测试点/用例（deleted_by / deleted_at 留痕）。"""
     from app.recycle import list_bin
 
-    if request.app.state.tasks.get(task_id) is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    _task(request, task_id, "case.view")
     return {"task_id": task_id, "items": list_bin(task_id)}
 
 
@@ -1879,9 +2011,7 @@ async def recycle_bin_restore(request: Request, task_id: str, body: RecycleResto
     from app.versions import record_version
 
     store = request.app.state.tasks
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "case.edit")
     item = get_item(task_id, body.item_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"回收站条目不存在: {body.item_id}")
@@ -1948,6 +2078,7 @@ async def recycle_bin_by_project(request: Request, project: str) -> dict:
     """项目回收站：聚合项目下全部任务的逻辑删除条目（恢复/永久删除仍走任务级接口）。"""
     from app.recycle import list_bin_for_tasks
 
+    _require_project(request, project, "case.view")
     task_ids = [
         r.task_id for r in request.app.state.tasks.list(limit=100000)
         if ((r.context or {}).get("project") or "（未指定）") == project
@@ -1963,8 +2094,7 @@ async def recycle_bin_purge(request: Request, task_id: str, item_id: int) -> dic
     user = getattr(request.state, "user", None)
     if user is not None and user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可永久删除")
-    if request.app.state.tasks.get(task_id) is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    _task(request, task_id, "case.view")
     if not purge(task_id, item_id):
         raise HTTPException(status_code=404, detail=f"回收站条目不存在: {item_id}")
     logger.info("任务 {} 回收站条目 {} 已被 {} 永久删除", task_id, item_id, _operator(request))
@@ -1987,9 +2117,7 @@ async def requirement_diff(request: Request, task_id: str, body: RequirementDiff
     from app.agents.quality import run_requirement_diff
 
     store = request.app.state.tasks
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "point.ai")
     if not body.new_requirement.strip():
         raise HTTPException(status_code=400, detail="新版需求内容不能为空")
     ctx = record.context or {}
@@ -2025,9 +2153,7 @@ async def apply_requirement_diff(request: Request, task_id: str) -> dict:
     from app.agents.prompts import CASE_FIX_SYSTEM
 
     store = request.app.state.tasks
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "point.review")
     rdiff = record.requirement_diff
     if not rdiff:
         raise HTTPException(status_code=409, detail="请先执行需求差异分析")
@@ -2099,10 +2225,8 @@ async def apply_requirement_diff(request: Request, task_id: str) -> dict:
 EXEC_STATUSES = ("pass", "fail", "blocked", "skipped")
 
 
-def _exec_task(store, task_id: str):
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+def _exec_task(request: Request, task_id: str):
+    record = _task(request, task_id, "exec.run")
     if record.exec_migrated_to:
         raise HTTPException(
             status_code=409,
@@ -2143,7 +2267,7 @@ async def create_execution_run(request: Request, task_id: str, body: ExecRunBody
     import uuid
 
     store = request.app.state.tasks
-    record = _exec_task(store, task_id)
+    record = _exec_task(request, task_id)
     if any(not r.get("finished_at") for r in record.executions):
         raise HTTPException(status_code=409, detail="存在未结束的执行轮次，请先结束后再新建")
     run = {
@@ -2176,7 +2300,7 @@ async def record_execution_results(
 ) -> dict:
     """记录执行结果（支持批量）：同轮次内重复执行覆盖并保留历史（history）。"""
     store = request.app.state.tasks
-    record = _exec_task(store, task_id)
+    record = _exec_task(request, task_id)
     run = _exec_run(record, run_id)
     if run.get("finished_at"):
         raise HTTPException(status_code=409, detail="该执行轮次已结束，如需继续执行请新建轮次")
@@ -2214,7 +2338,7 @@ async def record_execution_results(
 async def finish_execution_run(request: Request, task_id: str, run_id: str) -> dict:
     """结束执行轮次：定格记录；未执行用例保持未执行状态留痕。"""
     store = request.app.state.tasks
-    record = _exec_task(store, task_id)
+    record = _exec_task(request, task_id)
     run = _exec_run(record, run_id)
     if run.get("finished_at"):
         raise HTTPException(status_code=409, detail="该执行轮次已结束")
@@ -2226,13 +2350,6 @@ async def finish_execution_run(request: Request, task_id: str, run_id: str) -> d
 
 
 # ---- 测试计划（完整需求 12/13 章 · M4）：计划实体 + 用例快照 + 分配 + 计划执行 ----
-
-
-def _plan_or_404(request: Request, plan_id: str) -> dict:
-    plan = request.app.state.plans.get(plan_id)
-    if plan is None:
-        raise HTTPException(status_code=404, detail=f"测试计划不存在: {plan_id}")
-    return plan
 
 
 def _approved_cases(record) -> list[dict]:
@@ -2263,8 +2380,12 @@ async def list_plans(
     from app.plans import PLAN_STATUSES, plan_summary
 
     me = _operator(request)
+    if project:
+        _require_project(request, project, "plan.view")
     out = []
     for plan in request.app.state.plans.list(project=project):
+        if not _record_visible(request, plan.get("project")):
+            continue
         task_items = [i for i in plan["items"] if i["task_id"] == task_id] if task_id else []
         if task_id and not task_items:
             continue
@@ -2301,6 +2422,9 @@ class PlanBody(BaseModel):
 async def create_plan(request: Request, body: PlanBody) -> dict:
     from app.plans import PlanError
 
+    if _is_admin(request):
+        request.app.state.projects.ensure([body.project], created_by=_operator(request))
+    _require_project(request, body.project, "plan.manage")
     try:
         plan = request.app.state.plans.create(
             body.name, body.project, owner=body.owner,
@@ -2316,7 +2440,7 @@ async def create_plan(request: Request, body: PlanBody) -> dict:
 
 @router.get("/api/v1/plans/{plan_id}")
 async def get_plan(request: Request, plan_id: str) -> dict:
-    return _plan_view(_plan_or_404(request, plan_id))
+    return _plan_view(_plan(request, plan_id, "plan.view"))
 
 
 class PlanUpdateBody(BaseModel):
@@ -2331,6 +2455,7 @@ class PlanUpdateBody(BaseModel):
 async def update_plan(request: Request, plan_id: str, body: PlanUpdateBody) -> dict:
     from app.plans import PlanError
 
+    _plan(request, plan_id, "plan.manage")
     try:
         plan = request.app.state.plans.update(plan_id, body.model_dump(exclude_none=True))
     except PlanError as e:
@@ -2343,7 +2468,7 @@ async def update_plan(request: Request, plan_id: str, body: PlanUpdateBody) -> d
 async def delete_plan(request: Request, plan_id: str) -> dict:
     from app.plans import PlanError
 
-    plan = _plan_or_404(request, plan_id)
+    plan = _plan(request, plan_id, "plan.manage")
     user = _current_user(request)
     if user["role"] != "admin" and user["username"] not in (plan["created_by"], plan["owner"]):
         raise HTTPException(status_code=403, detail="仅计划创建人/负责人或管理员可删除计划")
@@ -2363,7 +2488,7 @@ async def plan_candidates(
     """可加入计划的用例池：不带 task_id 列出本项目下有已通过用例的任务；带则列用例（含筛选）。"""
     from app.plans import match_case
 
-    plan = _plan_or_404(request, plan_id)
+    plan = _plan(request, plan_id, "plan.view")
     store = request.app.state.tasks
     if not task_id:
         tasks = []
@@ -2378,9 +2503,7 @@ async def plan_candidates(
                     "created_at": r.created_at, "approved": len(approved),
                 })
         return {"tasks": tasks}
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "case.view")
     added = {(i["task_id"], i["uid"]) for i in plan["items"]}
     cases = []
     for c in _approved_cases(record):
@@ -2411,12 +2534,10 @@ async def add_plan_cases(request: Request, plan_id: str, body: PlanCasesBody) ->
     from app.plans import match_case, snapshot_item
     from app.versions import case_entities, ensure_versions, latest_version_no
 
-    plan = _plan_or_404(request, plan_id)
+    plan = _plan(request, plan_id, "plan.manage")
     if plan["status"] == "archived":
         raise HTTPException(status_code=409, detail="计划已归档，不可再加入用例")
-    record = request.app.state.tasks.get(body.task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {body.task_id}")
+    record = _task(request, body.task_id, "case.view")
     approved = {str(c.get("uid") or ""): c for c in _approved_cases(record)}
     if body.uids:
         pool = []
@@ -2455,7 +2576,7 @@ async def add_plan_cases(request: Request, plan_id: str, body: PlanCasesBody) ->
 
 @router.delete("/api/v1/plans/{plan_id}/cases/{item_id}")
 async def remove_plan_case(request: Request, plan_id: str, item_id: str) -> dict:
-    plan = _plan_or_404(request, plan_id)
+    plan = _plan(request, plan_id, "plan.manage")
     item = next((i for i in plan["items"] if i["item_id"] == item_id), None)
     if item is None:
         raise HTTPException(status_code=404, detail=f"用例不在计划中: {item_id}")
@@ -2483,7 +2604,7 @@ async def assign_plan_cases(request: Request, plan_id: str, body: PlanAssignBody
     """
     from app.plans import PlanError, assign_items
 
-    plan = _plan_or_404(request, plan_id)
+    plan = _plan(request, plan_id, "plan.assign")
     if plan["status"] == "archived":
         raise HTTPException(status_code=409, detail="计划已归档，不可再分配")
     assignee = body.assignee.strip()
@@ -2527,7 +2648,7 @@ class PlanRunBody(BaseModel):
 async def create_plan_run(request: Request, plan_id: str, body: PlanRunBody | None = None) -> dict:
     from app.plans import PlanError, new_run, run_summary
 
-    plan = _plan_or_404(request, plan_id)
+    plan = _plan(request, plan_id, "exec.run")
     if plan["status"] == "archived":
         raise HTTPException(status_code=409, detail="计划已归档，不可再执行")
     try:
@@ -2566,7 +2687,7 @@ async def record_plan_results(
     from app.plans import EXEC_STATUSES as PLAN_EXEC_STATUSES
     from app.plans import FAIL_REASONS, run_summary
 
-    plan = _plan_or_404(request, plan_id)
+    plan = _plan(request, plan_id, "exec.run")
     run = _plan_run(plan, run_id)
     if run.get("finished_at"):
         raise HTTPException(status_code=409, detail="该执行轮次已结束，如需继续执行请新建轮次")
@@ -2612,7 +2733,7 @@ async def record_plan_results(
 async def finish_plan_run(request: Request, plan_id: str, run_id: str) -> dict:
     from app.plans import run_summary
 
-    plan = _plan_or_404(request, plan_id)
+    plan = _plan(request, plan_id, "exec.run")
     run = _plan_run(plan, run_id)
     if run.get("finished_at"):
         raise HTTPException(status_code=409, detail="该执行轮次已结束")
@@ -2631,7 +2752,7 @@ async def upload_plan_attachment(
     """执行附件（13.4）：图片/视频/日志/压缩包，记录上传人、时间与关联执行记录。"""
     import uuid as _uuid
 
-    plan = _plan_or_404(request, plan_id)
+    plan = _plan(request, plan_id, "exec.attach")
     run = _plan_run(plan, run_id)
     suffix = Path(file.filename or "").suffix.lower()
     kind = next((k for k, s in _ATTACHMENT_SUFFIXES.items() if suffix in s), None)
@@ -2662,7 +2783,7 @@ async def upload_plan_attachment(
 
 @router.get("/api/v1/plans/{plan_id}/attachments/{att_id}")
 async def download_plan_attachment(request: Request, plan_id: str, att_id: str) -> FileResponse:
-    plan = _plan_or_404(request, plan_id)
+    plan = _plan(request, plan_id, "exec.view")
     for run in plan["runs"]:
         for att in run.get("attachments", []):
             if att["att_id"] == att_id:
@@ -2674,16 +2795,37 @@ async def download_plan_attachment(request: Request, plan_id: str, att_id: str) 
     raise HTTPException(status_code=404, detail=f"附件不存在: {att_id}")
 
 
-# ---- 项目视角（项目管理信息架构）----
+# ---- 项目视角（项目管理信息架构 / 完整需求 3.2 多项目管理）----
 
 
 _EMPTY_STATS = {"tasks": 0, "cases": 0, "pending": 0, "rejected": 0,
                 "approved": 0, "executed": 0, "exec_pass": 0, "last_activity": ""}
 
 
+def _project_view(request: Request, p: dict, stats: dict | None = None) -> dict:
+    from app.projects import PROJECT_STATUSES
+
+    me = _operator(request)
+    prefs = request.app.state.user_prefs.get(me)
+    recent = {r["project"]: r["at"] for r in prefs["recent"]}
+    return {
+        **_EMPTY_STATS, **(stats or {}),
+        "project": p["name"], "code": p.get("code", ""), "description": p.get("description", ""),
+        "owner": p.get("owner", ""), "status": p.get("status", "active"),
+        "status_label": PROJECT_STATUSES.get(p.get("status", "active"), p.get("status")),
+        "members": p.get("members", {}), "member_count": len(p.get("members", {})),
+        "my_role": _project_role(request, p["name"]),
+        "favorite": p["name"] in prefs["favorites"], "last_visited": recent.get(p["name"]),
+        "created_by": p.get("created_by"), "created_at": p.get("created_at"),
+        "updated_by": p.get("updated_by"), "updated_at": p.get("updated_at"),
+    }
+
+
 @router.get("/api/v1/projects")
-async def list_projects(request: Request) -> dict:
-    """项目列表：项目实体（描述/创建人）+ 汇总统计（产出、生命周期分布、执行、最近活动）。
+async def list_projects(
+    request: Request, keyword: str = "", status: str = "", include_archived: bool = True,
+) -> dict:
+    """项目列表：实体字段 + 汇总统计 + 我的角色/收藏/最近访问；非管理员只见所属项目。
 
     历史任务中出现过的项目名自动注册为项目实体（兼容项目实体化之前的数据）。
     """
@@ -2693,75 +2835,388 @@ async def list_projects(request: Request) -> dict:
     stats = {p["project"]: p for p in project_rollup(records)}
     pstore = request.app.state.projects
     pstore.ensure([n for n in stats if n != UNASSIGNED])
+    visible = _visible_projects(request)
+    kw = keyword.strip().lower()
     merged = []
     for p in pstore.list():
-        merged.append({**_EMPTY_STATS, **stats.get(p["name"], {}), "project": p["name"],
-                       "description": p.get("description", ""), "created_by": p.get("created_by")})
-    if UNASSIGNED in stats:  # 未指定项目的任务聚合行（不可编辑/删除）
-        merged.append({**stats[UNASSIGNED], "description": "", "created_by": None, "builtin": True})
+        if visible is not None and p["name"] not in visible:
+            continue
+        if status and p["status"] != status:
+            continue
+        if not include_archived and p["status"] == "archived":
+            continue
+        if kw and kw not in p["name"].lower() and kw not in p.get("code", "").lower():
+            continue
+        merged.append(_project_view(request, p, stats.get(p["name"])))
+    if UNASSIGNED in stats and not kw and not status:
+        # 未指定项目的任务聚合行（不可编辑/删除），仅管理员可见
+        if visible is None:
+            merged.append({**_EMPTY_STATS, **stats[UNASSIGNED], "description": "", "code": "",
+                           "owner": "", "status": "active", "status_label": "进行中", "members": {},
+                           "member_count": 0, "my_role": "project_admin", "favorite": False,
+                           "last_visited": None, "created_by": None, "builtin": True})
+    # 收藏置顶，其余按最近活动倒序
     merged.sort(key=lambda x: x["last_activity"], reverse=True)
+    merged.sort(key=lambda x: not x.get("favorite"))
     return {"projects": merged}
 
 
 class ProjectBody(BaseModel):
     name: str
     description: str = ""
+    code: str = ""
+    owner: str = ""
 
 
 @router.post("/api/v1/projects")
 async def create_project(request: Request, body: ProjectBody) -> dict:
+    """创建项目（系统管理员）：创建人与负责人自动成为项目管理员。"""
     from app.projects import ProjectError
 
+    _require_admin(request)
+    auth = request.app.state.auth
+    if body.owner.strip() and not auth.exists(body.owner.strip()) and get_settings().auth_enabled:
+        raise HTTPException(status_code=400, detail=f"负责人不存在: {body.owner}")
     try:
-        return request.app.state.projects.create(
-            body.name, body.description, created_by=_operator(request)
+        project = request.app.state.projects.create(
+            body.name, body.description, created_by=_operator(request),
+            code=body.code, owner=body.owner,
         )
     except ProjectError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    return _project_view(request, project)
 
 
 class ProjectUpdateBody(BaseModel):
-    name: str | None = None         # 改名（联动更新引用该项目的全部任务）
+    name: str | None = None         # 改名（联动更新引用该项目的全部任务/计划/版本/模块）
     description: str | None = None
+    code: str | None = None
+    owner: str | None = None
+    status: str | None = None       # active / paused / archived
 
 
 @router.put("/api/v1/projects/{name}")
 async def update_project(request: Request, name: str, body: ProjectUpdateBody) -> dict:
     from app.projects import ProjectError
 
+    # 归档项目只允许「恢复」这一种修改；其余修改需 project.edit
+    if body.status is not None and body.status != "archived":
+        _require_project(request, name, "project.view")
+        if not _is_admin(request) and _project_role(request, name) != "project_admin":
+            raise HTTPException(status_code=403, detail="仅项目管理员可变更项目状态")
+    else:
+        _require_project(request, name, "project.edit")
+    if body.owner and body.owner.strip() and get_settings().auth_enabled \
+            and not request.app.state.auth.exists(body.owner.strip()):
+        raise HTTPException(status_code=400, detail=f"负责人不存在: {body.owner}")
     store = request.app.state.tasks
     try:
-        project = request.app.state.projects.update(name, body.name, body.description)
+        project = request.app.state.projects.update(
+            name, body.name, body.description, code=body.code, owner=body.owner,
+            status=body.status, operator=_operator(request),
+        )
     except ProjectError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if body.name and body.name.strip() and body.name.strip() != name:
-        # 改名联动：更新所有引用旧名的任务上下文
+        # 改名联动：任务上下文、测试计划、版本、模块、个人偏好
         renamed = 0
         for r in store.list(limit=100000):
             if (r.context or {}).get("project") == name:
                 r.context["project"] = project["name"]
                 store.save(r)
                 renamed += 1
+        plans = request.app.state.plans
+        for plan in plans.list(project=name):
+            plan["project"] = project["name"]
+            plans.save(plan)
+        request.app.state.versions.rename_project(name, project["name"])
+        request.app.state.modules.rename_project(name, project["name"])
+        request.app.state.user_prefs.rename_project(name, project["name"])
         logger.info("项目改名 {} → {}：联动更新 {} 个任务", name, project["name"], renamed)
-    return project
+    return _project_view(request, project)
 
 
 @router.delete("/api/v1/projects/{name}")
 async def delete_project(request: Request, name: str) -> dict:
-    """删除项目：仅允许空项目；有任务引用时拒绝（先迁移或删除任务）。"""
+    """删除项目（系统管理员）：仅允许空项目；有任务/计划引用时拒绝（先迁移或删除）。"""
     from app.projects import ProjectError
 
+    _require_admin(request)
     referenced = sum(
         1 for r in request.app.state.tasks.list(limit=100000)
         if (r.context or {}).get("project") == name
     )
     if referenced:
         raise HTTPException(status_code=400, detail=f"项目下仍有 {referenced} 个任务，不可删除")
+    if request.app.state.plans.list(project=name):
+        raise HTTPException(status_code=400, detail="项目下仍有测试计划，不可删除")
     try:
         request.app.state.projects.delete(name)
     except ProjectError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    request.app.state.versions.drop_project(name)
+    request.app.state.modules.drop_project(name)
+    request.app.state.user_prefs.drop_project(name)
     return {"deleted": name}
+
+
+@router.post("/api/v1/projects/{name}/favorite")
+async def toggle_project_favorite(request: Request, name: str) -> dict:
+    _require_project(request, name, "project.view")
+    fav = request.app.state.user_prefs.toggle_favorite(_operator(request), name)
+    return {"project": name, "favorite": fav}
+
+
+# ---- 项目成员与角色（3.4）----
+
+
+class MemberBody(BaseModel):
+    username: str
+    role: str  # project_admin / test_lead / tester / viewer
+
+
+@router.get("/api/v1/projects/{name}/members")
+async def list_members(request: Request, name: str) -> dict:
+    from app.permissions import PROJECT_ROLES
+
+    p = _require_project(request, name, "project.view")
+    if p is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {name}")
+    auth = request.app.state.auth
+    members = []
+    for username, role in p["members"].items():
+        info = auth.public_user(username) if auth.exists(username) else {"username": username, "name": "", "status": "unknown"}
+        members.append({"username": username, "role": role, "role_label": PROJECT_ROLES.get(role, role),
+                        "name": info.get("name", ""), "status": info.get("status", "active"),
+                        "system_role": info.get("role")})
+    return {"project": name, "members": members, "roles": PROJECT_ROLES}
+
+
+@router.put("/api/v1/projects/{name}/members")
+async def set_member(request: Request, name: str, body: MemberBody) -> dict:
+    """添加成员或修改项目角色（项目管理员 / 系统管理员）。"""
+    from app.projects import ProjectError
+
+    _require_project(request, name, "project.members")
+    if get_settings().auth_enabled and not request.app.state.auth.exists(body.username.strip()):
+        raise HTTPException(status_code=400, detail=f"用户不存在: {body.username}")
+    try:
+        p = request.app.state.projects.set_member(name, body.username, body.role, operator=_operator(request))
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("项目 {} 成员变更：{} → {}（操作人 {}）", name, body.username, body.role, _operator(request))
+    return {"project": name, "members": p["members"]}
+
+
+@router.delete("/api/v1/projects/{name}/members/{username}")
+async def remove_member(request: Request, name: str, username: str) -> dict:
+    from app.projects import ProjectError
+
+    _require_project(request, name, "project.members")
+    try:
+        p = request.app.state.projects.remove_member(name, username, operator=_operator(request))
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"project": name, "members": p["members"]}
+
+
+# ---- 项目版本（4.1）----
+
+
+class VersionBody(BaseModel):
+    name: str
+    code: str = ""
+    description: str = ""
+    start_date: str = ""
+    planned_end: str = ""
+    actual_end: str = ""
+    status: str = "not_started"
+
+
+class VersionUpdateBody(BaseModel):
+    name: str | None = None
+    code: str | None = None
+    description: str | None = None
+    start_date: str | None = None
+    planned_end: str | None = None
+    actual_end: str | None = None
+    status: str | None = None
+
+
+@router.get("/api/v1/projects/{name}/versions")
+async def list_versions(request: Request, name: str) -> dict:
+    from app.projects import VERSION_STATUSES
+
+    _require_project(request, name, "version.view")
+    return {"project": name, "versions": request.app.state.versions.list(name),
+            "statuses": VERSION_STATUSES}
+
+
+@router.post("/api/v1/projects/{name}/versions")
+async def create_version(request: Request, name: str, body: VersionBody) -> dict:
+    from app.projects import ProjectError
+
+    _require_project(request, name, "version.manage")
+    try:
+        return request.app.state.versions.create(
+            name, created_by=_operator(request), **body.model_dump()
+        )
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _version_of(request: Request, name: str, version_id: str, action: str) -> dict:
+    _require_project(request, name, action)
+    v = request.app.state.versions.get(version_id)
+    if v is None or v["project"] != name:
+        raise HTTPException(status_code=404, detail=f"版本不存在: {version_id}")
+    return v
+
+
+@router.put("/api/v1/projects/{name}/versions/{version_id}")
+async def update_version(request: Request, name: str, version_id: str, body: VersionUpdateBody) -> dict:
+    from app.projects import ProjectError
+
+    _version_of(request, name, version_id, "version.manage")
+    try:
+        return request.app.state.versions.update(version_id, **body.model_dump(exclude_none=True))
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/api/v1/projects/{name}/versions/{version_id}")
+async def delete_version(request: Request, name: str, version_id: str) -> dict:
+    _version_of(request, name, version_id, "version.manage")
+    request.app.state.versions.delete(version_id)
+    return {"deleted": version_id}
+
+
+# ---- 项目模块树（4.2）----
+
+
+class ModuleBody(BaseModel):
+    name: str
+    parent_id: str | None = None
+    description: str = ""
+
+
+class ModuleUpdateBody(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    parent_id: str | None = None
+    move: bool = False  # True 时按 parent_id 移动（None 表示移到根）
+
+
+class ModuleReorderBody(BaseModel):
+    parent_id: str | None = None
+    ordered_ids: list[str]
+
+
+def _module_referenced(request: Request, project: str):
+    """模块是否被项目内用例引用（按模块名或路径匹配）。"""
+    names: set[str] = set()
+    for r in request.app.state.tasks.list(limit=100000):
+        if (r.context or {}).get("project") != project:
+            continue
+        for c in (r.result or {}).get("cases", []):
+            if c.get("module"):
+                names.add(str(c["module"]))
+    return lambda key: key in names
+
+
+@router.get("/api/v1/projects/{name}/modules")
+async def list_modules(request: Request, name: str, include_deleted: bool = False) -> dict:
+    _require_project(request, name, "version.view")
+    mstore = request.app.state.modules
+    referenced = _module_referenced(request, name)
+    deleted = [
+        {**m, "path": mstore.path(m["module_id"]), "referenced": referenced(mstore.path(m["module_id"])) or referenced(m["name"])}
+        for m in mstore.list(name, include_deleted=True) if m.get("deleted_at")
+    ] if include_deleted else []
+    return {"project": name, "tree": mstore.tree(name), "deleted": deleted,
+            "max_depth": 5}
+
+
+@router.post("/api/v1/projects/{name}/modules")
+async def create_module(request: Request, name: str, body: ModuleBody) -> dict:
+    from app.projects import ProjectError
+
+    _require_project(request, name, "version.manage")
+    try:
+        m = request.app.state.modules.create(
+            name, body.name, parent_id=body.parent_id, description=body.description,
+            created_by=_operator(request),
+        )
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {**m, "path": request.app.state.modules.path(m["module_id"])}
+
+
+def _module_of(request: Request, name: str, module_id: str, action: str, allow_deleted: bool = False) -> dict:
+    _require_project(request, name, action)
+    m = request.app.state.modules.get(module_id)
+    if m is None or m["project"] != name or (m.get("deleted_at") and not allow_deleted):
+        raise HTTPException(status_code=404, detail=f"模块不存在: {module_id}")
+    return m
+
+
+@router.put("/api/v1/projects/{name}/modules/{module_id}")
+async def update_module(request: Request, name: str, module_id: str, body: ModuleUpdateBody) -> dict:
+    from app.projects import ProjectError
+
+    _module_of(request, name, module_id, "version.manage")
+    try:
+        m = request.app.state.modules.update(
+            module_id, name=body.name, description=body.description,
+            parent_id=body.parent_id if body.move else ..., operator=_operator(request),
+        )
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {**m, "path": request.app.state.modules.path(m["module_id"])}
+
+
+@router.post("/api/v1/projects/{name}/modules/reorder")
+async def reorder_modules(request: Request, name: str, body: ModuleReorderBody) -> dict:
+    from app.projects import ProjectError
+
+    _require_project(request, name, "version.manage")
+    try:
+        request.app.state.modules.reorder(name, body.parent_id, body.ordered_ids)
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"project": name, "tree": request.app.state.modules.tree(name)}
+
+
+@router.delete("/api/v1/projects/{name}/modules/{module_id}")
+async def delete_module(request: Request, name: str, module_id: str, permanent: bool = False) -> dict:
+    """删除模块：默认逻辑删除（含子树，可恢复）；permanent=true 物理删除，被用例引用时拒绝。"""
+    from app.projects import ProjectError
+
+    mstore = request.app.state.modules
+    try:
+        if permanent:
+            _module_of(request, name, module_id, "version.manage", allow_deleted=True)
+            if not _is_admin(request) and _project_role(request, name) != "project_admin":
+                raise HTTPException(status_code=403, detail="永久删除仅限项目管理员")
+            mstore.purge(module_id, _module_referenced(request, name))
+            return {"deleted": module_id, "permanent": True}
+        _module_of(request, name, module_id, "version.manage")
+        removed = mstore.delete(module_id, operator=_operator(request))
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"deleted": module_id, "permanent": False, "removed": [m["module_id"] for m in removed]}
+
+
+@router.post("/api/v1/projects/{name}/modules/{module_id}/restore")
+async def restore_module(request: Request, name: str, module_id: str) -> dict:
+    from app.projects import ProjectError
+
+    _module_of(request, name, module_id, "version.manage", allow_deleted=True)
+    try:
+        m = request.app.state.modules.restore(module_id)
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {**m, "path": request.app.state.modules.path(m["module_id"])}
 
 
 @router.get("/api/v1/projects/cases")
@@ -2769,12 +3224,28 @@ async def list_project_cases(request: Request, project: str) -> dict:
     """项目用例库：跨任务聚合全部用例，带生命周期阶段与最新执行结果。"""
     from app.reports import project_cases
 
+    _require_project(request, project, "case.view")
     records = request.app.state.tasks.list(limit=100000)
     return {"project": project,
             "cases": project_cases(records, project, plans=request.app.state.plans.list())}
 
 
 CASE_PAGE_SIZES = (20, 50, 100, 200)
+
+
+
+@router.get("/api/v1/projects/{name}")
+async def get_project(request: Request, name: str) -> dict:
+    """项目详情（记入最近访问）：实体字段、成员、版本与模块数。"""
+    _require_project(request, name, "project.view")
+    p = request.app.state.projects.get(name)
+    if p is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {name}")
+    request.app.state.user_prefs.record_visit(_operator(request), name)
+    view = _project_view(request, p)
+    view["versions"] = len(request.app.state.versions.list(name))
+    view["modules"] = len(request.app.state.modules.list(name))
+    return view
 
 
 @router.get("/api/v1/cases")
@@ -2790,7 +3261,10 @@ async def list_all_cases(
             status_code=400,
             detail=f"page_size 仅支持 {'/'.join(map(str, CASE_PAGE_SIZES))}",
         )
-    records = request.app.state.tasks.list(limit=100000)
+    if project:
+        _require_project(request, project, "case.view")
+    records = [r for r in request.app.state.tasks.list(limit=100000)
+               if _record_visible(request, (r.context or {}).get("project"))]
     rows = project_cases(records, project or None, plans=request.app.state.plans.list())
     modules = sorted({r["module"] for r in rows if r["module"]})
     if module:
@@ -2829,7 +3303,10 @@ async def reports_summary(
     """
     from app.reports import summarize
 
-    records = request.app.state.tasks.list(limit=100000)
+    if project:
+        _require_project(request, project, "project.view")
+    records = [r for r in request.app.state.tasks.list(limit=100000)
+               if _record_visible(request, (r.context or {}).get("project"))]
     data = summarize(records, days=max(0, days), project=project,
                      plans=request.app.state.plans.list())
     rules = request.app.state.rules
@@ -2943,9 +3420,7 @@ async def upload_final_cases(
 
     settings = get_settings()
     store = request.app.state.tasks
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "case.review")
     if not (record.result or {}).get("cases"):
         raise HTTPException(status_code=409, detail="任务无生成结果，无法对比终稿")
 
@@ -2976,9 +3451,11 @@ async def list_tasks(
     created_by: str | None = None, limit: int = 50
 ) -> dict:
     """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人过滤。"""
-    records = request.app.state.tasks.list(status=status, limit=limit)
+    records = request.app.state.tasks.list(status=status, limit=100000)
+    records = [r for r in records if _record_visible(request, (r.context or {}).get("project"))]
     if project is not None:
         records = [r for r in records if (r.context or {}).get("project") == project]
+    records = records[:limit]
     if created_by is not None:
         records = [r for r in records if r.created_by == created_by]
     return {
@@ -3004,9 +3481,7 @@ async def list_tasks(
 async def cancel_task(request: Request, task_id: str) -> dict:
     """取消进行中的后台任务（任务管理）：中断执行，任务标记失败并留痕取消原因。"""
     store = request.app.state.tasks
-    record = store.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "point.ai")
     if record.status not in ("queued", "running"):
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可取消的执行")
     if not store.cancel(task_id):
@@ -3018,9 +3493,7 @@ async def cancel_task(request: Request, task_id: str) -> dict:
 
 @router.get("/api/v1/tasks/{task_id}")
 async def get_task(request: Request, task_id: str) -> dict:
-    record = request.app.state.tasks.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "case.view")
     return {**record.model_dump(), "editing": _active_editing(request.app, task_id)}
 
 
@@ -3059,8 +3532,7 @@ async def task_editing(request: Request, task_id: str, body: EditingBody) -> dic
 
     占用只用于提示与协作提醒，不阻塞保存——并发覆盖由乐观锁版本号拦截，解除占用不绕过版本冲突。
     """
-    if request.app.state.tasks.get(task_id) is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    _task(request, task_id, "case.edit")
     if body.kind not in ("point", "case"):
         raise HTTPException(status_code=400, detail="kind 须为 point 或 case")
     registry = _editing_registry(request.app)
@@ -3099,9 +3571,7 @@ _MEDIA_TYPES = {
 
 @router.get("/api/v1/tasks/{task_id}/files/{fmt}")
 async def download_file(request: Request, task_id: str, fmt: str) -> FileResponse:
-    record = request.app.state.tasks.get(task_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    record = _task(request, task_id, "case.export")
     path = record.files.get(fmt)
     if path is None or not Path(path).exists():
         raise HTTPException(status_code=404, detail=f"任务 {task_id} 无 {fmt} 产物")

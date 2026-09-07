@@ -48,8 +48,8 @@ async def test_登录_鉴权_登出(client, auth_on):
     token = await _login(client)
     headers = {"Authorization": f"Bearer {token}"}
     me = (await client.get("/api/v1/auth/me", headers=headers)).json()
-    assert me == {"username": "admin", "role": "admin",
-                  "created_at": me["created_at"], "totp_enabled": False}
+    assert (me["username"], me["role"], me["totp_enabled"], me["status"]) == ("admin", "admin", False, "active")
+    assert me["last_login_ip"] is not None and "projects" in me and "prefs" in me
     assert (await client.get("/api/v1/tasks", headers=headers)).status_code == 200
     # 下载类链接支持 ?token= 查询参数鉴权
     assert (await client.get(f"/api/v1/tasks?token={token}")).status_code == 200
@@ -239,9 +239,16 @@ async def test_任务创建精确到人(client, auth_on):
     await client.post("/api/v1/auth/users", headers=headers,
                       json={"username": "lisi", "password": "lisi123", "role": "member"})
     lisi_headers = {"Authorization": f"Bearer {await _login(client, 'lisi', 'lisi123')}"}
+    # 非管理员创建任务必须归属其所属项目（M1 接口级项目隔离）
+    await client.post("/api/v1/projects", headers=headers, json={"name": "商城"})
+    await client.put("/api/v1/projects/商城/members", headers=headers,
+                     json={"username": "lisi", "role": "tester"})
+    assert (await client.post("/api/v1/tasks", headers=lisi_headers,
+                              data={"text": "登录需求"})).status_code == 400  # 未选项目
 
     _app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
-    resp = await client.post("/api/v1/tasks", headers=lisi_headers, data={"text": "登录需求"})
+    resp = await client.post("/api/v1/tasks", headers=lisi_headers,
+                             data={"text": "登录需求", "project": "商城"})
     task_id = resp.json()["task_id"]
 
     task = (await client.get(f"/api/v1/tasks/{task_id}", headers=headers)).json()
