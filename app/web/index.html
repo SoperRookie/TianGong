@@ -381,7 +381,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <div class="grp">工作台</div>
     <button id="nav-projects" class="on" onclick="switchView('projects')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
-      项目</button>
+      项目管理</button>
     <button id="nav-board" onclick="switchView('board')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>
       任务列表</button>
@@ -1128,7 +1128,7 @@ async function boot() {
 }
 
 /* ---------- 视图切换与面包屑 ---------- */
-const VIEW_LABELS = {projects:'项目', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
+const VIEW_LABELS = {projects:'项目管理', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
 function setCrumb(html) { $('crumb').innerHTML = html; }
 function crumbForBoard() {
   if (currentTask) {
@@ -2996,8 +2996,8 @@ const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','re
 
 function crumbForProjects() {
   if (curProject) {
-    setCrumb(`<a onclick="backToProjects()">项目</a><span class="sep">/</span>${esc(curProject)}`);
-  } else setCrumb('项目');
+    setCrumb(`<a onclick="backToProjects()">项目管理</a><span class="sep">/</span>${esc(curProject)}`);
+  } else setCrumb('项目管理');
 }
 function backToProjects() { curProject = null; renderProjects(); }
 
@@ -3025,7 +3025,7 @@ async function renderProjects() {
     </tr>`;
   }).join('');
   $('projArea').innerHTML = `<div class="card">
-    <div class="card-h"><h3>项目</h3><span class="meta">共 ${_projectsCache.length} 个 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
+    <div class="card-h"><h3>项目管理</h3><span class="meta">共 ${_projectsCache.length} 个 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
       <div class="grow">
         <button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>
         <button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
@@ -3056,7 +3056,7 @@ async function renderProjectWorkspace() {
   else if (projTab === 'recycle') body = await projRecycleHtml();
   $('projArea').innerHTML = `<div class="card">
     <div class="card-h" style="border-bottom:none">
-      <button class="btn ghost sm" onclick="backToProjects()">← 项目</button>
+      <button class="btn ghost sm" onclick="backToProjects()">← 项目管理</button>
       <h3>${esc(curProject)}</h3>
       <span class="meta">${p.tasks} 个任务 · ${p.cases} 条用例</span>
       <div class="grow"><button class="btn sm" onclick="$('projectInput').value=curProject==='（未指定）'?'':curProject;openDrawer()">＋ 新建任务</button></div>
