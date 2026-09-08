@@ -2809,8 +2809,10 @@ async def plan_candidates(
     store = request.app.state.tasks
     if not task_id:
         tasks = []
-        for r in store.list(limit=100000):
-            if ((r.context or {}).get("project") or "（未指定）") != plan["project"]:
+        from app.reports import UNASSIGNED as _UN
+        scoped = store.list(limit=100000, project=None if plan["project"] == _UN else plan["project"])
+        for r in scoped:
+            if plan["project"] == _UN and (r.context or {}).get("project"):
                 continue
             approved = _approved_cases(r)
             if approved:
