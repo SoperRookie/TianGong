@@ -137,6 +137,7 @@ def _execution_summary(
     """用例执行情况统计（测试计划口径）：轮次/已执行用例/总次数/结果分布/失败分类。"""
     status: Counter = Counter({s: 0 for s in ("pass", "fail", "blocked", "skipped")})
     fail_reasons: Counter = Counter()
+    people: dict[str, dict] = {}  # 人员维度（18 章）：执行人 -> 执行次数/结果分布/代执行
     executed: set[tuple[str, str]] = set()
     runs = 0
     executions = 0
@@ -155,6 +156,18 @@ def _execution_summary(
                 plans_hit.add(plan["plan_id"])
                 status[res["status"]] += 1
                 executions += 1 + len(res.get("history") or [])
+                for rec in [res, *(res.get("history") or [])]:
+                    who = rec.get("by") or ""
+                    if not who:
+                        continue
+                    pp = people.setdefault(who, {"username": who, "executions": 0, "cases": set(),
+                                                 "proxied": 0, "pass": 0, "fail": 0, "blocked": 0, "skipped": 0})
+                    pp["executions"] += 1
+                    pp["cases"].add((plan["plan_id"], item_id))
+                    if rec.get("status") in ("pass", "fail", "blocked", "skipped"):
+                        pp[rec["status"]] += 1
+                    if rec.get("on_behalf_of"):
+                        pp["proxied"] += 1
                 item = by_item.get(item_id)
                 executed.add((item["task_id"], item["uid"]) if item else (plan["plan_id"], item_id))
                 if res["status"] == "fail" and res.get("reason"):
@@ -170,6 +183,13 @@ def _execution_summary(
         "fail_reasons": sorted(
             ({"reason": k, "count": v} for k, v in fail_reasons.items()),
             key=lambda x: -x["count"],
+        ),
+        "people": sorted(
+            ({**p, "cases": len(p["cases"]),
+              "pass_rate": round(p["pass"] / (p["pass"] + p["fail"] + p["blocked"] + p["skipped"]), 3)
+              if (p["pass"] + p["fail"] + p["blocked"] + p["skipped"]) else None}
+             for p in people.values()),
+            key=lambda x: -x["executions"],
         ),
     }
 

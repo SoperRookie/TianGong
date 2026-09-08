@@ -227,6 +227,41 @@ def run_summary(plan: dict, run: dict) -> dict:
     }
 
 
+def people_summary(plan: dict, run: dict | None = None) -> list[dict]:
+    """按执行人统计（需求 13/18 章人员维度）：分配数 / 已执行 / 通过 / 失败 / 阻塞 / 跳过 / 待执行。
+
+    以指定轮次（默认最近一轮）的结果为准；执行人以实际打结果的人为准（代执行计入代执行人，
+    并在 proxied 中记录），未分配但已执行的用例归入实际执行人。
+    """
+    run = run or (plan["runs"][-1] if plan["runs"] else None)
+    results = (run or {}).get("results") or {}
+    people: dict[str, dict] = {}
+
+    def slot(name: str) -> dict:
+        return people.setdefault(name, {
+            "username": name, "assigned": 0, "executed": 0, "pending": 0, "proxied": 0,
+            **{s: 0 for s in EXEC_STATUSES},
+        })
+
+    for item in plan["items"]:
+        assignee = item.get("assignee")
+        res = results.get(item["item_id"])
+        if assignee:
+            slot(assignee)["assigned"] += 1
+        if res:
+            who = res.get("by") or assignee or ""
+            if who:
+                p = slot(who)
+                p["executed"] += 1
+                if res["status"] in EXEC_STATUSES:
+                    p[res["status"]] += 1
+                if res.get("on_behalf_of"):
+                    p["proxied"] += 1
+        elif assignee:
+            slot(assignee)["pending"] += 1
+    return sorted(people.values(), key=lambda x: (-x["assigned"], -x["executed"], x["username"]))
+
+
 def plan_summary(plan: dict) -> dict:
     """计划列表行的汇总：用例数 / 已分配数 / 最近一轮执行进度。"""
     latest = plan["runs"][-1] if plan["runs"] else None

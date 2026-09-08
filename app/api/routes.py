@@ -2361,14 +2361,50 @@ def _approved_cases(record) -> list[dict]:
 
 
 def _plan_view(plan: dict) -> dict:
-    from app.plans import PLAN_STATUSES, plan_summary, run_summary
+    from app.plans import PLAN_STATUSES, people_summary, plan_summary, run_summary
 
     return {
         **plan,
         "status_label": PLAN_STATUSES.get(plan["status"], plan["status"]),
         "summary": plan_summary(plan),
+        "people": people_summary(plan),
         "runs": [{**r, "summary": run_summary(plan, r)} for r in plan["runs"]],
     }
+
+
+@router.get("/api/v1/plans/my-items")
+async def my_plan_items(request: Request, include_done: bool = False) -> dict:
+    """我的执行任务（13 章）：跨计划列出分配给我的用例快照及其在当前轮次的结果，可就地执行。
+
+    默认只列未归档计划中"待执行"的条目（当前轮次无结果、或轮次已结束等待新轮次）；
+    include_done=true 一并返回本轮已执行的条目。
+    """
+    me = _operator(request)
+    out = []
+    for plan in request.app.state.plans.list():
+        if plan["status"] == "archived" or not _record_visible(request, plan.get("project")):
+            continue
+        run = plan["runs"][-1] if plan["runs"] else None
+        active = bool(run and not run.get("finished_at"))
+        results = (run or {}).get("results") or {}
+        for it in plan["items"]:
+            if it.get("assignee") != me:
+                continue
+            res = results.get(it["item_id"])
+            if res and not include_done:
+                continue
+            out.append({
+                "plan_id": plan["plan_id"], "plan_name": plan["name"], "project": plan["project"],
+                "plan_status": plan["status"], "run_id": run["run_id"] if run else None,
+                "run_name": run["name"] if run else None, "run_active": active,
+                "item_id": it["item_id"], "case_id": it["case_id"], "title": it["title"],
+                "module": it.get("module", ""), "priority": it.get("priority", ""),
+                "version_no": it.get("version_no"), "snapshot": it.get("snapshot"),
+                "result": res,
+            })
+    out.sort(key=lambda x: (not x["run_active"], x["plan_name"], x["module"], x["case_id"]))
+    return {"items": out, "pending": sum(1 for x in out if not x["result"]),
+            "executed": sum(1 for x in out if x["result"])}
 
 
 @router.get("/api/v1/plans")
@@ -2714,7 +2750,7 @@ async def record_plan_results(
     request: Request, plan_id: str, run_id: str, body: PlanExecBody
 ) -> dict:
     from app.plans import EXEC_STATUSES as PLAN_EXEC_STATUSES
-    from app.plans import FAIL_REASONS, run_summary
+    from app.plans import FAIL_REASONS, people_summary, run_summary
 
     plan = _plan(request, plan_id, "exec.run")
     run = _plan_run(plan, run_id)
@@ -2723,10 +2759,26 @@ async def record_plan_results(
     by_id = {i["item_id"]: i for i in plan["items"]}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     operator = _operator(request)
+    can_proxy = _project_role(request, plan.get("project")) in ("project_admin", "test_lead")
+    proxied: dict[str, str] = {}
     for entry in body.items:
         item = by_id.get(entry.item_id)
         if item is None:
             raise HTTPException(status_code=400, detail=f"用例不在计划中: {entry.item_id}")
+        assignee = item.get("assignee")
+        if assignee and assignee != operator:
+            if not can_proxy:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"{item['case_id']} 已分配给 {assignee}，只能由本人执行（负责人可代执行）",
+                )
+            proxied[entry.item_id] = assignee
+        elif not assignee:
+            # 未分配的用例：执行即认领，分配留痕记为执行人自己
+            item.setdefault("assign_log", []).append(
+                {"prev": None, "assignee": operator, "by": operator, "at": now, "note": "执行时认领"}
+            )
+            item["assignee"] = operator
         if entry.status not in PLAN_EXEC_STATUSES:
             raise HTTPException(
                 status_code=400,
@@ -2748,14 +2800,16 @@ async def record_plan_results(
             "status": entry.status, "note": entry.note.strip(),
             "reason": entry.reason if entry.status == "fail" else "",
             "by": operator, "at": now,
+            "on_behalf_of": proxied.get(entry.item_id),  # 代执行：记录被代的执行人
             "history": (prev.get("history", []) + [
-                {k: prev.get(k, "") for k in ("status", "note", "reason", "by", "at")}
+                {k: prev.get(k, "") for k in ("status", "note", "reason", "by", "at", "on_behalf_of")}
             ]) if prev else [],
         }
     request.app.state.plans.save(plan)
     summary = run_summary(plan, run)
-    logger.info("计划 {} 轮次 {} 记录执行 {} 条（{}）", plan_id, run_id, len(body.items), summary)
-    return {"run_id": run_id, "summary": summary, "results": run["results"]}
+    logger.info("计划 {} 轮次 {} 记录执行 {} 条（{}，代执行 {}）", plan_id, run_id, len(body.items), summary, len(proxied))
+    return {"run_id": run_id, "summary": summary, "results": run["results"],
+            "people": people_summary(plan, run)}
 
 
 @router.post("/api/v1/plans/{plan_id}/runs/{run_id}/finish")

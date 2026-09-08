@@ -72,6 +72,7 @@ body { margin:0; font:13.5px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",
 .star-btn { border:none; background:transparent; cursor:pointer; font-size:15px; color:#c9cfd9; padding:0 4px; line-height:1; }
 .star-btn.on { color:#f5b301; }
 .role-tag { display:inline-block; padding:0 7px; border-radius:5px; font-size:11.5px; background:var(--primary-100); color:var(--primary); }
+tr.mine td { background:rgba(79,70,229,.035); }
 .tree { list-style:none; margin:0; padding:0; }
 .tree ul { list-style:none; margin:0; padding-left:22px; border-left:1px dashed var(--line); margin-left:9px; }
 .tree li { margin:2px 0; }
@@ -2623,16 +2624,17 @@ async function projRecyclePurge(taskId, itemId) {
 const EXEC_LABEL = {pass:'通过', fail:'失败', blocked:'阻塞', skipped:'跳过'};
 const EXEC_CLS = {pass:'approved', fail:'rejected', blocked:'candidate', skipped:'pending'};
 /* ---------- 测试计划视图（M4：计划实体 + 快照 + 分配 + 计划执行与附件） ---------- */
-let curPlan = null, planRunId = null, plansMine = false, plansProject = '';
+let curPlan = null, planRunId = null, plansMine = false, plansProject = '', planExecFilter = '';
 let _planDetail = null;
 const PLAN_ST = {not_started:['未开始','pending'], in_progress:['进行中','candidate'], done:['已完成','approved'], archived:['已归档','pending']};
 
 function crumbForPlans() {
   if (curPlan && _planDetail) setCrumb(`<a onclick="backToPlans()">测试计划</a><span class="sep">/</span>${esc(_planDetail.name)}`);
-  else setCrumb('测试计划');
+  else setCrumb(plansMine ? '我的执行任务' : '测试计划');
 }
 function backToPlans() { curPlan = null; _planDetail = null; planRunId = null; renderPlans(); }
-function openPlan(pid) { curPlan = pid; planRunId = null; switchView('plans'); }
+function openPlan(id, filter) { planExecFilter = filter || ''; return _openPlan(id); }
+function _openPlan(pid) { curPlan = pid; planRunId = null; switchView('plans'); }
 
 async function renderPlans() {
   if (curPlan) return renderPlanDetail();
@@ -2658,8 +2660,36 @@ async function renderPlans() {
       <td>${p.my_items ? `${p.my_items} 条${p.my_pending ? ` <span class="st rejected">待执行 ${p.my_pending}</span>` : ''}` : '<span class="hint">—</span>'}</td>
     </tr>`;
   }).join('');
-  $('plansArea').innerHTML = `<div class="card">
-    <div class="card-h"><h3>测试计划</h3>
+  let myCard = '';
+  if (plansMine) {
+    try {
+      const mine = await api('/api/v1/plans/my-items' + (myShowDone ? '?include_done=true' : ''));
+      const byPlan = {};
+      for (const it of mine.items) (byPlan[it.plan_id] = byPlan[it.plan_id] || {name: it.plan_name, project: it.project, run: it.run_name, active: it.run_active, items: []}).items.push(it);
+      myCard = `<div class="card" style="margin-bottom:14px"><div class="card-h">
+        <h3>我的待执行用例<span class="cnt" style="margin-left:6px">${mine.pending}</span></h3>
+        <span class="meta">分配给我、本轮尚未执行的用例，可在此直接打结果${myShowDone ? ` · 本轮已执行 ${mine.executed}` : ''}</span>
+        <div class="grow"><label class="check">显示本轮已执行 <input type="checkbox" ${myShowDone?'checked':''} onchange="myShowDone=this.checked;renderPlans()"></label></div></div>
+        <div class="card-b">${mine.items.length ? Object.entries(byPlan).map(([pid, g]) => `
+          <div class="section-t" style="display:flex;align-items:center;gap:8px"><a onclick="openPlan('${pid}','__me')">${esc(g.name)}</a><span class="hint">${esc(g.project)} · ${g.run ? esc(g.run) : '尚未开始执行轮次'}${g.active ? '' : ' · <span style="color:var(--warn)">轮次未开始或已结束，需负责人新建轮次后才能执行</span>'}</span></div>
+          <div class="tbl-wrap" style="margin:4px 0 12px"><table>
+            <tr><th style="width:104px">编号 / 版本</th><th>标题</th><th style="width:90px">模块</th><th style="width:44px">优先级</th><th>操作步骤</th><th>预期结果</th><th style="width:110px">执行状态</th><th style="width:150px">操作</th></tr>
+            ${g.items.map(it => { const r = it.result; const c = it.snapshot || {}; return `<tr>
+              <td><span class="cid">${esc(it.case_id)}</span><div class="hint">v${it.version_no}</div></td>
+              <td>${esc(it.title)}</td><td>${esc(it.module)}</td><td><span class="prio ${esc(it.priority)}">${esc(it.priority)}</span></td>
+              ${stepCells('my-' + it.item_id, c.steps || [], 160)}
+              <td>${r ? `<span class="st ${EXEC_CLS[r.status]}">${EXEC_LABEL[r.status]}</span><div class="hint">${esc(r.by)}</div>` : '<span class="hint">未执行</span>'}</td>
+              <td><div class="rowops">${g.active ? `
+                <button class="ibtn ok" title="通过" onclick="myExecAct('${pid}','${it.run_id}','${it.item_id}','pass')">${IC.check}</button>
+                <button class="ibtn bad" title="失败（填写原因/缺陷号）" onclick="myExecAct('${pid}','${it.run_id}','${it.item_id}','fail')">${IC.x}</button>
+                <button class="btn ghost sm" onclick="myExecAct('${pid}','${it.run_id}','${it.item_id}','blocked')">阻塞</button>
+                <button class="btn ghost sm" onclick="myExecAct('${pid}','${it.run_id}','${it.item_id}','skipped')">跳过</button>` : ''}
+                <button class="btn ghost sm" onclick="openPlan('${pid}','__me')">进计划</button></div></td></tr>`; }).join('')}
+          </table></div>`).join('') : '<div class="empty">当前没有分配给我的待执行用例</div>'}</div></div>`;
+    } catch (e) { myCard = `<div class="card" style="margin-bottom:14px"><div class="card-b"><div class="empty">加载我的执行任务失败：${esc(e.message)}</div></div></div>`; }
+  }
+  $('plansArea').innerHTML = myCard + `<div class="card">
+    <div class="card-h"><h3>${plansMine ? '我参与的测试计划' : '测试计划'}</h3>
       <span class="meta">只能加入已通过评审的正式用例 · 加入即快照 · 执行与附件挂计划</span>
       <div class="grow">
         <label class="check">只看我的执行任务
@@ -2727,21 +2757,32 @@ async function renderPlanDetail() {
       <button class="btn ghost sm" onclick="deletePlan()">删除</button>
     </div></div></div>`;
 
-  const rows = p.items.map(it => {
+  const me = curUser ? curUser.username : '';
+  const execOf = it => (results[it.item_id] || {}).by || '';
+  const matchExec = it => planExecFilter === '' ? true
+    : planExecFilter === '__me' ? (it.assignee === me || execOf(it) === me)
+    : planExecFilter === '__unassigned' ? !it.assignee
+    : planExecFilter === '__pending' ? !results[it.item_id]
+    : (it.assignee === planExecFilter || execOf(it) === planExecFilter);
+  const shownItems = p.items.filter(matchExec);
+  const myItems = p.items.filter(it => it.assignee === me);
+  const myDone = myItems.filter(it => results[it.item_id]).length;
+  const rows = shownItems.map(it => {
     const r = results[it.item_id];
     const c = it.snapshot;
-    return `<tr>
+    const mineRow = it.assignee === me;
+    return `<tr class="${mineRow ? 'mine' : ''}">
       <td style="width:30px">${editable ? `<input type="checkbox" class="plck" data-iid="${it.item_id}">` : ''}</td>
       <td style="width:104px"><span class="cid">${esc(it.case_id)}</span><div class="hint">v${it.version_no}</div></td>
       <td style="min-width:170px">${esc(it.title)}${c.keywords ? `<div class="kw">${esc(c.keywords)}</div>` : ''}</td>
       <td style="width:80px">${esc(it.module)}</td>
       <td style="width:44px"><span class="prio ${esc(it.priority)}">${esc(it.priority)}</span></td>
       ${stepCells(it.item_id, c.steps, 200)}
-      <td style="width:110px">${it.assignee ? `<b>${esc(it.assignee)}</b>` : '<span class="hint">未分配</span>'}
+      <td style="width:110px">${it.assignee ? `<b>${esc(it.assignee)}</b>${mineRow ? ' <span class="tag">我</span>' : ''}` : '<span class="hint">未分配</span>'}
         ${(it.assign_log || []).length > 1 ? `<div class="hint" title="${esc(it.assign_log.map(x => `${x.prev || '—'} → ${x.assignee}（${x.by}）`).join('\n'))}">已改派 ${it.assign_log.length - 1} 次</div>` : ''}</td>
       <td style="width:118px">${r ? `<span class="st ${EXEC_CLS[r.status]}">${EXEC_LABEL[r.status]}</span>
           ${r.note || r.reason ? `<div class="hint" style="color:var(--danger)">${r.reason?`【${esc(r.reason)}】`:''}${esc(r.note)}</div>` : ''}
-          <div class="hint">${(r.history||[]).length ? `第 ${r.history.length+1} 次 · ` : ''}${esc(r.by)}</div>`
+          <div class="hint">${(r.history||[]).length ? `第 ${r.history.length+1} 次 · ` : ''}${esc(r.by)}${r.on_behalf_of ? ` <span title="代 ${esc(r.on_behalf_of)} 执行">代执行</span>` : ''}</div>`
         : '<span class="hint">未执行</span>'}</td>
       <td style="width:170px"><div class="rowops">
         ${active ? `
@@ -2756,16 +2797,36 @@ async function renderPlanDetail() {
   }).join('');
 
   const itemsCard = `<div class="card" style="margin-top:14px"><div class="card-h">
-    <h3>用例快照<span class="cnt" style="margin-left:6px">${p.items.length}</span></h3>
-    <span class="meta">已分配 ${p.summary.assigned}/${p.summary.cases} · 快照引用版本记录，正式用例修改不影响此处</span>
+    <h3>用例快照<span class="cnt" style="margin-left:6px">${shownItems.length}${planExecFilter ? ` / ${p.items.length}` : ''}</span></h3>
+    <span class="meta">已分配 ${p.summary.assigned}/${p.summary.cases}${myItems.length ? ` · <b>我的：待执行 ${myItems.length - myDone} / 已执行 ${myDone}</b>` : ''} · 快照引用版本记录</span>
     <div class="grow">
+      <select style="width:150px" onchange="planExecFilter=this.value;renderPlanDetail()" title="按执行人筛选">
+        <option value="">全部执行人</option>
+        <option value="__me" ${planExecFilter==='__me'?'selected':''}>我的（分配给我 / 我执行的）</option>
+        <option value="__pending" ${planExecFilter==='__pending'?'selected':''}>本轮未执行</option>
+        <option value="__unassigned" ${planExecFilter==='__unassigned'?'selected':''}>未分配</option>
+        ${(p.people||[]).filter(x=>x.username!==me).map(x => `<option value="${esc(x.username)}" ${planExecFilter===x.username?'selected':''}>${esc(x.username)} · 分配 ${x.assigned} / 已执行 ${x.executed}</option>`).join('')}
+      </select>
       ${editable ? `<button class="btn ghost sm" onclick="planAssignChecked()">分配选中</button>
       <button class="btn ghost sm" onclick="planAssignModule()">按模块分配</button>
       <button class="btn sm" onclick="openPlanCaseDlg()">＋ 加入用例</button>` : ''}
     </div></div>
     <div class="card-b">${p.items.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
       <tr><th></th><th>编号 / 版本</th><th>标题</th><th>模块</th><th>优先级</th><th>操作步骤</th><th>预期结果</th><th>执行人</th><th>执行状态</th><th>操作</th></tr>
-      ${rows}</table></div>` : '<div class="empty">尚未加入用例。点击「＋ 加入用例」从本项目已通过的正式用例中挑选</div>'}</div></div>`;
+      ${rows}</table></div>` : '<div class="empty">尚未加入用例。点击「＋ 加入用例」从本项目已通过的正式用例中挑选</div>'}
+      ${p.items.length && !shownItems.length ? '<div class="empty">当前筛选下没有用例</div>' : ''}</div></div>`;
+
+  const peopleCard = (p.people||[]).length ? `<div class="card" style="margin-top:14px"><div class="card-h">
+    <h3>按执行人统计</h3><span class="meta">${run ? `以「${esc(run.name)}」结果为准` : '尚未开始执行'} · 分配了执行人的用例只能由本人执行，负责人可代执行（留痕）；未分配用例执行即认领</span></div>
+    <div class="card-b"><div class="tbl-wrap" style="margin-top:0"><table>
+      <tr><th>执行人</th><th style="width:80px">分配</th><th style="width:80px">已执行</th><th style="width:80px">待执行</th><th style="width:70px">通过</th><th style="width:70px">失败</th><th style="width:70px">阻塞</th><th style="width:70px">跳过</th><th style="width:70px">代执行</th><th>进度</th></tr>
+      ${p.people.map(x => `<tr class="rowlink" onclick="planExecFilter='${esc(x.username===me?'__me':x.username)}';renderPlanDetail()">
+        <td><b>${esc(x.username)}</b>${x.username===me?' <span class="tag">我</span>':''}</td>
+        <td>${x.assigned}</td><td>${x.executed}</td><td>${x.pending ? `<b style="color:var(--warn)">${x.pending}</b>` : 0}</td>
+        <td>${x.pass}</td><td>${x.fail ? `<b style="color:var(--danger)">${x.fail}</b>` : 0}</td><td>${x.blocked}</td><td>${x.skipped}</td><td class="hint">${x.proxied||0}</td>
+        <td style="min-width:160px">${x.assigned ? `<div class="segbar">${[['通过',x.pass,'var(--s-ok)'],['失败',x.fail,'var(--s-rej)'],['阻塞',x.blocked,'var(--warn)'],['跳过',x.skipped,'var(--line-2)'],['待执行',x.pending,'var(--s-pend)']].filter(e=>e[1]).map(e=>`<i style="flex:${e[1]};background:${e[2]}" title="${e[0]} · ${e[1]}"></i>`).join('')}</div>` : '<span class="hint">—</span>'}</td>
+      </tr>`).join('')}
+    </table></div></div></div>` : '';
 
   const atts = run ? (run.attachments || []) : [];
   const attRows = atts.map(a => {
@@ -2803,7 +2864,7 @@ async function renderPlanDetail() {
     </div></div>
     <input type="file" id="planAttFile" style="display:none" onchange="planUploadAtt(this)">`;
 
-  $('plansArea').innerHTML = info + itemsCard + runsCard;
+  $('plansArea').innerHTML = info + itemsCard + peopleCard + runsCard;
 }
 
 async function planSetStatus(status) {
@@ -2964,6 +3025,22 @@ function submitFail() {
 }
 function resolveFail(v) { $('failDlg').close(); const r=_fdResolve; _fdResolve=null; r && r(v); }
 
+let myShowDone = false;
+async function myExecAct(planId, runId, itemId, status) {
+  let note = '', reason = '';
+  if (status === 'fail') {
+    const fail = await askFailReason('');
+    if (!fail) return;
+    ({reason, note} = fail);
+  } else if (status === 'blocked') {
+    note = await askComment('执行阻塞', '原因 / 缺陷号');
+    if (!note) return;
+  }
+  try {
+    await jpost(`/api/v1/plans/${planId}/runs/${runId}/results`, {items: [{item_id: itemId, status, note, reason}]});
+    toast('已记录', 'ok'); renderPlans();
+  } catch (e) { toast(e.message, 'err'); }
+}
 async function planExecAct(itemId, status) {
   let note = '', reason = '';
   const item = _planDetail.items.find(i => i.item_id === itemId);
@@ -3871,6 +3948,11 @@ async function renderReports() {
       <div><div class="section-t">失败分类分布<span class="hint">（用例问题类是提示词优化信号）</span></div>
         ${hbarList(d.execution.fail_reasons, 'reason', 'count', '次')}</div>
     </div>
+    ${(d.execution.people||[]).length ? `<div class="section-t">执行人员统计<span class="hint">（按实际执行人；代执行计入执行人并单独列出）</span></div>
+    <div class="tbl-wrap" style="margin-top:4px;max-height:260px"><table>
+      <tr><th>执行人</th><th>执行次数</th><th>用例数</th><th>通过</th><th>失败</th><th>阻塞</th><th>跳过</th><th>通过率</th><th>代执行</th></tr>
+      ${d.execution.people.map(x => `<tr><td><b>${esc(x.username)}</b></td><td>${x.executions}</td><td>${x.cases}</td><td>${x.pass}</td><td>${x.fail?`<b style="color:var(--danger)">${x.fail}</b>`:0}</td><td>${x.blocked}</td><td>${x.skipped}</td><td>${pct(x.pass_rate)}</td><td class="hint">${x.proxied||0}</td></tr>`).join('')}
+    </table></div>` : ''}
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:10px 26px">
       <div><div class="section-t">项目产出 Top</div>${hbarList(d.projects, 'project', 'cases', '条')}</div>
       <div><div class="section-t">成员产出</div>
