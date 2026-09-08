@@ -51,8 +51,9 @@ async def test_登录_鉴权_登出(client, auth_on):
     assert (me["username"], me["role"], me["totp_enabled"], me["status"]) == ("admin", "admin", False, "active")
     assert me["last_login_ip"] is not None and "projects" in me and "prefs" in me
     assert (await client.get("/api/v1/tasks", headers=headers)).status_code == 200
-    # 下载类链接支持 ?token= 查询参数鉴权
-    assert (await client.get(f"/api/v1/tasks?token={token}")).status_code == 200
+    # ?token= 查询参数只对下载类路径生效（/files/、/attachments/），普通接口不接受，避免令牌进日志/历史
+    assert (await client.get(f"/api/v1/tasks?token={token}")).status_code == 401
+    assert (await client.get(f"/api/v1/tasks/none/files/xlsx?token={token}")).status_code == 404
 
     await client.post("/api/v1/auth/logout", headers=headers)
     assert (await client.get("/api/v1/tasks", headers=headers)).status_code == 401
@@ -113,7 +114,7 @@ async def test_管理员重置密码与修改角色(client, auth_on):
     # 保护：不能降级最后一个管理员
     await client.put("/api/v1/auth/users/zhang", headers=headers, json={"role": "member"})
     resp = await client.put("/api/v1/auth/users/admin", headers=headers, json={"role": "member"})
-    assert resp.status_code == 400 and "最后一个管理员" in resp.json()["detail"]
+    assert resp.status_code == 400 and "最后一个可用管理员" in resp.json()["detail"]
     # 空请求拒绝；member 无权调用
     assert (await client.put("/api/v1/auth/users/zhang", headers=headers, json={})).status_code == 400
     assert (await client.put("/api/v1/auth/users/zhang", json={"role": "admin"},

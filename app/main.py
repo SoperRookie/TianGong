@@ -59,8 +59,12 @@ async def lifespan(app: FastAPI):
     app.state.auth = AuthStore(
         storage_path=settings.data_dir / "auth.json",
         session_ttl_hours=settings.session_ttl_hours,
+        max_failures=settings.login_max_failures,
+        lockout_minutes=settings.login_lockout_minutes,
     )
     app.state.auth.ensure_admin(settings.admin_username, settings.admin_password)
+    _acquire_instance_lock(settings)
+    _purge_logs(settings)
     logger.info(
         "服务启动：默认模型={} 可用模型={} 输出目录={} 日志目录={}",
         registry.default_model,
@@ -70,10 +74,69 @@ async def lifespan(app: FastAPI):
     )
     yield
     set_current(None)
+    _release_instance_lock()
     logger.info("服务关闭")
 
 
-app = FastAPI(title="TestCase Agent", version="0.1.0", lifespan=lifespan)
+_lock_handle = None
+
+
+def _acquire_instance_lock(settings) -> None:
+    """单实例守卫：用户/项目/任务等为进程内内存态 + 整表回写，多 worker 会互相覆盖，启动即拦截。"""
+    global _lock_handle
+    if not settings.single_instance_lock:
+        return
+    import fcntl
+
+    settings.outputs_dir.mkdir(parents=True, exist_ok=True)
+    handle = open(settings.outputs_dir / ".instance.lock", "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise RuntimeError(
+            "检测到另一个天工实例正在使用同一数据目录。当前架构只支持单进程（uvicorn 不要加 --workers），"
+            "如需多实例请先迁移到按键读写的存储层。"
+        )
+    handle.write(str(__import__("os").getpid()))
+    handle.flush()
+    _lock_handle = handle
+
+
+def _release_instance_lock() -> None:
+    global _lock_handle
+    if _lock_handle is not None:
+        try:
+            _lock_handle.close()
+        except OSError:
+            pass
+        _lock_handle = None
+
+
+def _purge_logs(settings) -> None:
+    if settings.log_retention_days <= 0:
+        return
+    from datetime import datetime, timedelta, timezone
+
+    from app.audit import purge_before as purge_audit
+    from app.llm.calllog import purge_before as purge_calls
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=settings.log_retention_days)).isoformat(timespec="seconds")
+    try:
+        n1, n2 = purge_calls(cutoff), purge_audit(cutoff)
+        if n1 or n2:
+            logger.info("日志留存清理：AI 调用日志 {} 条，操作日志 {} 条（早于 {} 天）", n1, n2, settings.log_retention_days)
+    except Exception as e:  # pragma: no cover
+        logger.warning("日志清理失败：{}", e)
+
+
+_settings_boot = get_settings()
+app = FastAPI(
+    title="TestCase Agent", version="0.1.0", lifespan=lifespan,
+    docs_url="/docs" if _settings_boot.expose_docs else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if _settings_boot.expose_docs else None,
+)
 app.include_router(router)
 
 # 前端第三方库本地托管（kity / kityminder-core，MeterSphere 同款脑图内核）：内网部署无外部依赖
@@ -86,8 +149,32 @@ _PUBLIC_API_PATHS = {"/api/v1/auth/login", "/health"}
 
 
 def _client_ip(request: Request) -> str:
+    """客户端 IP：只有来自可信代理的请求才采信 X-Forwarded-For，否则一律用直连地址（防审计 IP 伪造）。"""
+    direct = request.client.host if request.client else ""
+    trusted = {p.strip() for p in get_settings().trusted_proxies.split(",") if p.strip()}
     fwd = request.headers.get("X-Forwarded-For", "")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
+    if fwd and direct in trusted:
+        hops = [h.strip() for h in fwd.split(",") if h.strip()]
+        for hop in reversed(hops):  # 从右往左跳过可信代理，取第一个非代理地址
+            if hop not in trusted:
+                return hop
+    return direct
+
+
+# 允许用 ?token= 鉴权的下载类路径（浏览器直接打开链接无法带 Authorization 头）
+_QUERY_TOKEN_PATHS = ("/files/", "/attachments/")
+# 强制改密期间仍允许访问的接口
+_MUST_CHANGE_ALLOW = {"/api/v1/auth/password", "/api/v1/auth/me", "/api/v1/auth/logout"}
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+        "base-uri 'self'; form-action 'self'"
+    ),
+}
 
 
 @app.middleware("http")
@@ -107,14 +194,20 @@ async def auth_middleware(request: Request, call_next):
         and path not in _PUBLIC_API_PATHS
     ):
         header = request.headers.get("Authorization", "")
-        token = header.removeprefix("Bearer ").strip() or request.query_params.get("token")
+        token = header.removeprefix("Bearer ").strip()
+        if not token and any(seg in path for seg in _QUERY_TOKEN_PATHS):
+            token = request.query_params.get("token")
         user = request.app.state.auth.verify(token)
         if user is None:
             return JSONResponse({"detail": "未登录、会话已过期或账号已禁用，请重新登录"}, status_code=401)
+        if user.get("must_change_password") and path not in _MUST_CHANGE_ALLOW:
+            return JSONResponse({"detail": "初始口令须先修改后才能使用系统", "must_change_password": True}, status_code=403)
         request.state.user = user
     described = describe(request.method, path)
     started = time.monotonic()
     response = await call_next(request)
+    for k, v in _SECURITY_HEADERS.items():
+        response.headers.setdefault(k, v)
     if described is not None:
         kind, action, target = described
         user = getattr(request.state, "user", None)

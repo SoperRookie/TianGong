@@ -22,6 +22,7 @@ from app.exporters import export_csv, export_excel, export_xmind
 from app.llm.client import AllModelsFailedError
 from app.llm.registry import NoVisionModelError, UnknownModelError
 from app.llm.schemas import MissingAPIKeyError
+from app.parsers.base import UnsafeFileError
 from app.parsers import (
     IMAGE_SUFFIXES,
     ScannedPDFError,
@@ -84,10 +85,9 @@ def _require_admin(request: Request) -> dict:
 
 
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("X-Forwarded-For", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else ""
+    from app.main import _client_ip as _ip
+
+    return _ip(request)
 
 
 # ---- 项目级权限与数据隔离（完整需求 3.3 / 3.4 / 3.5）----
@@ -198,10 +198,13 @@ async def auth_login(request: Request, body: LoginBody) -> dict:
 
     from app.audit import record as audit
 
+    from fastapi.concurrency import run_in_threadpool
+
     ua = request.headers.get("User-Agent", "")
     try:
-        token, user = request.app.state.auth.login(
-            body.username, body.password, otp=body.otp, ip=_client_ip(request)
+        # PBKDF2 120k 轮约 50~100ms：放线程池，避免并发登录拖住事件循环
+        token, user = await run_in_threadpool(
+            request.app.state.auth.login, body.username, body.password, otp=body.otp, ip=_client_ip(request)
         )
     except OtpRequired:
         # 口令正确但需动态码：不签发会话，前端展示验证码输入后重新提交
@@ -491,6 +494,13 @@ async def update_models_config(request: Request, body: ModelsConfigBody) -> dict
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"模型配置不合法: {e}")
+    for m in models:
+        # 密钥变量名白名单：只允许 *_API_KEY / *_TOKEN / *_KEY 且不得指向平台自身配置，防止把任意环境变量当密钥外发
+        if m.api_key_env and (not re.fullmatch(r"[A-Z][A-Z0-9_]*_(API_KEY|TOKEN|KEY)", m.api_key_env)
+                              or m.api_key_env.startswith("TIANGONG_")):
+            raise HTTPException(status_code=400, detail=f"模型 {m.name} 的密钥环境变量名 {m.api_key_env} 不合法（须形如 XXX_API_KEY，且不能是 TIANGONG_ 配置项）")
+        if not re.match(r"^https?://[A-Za-z0-9.\-_:\[\]]+(/.*)?$", m.base_url or ""):
+            raise HTTPException(status_code=400, detail=f"模型 {m.name} 的 base_url 不合法（须为 http(s) 地址）")
 
     # 保留 embeddings 段原样写回（Embedding 选型已定型，不在此界面管理）
     path = get_settings().models_config_path
@@ -507,7 +517,12 @@ async def update_models_config(request: Request, body: ModelsConfigBody) -> dict
         "# LLM 模型配置（F-1-1 ~ F-1-5）——本文件由平台「模型配置」界面管理，手工注释不会保留。\n"
         "# 密钥不写入本文件：api_key_env 为密钥所在环境变量名，请在部署环境/.env 中配置。\n"
     )
-    path.write_text(header + yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    import os
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".models.", suffix=".yaml")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(header + yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
+    os.replace(tmp, path)  # 原子替换：并发写或中途崩溃不会留下半截 YAML
 
     request.app.state.registry = registry
     request.app.state.llm = LLMClient(registry)
@@ -536,20 +551,45 @@ async def test_model(request: Request, body: ModelTestBody) -> dict:
         return {"ok": True, "model": result.model_name, "provider": result.provider,
                 "elapsed_ms": result.elapsed_ms, "reply": result.content[:50]}
     except Exception as e:
-        return {"ok": False, "model": body.name, "error": str(e)}
+        return {"ok": False, "model": body.name, "error": _public_error(e)}
 
 
-async def _read_upload(upload: UploadFile, task_dir: Path, max_bytes: int) -> Path:
-    """文件限制校验（F-2-8）：大小上限 + 落盘供解析。格式白名单由 parse_file 校验。"""
-    content = await upload.read()
-    if len(content) > max_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"文件 {upload.filename} 超过大小上限 {max_bytes // (1024 * 1024)}MB",
-        )
-    dest = task_dir / "uploads" / Path(upload.filename or "unnamed").name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(content)
+def _safe_filename(name: str | None) -> str:
+    """去掉目录部分与控制/引号字符；空名或 . / .. 兜底为 unnamed。"""
+    base = Path(name or "").name
+    base = re.sub(r"[\x00-\x1f<>\"'\\|]", "_", base).strip()
+    if base in ("", ".", ".."):
+        base = "unnamed"
+    return base[:150]
+
+
+def _public_error(e: Exception) -> str:
+    """对外错误文案：只给异常类型与首行，细节留在日志（避免回传 base_url / 请求体等内部信息）。"""
+    text = str(e).splitlines()[0] if str(e) else e.__class__.__name__
+    return f"{e.__class__.__name__}: {text[:160]}"
+
+
+async def _read_upload(upload: UploadFile, task_dir: Path, max_bytes: int, unique: bool = True) -> Path:
+    """文件限制校验（F-2-8）：分块读取、超限即中止（不整读入内存）；落盘名加随机前缀防同名覆盖。"""
+    dest_dir = task_dir / "uploads"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    safe = _safe_filename(upload.filename)
+    dest = dest_dir / (f"{uuid.uuid4().hex[:8]}_{safe}" if unique else safe)
+    size = 0
+    with dest.open("wb") as fh:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > max_bytes:
+                fh.close()
+                dest.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"文件 {upload.filename} 超过大小上限 {max_bytes // (1024 * 1024)}MB",
+                )
+            fh.write(chunk)
     return dest
 
 
@@ -565,13 +605,15 @@ async def _parse_inputs(
         for upload in files:
             saved = await _read_upload(upload, save_dir, max_bytes)
             if saved.suffix.lower() in IMAGE_SUFFIXES:
-                docs.append(await parse_image(saved, llm))
+                doc = await parse_image(saved, llm)
             else:
                 # 图文混排：文档内嵌图片经 Vision 理解后回填原位置
-                docs.append(await enrich_images(parse_file(saved), llm))
+                doc = await enrich_images(parse_file(saved), llm)
+            doc.source = _safe_filename(upload.filename)  # 来源显示原始文件名（落盘名带随机前缀）
+            docs.append(doc)
         if text.strip():
             docs.append(parse_text(text))
-    except (UnsupportedFormatError, ScannedPDFError, NoVisionModelError) as e:
+    except (UnsupportedFormatError, ScannedPDFError, NoVisionModelError, UnsafeFileError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except AllModelsFailedError as e:
         raise HTTPException(status_code=502, detail=f"图片解析失败（Vision 模型不可用）：{e}")
@@ -599,6 +641,11 @@ async def preview_parse(
     """解析结果预览（F-2-7）：返回结构化解析结果供确认修正，修正后以 text 提交创建任务。"""
     from app.parsers.chunking import split_text
 
+    if not _is_admin(request) and not any(
+        can(request, p["project"], "point.ai") for p in request.app.state.projects.projects_of(_operator(request))
+    ):
+        raise HTTPException(status_code=403, detail="解析预览需要至少一个项目的 AI 生成权限")
+    _ai_ctx(request, purpose="解析预览")
     settings = get_settings()
     preview_dir = request.app.state.tasks.output_dir / "_previews"
     docs = await _parse_inputs(
@@ -628,6 +675,7 @@ async def upload_template(
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
 ) -> dict:
+    _require_admin(request)
     """上传模板并自动识别字段结构（F-4-1）；返回识别草稿供确认调整（F-4-3）。"""
     settings = get_settings()
     content = await file.read()
@@ -661,6 +709,7 @@ async def get_template(request: Request, template_id: str) -> dict:
 @router.put("/api/v1/templates/{template_id}")
 async def update_template(request: Request, template_id: str, body: CustomTemplate) -> dict:
     """字段映射确认与调整（F-4-3）：整体覆盖模板定义。"""
+    _require_admin(request)
     store = request.app.state.templates
     if store.get(template_id) is None:
         raise HTTPException(status_code=404, detail=f"模板不存在: {template_id}")
@@ -670,6 +719,7 @@ async def update_template(request: Request, template_id: str, body: CustomTempla
 
 @router.delete("/api/v1/templates/{template_id}")
 async def delete_template(request: Request, template_id: str) -> dict:
+    _require_admin(request)
     try:
         existed = request.app.state.templates.delete(template_id)
     except ValueError as e:
@@ -681,6 +731,7 @@ async def delete_template(request: Request, template_id: str) -> dict:
 
 @router.post("/api/v1/templates/{template_id}/default")
 async def set_default_template(request: Request, template_id: str) -> dict:
+    _require_admin(request)
     try:
         request.app.state.templates.set_default(template_id)
     except KeyError as e:
@@ -1058,20 +1109,26 @@ async def create_task(
     template = request.app.state.templates.get(template_id)
     if template is None:
         raise HTTPException(status_code=404, detail=f"模板不存在: {template_id}")
-    task_id, task_dir = store.new_task_dir()
-
-    # 1. 解析输入（文件 + 粘贴文本可混合 F-2-5；图片走 Vision F-2-3）
-    docs = await _parse_inputs(
-        files, text, task_dir, settings.max_upload_size_mb * 1024 * 1024, request.app.state.llm
-    )
-    sources = [doc.source for doc in docs]
-    requirement = _merge_docs(docs)
+    # 0. 先校验项目权限，再落盘解析（避免无权限用户消耗 Vision token 与磁盘）
     project = (project or "").strip() or None
     if project is None and not _is_admin(request):
         raise HTTPException(status_code=400, detail="请选择任务所属项目")
     if project and _is_admin(request):  # 管理员直传的新项目名自动注册
         request.app.state.projects.ensure([project], created_by=_operator(request))
     _require_project(request, project, "point.ai")
+    task_id, task_dir = store.new_task_dir()
+
+    # 1. 解析输入（文件 + 粘贴文本可混合 F-2-5；图片走 Vision F-2-3）
+    try:
+        docs = await _parse_inputs(
+            files, text, task_dir, settings.max_upload_size_mb * 1024 * 1024, request.app.state.llm
+        )
+    except HTTPException:
+        import shutil
+        shutil.rmtree(task_dir, ignore_errors=True)
+        raise
+    sources = [doc.source for doc in docs]
+    requirement = _merge_docs(docs)
     # 使用习惯沉淀（F-8-2）：直接生成与拆解确认两条路径统一在此记录模板/模型使用
     request.app.state.memory.record_usage("template", template.template_id)
     if model:
@@ -1100,6 +1157,8 @@ async def _launch_task(
     from app.llm.calllog import set_ai_context
     set_ai_context(task_id=task_id)
     knowledge_space = (knowledge_space or "").strip() or project  # 16 章：检索范围 = 本项目 + 公共层
+    if knowledge_space != project and knowledge_space not in ("public", "default"):
+        _require_project(request, knowledge_space, "knowledge.view")  # 禁止借他项目知识空间检索
     task_context = {
         "requirement": requirement,
         "confirm_points": confirm_points,
@@ -2660,6 +2719,8 @@ async def plan_candidates(
                 })
         return {"tasks": tasks}
     record = _task(request, task_id, "case.view")
+    if ((record.context or {}).get("project") or None) != (plan.get("project") or None):
+        raise HTTPException(status_code=409, detail="只能选择本项目任务的用例")
     added = {(i["task_id"], i["uid"]) for i in plan["items"]}
     cases = []
     for c in _approved_cases(record):
@@ -2694,6 +2755,8 @@ async def add_plan_cases(request: Request, plan_id: str, body: PlanCasesBody) ->
     if plan["status"] == "archived":
         raise HTTPException(status_code=409, detail="计划已归档，不可再加入用例")
     record = _task(request, body.task_id, "case.view")
+    if ((record.context or {}).get("project") or None) != (plan.get("project") or None):
+        raise HTTPException(status_code=409, detail="只能加入本项目任务的用例")
     approved = {str(c.get("uid") or ""): c for c in _approved_cases(record)}
     if body.uids:
         pool = []
@@ -2966,23 +3029,36 @@ async def upload_plan_attachment(
         raise HTTPException(status_code=400, detail=f"不支持的附件类型 {suffix or '（无后缀）'}（可用 {allowed}）")
     if item_id and not any(i["item_id"] == item_id for i in plan["items"]):
         raise HTTPException(status_code=400, detail=f"用例不在计划中: {item_id}")
+    if run.get("finished_at") or plan["status"] == "archived":
+        raise HTTPException(status_code=409, detail="该执行轮次已结束或计划已归档，不可再上传附件")
     att_id = _uuid.uuid4().hex[:12]
     dest_dir = get_settings().outputs_dir / "attachments" / plan_id / run_id
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{att_id}{suffix}"
-    content = await file.read()
-    dest.write_bytes(content)
+    max_bytes = get_settings().max_attachment_size_mb * 1024 * 1024
+    size = 0
+    with dest.open("wb") as fh:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > max_bytes:
+                fh.close()
+                dest.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail=f"附件超过大小上限 {get_settings().max_attachment_size_mb}MB")
+            fh.write(chunk)
     att = {
         "att_id": att_id, "item_id": item_id or None, "kind": kind,
-        "filename": file.filename, "stored": str(dest),
-        "content_type": file.content_type, "size": len(content),
+        "filename": _safe_filename(file.filename), "stored": str(dest),
+        "content_type": file.content_type, "size": size,
         "by": _operator(request),
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     run["attachments"].append(att)
     request.app.state.plans.save(plan)
     logger.info("计划 {} 轮次 {} 上传附件 {}（{}，{} 字节）",
-                plan_id, run_id, file.filename, kind, len(content))
+                plan_id, run_id, file.filename, kind, size)
     return att
 
 
@@ -3012,8 +3088,9 @@ def _req(request: Request, req_id: str, action: str) -> dict:
 
 
 def _attachment_record(saved: Path, doc=None, error: str | None = None) -> dict:
+    display = saved.name.split("_", 1)[1] if re.match(r"^[0-9a-f]{8}_", saved.name) else saved.name
     return {
-        "att_id": uuid.uuid4().hex[:8], "filename": saved.name, "stored": str(saved),
+        "att_id": uuid.uuid4().hex[:8], "filename": display, "stored": str(saved),
         "size": saved.stat().st_size if saved.exists() else 0,
         "parsed": doc is not None, "error": error,
         "text": doc.full_text if doc is not None else "",
@@ -3047,7 +3124,7 @@ async def _parse_saved_attachment(saved: Path, llm) -> dict:
             doc = await enrich_images(parse_file(saved), llm)
         return _attachment_record(saved, doc)
     except (UnsupportedFormatError, ScannedPDFError, NoVisionModelError, MissingAPIKeyError,
-            AllModelsFailedError, ValueError) as e:
+            AllModelsFailedError, UnsafeFileError, ValueError, UnicodeDecodeError) as e:
         logger.warning("需求附件解析失败 {}：{}", saved.name, e)
         return _attachment_record(saved, None, error=str(e))
     except Exception as e:  # 解析器内部异常也必须显式落到附件上
@@ -4414,8 +4491,11 @@ async def ai_call_detail(request: Request, call_id: int) -> dict:
     row = get_call(call_id)
     if row is None:
         raise HTTPException(status_code=404, detail="调用记录不存在")
-    if row.get("project") and not _record_visible(request, row["project"]):
-        raise HTTPException(status_code=403, detail="无权查看该项目的调用记录")
+    if row.get("project"):
+        if not _record_visible(request, row["project"]):
+            raise HTTPException(status_code=403, detail="无权查看该项目的调用记录")
+    elif not _is_admin(request) and row.get("by") != _operator(request):
+        raise HTTPException(status_code=403, detail="该调用记录未归属项目，仅发起人或管理员可查看")
     return row
 
 
@@ -4423,6 +4503,8 @@ async def ai_call_detail(request: Request, call_id: int) -> dict:
 async def ai_stats(request: Request, days: int = 30, project: str = "") -> dict:
     from app.llm.calllog import stats
 
+    if project:
+        _require_project(request, project, "log.view")
     since = None
     if days > 0:
         from datetime import timedelta

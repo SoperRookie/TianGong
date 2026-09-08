@@ -1169,12 +1169,30 @@ async function api(path, opts) {
   opts.headers = Object.assign({}, opts.headers, authToken ? {Authorization: 'Bearer ' + authToken} : {});
   const resp = await fetch(path, opts);
   const data = await resp.json().catch(() => ({}));
-  if (resp.status === 401 && path !== '/api/v1/auth/login') { showLogin(); throw new Error(data.detail || '请先登录'); }
+  if (resp.status === 401 && path !== '/api/v1/auth/login') { authToken = ''; localStorage.removeItem('tg_token'); showLogin(); throw new Error(data.detail || '请先登录'); }
+  if (resp.status === 403 && data.must_change_password) { forcePasswordChange(); throw new Error(data.detail); }
   if (!resp.ok) throw new Error(data.detail || resp.statusText);
   return data;
 }
+async function downloadFile(path, filename) {
+  // 下载走 Authorization 头 + blob：令牌不再出现在 URL / 浏览器历史 / 服务器访问日志
+  try {
+    const resp = await fetch(path, {headers: authToken ? {Authorization: 'Bearer ' + authToken} : {}});
+    if (!resp.ok) { const d = await resp.json().catch(()=>({})); throw new Error(d.detail || resp.statusText); }
+    const blob = await resp.blob(); const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = filename || 'download'; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+  } catch (e) { toast('下载失败：' + e.message, 'err'); }
+}
+function forcePasswordChange() {
+  if ($('pwdDlg').open) return;
+  toast('初始口令须先修改后才能使用系统', 'warn');
+  $('pwOld').value = ''; $('pwNew').value = ''; $('pwdDlg').showModal();
+}
 const jpost = (p, b) => api(p, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b)});
-const esc = s => String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = s => String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// 放进内联事件属性里的 JS 字符串字面量：先 JSON 转义（引号/反斜杠/控制字符），再 HTML 转义整体
+const jsq = s => esc(JSON.stringify(String(s??'')));
 
 function toast(msg, type='') {
   const el = document.createElement('div');
@@ -1373,6 +1391,7 @@ async function doLogin() {
     }
     authToken = data.token; localStorage.setItem('tg_token', authToken);
     curUser = data.user;
+    if (curUser.must_change_password) { $('loginView').style.display = 'none'; forcePasswordChange(); btn.disabled = false; btn.textContent = '登 录'; return; }
     $('loginView').style.display = 'none'; $('loginPwd').value = '';
     $('loginOtpWrap').style.display = 'none'; $('loginOtp').value = '';
     await init();
@@ -1450,7 +1469,7 @@ const PROJECT_ROLES = {project_admin:'项目管理员', test_lead:'测试负责�
 const _ALL_ACTIONS = ['project.view','project.edit','project.members','version.view','version.manage',
   'requirement.view','requirement.edit','requirement.ai','point.view','point.edit','point.review','point.ai',
   'case.view','case.edit','case.review','case.ai','case.export','plan.view','plan.manage','plan.assign',
-  'exec.view','exec.run','exec.attach','log.view'];
+  'exec.view','exec.run','exec.attach','log.view','knowledge.view','knowledge.manage'];
 const _VIEW_ACTIONS = _ALL_ACTIONS.filter(a => a.endsWith('.view'));
 const ROLE_ACTIONS = {
   project_admin: _ALL_ACTIONS,
@@ -1458,7 +1477,7 @@ const ROLE_ACTIONS = {
   tester: [..._VIEW_ACTIONS, 'point.edit','point.ai','case.edit','case.ai','case.export','exec.run','exec.attach'],
   viewer: _VIEW_ACTIONS,
 };
-const isSysAdmin = () => !curUser || curUser.role === 'admin';
+const isSysAdmin = () => !!curUser && curUser.role === 'admin';
 function myRole(project) {
   if (isSysAdmin()) return 'project_admin';
   if (!project || project === '（未指定）') return null;  // 遗留未指定项目：仅系统管理员
@@ -1511,7 +1530,7 @@ function renderProjMenu(q) {
   const all = _projectsCache.filter(p => !p.builtin);
   const kw = (q || '').trim().toLowerCase();
   const match = p => !kw || p.project.toLowerCase().includes(kw) || (p.code || '').toLowerCase().includes(kw);
-  const item = p => `<div class="it ${p.project===curProjectName?'on':''}" onclick="setCurrentProject('${esc(p.project)}')">
+  const item = p => `<div class="it ${p.project===curProjectName?'on':''}" onclick="setCurrentProject(${jsq(p.project)})">
     <span class="star" title="${p.favorite?'已收藏':''}">${p.favorite?'★':''}</span><span>${esc(p.project)}</span>
     ${p.status!=='active'?`<span class="tag">${esc(p.status_label)}</span>`:''}
     <span class="role">${esc(PROJECT_ROLES[p.my_role] || '')}</span></div>`;
@@ -2039,7 +2058,7 @@ function renderOverview(t) {
           <div><dt>来源</dt><dd>${(t.sources||[]).map(esc).join('、')||'-'}</dd></div>
           <div><dt>创建人</dt><dd>${esc(t.created_by||'—')}</dd></div>
           <div><dt>项目</dt><dd>${esc(ctx.project||'—')}</dd></div>
-          <div><dt>来源需求</dt><dd>${ctx.requirement_id?`<a onclick="openRequirement('${esc(ctx.requirement_id)}')">${esc(ctx.requirement_title||ctx.requirement_id)}</a>`:'—'}</dd></div>
+          <div><dt>来源需求</dt><dd>${ctx.requirement_id?`<a onclick="openRequirement(${jsq(ctx.requirement_id)})">${esc(ctx.requirement_title||ctx.requirement_id)}</a>`:'—'}</dd></div>
           <div><dt>生成模型</dt><dd>${esc(ctx.model||'默认')}</dd></div>
           <div><dt>Prompt 版本</dt><dd>${Object.keys(t.prompt_versions||{}).length?Object.entries(t.prompt_versions).map(([k,v])=>`<code title="${esc(k)}">${esc(PROMPT_NAMES[k]||k)} v${v}</code>`).join(' '):'—'}${ctx.retry_count?`<div class="hint">已重试 ${ctx.retry_count} 次</div>`:''}</dd></div>
           <div><dt>模板</dt><dd>${esc(ctx.template_id||'—')}</dd></div>
@@ -2047,7 +2066,7 @@ function renderOverview(t) {
           <div><dt>创建时间</dt><dd>${esc((t.created_at||'').replace('T',' ').replace('+00:00',' UTC'))}</dd></div>
         </dl>
         ${hasCases ? `<div class="section-t">导出下载</div><div class="toolbar" style="margin-top:4px">
-          ${Object.keys(t.files||{}).map(f=>`<a class="btn ghost sm" href="/api/v1/tasks/${t.task_id}/files/${f}?token=${authToken}">${f}</a>`).join('')}</div>` : ''}
+          ${Object.keys(t.files||{}).map(f=>`<a class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/files/'+f)}, ${jsq('测试用例.'+f)})">${esc(f)}</a>`).join('')}</div>` : ''}
       </div>
       <div>
         <div class="section-t">质量提示与注入<span class="hint">（AI 自检仅供参考，不作为自动通过依据）</span></div>
@@ -2119,7 +2138,7 @@ function renderPointWorkbench(t) {
 
   const rows = modules.map(m => {
     const head = `<tr class="module-head"><td colspan="7">
-      <label class="check"><input type="checkbox" onclick="toggleModule('${esc(m.module)}',this.checked)">
+      <label class="check"><input type="checkbox" onclick="toggleModule(${jsq(m.module)},this.checked)">
       ${esc(m.module)}　<span class="hint">${(m.points||[]).length} 条</span></label></td></tr>`;
     const body = (m.points||[]).map(normPoint).map(p => `
       <tr>
@@ -2134,12 +2153,12 @@ function renderPointWorkbench(t) {
         <td style="width:92px"><span class="st ${p.status}">${pStatusText[p.status]||p.status}</span>
           ${p.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${p.reject_count} 次</div>`:''}</td>
         <td style="width:132px">${p.legacy?'<span class="hint">旧版任务只读</span>':`<div class="rowops">
-          <button class="ibtn ok" title="通过（锁定）" onclick="pointAct('${esc(p.tp_id)}','approve')">${IC.check}</button>
-          <button class="ibtn" title="版本历史" onclick="openVersions('point','${esc(p.tp_id)}','${esc(p.tp_id)}')">${IC.clock}</button>
-          <button class="ibtn" title="修改" onclick="pointModify('${esc(p.tp_id)}')">${IC.edit}</button>
-          <button class="ibtn bad" title="驳回" onclick="pointReject('${esc(p.tp_id)}')">${IC.x}</button>
-          <button class="ibtn bad" title="删除" onclick="pointDelete('${esc(p.tp_id)}')">${IC.trash}</button>
-          ${p.status==='approved'?`<button class="ibtn" title="解锁" onclick="pointAct('${esc(p.tp_id)}','unlock')">${IC.unlock}</button>`:''}
+          <button class="ibtn ok" title="通过（锁定）" onclick="pointAct(${jsq(p.tp_id)},'approve')">${IC.check}</button>
+          <button class="ibtn" title="版本历史" onclick="openVersions('point',${jsq(p.tp_id)},${jsq(p.tp_id)})">${IC.clock}</button>
+          <button class="ibtn" title="修改" onclick="pointModify(${jsq(p.tp_id)})">${IC.edit}</button>
+          <button class="ibtn bad" title="驳回" onclick="pointReject(${jsq(p.tp_id)})">${IC.x}</button>
+          <button class="ibtn bad" title="删除" onclick="pointDelete(${jsq(p.tp_id)})">${IC.trash}</button>
+          ${p.status==='approved'?`<button class="ibtn" title="解锁" onclick="pointAct(${jsq(p.tp_id)},'unlock')">${IC.unlock}</button>`:''}
         </div>`}</td>
       </tr>`).join('');
     return head + body;
@@ -2194,9 +2213,9 @@ function renderDupReport(t) {
       ${p.reason?`<div class="hint">原因：${esc(p.reason)}</div>`:''}
       ${p.suggestion?`<div class="hint">建议：${esc(p.suggestion)}</div>`:''}
       <div class="toolbar" style="margin-top:8px">
-        <button class="btn ghost sm" onclick="pointDelete('${esc(p.a)}')">删除 ${esc(p.a)}</button>
-        <button class="btn ghost sm" onclick="pointDelete('${esc(p.b)}')">删除 ${esc(p.b)}</button>
-        <button class="btn ghost sm" onclick="hiddenDupPairs.add('${esc(p.a)}|${esc(p.b)}');renderDetail()">忽略</button>
+        <button class="btn ghost sm" onclick="pointDelete(${jsq(p.a)})">删除 ${esc(p.a)}</button>
+        <button class="btn ghost sm" onclick="pointDelete(${jsq(p.b)})">删除 ${esc(p.b)}</button>
+        <button class="btn ghost sm" onclick="hiddenDupPairs.add(${jsq(p.a+'|'+p.b)});renderDetail()">忽略</button>
       </div></div>`).join('')}`;
 }
 function renderPointDiff(d) {
@@ -2334,12 +2353,12 @@ function renderCases(t) {
       <td style="width:92px"><span class="st ${s.status}">${cStatusText[s.status]}</span>
         ${s.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${s.reject_count} 次</div>`:''}</td>
       <td style="width:132px"><div class="rowops">
-        <button class="ibtn ok" title="通过（锁定）" onclick="caseAct('${esc(c.case_id)}','approve')">${IC.check}</button>
-        <button class="ibtn" title="版本历史" onclick="openVersions('case','${esc(c.uid)}','${esc(c.case_id)}')">${IC.clock}</button>
-        <button class="ibtn" title="修改" onclick="openEdit('${esc(c.case_id)}')">${IC.edit}</button>
-        <button class="ibtn bad" title="驳回" onclick="caseReject('${esc(c.case_id)}')">${IC.x}</button>
-        <button class="ibtn bad" title="删除" onclick="caseDelete('${esc(c.case_id)}')">${IC.trash}</button>
-        ${s.locked?`<button class="ibtn" title="解锁" onclick="caseAct('${esc(c.case_id)}','unlock')">${IC.unlock}</button>`:''}
+        <button class="ibtn ok" title="通过（锁定）" onclick="caseAct(${jsq(c.case_id)},'approve')">${IC.check}</button>
+        <button class="ibtn" title="版本历史" onclick="openVersions('case',${jsq(c.uid)},${jsq(c.case_id)})">${IC.clock}</button>
+        <button class="ibtn" title="修改" onclick="openEdit(${jsq(c.case_id)})">${IC.edit}</button>
+        <button class="ibtn bad" title="驳回" onclick="caseReject(${jsq(c.case_id)})">${IC.x}</button>
+        <button class="ibtn bad" title="删除" onclick="caseDelete(${jsq(c.case_id)})">${IC.trash}</button>
+        ${s.locked?`<button class="ibtn" title="解锁" onclick="caseAct(${jsq(c.case_id)},'unlock')">${IC.unlock}</button>`:''}
       </div></td></tr>`;
   }).join('');
 
@@ -2701,7 +2720,7 @@ function editingHint(kind, id) {
   if (!e || (curUser && e.by === curUser.username)) return '';
   const canForce = curUser && curUser.role === 'admin';
   return `<div class="hint" style="color:var(--warn)">✎ ${esc(e.by)} 正在编辑${
-    canForce?`　<a href="#" onclick="forceRelease('${kind}','${esc(id)}');return false">解除占用</a>`:''}</div>`;
+    canForce?`　<a href="#" onclick="forceRelease('${kind}',${jsq(id)});return false">解除占用</a>`:''}</div>`;
 }
 async function forceRelease(kind, id) {
   try {
@@ -2952,7 +2971,7 @@ async function renderPlanDetail() {
     <h3>按执行人统计</h3><span class="meta">${run ? `以「${esc(run.name)}」结果为准` : '尚未开始执行'} · 分配了执行人的用例只能由本人执行，负责人可代执行（留痕）；未分配用例执行即认领</span></div>
     <div class="card-b"><div class="tbl-wrap" style="margin-top:0"><table>
       <tr><th>执行人</th><th style="width:80px">分配</th><th style="width:80px">已执行</th><th style="width:80px">待执行</th><th style="width:70px">通过</th><th style="width:70px">失败</th><th style="width:70px">阻塞</th><th style="width:70px">跳过</th><th style="width:70px">代执行</th><th>进度</th></tr>
-      ${p.people.map(x => `<tr class="rowlink" onclick="planExecFilter='${esc(x.username===me?'__me':x.username)}';renderPlanDetail()">
+      ${p.people.map(x => `<tr class="rowlink" onclick="planExecFilter=${jsq(x.username===me?'__me':x.username)};renderPlanDetail()">
         <td><b>${esc(x.username)}</b>${x.username===me?' <span class="tag">我</span>':''}</td>
         <td>${x.assigned}</td><td>${x.executed}</td><td>${x.pending ? `<b style="color:var(--warn)">${x.pending}</b>` : 0}</td>
         <td>${x.pass}</td><td>${x.fail ? `<b style="color:var(--danger)">${x.fail}</b>` : 0}</td><td>${x.blocked}</td><td>${x.skipped}</td><td class="hint">${x.proxied||0}</td>
@@ -2964,7 +2983,7 @@ async function renderPlanDetail() {
   const attRows = atts.map(a => {
     const item = p.items.find(i => i.item_id === a.item_id);
     return `<tr>
-      <td><a href="/api/v1/plans/${p.plan_id}/attachments/${a.att_id}?token=${encodeURIComponent(authToken)}" target="_blank">${esc(a.filename)}</a></td>
+      <td><a onclick="downloadFile(${jsq('/api/v1/plans/'+p.plan_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a></td>
       <td>${({image:'图片',video:'视频',log:'日志',archive:'压缩包'})[a.kind] || a.kind}</td>
       <td class="hint">${(a.size/1024).toFixed(1)} KB</td>
       <td>${item ? `<span class="cid">${esc(item.case_id)}</span>` : '<span class="hint">整轮</span>'}</td>
@@ -3568,7 +3587,7 @@ async function renderWorkbench() {
   const card = (title, count, body, more) => `<div class="card wb-card"><div class="card-h"><h3>${title}${count!=null?`<span class="cnt ${count?'hot':''}">${count}</span>`:''}</h3>${more?`<div class="grow"><a class="hint" onclick="${more}">查看全部 ›</a></div>`:''}</div><div class="card-b">${body}</div></div>`;
   const empty = t => `<div class="hint" style="padding:6px 0">${t}</div>`;
   const li = (html, onclick) => `<li><span class="t" onclick="${onclick}">${html}</span></li>`;
-  const projects = d.projects.length ? `<ul class="wb-list">${d.projects.map(p=>`<li><span class="t" onclick="openProject('${esc(p.project)}');switchView('projects')"><b>${esc(p.project)}</b></span><span class="role-tag">${esc(p.role_label)}</span>${p.status!=='active'?`<span class="tag">${p.status==='archived'?'已归档':'暂停'}</span>`:''}<button class="btn ghost sm" onclick="setCurrentProject('${esc(p.project)}',{silent:true});renderWorkbench()">设为当前</button></li>`).join('')}</ul>` : empty(isSysAdmin()?'暂无项目':'尚未加入任何项目，请联系管理员');
+  const projects = d.projects.length ? `<ul class="wb-list">${d.projects.map(p=>`<li><span class="t" onclick="openProject(${jsq(p.project)});switchView('projects')"><b>${esc(p.project)}</b></span><span class="role-tag">${esc(p.role_label)}</span>${p.status!=='active'?`<span class="tag">${p.status==='archived'?'已归档':'暂停'}</span>`:''}<button class="btn ghost sm" onclick="setCurrentProject(${jsq(p.project)},{silent:true});renderWorkbench()">设为当前</button></li>`).join('')}</ul>` : empty(isSysAdmin()?'暂无项目':'尚未加入任何项目，请联系管理员');
   const review = d.pending_review.items.length ? `<ul class="wb-list">${d.pending_review.items.map(t=>li(`<span class="tag">${t.kind==='point'?'测试点':'用例'} ${t.count}</span> ${esc(t.requirement_title||(t.sources||[]).join('、')||t.task_id)} <span class="hint">${esc(t.project||'')} · ${esc(t.created_by||'')}</span>`, `openTaskFromProject('${t.task_id}','${t.kind==='point'?'points':'cases'}')`)).join('')}</ul>` : empty('没有待评审的测试点或用例');
   const fix = d.to_fix.items.length ? `<ul class="wb-list">${d.to_fix.items.map(t=>li(`${t.points?`<span class="st rejected">测试点驳回 ${t.points}</span> `:''}${t.cases?`<span class="st rejected">用例驳回 ${t.cases}</span> `:''}${t.has_proposal?'<span class="tag">有 AI 提案待确认</span> ':''}${esc(t.requirement_title||(t.sources||[]).join('、')||t.task_id)} <span class="hint">${esc(t.project||'')}</span>`, `openTaskFromProject('${t.task_id}','${t.points?'points':'cases'}')`)).join('')}</ul>` : empty('没有待修改项');
   const exec = d.to_execute.items.length ? `<ul class="wb-list">${d.to_execute.items.map(i=>li(`<span class="cid">${esc(i.case_id)}</span> ${esc(i.title)} <span class="hint">${esc(i.plan_name)} · ${esc(i.project)}${i.run_active?'':' · 轮次未开始'}</span>`, `openPlan('${i.plan_id}','__me')`)).join('')}</ul>` : empty('没有分配给我的待执行用例');
@@ -3637,7 +3656,7 @@ async function renderKnowledge() {
           <td class="hint">${d.level==='public'?'—':esc(d.space)}${d.module?`<div>${esc(d.module)}</div>`:''}</td>
           <td>${esc(meta.categories[d.category]||d.category)}</td><td>${d.chunk_count}</td>
           <td class="hint">${esc(d.embedding_model)}</td><td class="hint">${esc(d.created_by||'')}</td><td class="hint">${relTime(d.created_at)}</td>
-          <td>${(d.level==='public'?isSysAdmin():can(d.space,'knowledge.manage'))?`<button class="ibtn bad" title="删除" onclick="deleteKb('${d.doc_id}','${esc(d.source)}')">${IC.trash}</button>`:''}</td></tr>`).join('')
+          <td>${(d.level==='public'?isSysAdmin():can(d.space,'knowledge.manage'))?`<button class="ibtn bad" title="删除" onclick="deleteKb('${d.doc_id}',${jsq(d.source)})">${IC.trash}</button>`:''}</td></tr>`).join('')
           || '<tr><td colspan="9"><div class="empty">暂无知识文档</div></td></tr>'}</tbody></table></div></div></div>`;
 }
 async function kbSearch() {
@@ -3890,7 +3909,7 @@ async function renderRequirementDetail() {
     </table></div>` : '<div class="hint" style="margin-top:8px">尚未发起测试设计</div>'}`;
 
   const attRows = r.attachments.map(a => `<tr>
-    <td>${a.stored?`<a href="/api/v1/requirements/${r.req_id}/attachments/${a.att_id}?token=${encodeURIComponent(authToken)}" target="_blank">${esc(a.filename)}</a>`:esc(a.filename)}</td>
+    <td>${a.stored?`<a onclick="downloadFile(${jsq('/api/v1/requirements/'+r.req_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a>`:esc(a.filename)}</td>
     <td class="hint">${(a.size/1024).toFixed(1)} KB</td>
     <td>${a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>`:`<span class="st rejected">解析失败</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
     <td>${canEdit&&a.stored?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">重新解析</button>`:''}</td>
@@ -4122,8 +4141,8 @@ async function renderProjects() {
   const rows = shown.map(p => {
     const reviewed = p.approved + p.rejected + p.pending;
     const canEdit = !p.builtin && can(p.project, 'project.edit');
-    return `<tr class="rowlink" onclick="openProject('${esc(p.project)}')">
-      <td onclick="event.stopPropagation()" style="width:26px;padding-right:0">${p.builtin?'':`<button class="star-btn ${p.favorite?'on':''}" title="${p.favorite?'取消收藏':'收藏'}" onclick="toggleFavorite('${esc(p.project)}')">${p.favorite?'★':'☆'}</button>`}</td>
+    return `<tr class="rowlink" onclick="openProject(${jsq(p.project)})">
+      <td onclick="event.stopPropagation()" style="width:26px;padding-right:0">${p.builtin?'':`<button class="star-btn ${p.favorite?'on':''}" title="${p.favorite?'取消收藏':'收藏'}" onclick="toggleFavorite(${jsq(p.project)})">${p.favorite?'★':'☆'}</button>`}</td>
       <td><b>${esc(p.project)}</b>${p.code?` <code class="hint">${esc(p.code)}</code>`:''}${p.description?`<div class="hint">${esc(p.description)}</div>`:''}</td>
       <td>${p.owner?`<span class="tag">${esc(p.owner)}</span>`:'<span class="hint">—</span>'}</td>
       <td><span class="st ${STATUS_CLS[p.status]||'pending'}">${esc(p.status_label||'')}</span></td>
@@ -4138,9 +4157,9 @@ async function renderProjects() {
       <td>${p.executed ? `已执行 ${p.executed}<div class="hint">通过率 ${(p.exec_pass/p.executed*100).toFixed(0)}%</div>` : '<span class="hint">未执行</span>'}</td>
       <td class="hint">${relTime(p.last_activity)||'—'}</td>
       <td onclick="event.stopPropagation()">${p.builtin?'':`<div class="rowops">
-        ${canEdit?`<button class="ibtn" title="编辑" onclick="openProjDlg('${esc(p.project)}')">${IC.edit}</button>`:''}
-        ${p.status==='archived'&&myRole(p.project)==='project_admin'?`<button class="ibtn ok" title="恢复" onclick="setProjectStatus('${esc(p.project)}','active')">${IC.unlock}</button>`:''}
-        ${isSysAdmin()?`<button class="ibtn bad" title="删除（仅空项目）" onclick="deleteProject('${esc(p.project)}')">${IC.trash}</button>`:''}
+        ${canEdit?`<button class="ibtn" title="编辑" onclick="openProjDlg(${jsq(p.project)})">${IC.edit}</button>`:''}
+        ${p.status==='archived'&&myRole(p.project)==='project_admin'?`<button class="ibtn ok" title="恢复" onclick="setProjectStatus(${jsq(p.project)},'active')">${IC.unlock}</button>`:''}
+        ${isSysAdmin()?`<button class="ibtn bad" title="删除（仅空项目）" onclick="deleteProject(${jsq(p.project)})">${IC.trash}</button>`:''}
       </div>`}</td>
     </tr>`;
   }).join('');
@@ -4191,17 +4210,17 @@ async function renderProjectWorkspace() {
   $('projArea').innerHTML = `<div class="card">
     <div class="card-h" style="border-bottom:none">
       <button class="btn ghost sm" onclick="backToProjects()">← 项目管理</button>
-      ${legacy?'':`<button class="star-btn ${p.favorite?'on':''}" title="${p.favorite?'取消收藏':'收藏'}" onclick="toggleFavorite('${esc(p.project)}')">${p.favorite?'★':'☆'}</button>`}
+      ${legacy?'':`<button class="star-btn ${p.favorite?'on':''}" title="${p.favorite?'取消收藏':'收藏'}" onclick="toggleFavorite(${jsq(p.project)})">${p.favorite?'★':'☆'}</button>`}
       <h3>${esc(curProject)}</h3>
       ${p.code?`<code class="hint">${esc(p.code)}</code>`:''}
       ${legacy?'':`<span class="st ${STATUS_CLS[p.status]||'pending'}">${esc(p.status_label||'')}</span>`}
       ${p.my_role?`<span class="role-tag">${esc(PROJECT_ROLES[p.my_role]||p.my_role)}</span>`:''}
       <span class="meta">${p.tasks} 个任务 · ${p.cases} 条用例${p.owner?` · 负责人 ${esc(p.owner)}`:''}</span>
       <div class="grow">
-        ${curProjectName!==curProject&&!legacy?`<button class="btn ghost sm" onclick="setCurrentProject('${esc(curProject)}',{silent:true});renderProjectWorkspace()">设为当前项目</button>`:''}
-        ${!legacy&&can(curProject,'project.edit')?`<button class="btn ghost sm" onclick="openProjDlg('${esc(curProject)}')">编辑项目</button>`:''}
-        ${!legacy&&p.status!=='archived'&&myRole(curProject)==='project_admin'?`<button class="btn ghost sm" onclick="setProjectStatus('${esc(curProject)}','archived')">归档</button>`:''}
-        ${!legacy&&p.status==='archived'&&myRole(curProject)==='project_admin'?`<button class="btn ghost sm" onclick="setProjectStatus('${esc(curProject)}','active')">恢复</button>`:''}
+        ${curProjectName!==curProject&&!legacy?`<button class="btn ghost sm" onclick="setCurrentProject(${jsq(curProject)},{silent:true});renderProjectWorkspace()">设为当前项目</button>`:''}
+        ${!legacy&&can(curProject,'project.edit')?`<button class="btn ghost sm" onclick="openProjDlg(${jsq(curProject)})">编辑项目</button>`:''}
+        ${!legacy&&p.status!=='archived'&&myRole(curProject)==='project_admin'?`<button class="btn ghost sm" onclick="setProjectStatus(${jsq(curProject)},'archived')">归档</button>`:''}
+        ${!legacy&&p.status==='archived'&&myRole(curProject)==='project_admin'?`<button class="btn ghost sm" onclick="setProjectStatus(${jsq(curProject)},'active')">恢复</button>`:''}
         ${can(curProject,'point.ai')&&p.status!=='archived'?`<button class="btn sm" onclick="$('projectInput').value=curProject==='（未指定）'?'':curProject;openDrawer()">＋ 新建任务</button>`:''}</div>
     </div>
     <div class="dtabs">
@@ -4265,8 +4284,8 @@ async function projMembersHtml() {
         <td>${m.system_role?`<span class="st ${m.system_role==='admin'?'approved':'pending'}">${esc(m.system_role)}</span>`:'<span class="hint">—</span>'}</td>
         <td>${m.status==='disabled'?'<span class="st rejected">已禁用</span>':m.status==='unknown'?'<span class="hint">账号不存在</span>':'<span class="st approved">正常</span>'}</td>
         <td>${manage?`<div class="rowops">
-          <button class="ibtn" title="修改角色" onclick="openMemberDlg('${esc(m.username)}','${esc(m.role)}')">${IC.edit}</button>
-          <button class="ibtn bad" title="移出项目" onclick="removeMember('${esc(m.username)}')">${IC.trash}</button></div>`:''}</td>
+          <button class="ibtn" title="修改角色" onclick="openMemberDlg(${jsq(m.username)},${jsq(m.role)})">${IC.edit}</button>
+          <button class="ibtn bad" title="移出项目" onclick="removeMember(${jsq(m.username)})">${IC.trash}</button></div>`:''}</td>
       </tr>`).join('') || '<tr><td colspan="7"><div class="empty">暂无成员</div></td></tr>'}</tbody>
     </table></div>`;
 }
@@ -4318,7 +4337,7 @@ async function projVersionsHtml() {
         <td class="hint">${esc(v.created_by||'')}<div>${relTime(v.created_at)}</div></td>
         <td>${manage?`<div class="rowops">
           <button class="ibtn" title="编辑" onclick="openVersionDlg('${v.version_id}')">${IC.edit}</button>
-          <button class="ibtn bad" title="删除" onclick="deleteVersion('${v.version_id}','${esc(v.name)}')">${IC.trash}</button></div>`:''}</td>
+          <button class="ibtn bad" title="删除" onclick="deleteVersion('${v.version_id}',${jsq(v.name)})">${IC.trash}</button></div>`:''}</td>
       </tr>`).join('') || '<tr><td colspan="9"><div class="empty">暂无版本</div></td></tr>'}</tbody>
     </table></div>`;
 }
@@ -4371,7 +4390,7 @@ async function projModulesHtml() {
         <button class="ibtn" title="上移" ${idx===0?'disabled':''} onclick="moveModule('${n.module_id}',-1)">↑</button>
         <button class="ibtn" title="下移" ${idx===siblings.length-1?'disabled':''} onclick="moveModule('${n.module_id}',1)">↓</button>
         <button class="ibtn" title="编辑 / 移动" onclick="openModuleDlg('${n.module_id}')">${IC.edit}</button>
-        <button class="ibtn bad" title="删除（逻辑删除，可恢复）" onclick="deleteModule('${n.module_id}','${esc(n.path)}')">${IC.trash}</button>
+        <button class="ibtn bad" title="删除（逻辑删除，可恢复）" onclick="deleteModule('${n.module_id}',${jsq(n.path)})">${IC.trash}</button>
       </div>`:''}
     </div>${n.children.length?`<ul>${n.children.map(c => node(c, n.children)).join('')}</ul>`:''}</li>`;
   };
@@ -4387,7 +4406,7 @@ async function projModulesHtml() {
         <td class="hint">${esc((m.deleted_at||'').replace('T',' ').slice(0,16))}</td>
         <td>${m.referenced?'<span class="st candidate">有引用</span>':'<span class="hint">无</span>'}</td>
         <td><div class="rowops">${manage?`<button class="btn ghost sm" onclick="restoreModule('${m.module_id}')">恢复</button>`:''}
-          ${isPA&&!m.referenced?`<button class="btn ghost sm" style="color:var(--danger)" onclick="purgeModule('${m.module_id}','${esc(m.path)}')">永久删除</button>`:''}</div></td></tr>`).join('')
+          ${isPA&&!m.referenced?`<button class="btn ghost sm" style="color:var(--danger)" onclick="purgeModule('${m.module_id}',${jsq(m.path)})">永久删除</button>`:''}</div></td></tr>`).join('')
         || '<tr><td colspan="5"><div class="empty">回收站为空</div></td></tr>'}</tbody></table></div>`:''}`;
 }
 function openModuleDlg(id, parentId) {
@@ -4707,10 +4726,10 @@ async function refreshModelsCfg() {
       <td>${m.max_tokens}</td>
       <td class="hint">${(m.fallbacks||[]).map(esc).join(' → ')||'—'}</td>
       <td><div class="rowops">
-        <button class="ibtn" title="编辑" onclick="openModelDlg('${esc(m.name)}')">${IC.edit}</button>
-        <button class="ibtn ok" title="连通性测试" onclick="testModel('${esc(m.name)}')">${IC.check}</button>
-        ${m.name!==_modelCfg.default_model?`<button class="ibtn" title="设为默认" onclick="setDefaultModel('${esc(m.name)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M12 3l2.7 6.3 6.8.5-5.2 4.4 1.6 6.6L12 17.2 6.1 20.8l1.6-6.6L2.5 9.8l6.8-.5z"/></svg></button>`:''}
-        <button class="ibtn bad" title="删除" onclick="deleteModel('${esc(m.name)}')">${IC.trash}</button>
+        <button class="ibtn" title="编辑" onclick="openModelDlg(${jsq(m.name)})">${IC.edit}</button>
+        <button class="ibtn ok" title="连通性测试" onclick="testModel(${jsq(m.name)})">${IC.check}</button>
+        ${m.name!==_modelCfg.default_model?`<button class="ibtn" title="设为默认" onclick="setDefaultModel(${jsq(m.name)})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M12 3l2.7 6.3 6.8.5-5.2 4.4 1.6 6.6L12 17.2 6.1 20.8l1.6-6.6L2.5 9.8l6.8-.5z"/></svg></button>`:''}
+        <button class="ibtn bad" title="删除" onclick="deleteModel(${jsq(m.name)})">${IC.trash}</button>
       </div></td></tr>`).join('')}
   </table></div>
   <div class="hint" style="margin-top:8px">改动即时校验并热重载（无需重启服务）；密钥值不经过本界面，仅在服务器环境变量中配置</div>`;
@@ -4824,9 +4843,9 @@ async function refreshUsers() {
         <td class="hint">${u.last_login_at?`${fmt(u.last_login_at)}<div>${esc(u.last_login_ip||'')}</div>`:'—'}</td>
         <td class="hint">${fmt(u.created_at)}</td>
         <td><div class="rowops">
-          <button class="ibtn" title="编辑资料 / 角色 / 状态 / 重置密码" onclick="openUserEdit('${esc(u.username)}')">${IC.edit}</button>
-          ${curUser&&u.username===curUser.username?'':`<button class="ibtn ${u.status==='disabled'?'ok':''}" title="${u.status==='disabled'?'启用':'禁用'}" onclick="toggleUserStatus('${esc(u.username)}','${u.status==='disabled'?'active':'disabled'}')">${u.status==='disabled'?IC.check:IC.x}</button>`}
-          ${curUser&&u.username===curUser.username?'':`<button class="ibtn bad" title="删除" onclick="deleteUser('${esc(u.username)}')">${IC.trash}</button>`}
+          <button class="ibtn" title="编辑资料 / 角色 / 状态 / 重置密码" onclick="openUserEdit(${jsq(u.username)})">${IC.edit}</button>
+          ${curUser&&u.username===curUser.username?'':`<button class="ibtn ${u.status==='disabled'?'ok':''}" title="${u.status==='disabled'?'启用':'禁用'}" onclick="toggleUserStatus(${jsq(u.username)},'${u.status==='disabled'?'active':'disabled'}')">${u.status==='disabled'?IC.check:IC.x}</button>`}
+          ${curUser&&u.username===curUser.username?'':`<button class="ibtn bad" title="删除" onclick="deleteUser(${jsq(u.username)})">${IC.trash}</button>`}
         </div></td></tr>`).join('')}
     </table></div>`;
   } catch (e) { toast(e.message, 'err'); }

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.graph import analyze_requirement, build_graph
 from app.agents.state import MAX_REVIEW_ROUNDS
+from app.agents.prompts import wrap_data
 from app.config import get_settings
 from app.llm.client import LLMClient
 from app.parsers.chunking import split_text
@@ -79,7 +80,7 @@ async def run_requirement_analysis(
     chunks = split_text(text, get_settings().chunk_max_chars)
     outputs = await asyncio.gather(*[
         _chat_json(llm, [{"role": "system", "content": prompt_text("requirement_analysis")},
-                         {"role": "user", "content": f"需求原文：\n{chunk}"}], model)
+                         {"role": "user", "content": f"需求原文：\n{wrap_data('需求原文', chunk)}"}], model)
         for chunk in chunks
     ])
     merged: dict = {k: [] for k in REQUIREMENT_ANALYSIS_KEYS}
@@ -269,7 +270,7 @@ async def run_revision(
     history：本任务此前已应用的修订指令（短期会话记忆 F-8-1），注入保持多轮一致性。
     memory_notes：用户偏好与项目记忆（F-8-7）。
     """
-    problem = f"用户修订要求：{instruction}"
+    problem = f"用户修订要求：{wrap_data('修订要求', instruction)}"
     if history:
         applied = "；".join(history)
         problem += f"\n（此前已应用的修订，保持其效果不被本次修订破坏：{applied}）"

@@ -15,6 +15,7 @@ from loguru import logger
 from pydantic import ValidationError
 
 from app.agents.graph import _chat_json
+from app.agents.prompts import wrap_data
 from app.prompts import prompt_text
 from app.llm.client import LLMClient
 from app.tasks.points import (
@@ -60,7 +61,7 @@ async def run_gap_check(
             {"role": "system", "content": prompt_text("gap_check")},
             {
                 "role": "user",
-                "content": f"需求内容：\n{requirement}\n\n已有测试点：\n{_dump(_points_view(modules))}",
+                "content": f"需求内容：\n{wrap_data('需求原文', requirement)}\n\n已有测试点：\n{wrap_data('测试点', _dump(_points_view(modules)))}",
             },
         ],
         model,
@@ -97,7 +98,7 @@ async def run_dup_judge(
                 {"role": "system", "content": prompt_text("dup_judge")},
                 {
                     "role": "user",
-                    "content": f"需求内容：\n{requirement[:2000]}\n\n疑似重复测试点对：\n{_dump(pairs)}",
+                    "content": f"需求内容：\n{wrap_data('需求原文', requirement[:2000])}\n\n疑似重复测试点对：\n{wrap_data('测试点对', _dump(pairs))}",
                 },
             ],
             model,
@@ -145,7 +146,7 @@ async def run_point_fix(
             {"role": "system", "content": prompt_text("point_fix")},
             {
                 "role": "user",
-                "content": f"关联需求：\n{requirement}\n\n被驳回的测试点与审核意见：\n{_dump(payload)}",
+                "content": f"关联需求：\n{wrap_data('需求原文', requirement)}\n\n被驳回的测试点与审核意见：\n{wrap_data('测试点与审核意见', _dump(payload))}",
             },
         ],
         model,
@@ -308,7 +309,7 @@ async def run_case_fix(
             {"role": "system", "content": system},
             {
                 "role": "user",
-                "content": f"关联需求：\n{requirement}\n\n被驳回的用例与审核意见：\n{_dump(payload)}",
+                "content": f"关联需求：\n{wrap_data('需求原文', requirement)}\n\n被驳回的用例与审核意见：\n{wrap_data('用例与审核意见', _dump(payload))}",
             },
         ],
         model,
@@ -558,7 +559,7 @@ async def run_requirement_diff(
             {
                 "role": "user",
                 "content": (
-                    f"旧版需求：\n{old_requirement}\n\n新版需求：\n{new_requirement}\n\n"
+                    f"旧版需求：\n{wrap_data('旧版需求', old_requirement)}\n\n新版需求：\n{wrap_data('新版需求', new_requirement)}\n\n"
                     f"现有测试点：\n{_dump(_points_view(modules))}\n\n"
                     f"现有用例索引：\n{_dump(case_index)}"
                 ),
@@ -600,7 +601,7 @@ async def run_learning_analysis(
         llm,
         [
             {"role": "system", "content": prompt_text("learning")},
-            {"role": "user", "content": f"人工修改留痕样本（共 {len(samples)} 条）：\n{_dump(samples)}"},
+            {"role": "user", "content": f"人工修改留痕样本（共 {len(samples)} 条）：\n{wrap_data('修改留痕', _dump(samples))}"},
         ],
         model,
     )

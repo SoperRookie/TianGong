@@ -18,6 +18,9 @@ for _env, _sub in [
 
 # 业务接口测试默认免登录；登录鉴权行为由 test_auth.py 显式开启后单独覆盖
 os.environ["TIANGONG_AUTH_ENABLED"] = "false"
+os.environ["TIANGONG_ADMIN_PASSWORD"] = "admin123"   # 测试固定初始口令（生产未配置时为随机口令）
+os.environ["TIANGONG_SINGLE_INSTANCE_LOCK"] = "false"
+os.environ["TIANGONG_LOG_RETENTION_DAYS"] = "0"
 
 # 数据库隔离：测试用临时 SQLite（持久化层同一套 SQLAlchemy 代码，生产为 MySQL）
 os.environ["TIANGONG_DB_URL"] = f"sqlite:///{_TEST_STORAGE / 'test.db'}"

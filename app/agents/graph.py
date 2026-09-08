@@ -12,6 +12,7 @@ from loguru import logger
 from pydantic import ValidationError
 
 from app.agents.json_utils import LLMOutputError, extract_json
+from app.agents.prompts import DATA_GUARD, wrap_data
 from app.prompts import prompt_text
 from app.agents.state import MAX_REVIEW_ROUNDS, OrchestrationState
 from app.llm.client import LLMClient
@@ -65,6 +66,8 @@ _JSON_RETRIES = 1
 async def _chat_json(llm: LLMClient, messages: list[dict], model: str | None) -> tuple[dict, "object"]:
     """调用 LLM 并解析 JSON；解析失败自动重试（输出截断/格式异常兜底）。"""
     last_error: Exception | None = None
+    if messages and messages[0].get("role") == "system" and DATA_GUARD not in messages[0]["content"]:
+        messages = [{**messages[0], "content": messages[0]["content"] + DATA_GUARD}, *messages[1:]]
     for _ in range(1 + _JSON_RETRIES):
         result = await llm.chat(messages, model=model)
         try:
@@ -140,9 +143,9 @@ async def analyze_requirement(
 
     knowledge_cases：测试用例库检索结果，拆解阶段注入做覆盖度查漏（PRD 检索时机约束）。
     """
-    user = requirement
+    user = wrap_data("需求原文", requirement)
     if knowledge_cases:
-        user += prompt_text("knowledge_cases_block").format(knowledge=knowledge_cases)
+        user += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))
     data, result = await _chat_json(
         llm,
         [
@@ -199,17 +202,17 @@ def build_graph(
             action = "定点修正"
         else:
             user = (
-                f"需求内容：\n{state['requirement']}\n\n"
-                f"测试点拆解结果：\n{_dump(state['test_points'])}\n\n"
+                f"需求内容：\n{wrap_data('需求原文', state['requirement'])}\n\n"
+                f"测试点拆解结果：\n{wrap_data('测试点', _dump(state['test_points']))}\n\n"
                 "请为上述全部测试点生成详细测试用例。"
             )
             if knowledge_refs:
-                user += prompt_text("knowledge_refs_block").format(knowledge=knowledge_refs)
+                user += prompt_text("knowledge_refs_block").format(knowledge=wrap_data("需求/规则知识", knowledge_refs))
             action = "全量生成"
         if memory_notes:
-            user += prompt_text("memory_block").format(memories=memory_notes)
+            user += prompt_text("memory_block").format(memories=wrap_data("偏好记忆", memory_notes))
         if rule_notes:
-            user += prompt_text("rules_block").format(rules=rule_notes)
+            user += prompt_text("rules_block").format(rules=wrap_data("团队规则", rule_notes))
         data, result = await _chat_json(
             llm,
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -242,7 +245,7 @@ def build_graph(
             prior = f"\n\n上一轮评审问题（本轮重点核对是否已修复）：\n{_dump(state['issues'])}"
         if knowledge_cases:
             # 历史用例注入评审 Agent 辅助覆盖度把关（PRD：用例库进评审与拆解，不进生成）
-            prior += prompt_text("knowledge_cases_block").format(knowledge=knowledge_cases)
+            prior += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))
         data, result = await _chat_json(
             llm,
             [
@@ -251,8 +254,8 @@ def build_graph(
                     "role": "user",
                     "content": (
                         f"{scope_line}本次为第 {current_round} 轮评审。\n\n"
-                        f"需求内容：\n{state['requirement']}\n\n"
-                        f"待评审用例：\n{_dump(state['cases'])}{prior}"
+                        f"需求内容：\n{wrap_data('需求原文', state['requirement'])}\n\n"
+                        f"待评审用例：\n{wrap_data('待评审用例', _dump(state['cases']))}{prior}"
                     ),
                 },
             ],

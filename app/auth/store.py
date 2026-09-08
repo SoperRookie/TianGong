@@ -22,6 +22,9 @@ ROLES = ("admin", "member")
 USER_STATUSES = ("active", "disabled")
 PROFILE_FIELDS = ("name", "email", "phone", "avatar")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# 用户名：字母/数字/下划线/中文/点/@/连字符，1~64 位（不含引号与尖括号，避免进入内联属性时被利用）
+_USERNAME_RE = re.compile(r"^[\w.@-]{1,64}$")
+_DUMMY_SALT = "0" * 32
 
 _PBKDF2_ITERATIONS = 120_000
 
@@ -45,8 +48,14 @@ class OtpRequired(Exception):
     pass
 
 
+def _token_key(token: str) -> str:
+    """会话令牌入库只存 sha256（DB 只读权限泄露不等于会话劫持）。"""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 class AuthStore:
-    def __init__(self, storage_path: Path, session_ttl_hours: int = 72):
+    def __init__(self, storage_path: Path, session_ttl_hours: int = 72,
+                 max_failures: int = 5, lockout_minutes: int = 15):
         from app.db import DocStore
 
         self._path = storage_path  # 旧文件：仅用于首启迁移
@@ -55,6 +64,10 @@ class AuthStore:
         self._users: dict[str, dict] = {}
         self._sessions: dict[str, dict] = {}
         self._settings: dict = {"totp_enabled": True}
+        # 登录防爆破：(用户名, IP) -> {count, locked_until}（进程内即可，配合单实例锁）
+        self._failures: dict[tuple[str, str], dict] = {}
+        self._max_failures = max_failures
+        self._lockout = timedelta(minutes=lockout_minutes)
         self._load()
 
     def _load(self) -> None:
@@ -67,9 +80,12 @@ class AuthStore:
         self._users = raw.get("users", {})
         self._settings.update(raw.get("settings", {}))
         now = _now().isoformat()
-        self._sessions = {
-            t: s for t, s in raw.get("sessions", {}).items() if s.get("expires_at", "") > now
-        }
+        self._sessions = {}
+        for t, s in raw.get("sessions", {}).items():
+            if s.get("expires_at", "") <= now:
+                continue
+            # 迁移：历史明文令牌改为哈希键（43 位 urlsafe → 64 位 hex）
+            self._sessions[t if len(t) == 64 else _token_key(t)] = s
 
     def _persist(self) -> None:
         self._doc.replace_all(
@@ -89,11 +105,22 @@ class AuthStore:
     # ---- 用户管理 ----
 
     def ensure_admin(self, username: str, password: str) -> None:
-        """首启引导：无任何用户时创建管理员（口令经 TIANGONG_ADMIN_PASSWORD 配置）。"""
+        """首启引导：无任何用户时创建管理员。
+
+        未显式配置口令时生成随机口令只在日志打印一次，并强制首次登录改密。
+        """
         if self._users:
             return
+        generated = not password
+        if generated:
+            password = secrets.token_urlsafe(12)
         self.add_user(username, password, role="admin")
-        logger.info("已创建初始管理员账号 {}（请尽快登录并修改密码）", username)
+        if generated:
+            self._users[username]["must_change_password"] = True
+            self._persist()
+            logger.warning("已创建初始管理员 {}，随机口令：{}（仅打印一次，首次登录须改密）", username, password)
+        else:
+            logger.info("已创建初始管理员账号 {}（请尽快登录并修改密码）", username)
 
     @staticmethod
     def _clean_profile(**fields) -> dict:
@@ -121,6 +148,8 @@ class AuthStore:
         username = username.strip()
         if not username:
             raise AuthError("用户名不能为空")
+        if not _USERNAME_RE.match(username):
+            raise AuthError("用户名只能含字母、数字、中文、下划线、点、@ 和连字符，且不超过 64 位")
         if username in self._users:
             raise AuthError(f"用户已存在: {username}")
         if role not in ROLES:
@@ -147,9 +176,8 @@ class AuthStore:
             raise AuthError(f"用户不存在: {username}")
         if username == operator:
             raise AuthError("不能删除当前登录账号")
-        admins = [u for u in self._users.values() if u["role"] == "admin"]
-        if self._users[username]["role"] == "admin" and len(admins) <= 1:
-            raise AuthError("不能删除最后一个管理员")
+        if self._users[username]["role"] == "admin" and self._active_admins(exclude=username) == 0:
+            raise AuthError("不能删除最后一个可用管理员")
         self._users.pop(username)
         self._sessions = {t: s for t, s in self._sessions.items() if s["username"] != username}
         self._persist()
@@ -174,9 +202,7 @@ class AuthStore:
             if status == "disabled":
                 if username == operator:
                     raise AuthError("不能禁用当前登录账号")
-                admins = [u for u in self._users.values()
-                          if u["role"] == "admin" and u.get("status", "active") == "active"]
-                if user["role"] == "admin" and len(admins) <= 1:
+                if user["role"] == "admin" and self._active_admins(exclude=username) == 0:
                     raise AuthError("不能禁用最后一个可用管理员")
                 # 禁用即会话失效（3.1）
                 self._sessions = {t: s for t, s in self._sessions.items()
@@ -189,9 +215,8 @@ class AuthStore:
         if role and role != user["role"]:
             if role not in ROLES:
                 raise AuthError(f"未知角色: {role}（可用 {'/'.join(ROLES)}）")
-            admins = [u for u in self._users.values() if u["role"] == "admin"]
-            if user["role"] == "admin" and len(admins) <= 1:
-                raise AuthError("不能降级最后一个管理员")
+            if user["role"] == "admin" and self._active_admins(exclude=username) == 0:
+                raise AuthError("不能降级最后一个可用管理员")
             user["role"] = role
         if new_password:
             if len(new_password) < 6:
@@ -217,6 +242,10 @@ class AuthStore:
     def exists(self, username: str) -> bool:
         return username in self._users
 
+    def _active_admins(self, exclude: str | None = None) -> int:
+        return sum(1 for u in self._users.values()
+                   if u["role"] == "admin" and u.get("status", "active") == "active" and u["username"] != exclude)
+
     def list_users(self) -> list[dict]:
         return sorted((self.public_user(u) for u in self._users), key=lambda x: x["created_at"])
 
@@ -229,6 +258,7 @@ class AuthStore:
             "avatar": u.get("avatar", ""), "status": u.get("status", "active"),
             "updated_at": u.get("updated_at", u["created_at"]),
             "last_login_at": u.get("last_login_at"), "last_login_ip": u.get("last_login_ip"),
+            "must_change_password": bool(u.get("must_change_password")),
         }
 
     # ---- 登录会话 ----
@@ -238,8 +268,19 @@ class AuthStore:
     ) -> tuple[str, dict]:
         from app.auth.totp import verify_totp
 
-        user = self._users.get(username.strip())
-        if user is None or _hash_password(password, user["salt"]) != user["password_hash"]:
+        username = username.strip()
+        key = (username, ip or "")
+        fail = self._failures.get(key)
+        if fail and fail.get("locked_until") and fail["locked_until"] > _now():
+            remain = int((fail["locked_until"] - _now()).total_seconds() // 60) + 1
+            raise AuthError(f"登录失败次数过多，账号已锁定，请 {remain} 分钟后再试")
+        user = self._users.get(username)
+        # 用户不存在时也做一次等价哈希，避免响应时间侧信道枚举用户名
+        ok = user is not None and _hash_password(password, user["salt"]) == user["password_hash"]
+        if user is None:
+            _hash_password(password, _DUMMY_SALT)
+        if not ok:
+            self._note_failure(key)
             raise AuthError("用户名或密码错误")
         if user.get("status", "active") != "active":
             raise AuthError("账号已被禁用，请联系管理员")
@@ -249,10 +290,12 @@ class AuthStore:
                 raise OtpRequired()
             counter = verify_totp(user["totp_secret"], otp)
             if counter is None or counter <= int(user.get("totp_last_counter", -1)):
+                self._note_failure(key)
                 raise AuthError("动态验证码错误或已使用，请重新输入")
             user["totp_last_counter"] = counter  # 防重放：同一动态码只允许使用一次
+        self._failures.pop(key, None)
         token = secrets.token_urlsafe(32)
-        self._sessions[token] = {
+        self._sessions[_token_key(token)] = {
             "username": user["username"],
             "expires_at": (_now() + self._ttl).isoformat(),
         }
@@ -261,14 +304,28 @@ class AuthStore:
         self._persist()
         return token, self.public_user(user["username"])
 
+    def _note_failure(self, key: tuple[str, str]) -> None:
+        fail = self._failures.setdefault(key, {"count": 0, "locked_until": None})
+        fail["count"] += 1
+        if fail["count"] >= self._max_failures:
+            fail["locked_until"] = _now() + self._lockout
+            fail["count"] = 0
+            logger.warning("登录失败达到上限，锁定 {} 分钟：用户 {} IP {}", int(self._lockout.total_seconds() // 60), *key)
+        # 防止字典无限增长
+        if len(self._failures) > 10000:
+            cutoff = _now()
+            self._failures = {k: v for k, v in self._failures.items()
+                              if v.get("locked_until") and v["locked_until"] > cutoff}
+
     def verify(self, token: str | None) -> dict | None:
         if not token:
             return None
-        session = self._sessions.get(token)
+        key = _token_key(token)
+        session = self._sessions.get(key)
         if session is None:
             return None
         if session["expires_at"] <= _now().isoformat():
-            self._sessions.pop(token, None)
+            self._sessions.pop(key, None)
             self._persist()
             return None
         user = self._users.get(session["username"])
@@ -277,7 +334,7 @@ class AuthStore:
         return self.public_user(user["username"])
 
     def logout(self, token: str | None) -> None:
-        if token and self._sessions.pop(token, None) is not None:
+        if token and self._sessions.pop(_token_key(token), None) is not None:
             self._persist()
 
     # ---- 两步验证（TOTP）----
@@ -304,6 +361,8 @@ class AuthStore:
         user = self._users.get(username)
         if user is None or not user.get("totp_pending"):
             raise AuthError("请先获取绑定二维码")
+        if not self.totp_policy():
+            raise AuthError("两步验证功能已被管理员关闭")
         counter = verify_totp(user["totp_pending"], code)
         if counter is None:
             raise AuthError("动态验证码错误，请确认验证器时间同步后重试")
@@ -321,8 +380,9 @@ class AuthStore:
             raise AuthError("未绑定两步验证")
         if _hash_password(password, user["salt"]) != user["password_hash"]:
             raise AuthError("密码错误")
-        if verify_totp(user["totp_secret"], code) is None:
-            raise AuthError("动态验证码错误")
+        counter = verify_totp(user["totp_secret"], code)
+        if counter is None or counter <= int(user.get("totp_last_counter", -1)):
+            raise AuthError("动态验证码错误或已使用")
         for key in ("totp_secret", "totp_enabled", "totp_last_counter", "totp_pending"):
             user.pop(key, None)
         self._persist()
@@ -335,6 +395,7 @@ class AuthStore:
             raise AuthError("新密码长度至少 6 位")
         salt = secrets.token_hex(16)
         user["salt"], user["password_hash"] = salt, _hash_password(new_password, salt)
+        user.pop("must_change_password", None)
         # 改密后仅保留当前会话之外的失效：简单起见全部注销，需重新登录
         self._sessions = {t: s for t, s in self._sessions.items() if s["username"] != username}
         self._persist()

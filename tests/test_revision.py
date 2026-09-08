@@ -36,7 +36,7 @@ async def test_run_revision_incremental_fix_path():
     assert result.passed and result.cases[0].priority == "P0"
     # 生成 Agent 走定点修正路径：Prompt 含用户修订要求与当前用例全集
     fix_msg = llm.calls[0]["messages"][1]["content"]
-    assert "用户修订要求：把登录用例优先级调整为P0" in fix_msg
+    assert "用户修订要求：" in fix_msg and "把登录用例优先级调整为P0" in fix_msg
     assert "验证正确账号密码登录成功" in fix_msg
     # 主控路由留痕
     assert result.trace[0] == {"agent": "主控", "action": "修订路由", "instruction": "把登录用例优先级调整为P0"}

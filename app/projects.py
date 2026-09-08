@@ -29,6 +29,21 @@ class ProjectError(ValueError):
     pass
 
 
+_BAD_NAME_RE = __import__("re").compile(r"[<>\"'\\\x00-\x1f]")
+
+
+def check_name(value: str, label: str, max_len: int = 100) -> str:
+    """名称类字段：不含尖括号/引号/反斜杠/控制字符（会进入页面内联属性），长度受限。"""
+    value = (value or "").strip()
+    if not value:
+        raise ProjectError(f"{label}不能为空")
+    if len(value) > max_len:
+        raise ProjectError(f"{label}不能超过 {max_len} 个字符")
+    if _BAD_NAME_RE.search(value):
+        raise ProjectError(f"{label}不能包含 < > \" ' \\ 或控制字符")
+    return value
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -117,12 +132,10 @@ class ProjectStore:
         self, name: str, description: str = "", created_by: str | None = None,
         code: str = "", owner: str = "",
     ) -> dict:
-        name = (name or "").strip()
-        if not name:
-            raise ProjectError("项目名不能为空")
+        name = check_name(name, "项目名")
         if name in self._projects:
             raise ProjectError(f"项目已存在: {name}")
-        code = (code or "").strip()
+        code = check_name(code, "项目编码", 50) if (code or "").strip() else ""
         if code and any(p["code"] == code for p in self._projects.values()):
             raise ProjectError(f"项目编码已存在: {code}")
         project = self._normalize({
@@ -145,6 +158,7 @@ class ProjectStore:
         if project is None:
             raise ProjectError(f"项目不存在: {name}")
         if new_name is not None and (new_name := new_name.strip()) and new_name != name:
+            new_name = check_name(new_name, "项目名")
             if new_name in self._projects:
                 raise ProjectError(f"项目已存在: {new_name}")
             self._projects.pop(name)
@@ -298,9 +312,7 @@ class VersionStore:
     def create(self, project: str, name: str, code: str = "", description: str = "",
                start_date: str = "", planned_end: str = "", actual_end: str = "",
                status: str = "not_started", created_by: str | None = None) -> dict:
-        name = (name or "").strip()
-        if not name:
-            raise ProjectError("版本名称不能为空")
+        name = check_name(name, "版本名称", 60)
         if any(v["project"] == project and v["name"] == name for v in self._items.values()):
             raise ProjectError(f"版本已存在: {name}")
         if status not in VERSION_STATUSES:
@@ -438,9 +450,7 @@ class ModuleStore:
 
     def create(self, project: str, name: str, parent_id: str | None = None,
                description: str = "", created_by: str | None = None) -> dict:
-        name = (name or "").strip()
-        if not name:
-            raise ProjectError("模块名称不能为空")
+        name = check_name(name, "模块名称", 60)
         if "/" in name:
             raise ProjectError("模块名称不能包含 /")
         parent_id = parent_id or None
@@ -489,9 +499,7 @@ class ModuleStore:
                 item["parent_id"] = parent_id
                 item["order"] = max((m["order"] for m in siblings), default=-1) + 1
         if name is not None:
-            name = name.strip()
-            if not name:
-                raise ProjectError("模块名称不能为空")
+            name = check_name(name, "模块名称", 60)
             if "/" in name:
                 raise ProjectError("模块名称不能包含 /")
             self._check_name(item["project"], item["parent_id"], name, exclude=module_id)

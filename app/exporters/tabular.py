@@ -41,13 +41,25 @@ def _headers(template: CustomTemplate) -> list[str]:
     return [col.name for col in template.columns]
 
 
+_CONTROL_RE = __import__("re").compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def safe_cell(value) -> str:
+    """导出单元格防护：去掉 openpyxl 拒绝的控制字符；以 = + - @ 或制表/回车开头的文本加前导单引号，
+    防止 Excel/CSV 把用例文本当公式执行（CSV/公式注入）。"""
+    text = _CONTROL_RE.sub("", "" if value is None else str(value))
+    if text and text[0] in "=+-@\t\r":
+        return "'" + text
+    return text
+
+
 def _rows(cases: list[TestCase], template: CustomTemplate) -> list[list[str]]:
     rows = []
     for case in cases:
         row = []
         for col in template.columns:
             getter = _CANONICAL_GETTERS.get(col.maps_to)
-            row.append(getter(case) if getter else case.extras.get(col.name, ""))
+            row.append(safe_cell(getter(case) if getter else case.extras.get(col.name, "")))
         rows.append(row)
     return rows
 
@@ -62,7 +74,7 @@ def export_excel(
     ws = wb.active
     ws.title = "测试用例"
 
-    ws.append(headers)
+    ws.append([safe_cell(h) for h in headers])
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = _HEADER_FILL
@@ -70,6 +82,9 @@ def export_excel(
 
     for row in _rows(cases, template):
         ws.append(row)
+        for cell in ws[ws.max_row]:  # 强制字符串类型，杜绝被识别为公式
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
 
     priority_col = next(
         (i + 1 for i, col in enumerate(template.columns) if col.maps_to == "priority"), None
@@ -108,6 +123,6 @@ def export_csv(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(_headers(template))
+        writer.writerow([safe_cell(h) for h in _headers(template)])
         writer.writerows(_rows(cases, template))
     return path

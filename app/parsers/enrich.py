@@ -27,6 +27,8 @@ def _worth_vision(data: bytes) -> bool:
     try:
         with Image.open(io.BytesIO(data)) as img:
             return min(img.size) >= MIN_IMAGE_SIDE
+    except Image.DecompressionBombError:
+        return False  # 像素炸弹：直接跳过
     except Exception:
         return True  # 无法解码时不武断丢弃，交给 Vision
 
@@ -45,9 +47,13 @@ async def enrich_images(doc: ParsedDocument, llm: LLMClient) -> ParsedDocument:
         except Exception as e:  # 单图失败不阻塞整体解析
             return img.placeholder, f"（{img.placeholder} 解析失败：{e}）"
 
-    replacements = dict(
-        await asyncio.gather(*[understand(img) for img in doc.embedded_images])
-    )
+    sem = asyncio.Semaphore(4)  # 文档内图片并发上限，避免一次上传打满 Vision 配额
+
+    async def guarded(img):
+        async with sem:
+            return await understand(img)
+
+    replacements = dict(await asyncio.gather(*[guarded(img) for img in doc.embedded_images]))
     for section in doc.sections:
         if section.content in replacements:
             section.content = replacements[section.content]
