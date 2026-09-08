@@ -41,6 +41,9 @@ def _db_isolation(tmp_path, monkeypatch):
     get_settings.cache_clear()
     reset_engine_cache()
     yield
+    from app.db import flush_persist
+
+    flush_persist()
     get_settings.cache_clear()
     reset_engine_cache()
 

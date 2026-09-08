@@ -37,6 +37,17 @@ class LLMClient:
     def __init__(self, registry: ModelRegistry):
         self.registry = registry
         self._clients: dict[str, AsyncOpenAI] = {}
+        self._sem = None  # 全局并发上限（分片×模块×图片理解不再无限扇出），按事件循环惰性创建
+
+    def _semaphore(self):
+        import asyncio
+
+        from app.config import get_settings
+
+        loop = asyncio.get_running_loop()
+        if self._sem is None or self._sem[0] is not loop:
+            self._sem = (loop, asyncio.Semaphore(max(1, get_settings().llm_max_concurrency)))
+        return self._sem[1]
 
     def _client_for(self, cfg: ModelConfig) -> AsyncOpenAI:
         if cfg.name not in self._clients:
@@ -69,15 +80,21 @@ class LLMClient:
         for i, cfg in enumerate(chain):
             if i > 0:
                 logger.warning("模型降级：{} → {}（原因: {}）", chain[i - 1].name, cfg.name, last_error)
-            for _ in range(1 + self.registry.max_retries):
+            for retry in range(1 + self.registry.max_retries):
                 attempts += 1
                 try:
-                    result = await self._call_once(cfg, messages, attempts, **overrides)
+                    async with self._semaphore():
+                        result = await self._call_once(cfg, messages, attempts, **overrides)
                     record_call(messages, result)
                     return result
                 except _RETRYABLE as e:
                     last_error = e
                     logger.warning("模型调用失败（第 {} 次，{}）：{}", attempts, cfg.name, e)
+                    if retry < self.registry.max_retries:
+                        import asyncio
+                        # 限流/网络抖动：指数退避（限流更长），避免紧接着再撞一次
+                        base = 3.0 if isinstance(e, openai.RateLimitError) else 1.0
+                        await asyncio.sleep(min(20.0, base * (2 ** retry)))
                 except (openai.OpenAIError, MissingAPIKeyError) as e:
                     # 配置/服务级错误（模型不存在、鉴权失败、密钥未配、参数非法）：重试无意义，
                     # 换链路下一个模型；不再向上抛裸异常（曾致 500）

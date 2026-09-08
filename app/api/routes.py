@@ -140,10 +140,13 @@ def _role_label(role: str) -> str:
 
 
 def _visible_projects(request: Request) -> set[str] | None:
-    """当前用户可见的项目集合；None 表示不限（系统管理员）。"""
-    if _is_admin(request):
-        return None
-    return {p["project"] for p in request.app.state.projects.projects_of(_operator(request))}
+    """当前用户可见的项目集合；None 表示不限（系统管理员）。每个请求只计算一次。"""
+    cached = getattr(request.state, "_visible", ...)
+    if cached is not ...:
+        return cached
+    visible = None if _is_admin(request) else {p["project"] for p in request.app.state.projects.projects_of(_operator(request))}
+    request.state._visible = visible
+    return visible
 
 
 def _record_visible(request: Request, project: str | None) -> bool:
@@ -616,8 +619,9 @@ async def _parse_inputs(
             if saved.suffix.lower() in IMAGE_SUFFIXES:
                 doc = await parse_image(saved, llm)
             else:
-                # 图文混排：文档内嵌图片经 Vision 理解后回填原位置
-                doc = await enrich_images(parse_file(saved), llm)
+                # 文档解析是 CPU 密集同步代码：放线程池；内嵌图片经 Vision 理解后回填原位置
+                import asyncio
+                doc = await enrich_images(await asyncio.to_thread(parse_file, saved), llm)
             doc.source = _safe_filename(upload.filename)  # 来源显示原始文件名（落盘名带随机前缀）
             docs.append(doc)
         if text.strip():
@@ -1069,6 +1073,7 @@ async def delete_knowledge_doc(request: Request, doc_id: str) -> dict:
     else:
         _require_project(request, doc.space, "knowledge.manage")
     service.store.delete_doc(doc_id)
+    service.invalidate_cache()
     return {"deleted": doc_id}
 
 
@@ -1344,16 +1349,12 @@ def _finalize_task(
         if not case.uid:
             case.uid = new_uid()
 
+    # 导出按需生成（下载时在线程里导出）：每次审核动作不再重做三种格式的全量导出
     files_map: dict[str, str] = {}
     if result.cases:
-        files_map["xlsx"] = str(export_excel(result.cases, task_dir / "测试用例.xlsx", template))
-        files_map["csv"] = str(export_csv(result.cases, task_dir / "测试用例.csv", template))
-        root_title = Path(sources[0]).stem if sources and sources[0] != "text" else "测试用例"
-        files_map["xmind"] = str(
-            export_xmind(result.cases, task_dir / "测试用例.xmind", root_title=root_title)
-        )
-
-    logger.info("任务 {} 导出完成：{} 条用例，格式={}", task_id, len(result.cases), list(files_map))
+        files_map = {"xlsx": str(task_dir / "测试用例.xlsx"), "csv": str(task_dir / "测试用例.csv"),
+                     "xmind": str(task_dir / "测试用例.xmind")}
+    logger.info("任务 {} 结果落库：{} 条用例，导出格式={}（按需生成）", task_id, len(result.cases), list(files_map))
     record = store.get(task_id) or TaskRecord(task_id=task_id)
     # AI 修订/需求变更等改了内容的用例：追加 ai_fix 版本，保证计划快照引用与内容一致（需求 12/10 章）
     from app.versions import latest_version_no as _lv
@@ -1377,6 +1378,7 @@ def _finalize_task(
     record.sources = sources
     record.result = result.model_dump()
     record.files = files_map
+    record.files_dirty = True
     # 用例审核状态机：新 uid 初始化为 pending；已不存在的 uid 清理
     uids = {c.uid for c in result.cases}
     record.case_reviews = {
@@ -1424,7 +1426,13 @@ def _quality_report(record: TaskRecord, result) -> dict:
     covered = [d for d in applicable if coverage[d] == "已覆盖"]
     coverage_score = round(len(covered) / len(applicable) * 100) if applicable else None
 
-    dup_pairs = case_duplicate_candidates([c.model_dump() for c in result.cases])
+    import hashlib as _hl
+    sig = _hl.sha1(("|".join(f"{c.case_id}#{c.title}#{c.precondition}#{c.steps}" for c in result.cases)).encode()).hexdigest()
+    prev_q = record.quality or {}
+    if prev_q.get("_sig") == sig and "疑似重复用例对" in prev_q:
+        dup_pairs = prev_q.get("_dup_pairs") or prev_q["疑似重复用例对"]  # 用例未变化：复用上次 O(n²) 查重结果
+    else:
+        dup_pairs = case_duplicate_candidates([c.model_dump() for c in result.cases])
     dup_risk = "高" if len(dup_pairs) >= 3 else "中" if dup_pairs else "低"
     return {
         "测试维度覆盖度": coverage_score,
@@ -1435,6 +1443,7 @@ def _quality_report(record: TaskRecord, result) -> dict:
         "历史用例参考": sum(1 for k in record.knowledge if k.get("category") == "test_cases"),
         "评审轮次": result.review_rounds,
         "note": "评分仅供参考，不作为自动通过依据（需求五十八）",
+        "_sig": sig, "_dup_pairs": dup_pairs[:10],
     }
 
 
@@ -2349,9 +2358,10 @@ async def recycle_bin_by_project(request: Request, project: str) -> dict:
     from app.recycle import list_bin_for_tasks
 
     _require_project(request, project, "case.view")
+    from app.reports import UNASSIGNED as _UN
     task_ids = [
-        r.task_id for r in request.app.state.tasks.list(limit=100000)
-        if ((r.context or {}).get("project") or "（未指定）") == project
+        r.task_id for r in request.app.state.tasks.list(limit=100000, project=None if project == _UN else project)
+        if project != _UN or not (r.context or {}).get("project")
     ]
     return {"project": project, "items": list_bin_for_tasks(task_ids)}
 
@@ -3220,7 +3230,8 @@ async def _parse_saved_attachment(saved: Path, llm) -> dict:
         if saved.suffix.lower() in IMAGE_SUFFIXES:
             doc = await parse_image(saved, llm)
         else:
-            doc = await enrich_images(parse_file(saved), llm)
+            import asyncio
+            doc = await enrich_images(await asyncio.to_thread(parse_file, saved), llm)
         return _attachment_record(saved, doc)
     except (UnsupportedFormatError, ScannedPDFError, NoVisionModelError, MissingAPIKeyError,
             AllModelsFailedError, UnsafeFileError, ValueError, UnicodeDecodeError) as e:
@@ -3622,11 +3633,12 @@ async def list_projects(
     """
     from app.reports import UNASSIGNED, project_rollup
 
-    records = request.app.state.tasks.list(limit=100000)
+    visible = _visible_projects(request)
+    records = request.app.state.tasks.list(limit=100000, projects=visible)
     stats = {p["project"]: p for p in project_rollup(records)}
     pstore = request.app.state.projects
-    pstore.ensure([n for n in stats if n != UNASSIGNED])
-    visible = _visible_projects(request)
+    if visible is None:  # 管理员视角才自动注册历史项目名
+        pstore.ensure([n for n in stats if n != UNASSIGNED])
     kw = keyword.strip().lower()
     merged = []
     for p in pstore.list():
@@ -3715,11 +3727,10 @@ async def update_project(request: Request, name: str, body: ProjectUpdateBody) -
         if pstore.get(new_name) is not None:
             raise HTTPException(status_code=400, detail=f"项目已存在: {new_name}")
         renamed = 0
-        for r in store.list(limit=100000):
-            if (r.context or {}).get("project") == name:
-                r.context["project"] = new_name
-                store.save(r)
-                renamed += 1
+        for r in store.list(limit=100000, project=name):
+            r.context["project"] = new_name
+            store.save(r)
+            renamed += 1
         plans = request.app.state.plans
         for plan in plans.list(project=name):
             plan["project"] = new_name
@@ -3732,6 +3743,7 @@ async def update_project(request: Request, name: str, body: ProjectUpdateBody) -
         request.app.state.rules.rename_project(name, new_name)
         if getattr(request.app.state, "knowledge", None) is not None:
             request.app.state.knowledge.store.rename_space(name, new_name)
+            request.app.state.knowledge.invalidate_cache()
         from app.audit import rename_project as _rename_audit
         from app.llm.calllog import rename_project as _rename_calls
         _rename_calls(name, new_name)
@@ -3753,10 +3765,7 @@ async def delete_project(request: Request, name: str) -> dict:
     from app.projects import ProjectError
 
     _require_admin(request)
-    referenced = sum(
-        1 for r in request.app.state.tasks.list(limit=100000)
-        if (r.context or {}).get("project") == name
-    )
+    referenced = len(request.app.state.tasks.list(limit=100000, project=name))
     if referenced:
         raise HTTPException(status_code=400, detail=f"项目下仍有 {referenced} 个任务，不可删除")
     if request.app.state.plans.list(project=name):
@@ -3942,9 +3951,7 @@ def _module_referenced(request: Request, project: str):
         if req.get("module_id") and mstore.get(req["module_id"]):
             names.add(mstore.path(req["module_id"]))
             names.add(mstore.get(req["module_id"])["name"])
-    for r in request.app.state.tasks.list(limit=100000):
-        if (r.context or {}).get("project") != project:
-            continue
+    for r in request.app.state.tasks.list(limit=100000, project=project):
         for c in (r.result or {}).get("cases", []):
             if c.get("module"):
                 names.add(str(c["module"]))
@@ -3955,7 +3962,7 @@ def _module_referenced(request: Request, project: str):
 async def list_modules(request: Request, name: str, include_deleted: bool = False) -> dict:
     _require_project(request, name, "version.view")
     mstore = request.app.state.modules
-    referenced = _module_referenced(request, name)
+    referenced = _module_referenced(request, name) if include_deleted else (lambda _k: False)
     deleted = [
         {**m, "path": mstore.path(m["module_id"]), "referenced": referenced(mstore.path(m["module_id"])) or referenced(m["name"])}
         for m in mstore.list(name, include_deleted=True) if m.get("deleted_at")
@@ -4052,7 +4059,7 @@ async def list_project_cases(request: Request, project: str) -> dict:
     from app.reports import project_cases
 
     _require_project(request, project, "case.view")
-    records = request.app.state.tasks.list(limit=100000)
+    records = request.app.state.tasks.list(limit=100000, project=project)
     return {"project": project,
             "cases": project_cases(records, project, plans=request.app.state.plans.list())}
 
@@ -4090,8 +4097,8 @@ async def list_all_cases(
         )
     if project:
         _require_project(request, project, "case.view")
-    records = [r for r in request.app.state.tasks.list(limit=100000)
-               if _record_visible(request, (r.context or {}).get("project"))]
+    records = (request.app.state.tasks.list(limit=100000, project=project) if project
+               else request.app.state.tasks.list(limit=100000, projects=_visible_projects(request)))
     rows = project_cases(records, project or None, plans=request.app.state.plans.list())
     modules = sorted({r["module"] for r in rows if r["module"]})
     if module:
@@ -4132,8 +4139,8 @@ async def reports_summary(
 
     if project:
         _require_project(request, project, "project.view")
-    records = [r for r in request.app.state.tasks.list(limit=100000)
-               if _record_visible(request, (r.context or {}).get("project"))]
+    records = (request.app.state.tasks.list(limit=100000, project=project) if project
+               else request.app.state.tasks.list(limit=100000, projects=_visible_projects(request)))
     data = summarize(records, days=max(0, days), project=project,
                      plans=request.app.state.plans.list())
     rules = request.app.state.rules
@@ -4279,8 +4286,7 @@ async def list_tasks(
     created_by: str | None = None, limit: int = 50
 ) -> dict:
     """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人过滤。"""
-    records = request.app.state.tasks.list(status=status, limit=100000)
-    records = [r for r in records if _record_visible(request, (r.context or {}).get("project"))]
+    records = request.app.state.tasks.list(status=status, limit=100000, projects=_visible_projects(request))
     if project is not None:
         records = [r for r in records if (r.context or {}).get("project") == project]
     if created_by is not None:
@@ -4370,11 +4376,9 @@ async def workbench(request: Request) -> dict:
     can_review = {p["project"] for p in projects if _project_role(request, p["project"]) in ("project_admin", "test_lead")}
 
     pending_review, to_fix, my_ai = [], [], []
-    for r in request.app.state.tasks.list(limit=100000):
+    for r in request.app.state.tasks.list(limit=100000, projects=visible):
         ctx = r.context or {}
         proj = ctx.get("project")
-        if not _record_visible(request, proj):
-            continue
         pts = list(iter_points((r.analysis or {}).get("test_points", [])))
         cases = (r.result or {}).get("cases", [])
         pt_pending = sum(1 for _, p in pts if p.get("status", "pending") == "pending")
@@ -4435,7 +4439,7 @@ async def global_search(request: Request, q: str, limit: int = 8) -> dict:
         return {"q": q, "groups": []}
     lim = max(1, min(limit, 30))
     tstore = request.app.state.tasks
-    records = [r for r in tstore.list(limit=100000) if _record_visible(request, (r.context or {}).get("project"))]
+    records = tstore.list(limit=100000, projects=_visible_projects(request))
 
     def hit(text: str) -> bool:
         return kw in (text or "").lower()
@@ -4495,8 +4499,8 @@ async def project_coverage(request: Request, name: str) -> dict:
                      "module_id": req.get("module_id"), "version_id": req.get("version_id"),
                      "tasks": len(req["tasks"]), **t["totals"], "coverage": t["coverage"]})
     unlinked = [{"task_id": r.task_id, "sources": r.sources, "status": r.status, "created_at": r.created_at}
-                for r in request.app.state.tasks.list(limit=100000)
-                if (r.context or {}).get("project") == name and r.task_id not in linked]
+                for r in request.app.state.tasks.list(limit=100000, project=name)
+                if r.task_id not in linked]
     summary = {
         "requirements": len(rows),
         "with_points": sum(1 for r in rows if r["coverage"]["has_points"]),
@@ -4566,12 +4570,9 @@ async def ai_tasks(request: Request, status: str = "", project: str = "", mine: 
     """AI 任务中心：全部生成/设计任务，附类型、失败原因、部分成功提示、Prompt 版本与可重试标记。"""
     me = _operator(request)
     out = []
-    for r in request.app.state.tasks.list(limit=100000):
+    for r in request.app.state.tasks.list(limit=100000, project=project or None,
+                                          projects=None if project else _visible_projects(request)):
         ctx = r.context or {}
-        if not _record_visible(request, ctx.get("project")):
-            continue
-        if project and ctx.get("project") != project:
-            continue
         if status and r.status != status:
             continue
         if mine and r.created_by != me:
@@ -4782,6 +4783,36 @@ _MEDIA_TYPES = {
 async def download_file(request: Request, task_id: str, fmt: str) -> FileResponse:
     record = _task(request, task_id, "case.export")
     path = record.files.get(fmt)
-    if path is None or not Path(path).exists():
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"任务 {task_id} 无 {fmt} 产物")
+    if record.files_dirty or not Path(path).exists():
+        await _export_task_files(request, record)
+        path = record.files.get(fmt)
+    if not path or not Path(path).exists():
         raise HTTPException(status_code=404, detail=f"任务 {task_id} 无 {fmt} 产物")
     return FileResponse(path, media_type=_MEDIA_TYPES.get(fmt), filename=Path(path).name)
+
+
+async def _export_task_files(request: Request, record: TaskRecord) -> None:
+    """按需导出三种格式（线程池执行，不阻塞事件循环），完成后清除 dirty 标记。"""
+    import asyncio
+
+    from app.agents import GenerationResult
+
+    result = GenerationResult.model_validate(record.result)
+    template = request.app.state.templates.get((record.context or {}).get("template_id"))
+    task_dir = request.app.state.tasks.output_dir / record.task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    sources = record.sources or []
+    root_title = Path(sources[0]).stem if sources and sources[0] != "text" else "测试用例"
+
+    def _do():
+        return {
+            "xlsx": str(export_excel(result.cases, task_dir / "测试用例.xlsx", template)),
+            "csv": str(export_csv(result.cases, task_dir / "测试用例.csv", template)),
+            "xmind": str(export_xmind(result.cases, task_dir / "测试用例.xmind", root_title=root_title)),
+        }
+
+    record.files = await asyncio.to_thread(_do)
+    record.files_dirty = False
+    request.app.state.tasks.save(record)

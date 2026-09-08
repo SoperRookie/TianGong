@@ -27,6 +27,7 @@ class TaskRecord(BaseModel):
     result: dict | None = None
     error: str | None = None
     files: dict[str, str] = Field(default_factory=dict)  # 格式 -> 文件路径
+    files_dirty: bool = Field(default=False, description="用例已变化、导出文件待重新生成（下载时按需导出）")
     analysis: dict | None = Field(default=None, description="拆解确认阶段的分析结果（F-3-3）")
     context: dict | None = Field(default=None, description="待确认任务的生成上下文（需求文本/模型/模板）")
     knowledge: list[dict] = Field(default_factory=list, description="知识快照（F-7-13）：本次任务注入的知识切片留痕")
@@ -81,7 +82,10 @@ class TaskStore:
         return records
 
     def _persist(self, record: TaskRecord) -> None:
-        self._doc.put(record.task_id, record.model_dump())
+        from app.db import persist_async
+
+        self._sorted = None  # 排序缓存失效
+        persist_async(self._doc.put, record.task_id, record.model_dump())
 
     def new_task_dir(self) -> tuple[str, Path]:
         task_id = uuid.uuid4().hex[:12]
@@ -90,14 +94,29 @@ class TaskStore:
         return task_id, task_dir
 
     def save(self, record: TaskRecord) -> None:
+        if record.task_id not in self._records:
+            self._sorted = None
         self._records[record.task_id] = record
         self._persist(record)
 
     def get(self, task_id: str) -> TaskRecord | None:
         return self._records.get(task_id)
 
-    def list(self, status: str | None = None, limit: int = 50) -> list[TaskRecord]:
-        records = sorted(self._records.values(), key=lambda r: r.created_at, reverse=True)
+    _sorted: list[TaskRecord] | None = None
+
+    def _ordered(self) -> list[TaskRecord]:
+        if self._sorted is None:
+            self._sorted = sorted(self._records.values(), key=lambda r: r.created_at, reverse=True)
+        return self._sorted
+
+    def list(self, status: str | None = None, limit: int = 50, project: str | None = None,
+             projects: set[str] | None = None) -> list[TaskRecord]:
+        """倒序列表（排序结果缓存，保存时失效）；project / projects 按所属项目过滤。"""
+        records = self._ordered()
+        if project is not None:
+            records = [r for r in records if (r.context or {}).get("project") == project]
+        elif projects is not None:
+            records = [r for r in records if (r.context or {}).get("project") in projects]
         if status:
             records = [r for r in records if r.status == status]
         return records[:limit]

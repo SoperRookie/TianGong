@@ -329,13 +329,20 @@ def _has_similar_point(modules: list[dict], text: str, threshold: float = 0.75) 
     return any(similarity(p["point"], text) >= threshold for _, p in iter_points(modules))
 
 
+def _jaccard(ga: set[str], gb: set[str]) -> float:
+    if not ga or not gb:
+        return 0.0
+    return len(ga & gb) / len(ga | gb)
+
+
 def duplicate_candidates(modules: list[dict], threshold: float = 0.45) -> list[dict]:
-    """测试点两两相似候选：文字层初筛（语句不同但语义相同的靠 LLM 复核补充）。"""
+    """测试点两两相似候选：文字层初筛（语句不同但语义相同的靠 LLM 复核补充）。bigram 只算一次。"""
     flat = [dict(p, module=entry["module"]) for entry, p in iter_points(modules)]
+    grams = [_bigrams(p["point"]) for p in flat]
     pairs: list[dict] = []
     for i in range(len(flat)):
         for j in range(i + 1, len(flat)):
-            score = similarity(flat[i]["point"], flat[j]["point"])
+            score = _jaccard(grams[i], grams[j])
             if score >= threshold:
                 pairs.append({
                     "a": flat[i]["tp_id"], "a_point": flat[i]["point"],
@@ -356,10 +363,10 @@ def case_duplicate_candidates(cases: list[dict], threshold: float = 0.6) -> list
         return f"{c.get('title', '')} {c.get('precondition', '')} {steps}"
 
     pairs: list[dict] = []
-    texts = [_text(c) for c in cases]
+    grams = [_bigrams(_text(c)) for c in cases]
     for i in range(len(cases)):
         for j in range(i + 1, len(cases)):
-            score = similarity(texts[i], texts[j])
+            score = _jaccard(grams[i], grams[j])
             if score >= threshold:
                 pairs.append({
                     "a": str(cases[i].get("case_id")), "a_title": str(cases[i].get("title")),

@@ -72,10 +72,14 @@ class KnowledgeStore:
             docs[k] = KnowledgeDoc.model_validate(d)
         return docs
 
-    def _save_docs(self) -> None:
+    def _save_docs(self, *doc_ids: str, removed: str | None = None) -> None:
         if self._docs_path is None:
             return
-        self._doc_table.replace_all({d.doc_id: d.model_dump() for d in self._docs.values()})
+        if removed:
+            self._doc_table.remove(removed)
+        for did in (doc_ids or tuple(self._docs)):
+            if did in self._docs:
+                self._doc_table.put(did, self._docs[did].model_dump())
 
     def list_docs(self, space: str | None = None, category: str | None = None,
                   level: str | None = None) -> list[KnowledgeDoc]:
@@ -117,7 +121,7 @@ class KnowledgeStore:
         ]
         self._client.upsert(collection_name=_COLLECTION, points=points)
         self._docs[doc.doc_id] = doc
-        self._save_docs()
+        self._save_docs(doc.doc_id)
 
     @staticmethod
     def _scope_filter(category: str | None, space: str | None):
@@ -206,11 +210,11 @@ class KnowledgeStore:
             return 0
         for d in docs:
             d.space = new
+        self._save_docs(*[d.doc_id for d in docs])
         self._client.set_payload(
             collection_name=_COLLECTION, payload={"space": new},
             points=Filter(must=[FieldCondition(key="space", match=MatchValue(value=old))]),
         )
-        self._save_docs()
         return len(docs)
 
     def delete_doc(self, doc_id: str) -> bool:
@@ -223,5 +227,5 @@ class KnowledgeStore:
             ),
         )
         del self._docs[doc_id]
-        self._save_docs()
+        self._save_docs(removed=doc_id)
         return True

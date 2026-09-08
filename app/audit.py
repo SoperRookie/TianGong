@@ -165,7 +165,10 @@ def record(*, user: str | None, ip: str, ua: str, kind: str, action: str, target
     try:
         from sqlalchemy import insert
 
-        with get_engine().begin() as conn:
+        from app.db import persist_async
+
+        def _write():
+          with get_engine().begin() as conn:
             conn.execute(insert(audit_log).values(
                 at=_now(), user=(str(user)[:64] if user else None), ip=(ip or "")[:64], ua=(ua or "")[:300],
                 project=(str(project)[:191] if project else None),
@@ -173,6 +176,8 @@ def record(*, user: str | None, ip: str, ua: str, kind: str, action: str, target
                 status=int(status), detail=(detail or "")[:5000], duration_ms=int(duration_ms),
                 security=1 if (security if security is not None else kind in SECURITY_KINDS) else 0,
             ))
+
+        persist_async(_write)
     except Exception as e:  # pragma: no cover
         from loguru import logger
 

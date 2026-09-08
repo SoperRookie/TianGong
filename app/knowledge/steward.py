@@ -69,8 +69,9 @@ class KnowledgeSteward:
     ) -> KnowledgeBundle:
         total_shares = sum(QUOTA_SHARES.values())
         candidates: dict[str, list[SearchHit]] = {}
+        [vector] = await self.service.embedder.embed([query])  # 多分类共用一次查询向量
         for category in categories:
-            candidates[category] = await self._layered_search(query, category, space)
+            candidates[category] = await self._layered_search(query, category, space, vector)
 
         budgets = {
             c: self.budget_chars * QUOTA_SHARES[c] // total_shares for c in categories
@@ -110,7 +111,7 @@ class KnowledgeSteward:
         return bundle
 
     async def _layered_search(
-        self, query: str, category: str, space: str | None
+        self, query: str, category: str, space: str | None, vector: list[float] | None = None
     ) -> list[SearchHit]:
         """分层检索（完整需求 16 章 / 核心规则 24）：检索范围 = 当前项目（含模块层）+ 公共层。
 
@@ -119,7 +120,7 @@ class KnowledgeSteward:
         from app.knowledge.schemas import PUBLIC_SPACE
 
         return await self.service.search(
-            query, top_k=_CANDIDATES_PER_CATEGORY, category=category, space=space or PUBLIC_SPACE
+            query, top_k=_CANDIDATES_PER_CATEGORY, category=category, space=space or PUBLIC_SPACE, vector=vector
         )
 
     @staticmethod

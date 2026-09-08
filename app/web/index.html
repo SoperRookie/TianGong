@@ -1647,7 +1647,13 @@ async function init() {
   refreshList();
   if (!window._pollStarted) {  // 定时器与全局监听只注册一次：重新登录不叠加轮询
     window._pollStarted = true;
-    setInterval(refreshList, 3000);
+    // 自适应轮询：有任务在跑或停留在任务列表页 3 秒一次，其余情况 15 秒一次
+    let _lastPoll = 0;
+    setInterval(() => {
+      const busy = (_tasksCache || []).some(taskBusy) || (currentTask && taskBusy(currentTask));
+      const interval = busy || currentView === 'board' ? 3000 : 15000;
+      if (Date.now() - _lastPoll >= interval) { _lastPoll = Date.now(); refreshList(); }
+    }, 1000);
     setInterval(() => {
       if (curUser && currentTask && taskBusy(currentTask) && !editingInDetail()) renderDetail();
     }, 1000);

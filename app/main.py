@@ -73,6 +73,9 @@ async def lifespan(app: FastAPI):
         settings.log_dir,
     )
     yield
+    from app.db import flush_persist
+
+    flush_persist()
     set_current(None)
     _release_instance_lock()
     logger.info("服务关闭")

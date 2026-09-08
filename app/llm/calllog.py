@@ -52,6 +52,7 @@ ai_calls = Table(
     Column("output_preview", Text().with_variant(LONGTEXT, "mysql"), nullable=False, default=""),
     Index("ix_ai_calls_task", "task_id"),
     Index("ix_ai_calls_project_at", "project", "at"),
+    Index("ix_ai_calls_at", "at"),
 )
 
 
@@ -124,8 +125,13 @@ def record_call(messages: list[dict], result: Any = None, error: Exception | Non
             "input_chars": len(text_in), "output_chars": len(content),
             "input_preview": text_in[:PREVIEW_CHARS], "output_preview": content[:PREVIEW_CHARS],
         }
-        with get_engine().begin() as conn:
-            conn.execute(insert(ai_calls).values(**row))
+        from app.db import persist_async
+
+        def _write(r=row):
+            with get_engine().begin() as conn:
+                conn.execute(insert(ai_calls).values(**r))
+
+        persist_async(_write)
     except Exception as e:  # pragma: no cover - 日志写入失败不影响业务
         from loguru import logger
 

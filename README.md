@@ -57,7 +57,17 @@ bash scripts/dev.sh
 open http://localhost:8000/
 ```
 
-运行测试：`pytest`（121 项，LLM 调用以桩件隔离，无需网络）。
+运行测试：`pytest`（222 项，LLM 调用以桩件隔离，无需网络）。
+
+### 部署须知
+
+- **单进程运行**：用户/项目/任务等为进程内内存态 + 数据库回写，`uvicorn` 不要加 `--workers`；启动时会在 `outputs/.instance.lock` 加文件锁，第二个实例会直接拒绝启动。
+- **初始管理员**：未配置 `TIANGONG_ADMIN_PASSWORD` 时首启生成随机口令打印在日志（仅一次），首次登录强制改密。
+- **反向代理**：配置 `TIANGONG_TRUSTED_PROXIES=代理IP` 后才采信 `X-Forwarded-For`，否则审计 IP 取直连地址。
+- **OpenAPI 文档**默认关闭（`TIANGONG_EXPOSE_DOCS=true` 开启）；登录接口有失败锁定（5 次 / 15 分钟）。
+- **模型密钥**只能通过形如 `XXX_API_KEY` 的环境变量引用，配置样例见 `.env.example`。
+- 上传限制：单文件 `TIANGONG_MAX_UPLOAD_SIZE_MB`（默认 50）、执行附件 200MB、PDF 300 页、zip 类文档解压后 300MB。
+- 日志留存：AI 调用日志与操作日志默认保留 180 天（`TIANGONG_LOG_RETENTION_DAYS`）。
 
 ## 演示路径（约 10 分钟）
 

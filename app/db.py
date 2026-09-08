@@ -67,6 +67,41 @@ recycle_bin = Table(
 )
 
 
+# 后台持久化：单线程执行器保证写入顺序，读仍走内存；避免每次 save 阻塞事件循环
+_persist_pool = None
+
+
+def persist_async(fn, *args, **kwargs) -> None:
+    """在事件循环内把同步写库丢到单线程执行器（FIFO）；无事件循环（脚本/测试直调）时同步执行。"""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    global _persist_pool
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        fn(*args, **kwargs)
+        return
+    if _persist_pool is None:
+        _persist_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tg-persist")
+
+    def _run():
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:  # pragma: no cover
+            logger.error("后台持久化失败：{}", e)
+
+    loop.run_in_executor(_persist_pool, _run)
+
+
+def flush_persist() -> None:
+    """等待后台写入全部完成（测试隔离 / 关闭前调用）。"""
+    global _persist_pool
+    if _persist_pool is not None:
+        _persist_pool.shutdown(wait=True)
+        _persist_pool = None
+
+
 @lru_cache
 def get_engine():
     url = get_settings().db_url

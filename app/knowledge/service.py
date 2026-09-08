@@ -49,6 +49,7 @@ class KnowledgeService:
         vectors = await self.embedder.embed(chunks)
         record = self._new_doc(source=path.name, category="test_cases", space=space, chunk_count=len(chunks), **meta)
         self.store.upsert_chunks(record, chunks, vectors)
+        self.invalidate_cache()
         return record
 
     async def _ingest(self, text: str, source: str, category: str, space: str, **meta) -> KnowledgeDoc:
@@ -65,6 +66,7 @@ class KnowledgeService:
                 self.store.delete_doc(old.doc_id)
         record = self._new_doc(source=source, category=category, space=space, chunk_count=len(chunks), **meta)
         self.store.upsert_chunks(record, chunks, vectors)
+        self.invalidate_cache()
         return record
 
     def _check_dims(self, vectors: list[list[float]]) -> None:
@@ -98,17 +100,34 @@ class KnowledgeService:
         category: str | None = None,
         space: str | None = None,
         mode: str = "hybrid",
+        vector: list[float] | None = None,
     ) -> list[SearchHit]:
-        """检索知识切片。mode: hybrid（向量+关键词 RRF 融合，F-7-3b，默认）/ vector。"""
+        """检索知识切片。mode: hybrid（向量+关键词 RRF 融合，F-7-3b，默认）/ vector。
+        vector 可传入已算好的查询向量（知识管家多分类检索共用一次 embedding）。"""
         if category is not None and category not in CATEGORIES:
             raise InvalidCategoryError(category)
-        [vector] = await self.embedder.embed([query])
+        if vector is None:
+            [vector] = await self.embedder.embed([query])
         vector_hits = self.store.search(
             vector, top_k=top_k if mode == "vector" else top_k * 3, category=category, space=space
         )
         if mode == "vector":
             return vector_hits
         return self._fuse(query, vector_hits, top_k, category, space)
+
+    _corpus_cache: dict | None = None
+
+    def _corpus(self, category: str | None, space: str | None) -> list[SearchHit]:
+        """关键词侧语料按 (分类, 空间) 缓存，入库/删除/改名时整体失效（不再每次全量 scroll）。"""
+        if self._corpus_cache is None:
+            self._corpus_cache = {}
+        key = (category, space)
+        if key not in self._corpus_cache:
+            self._corpus_cache[key] = self.store.iter_chunks(category=category, space=space)
+        return self._corpus_cache[key]
+
+    def invalidate_cache(self) -> None:
+        self._corpus_cache = None
 
     def _fuse(
         self,
@@ -120,7 +139,7 @@ class KnowledgeService:
     ) -> list[SearchHit]:
         from app.knowledge.hybrid import bm25_scores, rrf_merge
 
-        corpus = self.store.iter_chunks(category=category, space=space)
+        corpus = self._corpus(category, space)
         if not corpus:
             return vector_hits[:top_k]
         by_key = {(h.doc_id, h.chunk_index): i for i, h in enumerate(corpus)}

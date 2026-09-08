@@ -85,8 +85,14 @@ class ProjectStore:
         p.setdefault("updated_by", p.get("created_by"))
         return p
 
-    def _persist(self) -> None:
-        self._doc.replace_all(self._projects)
+    def _persist(self, *names: str, removed: str | None = None) -> None:
+        """逐键写入（不再整表 replace_all）；不传 names 时写全部（仅迁移/批量场景）。"""
+        if removed:
+            self._doc.remove(removed)
+        keys = names or tuple(self._projects)
+        for n in keys:
+            if n in self._projects:
+                self._doc.put(n, self._projects[n])
 
     # ---- 查询 ----
 
@@ -124,9 +130,8 @@ class ProjectStore:
             self._projects[name] = self._normalize({
                 "name": name, "created_by": created_by, "created_at": _now(),
             })
+            self._persist(name)
             added = True
-        if added:
-            self._persist()
 
     def create(
         self, name: str, description: str = "", created_by: str | None = None,
@@ -146,7 +151,7 @@ class ProjectStore:
         if project["owner"]:
             project["members"].setdefault(project["owner"], "project_admin")
         self._projects[name] = project
-        self._persist()
+        self._persist(name)
         return project
 
     def update(
@@ -157,6 +162,7 @@ class ProjectStore:
         project = self._projects.get(name)
         if project is None:
             raise ProjectError(f"项目不存在: {name}")
+        removed = None
         if new_name is not None and (new_name := new_name.strip()) and new_name != name:
             new_name = check_name(new_name, "项目名")
             if new_name in self._projects:
@@ -164,6 +170,7 @@ class ProjectStore:
             self._projects.pop(name)
             project["name"] = new_name
             self._projects[new_name] = project
+            removed = name
         if description is not None:
             project["description"] = description.strip()
         if code is not None:
@@ -181,14 +188,14 @@ class ProjectStore:
             project["status"] = status
         project["updated_at"] = _now()
         project["updated_by"] = operator
-        self._persist()
+        self._persist(project["name"], removed=removed)
         return project
 
     def delete(self, name: str) -> None:
         if name not in self._projects:
             raise ProjectError(f"项目不存在: {name}")
         self._projects.pop(name)
-        self._persist()
+        self._persist(removed=name)
 
     # ---- 成员（3.4）----
 
@@ -206,7 +213,7 @@ class ProjectStore:
             raise ProjectError("项目至少保留一名项目管理员")
         project["members"][username] = role
         project["updated_at"], project["updated_by"] = _now(), operator
-        self._persist()
+        self._persist(name)
         return project
 
     def remove_member(self, name: str, username: str, operator: str | None = None) -> dict:
@@ -219,7 +226,7 @@ class ProjectStore:
             raise ProjectError("项目至少保留一名项目管理员")
         project["members"].pop(username)
         project["updated_at"], project["updated_by"] = _now(), operator
-        self._persist()
+        self._persist(name)
         return project
 
     def sole_admin_projects(self, username: str) -> list[str]:
@@ -232,13 +239,10 @@ class ProjectStore:
         blocked = self.sole_admin_projects(username)
         if blocked:
             raise ProjectError(f"{username} 是项目 {', '.join(blocked)} 的唯一项目管理员，请先指定其他项目管理员")
-        changed = False
         for p in self._projects.values():
             if username in p["members"]:
                 p["members"].pop(username)
-                changed = True
-        if changed:
-            self._persist()
+                self._persist(p["name"])
 
     @staticmethod
     def _admin_count(project: dict) -> int:
