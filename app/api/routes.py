@@ -5,6 +5,7 @@ M1 为同步执行；M4 接入 Celery 异步队列与任务进度。
 """
 
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -998,6 +999,21 @@ async def create_task(
         task_id, sources, len(requirement), project or "-", template.template_id, confirm_points, async_mode,
     )
 
+    return await _launch_task(
+        request, task_id, task_dir, sources, requirement, template, model, reviewer_model,
+        knowledge_space, project, confirm_points, async_mode,
+    )
+
+
+async def _launch_task(
+    request: Request, task_id: str, task_dir: Path, sources: list[str], requirement: str,
+    template, model: str | None, reviewer_model: str | None, knowledge_space: str | None,
+    project: str | None, confirm_points: bool, async_mode: bool,
+    extra_context: dict | None = None,
+) -> dict:
+    """任务启动（拆解确认 / 直接生成，同步或后台）；需求中心发起测试设计复用此函数。"""
+    settings = get_settings()
+    store = request.app.state.tasks
     task_context = {
         "requirement": requirement,
         "model": model,
@@ -1005,6 +1021,7 @@ async def create_task(
         "template_id": template.template_id,
         "knowledge_space": knowledge_space,
         "project": project,
+        **(extra_context or {}),
     }
 
     # 1.5 拆解确认流程（F-3-3）：只做需求分析，等待用户确认测试点。
@@ -2878,6 +2895,413 @@ async def download_plan_attachment(request: Request, plan_id: str, att_id: str) 
     raise HTTPException(status_code=404, detail=f"附件不存在: {att_id}")
 
 
+# ---- 需求中心（完整需求 5 章 / 21 章）----
+
+
+def _req(request: Request, req_id: str, action: str) -> dict:
+    item = request.app.state.requirements.get(req_id)
+    if item is None or item.get("deleted_at"):
+        raise HTTPException(status_code=404, detail=f"需求不存在: {req_id}")
+    _require_project(request, item["project"], action)
+    return item
+
+
+def _attachment_record(saved: Path, doc=None, error: str | None = None) -> dict:
+    return {
+        "att_id": uuid.uuid4().hex[:8], "filename": saved.name, "stored": str(saved),
+        "size": saved.stat().st_size if saved.exists() else 0,
+        "parsed": doc is not None, "error": error,
+        "text": doc.full_text if doc is not None else "",
+        "chars": len(doc.full_text) if doc is not None else 0,
+        "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+async def _parse_attachments(request: Request, files: list[UploadFile], save_dir: Path) -> list[dict]:
+    """逐文件解析：失败不中断、逐条记录失败原因（5.4 禁止部分失败无提示）。"""
+    settings = get_settings()
+    llm = request.app.state.llm
+    out = []
+    for upload in files:
+        try:
+            saved = await _read_upload(upload, save_dir, settings.max_upload_size_mb * 1024 * 1024)
+        except HTTPException as e:
+            out.append({"att_id": uuid.uuid4().hex[:8], "filename": upload.filename or "文件", "stored": "",
+                        "size": 0, "parsed": False, "error": str(e.detail), "text": "", "chars": 0,
+                        "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+            continue
+        out.append(await _parse_saved_attachment(saved, llm))
+    return out
+
+
+async def _parse_saved_attachment(saved: Path, llm) -> dict:
+    try:
+        if saved.suffix.lower() in IMAGE_SUFFIXES:
+            doc = await parse_image(saved, llm)
+        else:
+            doc = await enrich_images(parse_file(saved), llm)
+        return _attachment_record(saved, doc)
+    except (UnsupportedFormatError, ScannedPDFError, NoVisionModelError, MissingAPIKeyError,
+            AllModelsFailedError, ValueError) as e:
+        logger.warning("需求附件解析失败 {}：{}", saved.name, e)
+        return _attachment_record(saved, None, error=str(e))
+    except Exception as e:  # 解析器内部异常也必须显式落到附件上
+        logger.exception("需求附件解析异常 {}", saved.name)
+        return _attachment_record(saved, None, error=f"解析异常：{e}")
+
+
+def _req_dir(req_id: str) -> Path:
+    d = get_settings().outputs_dir / "requirements" / req_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
+    from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
+    from app.requirements import REQ_STATUSES, SOURCE_TYPES
+
+    rstore = request.app.state.requirements
+    view = {
+        **{k: v for k, v in item.items() if k != "attachments"},
+        "attachments": [{k: v for k, v in a.items() if k != "text"} for a in item["attachments"]],
+        "status_label": REQ_STATUSES.get(item["status"], item["status"]),
+        "source_label": SOURCE_TYPES.get(item["source_type"], item["source_type"]),
+        "open_questions": len(rstore.open_questions(item)),
+        "task_count": len(item["tasks"]),
+        "analysis_labels": REQUIREMENT_ANALYSIS_LABELS,
+        "parse_failed": sum(1 for a in item["attachments"] if not a.get("parsed")),
+    }
+    mstore = request.app.state.modules
+    if item.get("module_id"):
+        view["module_path"] = mstore.path(item["module_id"]) if mstore.get(item["module_id"]) else None
+    if item.get("version_id"):
+        v = request.app.state.versions.get(item["version_id"])
+        view["version_name"] = v["name"] if v else None
+    if with_trace:
+        view["trace"] = _req_trace(request, item)
+    return view
+
+
+def _req_trace(request: Request, item: dict) -> dict:
+    """需求 → 测试点 → 用例 → 计划 → 执行 的正向追溯与覆盖识别（21 章）。"""
+    from app.reports import plan_exec_index
+    from app.tasks.points import iter_points
+
+    tstore = request.app.state.tasks
+    plans = request.app.state.plans.list(project=item["project"])
+    exec_idx = plan_exec_index(plans)
+    in_plan: set[tuple[str, str]] = set()
+    for plan in plans:
+        for it in plan["items"]:
+            in_plan.add((it["task_id"], it["uid"]))
+    tasks, totals = [], {"points": 0, "points_approved": 0, "cases": 0, "cases_approved": 0,
+                         "in_plan": 0, "executed": 0, "exec_pass": 0}
+    for task_id in item["tasks"]:
+        r = tstore.get(task_id)
+        if r is None:
+            continue
+        points = list(iter_points((r.analysis or {}).get("test_points")
+                                  or (r.result or {}).get("test_points") or []))
+        cases = (r.result or {}).get("cases", [])
+        t = {"task_id": task_id, "status": r.status, "created_at": r.created_at, "created_by": r.created_by,
+             "points": len(points), "points_approved": sum(1 for _, p in points if p.get("status") == "approved"),
+             "cases": len(cases),
+             "cases_approved": sum(1 for c in cases if (r.case_reviews.get(str(c.get("uid") or "")) or {}).get("status") == "approved"),
+             "in_plan": sum(1 for c in cases if (task_id, str(c.get("uid") or "")) in in_plan),
+             "executed": 0, "exec_pass": 0}
+        for c in cases:
+            planned = exec_idx.get((task_id, str(c.get("uid") or "")))
+            if planned and planned.get("latest"):
+                t["executed"] += 1
+                if planned["latest"].get("status") == "pass":
+                    t["exec_pass"] += 1
+        tasks.append(t)
+        for k in totals:
+            totals[k] += t[k]
+    coverage = {
+        "has_points": totals["points"] > 0,
+        "has_cases": totals["cases"] > 0,
+        "in_plan": totals["in_plan"] > 0,
+        "executed": totals["executed"] > 0,
+    }
+    return {"tasks": tasks, "totals": totals, "coverage": coverage}
+
+
+@router.get("/api/v1/requirements")
+async def list_requirements(
+    request: Request, project: str | None = None, status: str = "", keyword: str = "",
+    module_id: str = "", version_id: str = "", include_deleted: bool = False,
+) -> dict:
+    from app.requirements import REQ_STATUSES
+
+    if project:
+        _require_project(request, project, "requirement.view")
+    kw = keyword.strip().lower()
+    out = []
+    for item in request.app.state.requirements.list(project or None, include_deleted=include_deleted):
+        if not _record_visible(request, item["project"]):
+            continue
+        if status and item["status"] != status:
+            continue
+        if module_id and item.get("module_id") != module_id:
+            continue
+        if version_id and item.get("version_id") != version_id:
+            continue
+        if kw and kw not in item["title"].lower() and kw not in item["raw_text"].lower():
+            continue
+        v = _req_view(request, item)
+        v.pop("raw_text", None)
+        v.pop("analysis", None)
+        v["questions"] = len(item["questions"])
+        out.append(v)
+    return {"requirements": out, "statuses": REQ_STATUSES}
+
+
+@router.post("/api/v1/requirements")
+async def create_requirement(
+    request: Request,
+    project: str = Form(...),
+    title: str = Form(...),
+    text: str = Form(default=""),
+    description: str = Form(default=""),
+    version_id: str = Form(default=""),
+    module_id: str = Form(default=""),
+    files: list[UploadFile] = File(default=[]),
+) -> dict:
+    """新建需求：手工文本 / 粘贴原文 / 上传文件（逐文件解析并记录失败原因）。"""
+    from app.requirements import RequirementError
+
+    _require_project(request, project, "requirement.edit")
+    if request.app.state.projects.get(project) is None:
+        if _is_admin(request):
+            request.app.state.projects.ensure([project], created_by=_operator(request))
+        else:
+            raise HTTPException(status_code=403, detail="无权访问该项目")
+    rstore = request.app.state.requirements
+    if module_id and (request.app.state.modules.get(module_id) or {}).get("project") != project:
+        raise HTTPException(status_code=400, detail="模块不属于该项目")
+    if version_id and (request.app.state.versions.get(version_id) or {}).get("project") != project:
+        raise HTTPException(status_code=400, detail="版本不属于该项目")
+    try:
+        item = rstore.create(project, title, text, created_by=_operator(request), description=description,
+                             source_type="mixed" if (text.strip() and files) else ("file" if files else "manual"),
+                             version_id=version_id or None, module_id=module_id or None,
+                             has_files=bool(files))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if files:
+        atts = await _parse_attachments(request, files, _req_dir(item["req_id"]))
+        rstore.add_attachments(item["req_id"], atts, operator=_operator(request))
+    logger.info("需求已创建：{}「{}」（{}，附件 {}）", item["req_id"], item["title"], project, len(files))
+    return _req_view(request, rstore.get(item["req_id"]))
+
+
+@router.get("/api/v1/requirements/{req_id}")
+async def get_requirement(request: Request, req_id: str) -> dict:
+    item = _req(request, req_id, "requirement.view")
+    view = _req_view(request, item, with_trace=True)
+    view["attachments"] = [{**{k: v for k, v in a.items() if k != "text"}, "preview": (a.get("text") or "")[:3000]}
+                           for a in item["attachments"]]
+    return view
+
+
+class RequirementUpdateBody(BaseModel):
+    title: str | None = None
+    description: str | None = None   # 人工补充（独立于原文）
+    version_id: str | None = None
+    module_id: str | None = None
+    status: str | None = None        # 仅允许 done / archived / designing 之间人工流转
+
+
+@router.put("/api/v1/requirements/{req_id}")
+async def update_requirement(request: Request, req_id: str, body: RequirementUpdateBody) -> dict:
+    from app.requirements import RequirementError
+
+    item = _req(request, req_id, "requirement.edit")
+    if body.status and body.status not in ("done", "archived", "designing"):
+        raise HTTPException(status_code=400, detail="状态只能人工流转为 设计中 / 已完成 / 已归档")
+    if body.module_id and (request.app.state.modules.get(body.module_id) or {}).get("project") != item["project"]:
+        raise HTTPException(status_code=400, detail="模块不属于该项目")
+    if body.version_id and (request.app.state.versions.get(body.version_id) or {}).get("project") != item["project"]:
+        raise HTTPException(status_code=400, detail="版本不属于该项目")
+    fields = body.model_dump(exclude_none=True)
+    for k in ("module_id", "version_id"):  # 传空串表示清除
+        if k in fields and fields[k] == "":
+            item[k] = None
+            fields.pop(k)
+    try:
+        item = request.app.state.requirements.update(req_id, operator=_operator(request), **fields)
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _req_view(request, item)
+
+
+@router.delete("/api/v1/requirements/{req_id}")
+async def delete_requirement(request: Request, req_id: str) -> dict:
+    """逻辑删除（核心规则 20）。"""
+    _req(request, req_id, "requirement.edit")
+    request.app.state.requirements.delete(req_id, operator=_operator(request))
+    return {"deleted": req_id}
+
+
+@router.post("/api/v1/requirements/{req_id}/restore")
+async def restore_requirement(request: Request, req_id: str) -> dict:
+    from app.requirements import RequirementError
+
+    item = request.app.state.requirements.get(req_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"需求不存在: {req_id}")
+    _require_project(request, item["project"], "requirement.edit")
+    try:
+        return _req_view(request, request.app.state.requirements.restore(req_id))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/api/v1/requirements/{req_id}/attachments")
+async def add_requirement_attachments(
+    request: Request, req_id: str, files: list[UploadFile] = File(default=[])
+) -> dict:
+    item = _req(request, req_id, "requirement.edit")
+    if not files:
+        raise HTTPException(status_code=400, detail="请选择文件")
+    atts = await _parse_attachments(request, files, _req_dir(req_id))
+    item = request.app.state.requirements.add_attachments(req_id, atts, operator=_operator(request))
+    return _req_view(request, item)
+
+
+@router.post("/api/v1/requirements/{req_id}/attachments/{att_id}/reparse")
+async def reparse_requirement_attachment(request: Request, req_id: str, att_id: str) -> dict:
+    """重新解析失败附件（5.4）。"""
+    from app.requirements import RequirementError
+
+    item = _req(request, req_id, "requirement.edit")
+    att = next((a for a in item["attachments"] if a["att_id"] == att_id), None)
+    if att is None:
+        raise HTTPException(status_code=404, detail=f"附件不存在: {att_id}")
+    if not att.get("stored") or not Path(att["stored"]).exists():
+        raise HTTPException(status_code=409, detail="原文件已不存在，请重新上传")
+    parsed = await _parse_saved_attachment(Path(att["stored"]), request.app.state.llm)
+    parsed["att_id"] = att_id
+    try:
+        item = request.app.state.requirements.replace_attachment(req_id, att_id, parsed)
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _req_view(request, item)
+
+
+@router.get("/api/v1/requirements/{req_id}/attachments/{att_id}")
+async def download_requirement_attachment(request: Request, req_id: str, att_id: str) -> FileResponse:
+    item = _req(request, req_id, "requirement.view")
+    att = next((a for a in item["attachments"] if a["att_id"] == att_id), None)
+    if att is None or not att.get("stored") or not Path(att["stored"]).exists():
+        raise HTTPException(status_code=404, detail="附件不存在")
+    return FileResponse(att["stored"], filename=att["filename"])
+
+
+class AnalyzeBody(BaseModel):
+    model: str | None = None
+
+
+@router.post("/api/v1/requirements/{req_id}/analyze")
+async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBody | None = None) -> dict:
+    """AI 需求分析（5.5）：11 项结构化输出，独立于原文保存；待确认事项进入确认流。"""
+    from app.agents import run_requirement_analysis
+    from app.requirements import design_brief
+
+    item = _req(request, req_id, "requirement.ai")
+    text = design_brief({**item, "analysis": None, "questions": []})
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="需求原文为空（文件解析失败时请先重新解析）")
+    model = body.model if body else None
+    try:
+        analysis = await run_requirement_analysis(text, request.app.state.llm, model=model)
+    except UnknownModelError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    meta = {"model": analysis.get("model_name"), "chunks": analysis.get("chunks"),
+            "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    item = request.app.state.requirements.set_analysis(req_id, analysis, meta)
+    logger.info("需求 {} AI 分析完成：待确认 {} 项（{}）", req_id, len(analysis.get("open_questions") or []), meta["model"])
+    return _req_view(request, item)
+
+
+class QuestionBody(BaseModel):
+    question: str
+
+
+@router.post("/api/v1/requirements/{req_id}/questions")
+async def add_requirement_question(request: Request, req_id: str, body: QuestionBody) -> dict:
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    try:
+        item = request.app.state.requirements.add_question(req_id, body.question, operator=_operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _req_view(request, item)
+
+
+class AnswerBody(BaseModel):
+    answer: str = ""
+    reopen: bool = False
+
+
+@router.post("/api/v1/requirements/{req_id}/questions/{q_id}")
+async def answer_requirement_question(request: Request, req_id: str, q_id: str, body: AnswerBody) -> dict:
+    """确认待确认事项（核心规则 4：确认后才能继续测试设计）。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    try:
+        item = request.app.state.requirements.answer_question(
+            req_id, q_id, body.answer, operator=_operator(request), reopen=body.reopen
+        )
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _req_view(request, item)
+
+
+class DesignBody(BaseModel):
+    model: str | None = None
+    reviewer_model: str | None = None
+    template_id: str | None = None
+    knowledge_space: str | None = None
+    confirm_points: bool = True   # 默认走拆解确认（测试点评审后再生成用例）
+    async_mode: bool = True
+
+
+@router.post("/api/v1/requirements/{req_id}/design")
+async def design_from_requirement(request: Request, req_id: str, body: DesignBody | None = None) -> dict:
+    """从需求发起测试设计：创建生成任务，任务上下文回挂需求/模块/版本（追溯链源头）。"""
+    from app.requirements import design_brief
+
+    body = body or DesignBody()
+    item = _req(request, req_id, "point.ai")
+    rstore = request.app.state.requirements
+    if rstore.open_questions(item):
+        raise HTTPException(status_code=409, detail=f"仍有 {len(rstore.open_questions(item))} 项待确认事项未确认，确认后才能开始测试设计")
+    template = request.app.state.templates.get(body.template_id)
+    if template is None:
+        raise HTTPException(status_code=404, detail=f"模板不存在: {body.template_id}")
+    store = request.app.state.tasks
+    task_id, task_dir = store.new_task_dir()
+    sources = [a["filename"] for a in item["attachments"] if a.get("parsed")] or ["text"]
+    if body.model:
+        request.app.state.memory.record_usage("model", body.model)
+    request.app.state.memory.record_usage("template", template.template_id)
+    extra = {"requirement_id": req_id, "requirement_title": item["title"],
+             "module_id": item.get("module_id"), "version_id": item.get("version_id")}
+    rstore.link_task(req_id, task_id)
+    resp = await _launch_task(
+        request, task_id, task_dir, sources, design_brief(item), template, body.model, body.reviewer_model,
+        body.knowledge_space, item["project"], body.confirm_points, body.async_mode, extra_context=extra,
+    )
+    logger.info("需求 {} 发起测试设计：任务 {}（确认拆解={} 异步={}）", req_id, task_id, body.confirm_points, body.async_mode)
+    return {**resp, "requirement_id": req_id}
+
+
 # ---- 项目视角（项目管理信息架构 / 完整需求 3.2 多项目管理）----
 
 
@@ -3015,6 +3439,7 @@ async def update_project(request: Request, name: str, body: ProjectUpdateBody) -
         request.app.state.versions.rename_project(name, project["name"])
         request.app.state.modules.rename_project(name, project["name"])
         request.app.state.user_prefs.rename_project(name, project["name"])
+        request.app.state.requirements.rename_project(name, project["name"])
         logger.info("项目改名 {} → {}：联动更新 {} 个任务", name, project["name"], renamed)
     return _project_view(request, project)
 
@@ -3033,6 +3458,8 @@ async def delete_project(request: Request, name: str) -> dict:
         raise HTTPException(status_code=400, detail=f"项目下仍有 {referenced} 个任务，不可删除")
     if request.app.state.plans.list(project=name):
         raise HTTPException(status_code=400, detail="项目下仍有测试计划，不可删除")
+    if request.app.state.requirements.list(name, include_deleted=True):
+        raise HTTPException(status_code=400, detail="项目下仍有需求，不可删除")
     try:
         request.app.state.projects.delete(name)
     except ProjectError as e:
@@ -3196,8 +3623,13 @@ class ModuleReorderBody(BaseModel):
 
 
 def _module_referenced(request: Request, project: str):
-    """模块是否被项目内用例引用（按模块名或路径匹配）。"""
+    """模块是否被项目内需求/用例引用（需求按 module_id，用例按模块名或路径匹配）。"""
     names: set[str] = set()
+    mstore = request.app.state.modules
+    for req in request.app.state.requirements.list(project, include_deleted=True):
+        if req.get("module_id") and mstore.get(req["module_id"]):
+            names.add(mstore.path(req["module_id"]))
+            names.add(mstore.get(req["module_id"])["name"])
     for r in request.app.state.tasks.list(limit=100000):
         if (r.context or {}).get("project") != project:
             continue
@@ -3550,6 +3982,8 @@ async def list_tasks(
                 "created_at": r.created_at,
                 "sources": r.sources,
                 "project": (r.context or {}).get("project"),
+                "requirement_id": (r.context or {}).get("requirement_id"),
+                "requirement_title": (r.context or {}).get("requirement_title"),
                 "created_by": r.created_by,
                 "case_count": len((r.result or {}).get("cases", [])),
                 "revision_count": len(r.revisions),

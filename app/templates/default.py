@@ -37,6 +37,8 @@ class TestCase(BaseModel):
     remark: str = Field(default="", description="备注")
     extras: dict[str, str] = Field(default_factory=dict, description="自定义模板扩展字段：列名 -> 值")
     uid: str = Field(default="", description="系统内部稳定标识：审核状态跟随 uid，不受编号重排影响")
+    point_ids: list[str] = Field(default_factory=list, description="来源测试点 tp_id（完整需求 8.2 / 21 章追溯）")
+    source: str = Field(default="ai", description="来源类型（8.2）：ai / manual / import / copy / ai_fix")
     version: int = Field(default=1, description="乐观锁版本号（完整需求 11 章）：内容每次修改 +1，保存时比对拦截并发覆盖")
 
     @field_validator("case_id", "module", "title")

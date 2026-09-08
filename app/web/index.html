@@ -412,6 +412,10 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <button id="nav-projects" class="on" onclick="switchView('projects')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
       项目管理</button>
+    <div class="grp">需求中心</div>
+    <button id="nav-requirements" onclick="curReq=null;switchView('requirements')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>
+      需求列表</button>
     <div class="grp">测试点 · 用例库</div>
     <button id="nav-board" onclick="switchView('board')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>
@@ -468,6 +472,11 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <!-- 项目视图：项目列表 ⇄ 项目工作区 -->
 <div class="layout" id="view-projects" style="display:none">
   <div class="page" style="max-width:1420px" id="projArea"></div>
+</div>
+
+<!-- 需求中心：需求列表 ⇄ 需求详情（M2） -->
+<div class="layout" id="view-requirements" style="display:none">
+  <div class="page" style="max-width:1420px" id="reqArea"></div>
 </div>
 
 <!-- 工作台视图：任务列表页 ⇄ 任务详情页 -->
@@ -812,6 +821,50 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="dlg-f">
     <button class="btn ghost" onclick="$('editUserDlg').close()">取消</button>
     <button class="btn" onclick="saveUserEdit()">保存</button>
+  </div>
+</dialog>
+
+<!-- 需求：新建 -->
+<dialog id="reqDlg" style="width:680px">
+  <div class="dlg-h"><h3>新建需求</h3></div>
+  <div class="dlg-b">
+    <div style="display:flex;gap:10px">
+      <div style="flex:2"><label class="f">需求标题</label><input type="text" id="rqTitle" placeholder="如：登录与找回密码"></div>
+      <div style="flex:1"><label class="f">所属项目</label><select id="rqProject" onchange="fillReqRefs(this.value)"></select></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">版本<span class="hint">（可选）</span></label><select id="rqVersion"><option value="">—</option></select></div>
+      <div style="flex:1"><label class="f">模块<span class="hint">（可选）</span></label><select id="rqModule"><option value="">—</option></select></div>
+    </div>
+    <label class="f">需求原文<span class="hint">（粘贴文本，永久保留；可与文件混合）</span></label>
+    <textarea id="rqText" rows="6" placeholder="粘贴需求原文…"></textarea>
+    <label class="f">需求文件<span class="hint">（Word / PDF / Excel / 图片 / Markdown / TXT，可多选；解析失败会逐文件提示）</span></label>
+    <input type="file" id="rqFiles" multiple>
+    <label class="f">人工补充<span class="hint">（可选，独立于原文保存）</span></label>
+    <textarea id="rqDesc" rows="2" placeholder="补充说明 / 口头约定 / 背景"></textarea>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('reqDlg').close()">取消</button>
+    <button class="btn" id="rqSaveBtn" onclick="saveReqDlg()">创建</button>
+  </div>
+</dialog>
+
+<!-- 需求：发起测试设计 -->
+<dialog id="designDlg">
+  <div class="dlg-h"><h3>开始测试设计</h3><span class="meta" id="dsMeta"></span></div>
+  <div class="dlg-b">
+    <label class="f">生成模型 / 评审模型</label>
+    <div style="display:flex;gap:8px"><select id="dsModel"></select><select id="dsReviewer"></select></div>
+    <label class="f">用例模板</label><select id="dsTemplate"></select>
+    <div class="toolbar">
+      <label class="check"><input type="checkbox" id="dsConfirm" checked> 先审核测试点</label>
+      <label class="check"><input type="checkbox" id="dsAsync" checked> 后台执行</label>
+    </div>
+    <div class="hint" style="margin-top:8px">拆解/生成使用：需求原文 + 附件解析结果 + 人工补充 + 待确认事项的确认结论；任务将回挂本需求（追溯链）</div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('designDlg').close()">取消</button>
+    <button class="btn" id="dsGoBtn" onclick="submitDesign()">开始</button>
   </div>
 </dialog>
 
@@ -1374,6 +1427,7 @@ function setCurrentProject(name, opts = {}) {
   if (opts.silent) return;
   if (currentView === 'projects') { if (curProjectName) openProject(curProjectName); else { curProject = null; renderProjects(); } }
   else if (currentView === 'board') { if (currentTask) backToList(); else renderTaskListRows(); }
+  else if (currentView === 'requirements') { curReq = null; renderRequirements(); }
   else if (currentView === 'plans') { curPlan = null; renderPlans(); }
   else if (currentView === 'cases') { acPage = 1; renderAllCases(); }
   else if (currentView === 'reports') renderReports();
@@ -1411,7 +1465,7 @@ function renderProjMenu(q) {
 document.addEventListener('click', () => { const m = $('curProjMenu'); if (m) m.style.display = 'none'; });
 
 /* ---------- 视图切换与面包屑 ---------- */
-const VIEW_LABELS = {projects:'项目管理', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
+const VIEW_LABELS = {projects:'项目管理', requirements:'需求列表', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
 function setCrumb(html) { $('crumb').innerHTML = html; }
 function crumbForBoard() {
   if (currentTask) {
@@ -1425,7 +1479,7 @@ function switchView(v) {
     v = 'projects';
   }
   currentView = v;
-  for (const k of ['projects','board','plans','cases','reports','rules','memory','models','users']) {
+  for (const k of ['projects','requirements','board','plans','cases','reports','rules','memory','models','users']) {
     $('view-'+k).style.display = k===v ? '' : 'none';
     $('nav-'+k).classList.toggle('on', k===v && !(k==='plans' && plansMine));
   }
@@ -1434,8 +1488,10 @@ function switchView(v) {
   if (v==='board') crumbForBoard();
   else if (v==='projects') crumbForProjects();
   else if (v==='plans') crumbForPlans();
+  else if (v==='requirements') crumbForReqs();
   else setCrumb(VIEW_LABELS[v]);
   if (v==='projects') renderProjects();
+  if (v==='requirements') renderRequirements();
   if (v==='plans') renderPlans();
   if (v==='cases') renderAllCases();
   if (v==='reports') renderReports();
@@ -1912,6 +1968,7 @@ function renderOverview(t) {
           <div><dt>来源</dt><dd>${(t.sources||[]).map(esc).join('、')||'-'}</dd></div>
           <div><dt>创建人</dt><dd>${esc(t.created_by||'—')}</dd></div>
           <div><dt>项目</dt><dd>${esc(ctx.project||'—')}</dd></div>
+          <div><dt>来源需求</dt><dd>${ctx.requirement_id?`<a onclick="openRequirement('${esc(ctx.requirement_id)}')">${esc(ctx.requirement_title||ctx.requirement_id)}</a>`:'—'}</dd></div>
           <div><dt>生成模型</dt><dd>${esc(ctx.model||'默认')}</dd></div>
           <div><dt>模板</dt><dd>${esc(ctx.template_id||'—')}</dd></div>
           <div><dt>测试点</dt><dd>${pts.length||'—'}</dd></div>
@@ -2197,6 +2254,7 @@ function renderCases(t) {
       <td style="width:80px">${esc(c.module)}</td>
       <td style="min-width:180px">${esc(c.title)}
         ${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}
+        ${(c.point_ids||[]).length?`<div class="hint" title="来源测试点">${c.point_ids.map(x=>`<code>${esc(x)}</code>`).join(' ')}</div>`:''}
         ${editingHint('case', c.uid)}
         ${rejectInfoLine(s)}</td>
       <td style="width:44px"><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
@@ -3326,6 +3384,230 @@ function renderOfflineDiff(o) {
       ${o.modified.map(x=>'<span>修改：'+esc(x.title)+'（'+x.changes.map(c=>esc(c.field)).join('/')+'）</span>').join('')}
     </div></div>`;
 }
+/* ==================== 需求中心（M2） ==================== */
+let curReq = null, _reqDetail = null, _reqsCache = [], reqStatus = '', reqKw = '', reqTab = 'raw';
+const REQ_ST_CLS = {draft:'pending', analyzed:'candidate', pending_confirm:'rejected', confirmed:'approved', designing:'candidate', done:'approved', archived:'pending'};
+function crumbForReqs() {
+  if (curReq && _reqDetail) setCrumb(`<a onclick="curReq=null;renderRequirements()">需求列表</a><span class="sep">/</span>${esc(_reqDetail.title)}`);
+  else setCrumb('需求列表');
+}
+function openRequirement(id, tab) { curReq = id; reqTab = tab || 'raw'; switchView('requirements'); }
+async function renderRequirements() {
+  if (curReq) return renderRequirementDetail();
+  crumbForReqs();
+  const q = new URLSearchParams();
+  if (curProjectName) q.set('project', curProjectName);
+  if (reqStatus) q.set('status', reqStatus);
+  if (reqKw.trim()) q.set('keyword', reqKw.trim());
+  let data;
+  try { data = await api('/api/v1/requirements?' + q); } catch (e) { return toast(e.message, 'err'); }
+  _reqsCache = data.requirements;
+  const canEdit = curProjectName ? can(curProjectName, 'requirement.edit') : (isSysAdmin() || (curUser.projects||[]).some(p => can(p.project, 'requirement.edit')));
+  const rows = data.requirements.map(r => `<tr class="rowlink" onclick="openRequirement('${r.req_id}')">
+    <td><b>${esc(r.title)}</b>${r.description?`<div class="hint">${esc(r.description.slice(0,80))}</div>`:''}</td>
+    <td class="hint">${esc(r.project)}${r.version_name?`<div>${esc(r.version_name)}</div>`:''}</td>
+    <td class="hint">${esc(r.module_path||'—')}</td>
+    <td><span class="st ${REQ_ST_CLS[r.status]||'pending'}">${esc(r.status_label)}</span>
+      ${r.open_questions?`<div class="hint" style="color:var(--warn)">待确认 ${r.open_questions}</div>`:''}
+      ${r.parse_failed?`<div class="hint" style="color:var(--danger)">${r.parse_failed} 个附件解析失败</div>`:''}</td>
+    <td class="hint">${esc(r.source_label)}${r.attachments.length?` · ${r.attachments.length} 附件`:''}</td>
+    <td>${r.task_count?`<b>${r.task_count}</b> 个任务`:'<span class="hint">未设计</span>'}</td>
+    <td class="hint">${esc(r.created_by||'')}<div>${relTime(r.created_at)}</div></td>
+  </tr>`).join('');
+  $('reqArea').innerHTML = `<div class="card">
+    <div class="card-h"><h3>需求列表</h3><span class="meta">原文永久保留 · AI 分析 11 项 · 待确认事项确认后才能开始测试设计 · 需求 → 测试点 → 用例 → 计划 → 执行 追溯</span>
+      <div class="grow">
+        <input type="text" placeholder="搜索标题 / 原文" value="${esc(reqKw)}" style="width:180px" onchange="reqKw=this.value;renderRequirements()">
+        <select style="width:120px" onchange="reqStatus=this.value;renderRequirements()"><option value="">全部状态</option>
+          ${Object.entries(data.statuses).map(([k,v])=>`<option value="${k}" ${reqStatus===k?'selected':''}>${v}</option>`).join('')}</select>
+        ${canEdit?`<button class="btn" onclick="openReqDlg()">＋ 新建需求</button>`:''}</div></div>
+    <div class="card-b"><div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
+      <thead><tr><th>需求</th><th style="width:120px">项目 / 版本</th><th style="width:120px">模块</th><th style="width:110px">状态</th><th style="width:130px">来源</th><th style="width:90px">测试设计</th><th style="width:110px">创建</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="7"><div class="empty">${curProjectName?`项目「${esc(curProjectName)}」`:''}暂无需求${canEdit?'，点击「新建需求」录入原文或上传文件':''}</div></td></tr>`}</tbody>
+    </table></div></div></div>`;
+}
+async function fillReqRefs(project) {
+  const vs = $('rqVersion'), ms = $('rqModule');
+  vs.innerHTML = '<option value="">—</option>'; ms.innerHTML = '<option value="">—</option>';
+  if (!project) return;
+  try {
+    const [v, m] = await Promise.all([api('/api/v1/projects/' + encodeURIComponent(project) + '/versions'), api('/api/v1/projects/' + encodeURIComponent(project) + '/modules')]);
+    vs.innerHTML += v.versions.map(x => `<option value="${x.version_id}">${esc(x.name)}</option>`).join('');
+    ms.innerHTML += _flattenModules(m.tree).map(x => `<option value="${x.module_id}">${'　'.repeat(x.depth-1)}${esc(x.path)}</option>`).join('');
+  } catch (e) {}
+}
+async function openReqDlg() {
+  const projects = _projectsCache.filter(p => !p.builtin && p.status !== 'archived' && can(p.project, 'requirement.edit'));
+  if (!projects.length) return toast('没有可录入需求的项目（需要测试人员及以上项目角色）', 'warn');
+  $('rqProject').innerHTML = projects.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
+  if (curProjectName && projects.some(p => p.project === curProjectName)) $('rqProject').value = curProjectName;
+  $('rqTitle').value = ''; $('rqText').value = ''; $('rqDesc').value = ''; $('rqFiles').value = '';
+  await fillReqRefs($('rqProject').value);
+  $('reqDlg').showModal();
+}
+async function saveReqDlg() {
+  const fd = new FormData();
+  fd.append('project', $('rqProject').value); fd.append('title', $('rqTitle').value.trim());
+  fd.append('text', $('rqText').value); fd.append('description', $('rqDesc').value);
+  fd.append('version_id', $('rqVersion').value); fd.append('module_id', $('rqModule').value);
+  for (const f of $('rqFiles').files) fd.append('files', f);
+  if (!$('rqTitle').value.trim()) return toast('请填写需求标题', 'warn');
+  if (!$('rqText').value.trim() && !$('rqFiles').files.length) return toast('请粘贴需求原文或上传文件', 'warn');
+  const btn = $('rqSaveBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 解析中';
+  try {
+    const r = await api('/api/v1/requirements', {method:'POST', body: fd});
+    $('reqDlg').close();
+    toast(r.parse_failed ? `需求已创建，${r.parse_failed} 个附件解析失败，请在详情中查看原因` : '需求已创建', r.parse_failed ? 'warn' : 'ok');
+    openRequirement(r.req_id);
+  } catch (e) { toast(e.message, 'err'); }
+  btn.disabled = false; btn.textContent = '创建';
+}
+async function renderRequirementDetail() {
+  let r;
+  try { r = await api('/api/v1/requirements/' + curReq); } catch (e) { toast(e.message, 'err'); curReq = null; return renderRequirements(); }
+  _reqDetail = r; crumbForReqs();
+  const canEdit = can(r.project, 'requirement.edit'), canAI = can(r.project, 'requirement.ai'), canDesign = can(r.project, 'point.ai');
+  const labels = r.analysis_labels;
+  const t = r.trace, tot = t.totals;
+  const cov = (ok, label, sub) => `<div class="stage ${ok?'s-ok':''}"><div class="lab">${label}</div><div class="n">${ok?'✓':'—'}</div><div class="sub">${sub}</div></div>`;
+  const trace = `<div class="section-t">覆盖识别<span class="hint">（需求 → 测试点 → 用例 → 计划 → 执行）</span></div>
+    <div class="pipeline">
+      ${cov(t.coverage.has_points, '已生成测试点', tot.points ? `${tot.points} 条 · 通过 ${tot.points_approved}` : '尚未拆解')}
+      ${cov(t.coverage.has_cases, '已生成用例', tot.cases ? `${tot.cases} 条 · 正式 ${tot.cases_approved}` : '尚未生成')}
+      ${cov(t.coverage.in_plan, '已进入计划', tot.in_plan ? `${tot.in_plan} 条入计划` : '未入计划')}
+      ${cov(t.coverage.executed, '已执行', tot.executed ? `${tot.executed} 条 · 通过 ${tot.exec_pass}` : '未执行')}
+    </div>
+    ${t.tasks.length ? `<div class="tbl-wrap" style="margin-top:10px"><table>
+      <tr><th style="width:110px">状态</th><th style="width:130px">任务</th><th>测试点</th><th>用例</th><th>入计划</th><th>已执行</th><th style="width:90px">创建人</th><th style="width:100px">创建时间</th></tr>
+      ${t.tasks.map(x => `<tr class="rowlink" onclick="openTaskFromProject('${x.task_id}')">
+        <td><span class="pill ${x.status}">${statusText(x.status)}</span></td><td><span class="tid-cell">${x.task_id}</span></td>
+        <td>${x.points ? `${x.points} <span class="hint">通过 ${x.points_approved}</span>` : '—'}</td>
+        <td>${x.cases ? `${x.cases} <span class="hint">正式 ${x.cases_approved}</span>` : '—'}</td>
+        <td>${x.in_plan||'—'}</td><td>${x.executed ? `${x.executed} <span class="hint">通过 ${x.exec_pass}</span>` : '—'}</td>
+        <td class="hint">${esc(x.created_by||'')}</td><td class="hint">${relTime(x.created_at)}</td></tr>`).join('')}
+    </table></div>` : '<div class="hint" style="margin-top:8px">尚未发起测试设计</div>'}`;
+
+  const attRows = r.attachments.map(a => `<tr>
+    <td>${a.stored?`<a href="/api/v1/requirements/${r.req_id}/attachments/${a.att_id}?token=${encodeURIComponent(authToken)}" target="_blank">${esc(a.filename)}</a>`:esc(a.filename)}</td>
+    <td class="hint">${(a.size/1024).toFixed(1)} KB</td>
+    <td>${a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>`:`<span class="st rejected">解析失败</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
+    <td>${canEdit&&a.stored?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">重新解析</button>`:''}</td>
+    <td class="hint" style="white-space:pre-wrap;max-width:420px">${a.parsed?esc((a.preview||'').slice(0,300))+((a.preview||'').length>300?'…':''):''}</td></tr>`).join('');
+  const rawTab = `<div class="section-t">需求原文<span class="hint">（永久保留，AI 结果不覆盖）</span></div>
+    <pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:420px;overflow:auto;font:inherit">${esc(r.raw_text||'（原文来自附件）')}</pre>
+    <div class="section-t" style="margin-top:14px;display:flex;align-items:center">附件与解析结果
+      ${canEdit?`<label class="btn ghost sm" style="margin-left:auto;cursor:pointer">＋ 上传附件<input type="file" multiple style="display:none" onchange="uploadReqAtt(this)"></label>`:''}</div>
+    ${r.attachments.length?`<div class="tbl-wrap" style="margin-top:6px"><table><tr><th>文件</th><th style="width:80px">大小</th><th style="width:160px">解析</th><th style="width:90px"></th><th>解析预览</th></tr>${attRows}</table></div>`:'<div class="hint" style="margin-top:6px">无附件</div>'}
+    <div class="section-t" style="margin-top:14px">人工补充<span class="hint">（独立于原文保存，参与测试设计）</span></div>
+    <textarea id="rqDescEdit" rows="3" style="width:100%;box-sizing:border-box" ${canEdit?'':'disabled'}>${esc(r.description||'')}</textarea>
+    ${canEdit?`<div class="toolbar" style="margin-top:6px"><button class="btn ghost sm" onclick="saveReqDesc()">保存补充</button></div>`:''}`;
+
+  const an = r.analysis;
+  const analysisTab = `<div class="toolbar" style="margin-bottom:10px">
+      ${canAI?`<select id="rqAnalyzeModel" style="width:150px">${[...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('')}</select>
+      <button class="btn sm" id="rqAnalyzeBtn" onclick="analyzeReq()">${an?'重新 AI 分析':'AI 需求分析'}</button>`:''}
+      ${r.analysis_meta?`<span class="hint">上次分析：${esc(r.analysis_meta.model||'')} · ${esc(r.analysis_meta.by||'')} · ${esc((r.analysis_meta.at||'').replace('T',' ').slice(0,16))}</span>`:'<span class="hint">尚未分析。AI 只整理需求已写明的内容，缺失规则会列入「待确认事项」而不是脑补</span>'}</div>
+    ${an?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px 24px">
+      ${Object.keys(labels).filter(k=>k!=='open_questions').map(k=>`<div><div class="section-t">${esc(labels[k])}<span class="cnt" style="margin-left:6px">${(an[k]||[]).length}</span></div>
+        ${(an[k]||[]).length?`<ul style="margin:4px 0 0 18px;padding:0;line-height:1.7">${an[k].map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<div class="hint">无</div>'}</div>`).join('')}
+    </div>`:''}`;
+
+  const qs = r.questions || [];
+  const openN = qs.filter(q=>q.status==='open').length;
+  const qTab = `<div class="hint" style="margin-bottom:8px">AI 遇到需求缺失/含糊时输出待确认事项；全部确认后才能开始测试设计（核心规则 4）。确认结论会作为需求的一部分参与拆解与生成。</div>
+    ${canEdit?`<div class="toolbar" style="margin-bottom:10px"><input type="text" id="rqNewQ" placeholder="人工补充一条待确认事项…" style="flex:1"><button class="btn ghost sm" onclick="addReqQuestion()">添加</button></div>`:''}
+    ${qs.length?`<div class="tbl-wrap"><table><tr><th style="width:36px">#</th><th>问题</th><th style="width:90px">状态</th><th>确认结论</th><th style="width:120px">确认人</th><th style="width:150px">操作</th></tr>
+      ${qs.map((q,i)=>`<tr>
+        <td class="hint">${i+1}</td><td>${esc(q.question)}${q.source==='manual'?' <span class="tag">人工</span>':''}</td>
+        <td>${q.status==='open'?'<span class="st rejected">待确认</span>':'<span class="st approved">已确认</span>'}</td>
+        <td>${q.status==='open'?(canEdit?`<input type="text" id="qa-${q.q_id}" placeholder="填写确认结论（产品/开发口径）" style="width:100%;box-sizing:border-box">`:'<span class="hint">—</span>'):esc(q.answer)}</td>
+        <td class="hint">${q.status==='open'?'':`${esc(q.by||'')}<div>${esc((q.at||'').replace('T',' ').slice(0,16))}</div>`}</td>
+        <td><div class="rowops">${canEdit?(q.status==='open'?`<button class="btn sm" onclick="answerReqQuestion('${q.q_id}')">确认</button>`:`<button class="btn ghost sm" onclick="answerReqQuestion('${q.q_id}',true)">重新打开</button>`):''}</div></td></tr>`).join('')}
+    </table></div>`:'<div class="empty">暂无待确认事项</div>'}`;
+
+  const body = reqTab==='raw' ? rawTab : reqTab==='analysis' ? analysisTab : reqTab==='questions' ? qTab : trace;
+  const designDisabled = openN>0 || r.status==='archived';
+  $('reqArea').innerHTML = `<div class="card">
+    <div class="card-h" style="border-bottom:none">
+      <button class="btn ghost sm" onclick="curReq=null;renderRequirements()">← 需求列表</button>
+      <h3>${esc(r.title)}</h3>
+      <span class="st ${REQ_ST_CLS[r.status]||'pending'}">${esc(r.status_label)}</span>
+      <span class="meta">${esc(r.project)}${r.version_name?` · ${esc(r.version_name)}`:''}${r.module_path?` · ${esc(r.module_path)}`:''} · ${esc(r.source_label)} · ${esc(r.created_by||'')} ${relTime(r.created_at)}</span>
+      <div class="grow">
+        ${canEdit?`<button class="btn ghost sm" onclick="editReqMeta()">编辑</button>`:''}
+        ${canEdit&&r.status==='designing'?`<button class="btn ghost sm" onclick="setReqStatus('done')">标记完成</button>`:''}
+        ${canEdit&&r.status!=='archived'?`<button class="btn ghost sm" onclick="setReqStatus('archived')">归档</button>`:`${canEdit?`<button class="btn ghost sm" onclick="setReqStatus('designing')">恢复</button>`:''}`}
+        ${canDesign?`<button class="btn sm" ${designDisabled?'disabled':''} title="${openN?`还有 ${openN} 项待确认事项`:''}" onclick="openDesignDlg()">开始测试设计</button>`:''}
+      </div></div>
+    <div class="dtabs">
+      <button class="${reqTab==='raw'?'on':''}" onclick="reqTab='raw';renderRequirementDetail()">原文与附件${r.parse_failed?`<span class="cnt hot">${r.parse_failed}</span>`:''}</button>
+      <button class="${reqTab==='analysis'?'on':''}" onclick="reqTab='analysis';renderRequirementDetail()">AI 需求分析</button>
+      <button class="${reqTab==='questions'?'on':''}" onclick="reqTab='questions';renderRequirementDetail()">待确认事项<span class="cnt ${openN?'hot':''}">${openN}</span></button>
+      <button class="${reqTab==='trace'?'on':''}" onclick="reqTab='trace';renderRequirementDetail()">测试设计与追溯<span class="cnt">${r.task_count}</span></button>
+    </div>
+    <div class="card-b">${body}</div></div>`;
+}
+async function saveReqDesc() {
+  try { await api('/api/v1/requirements/' + curReq, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({description: $('rqDescEdit').value})}); toast('已保存', 'ok'); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function editReqMeta() {
+  const title = await askInput('编辑需求', '需求标题', _reqDetail.title);
+  if (!title) return;
+  try { await api('/api/v1/requirements/' + curReq, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title})}); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function setReqStatus(status) {
+  try { await api('/api/v1/requirements/' + curReq, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({status})}); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function uploadReqAtt(input) {
+  const fd = new FormData(); for (const f of input.files) fd.append('files', f);
+  toast('解析中…');
+  try { const r = await api(`/api/v1/requirements/${curReq}/attachments`, {method:'POST', body: fd}); toast(r.parse_failed?`已上传，${r.parse_failed} 个附件解析失败`:'已上传并解析', r.parse_failed?'warn':'ok'); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function reparseAtt(attId) {
+  toast('重新解析中…');
+  try { await jpost(`/api/v1/requirements/${curReq}/attachments/${attId}/reparse`, {}); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function analyzeReq() {
+  const btn = $('rqAnalyzeBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 分析中';
+  try {
+    const r = await jpost(`/api/v1/requirements/${curReq}/analyze`, {model: $('rqAnalyzeModel').value || null});
+    toast(r.open_questions ? `分析完成，${r.open_questions} 项待确认事项需要确认` : '分析完成，无待确认事项', r.open_questions ? 'warn' : 'ok');
+    reqTab = r.open_questions ? 'questions' : 'analysis'; renderRequirementDetail();
+  } catch (e) { toast(e.message, 'err'); btn.disabled = false; btn.textContent = 'AI 需求分析'; }
+}
+async function addReqQuestion() {
+  const q = $('rqNewQ').value.trim(); if (!q) return;
+  try { await jpost(`/api/v1/requirements/${curReq}/questions`, {question: q}); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function answerReqQuestion(qid, reopen) {
+  const answer = reopen ? '' : ($('qa-' + qid).value || '').trim();
+  if (!reopen && !answer) return toast('请填写确认结论', 'warn');
+  try { await jpost(`/api/v1/requirements/${curReq}/questions/${qid}`, {answer, reopen: !!reopen}); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+function openDesignDlg() {
+  const copy = (from, to) => { $(to).innerHTML = $(from).innerHTML; $(to).value = $(from).value; };
+  copy('modelSel', 'dsModel'); copy('reviewerSel', 'dsReviewer'); copy('templateSel', 'dsTemplate');
+  $('dsMeta').textContent = _reqDetail.title;
+  $('designDlg').showModal();
+}
+async function submitDesign() {
+  const btn = $('dsGoBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 提交中';
+  try {
+    const r = await jpost(`/api/v1/requirements/${curReq}/design`, {model: $('dsModel').value || null, reviewer_model: $('dsReviewer').value || null,
+      template_id: $('dsTemplate').value, confirm_points: $('dsConfirm').checked, async_mode: $('dsAsync').checked});
+    $('designDlg').close(); toast('测试设计任务已创建', 'ok');
+    await refreshList(); openTaskFromProject(r.task_id);
+  } catch (e) { toast(e.message, 'err'); }
+  btn.disabled = false; btn.textContent = '开始';
+}
+
 /* ==================== 项目管理 ==================== */
 async function fillProjectSelect(keep) {
   try { _projectsCache = (await api('/api/v1/projects')).projects; } catch (e) { return; }

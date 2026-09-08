@@ -115,6 +115,9 @@ def project_cases(
             planned = exec_idx.get((r.task_id, uid))
             rows.append({
                 "task_id": r.task_id, "project": name,
+                "requirement_id": (r.context or {}).get("requirement_id"),
+                "requirement_title": (r.context or {}).get("requirement_title"),
+                "point_ids": c.get("point_ids") or [],
                 "case_id": c.get("case_id"), "uid": uid,
                 "version": int(c.get("version", 1) or 1),
                 "steps": c.get("steps") or [],

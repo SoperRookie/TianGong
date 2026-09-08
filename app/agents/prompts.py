@@ -34,6 +34,39 @@ ANALYST_SYSTEM = """你是一名资深测试分析师，负责阅读软件需求
 只输出 JSON，格式：
 {"modules": [{"module": "模块名", "points": [{"point": "测试点描述", "dimension": "维度"}]}], "blind_spots": ["盲区描述"]}"""
 
+# 需求中心 AI 需求分析（完整需求 5.5）：11 项结构化输出；AI 禁止脑补业务规则，缺失即列入待确认事项
+REQUIREMENT_ANALYSIS_KEYS = (
+    "features", "rules", "preconditions", "normal_flows", "exception_flows", "boundaries",
+    "state_changes", "permissions", "dependencies", "risks", "open_questions",
+)
+REQUIREMENT_ANALYSIS_LABELS = {
+    "features": "功能点", "rules": "业务规则", "preconditions": "前置条件", "normal_flows": "正常流程",
+    "exception_flows": "异常流程", "boundaries": "边界条件", "state_changes": "状态变化",
+    "permissions": "权限要求", "dependencies": "外部依赖", "risks": "风险点", "open_questions": "待确认事项",
+}
+REQUIREMENT_ANALYSIS_SYSTEM = """你是一名资深需求分析师兼测试架构师，负责把软件需求原文整理为结构化分析结果，供后续测试设计使用。
+
+输出 11 个部分，每部分为字符串数组（没有内容时输出空数组，不要编造）：
+1. features：功能点——需求交付的可独立验证的功能项
+2. rules：业务规则——需求明确写出的计算规则、校验规则、限制条件（只写需求里有的）
+3. preconditions：前置条件——功能可用需满足的账号/数据/环境/状态条件
+4. normal_flows：正常流程——主成功路径，按步骤描述
+5. exception_flows：异常流程——失败/取消/超时/冲突等分支及其结果
+6. boundaries：边界条件——需求中出现的最大/最小/长度/次数/金额/时间等临界规则
+7. state_changes：状态变化——对象状态流转（如 待支付→已支付→已退款）
+8. permissions：权限要求——角色/权限对功能的约束
+9. dependencies：外部依赖——依赖的第三方服务、其他系统、后台配置、数据
+10. risks：风险点——实现或测试上的风险与容易出错的地方
+11. open_questions：待确认事项——需求缺失、含糊、自相矛盾、需要产品/开发确认才能设计测试的问题
+
+**硬性规则**：
+- 严禁脑补：需求没写的业务规则不得当作事实写入 rules/boundaries/state_changes，应写入 open_questions。
+- 每条内容具体、可验证，避免套话；引用需求原文中的关键数值与术语。
+- open_questions 每条写成一个明确的问题（以「？」结尾），并说明为什么影响测试设计。
+
+只输出 JSON：
+{"features": [], "rules": [], "preconditions": [], "normal_flows": [], "exception_flows": [], "boundaries": [], "state_changes": [], "permissions": [], "dependencies": [], "risks": [], "open_questions": []}"""
+
 # 独立查漏 Agent（需求七/八/十）：与生成 Agent 分离的第二轮覆盖检查，只允许新增
 GAP_CHECK_SYSTEM = """你是一名独立的测试覆盖检查专家，与测试点编写者相互独立。
 任务：对照需求逐维度检查已有测试点的覆盖情况，输出覆盖矩阵与新增建议。
@@ -205,9 +238,11 @@ GENERATOR_SYSTEM = """你是一名拥有十年经验的资深测试专家，精�
    **禁止**出现「模拟系统无法识别」「构造异常数据」这类没有交代具体操作方法的步骤。
 9. 每条用例填写 keywords（关键词）：3-6 个概括测试对象与场景的词，逗号分隔，
    如「登录、密码错误、账号锁定、异常、安全」；团队有统一关键词约定时优先使用约定词。
+10. 追溯：测试点拆解结果中带 tp_id 时，每条用例在 point_ids 中填写它覆盖的来源测试点 tp_id
+    （通常 1 个，覆盖多个测试点时列出全部）；没有 tp_id 时 point_ids 为空数组。
 
 只输出**紧凑 JSON**（不要缩进与多余空白以节省输出长度；用例对象之间可以换行），格式：
-{{"cases": [{{"case_id": "...", "module": "...", "title": "...", "priority": "P1", "precondition": "...", "steps": [{{"action": "...", "expected": "..."}}], "keywords": "关键词1、关键词2", "remark": "", "extras": {{}}}}]}}
+{{"cases": [{{"case_id": "...", "module": "...", "title": "...", "priority": "P1", "precondition": "...", "steps": [{{"action": "...", "expected": "..."}}], "keywords": "关键词1、关键词2", "remark": "", "extras": {{}}, "point_ids": ["TP001"]}}]}}
 模板中标注「自定义字段」的列，其值写入 extras 对象（键为列名）；无自定义字段时 extras 为空对象。"""
 
 # 知识注入块（F-7-5/6）：知识管家按分类差异化时机注入，引用来源随切片可见

@@ -68,6 +68,33 @@ async def run_analysis(
     )
 
 
+async def run_requirement_analysis(
+    text: str, llm: LLMClient, model: str | None = None
+) -> dict:
+    """需求中心 AI 需求分析（完整需求 5.5）：11 项结构化输出。超长需求分片后逐项合并去重。"""
+    from app.agents.graph import _chat_json
+    from app.agents.prompts import REQUIREMENT_ANALYSIS_KEYS, REQUIREMENT_ANALYSIS_SYSTEM
+
+    chunks = split_text(text, get_settings().chunk_max_chars)
+    outputs = await asyncio.gather(*[
+        _chat_json(llm, [{"role": "system", "content": REQUIREMENT_ANALYSIS_SYSTEM},
+                         {"role": "user", "content": f"需求原文：\n{chunk}"}], model)
+        for chunk in chunks
+    ])
+    merged: dict = {k: [] for k in REQUIREMENT_ANALYSIS_KEYS}
+    model_name = ""
+    for data, result in outputs:
+        model_name = result.model_name
+        for key in REQUIREMENT_ANALYSIS_KEYS:
+            for item in data.get(key) or []:
+                item = str(item).strip()
+                if item and item not in merged[key]:
+                    merged[key].append(item)
+    merged["model_name"] = model_name
+    merged["chunks"] = len(chunks)
+    return merged
+
+
 async def run_generation(
     requirement: str,
     llm: LLMClient,

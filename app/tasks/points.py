@@ -246,7 +246,8 @@ def confirmable_points(modules: list[dict]) -> list[dict]:
     result: list[dict] = []
     for entry in modules:
         wanted = [
-            {"point": p["point"], "dimension": p.get("dimension", "")}
+            {"point": p["point"], "dimension": p.get("dimension", ""),
+             **({"tp_id": p["tp_id"]} if p.get("tp_id") else {})}
             for p in entry["points"]
             if (p.get("status") == "approved" if any_approved else p.get("status") != "rejected")
         ]

@@ -46,6 +46,12 @@ async def lifespan(app: FastAPI):
     migrated = migrate_task_executions(app.state.tasks, app.state.plans)
     if migrated:
         logger.info("M4 执行迁移：{} 个任务的历史执行轮次已搬入测试计划", migrated)
+    from app.requirements import RequirementStore, migrate_tasks
+
+    app.state.requirements = RequirementStore()
+    migrated = migrate_tasks(app.state.tasks, app.state.requirements)
+    if migrated:
+        logger.info("M2 需求迁移：{} 个历史任务已建为需求实体并回填关联", migrated)
     app.state.auth = AuthStore(
         storage_path=settings.data_dir / "auth.json",
         session_ttl_hours=settings.session_ttl_hours,
