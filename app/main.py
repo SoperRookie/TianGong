@@ -85,9 +85,21 @@ app.mount("/vendor", StaticFiles(directory=BASE_DIR / "app" / "web" / "vendor"),
 _PUBLIC_API_PATHS = {"/api/v1/auth/login", "/health"}
 
 
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("X-Forwarded-For", "")
+    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """登录鉴权：/api/v1/* 需携带有效 Bearer Token（文件下载支持 ?token= 查询参数）。"""
+    """登录鉴权：/api/v1/* 需携带有效 Bearer Token（文件下载支持 ?token= 查询参数）。
+
+    同时充当操作日志采集点（完整需求 17 章）：全部写接口按路由映射为中文动作落 audit_log。
+    """
+    import time
+
+    from app.audit import describe, record
+
     path = request.url.path
     if (
         get_settings().auth_enabled
@@ -100,7 +112,22 @@ async def auth_middleware(request: Request, call_next):
         if user is None:
             return JSONResponse({"detail": "未登录、会话已过期或账号已禁用，请重新登录"}, status_code=401)
         request.state.user = user
-    return await call_next(request)
+    described = describe(request.method, path)
+    started = time.monotonic()
+    response = await call_next(request)
+    if described is not None:
+        kind, action, target = described
+        user = getattr(request.state, "user", None)
+        record(
+            user=(user or {}).get("username") if user else ("anonymous" if not get_settings().auth_enabled else None),
+            ip=_client_ip(request), ua=request.headers.get("User-Agent", ""),
+            kind=kind, action=action, target=target,
+            project=getattr(request.state, "audit_project", None),
+            method=request.method, path=path, status=response.status_code,
+            detail=getattr(request.state, "audit_detail", ""),
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+    return response
 
 
 @app.get("/", include_in_schema=False)

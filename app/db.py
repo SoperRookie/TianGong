@@ -72,6 +72,7 @@ def get_engine():
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
     engine = create_engine(url, **kwargs)
+    import app.audit  # noqa: F401  — 注册 audit_log 表
     import app.llm.calllog  # noqa: F401  — 注册 ai_calls 表后再建表
     metadata.create_all(engine)
     logger.info("数据库已连接：{}", engine.url.render_as_string(hide_password=True))

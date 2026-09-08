@@ -116,6 +116,7 @@ def _require_project(request: Request, project: str | None, action: str) -> dict
         if not _is_admin(request):
             raise HTTPException(status_code=403, detail="该数据未归属任何项目，仅系统管理员可访问")
         return None
+    request.state.audit_project = project
     entity = request.app.state.projects.get(project)
     if entity is None:
         if _is_admin(request):
@@ -195,6 +196,9 @@ async def auth_login(request: Request, body: LoginBody) -> dict:
     from app.auth import AuthError
     from app.auth.store import OtpRequired
 
+    from app.audit import record as audit
+
+    ua = request.headers.get("User-Agent", "")
     try:
         token, user = request.app.state.auth.login(
             body.username, body.password, otp=body.otp, ip=_client_ip(request)
@@ -203,7 +207,11 @@ async def auth_login(request: Request, body: LoginBody) -> dict:
         # 口令正确但需动态码：不签发会话，前端展示验证码输入后重新提交
         return {"otp_required": True}
     except AuthError as e:
+        audit(user=body.username.strip(), ip=_client_ip(request), ua=ua, kind="auth", action="登录失败",
+              target=body.username.strip(), method="POST", path="/api/v1/auth/login", status=401, detail=str(e))
         raise HTTPException(status_code=401, detail=str(e))
+    audit(user=user["username"], ip=_client_ip(request), ua=ua, kind="auth", action="登录成功",
+          target=user["username"], method="POST", path="/api/v1/auth/login", status=200)
     logger.info("用户 {} 登录成功（IP {}）", user["username"], user.get("last_login_ip") or "-")
     return {"token": token, "user": _with_memberships(request, user)}
 
@@ -406,6 +414,10 @@ async def auth_update_user(request: Request, username: str, body: UserUpdateBody
         )
     except AuthError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    request.state.audit_detail = "；".join(x for x in [
+        f"角色→{body.role}" if body.role else "", f"状态→{body.status}" if body.status else "",
+        "重置密码" if body.new_password else "", "重置两步验证" if body.reset_totp else "",
+        "修改资料" if any(k in fields for k in ("name", "email", "phone", "avatar")) else ""] if x)
     logger.info("管理员更新用户 {}：角色={} 状态={} 重置密码={} 重置两步验证={} 资料字段={}",
                 username, body.role or "-", body.status or "-", bool(body.new_password),
                 body.reset_totp, [k for k in fields if k in ("name", "email", "phone", "avatar")])
@@ -1472,6 +1484,7 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
 
     store = request.app.state.tasks
     record = _task(request, task_id, "case.review")
+    request.state.audit_detail = f"批量 {len(body.items)} 条"
     if record.status != "completed" or not (record.result or {}).get("cases"):
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可评审的用例结果")
 
@@ -1628,6 +1641,7 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
 
     store = request.app.state.tasks
     record, modules = _points_record(request, task_id, "point.review")
+    request.state.audit_detail = f"批量 {len(body.items)} 条"
     operator = _operator(request)
     # 存量任务打底：改动前补记首版（新任务已在拆解时记录，幂等跳过）
     ensure_versions(task_id, "point", point_entities(modules), by=record.created_by)
@@ -2720,6 +2734,7 @@ async def assign_plan_cases(request: Request, plan_id: str, body: PlanAssignBody
     from app.plans import PlanError, assign_items
 
     plan = _plan(request, plan_id, "plan.assign")
+    request.state.audit_detail = f"分配给 {body.assignee}（{len(body.item_ids) or '按模块 ' + body.module} 条）"
     if plan["status"] == "archived":
         raise HTTPException(status_code=409, detail="计划已归档，不可再分配")
     assignee = body.assignee.strip()
@@ -2802,6 +2817,7 @@ async def record_plan_results(
     from app.plans import FAIL_REASONS, people_summary, run_summary
 
     plan = _plan(request, plan_id, "exec.run")
+    request.state.audit_detail = f"批量 {len(body.items)} 条"
     run = _plan_run(plan, run_id)
     if run.get("finished_at"):
         raise HTTPException(status_code=409, detail="该执行轮次已结束，如需继续执行请新建轮次")
@@ -3547,6 +3563,7 @@ async def set_member(request: Request, name: str, body: MemberBody) -> dict:
         p = request.app.state.projects.set_member(name, body.username, body.role, operator=_operator(request))
     except ProjectError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    request.state.audit_detail = f"{body.username} → {_role_label(body.role)}"
     logger.info("项目 {} 成员变更：{} → {}（操作人 {}）", name, body.username, body.role, _operator(request))
     return {"project": name, "members": p["members"]}
 
@@ -3556,6 +3573,7 @@ async def remove_member(request: Request, name: str, username: str) -> dict:
     from app.projects import ProjectError
 
     _require_project(request, name, "project.members")
+    request.state.audit_detail = f"移出 {username}"
     try:
         p = request.app.state.projects.remove_member(name, username, operator=_operator(request))
     except ProjectError as e:
@@ -4068,6 +4086,32 @@ async def retry_task(request: Request, task_id: str) -> dict:
     )
     logger.info("任务 {} 第 {} 次重试已提交", task_id, extra["retry_count"])
     return resp
+
+
+# ---- 操作日志与安全日志（17 章）----
+
+
+@router.get("/api/v1/audit")
+async def audit_list(
+    request: Request, project: str = "", kind: str = "", user: str = "", keyword: str = "",
+    days: int = 30, security: bool | None = None, failed_only: bool = False, page: int = 1, page_size: int = 50,
+) -> dict:
+    """操作日志：系统管理员看全部（含安全日志）；项目成员看所属项目业务日志与自己的操作。"""
+    from app.audit import KINDS, list_logs
+
+    if project:
+        _require_project(request, project, "log.view")
+    if security and not _is_admin(request):
+        raise HTTPException(status_code=403, detail="安全日志仅系统管理员可查看")
+    since = None
+    if days > 0:
+        from datetime import timedelta
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    data = list_logs(project=project or None, kind=kind or None, user=user or None, keyword=keyword or None,
+                     since=since, security=security, visible=_visible_projects(request), me=_operator(request),
+                     failed_only=failed_only, page=max(1, page), page_size=min(200, max(1, page_size)))
+    data["kinds"] = KINDS
+    return data
 
 
 # ---- AI 中心（15 章）：AI 任务中心 / 调用日志 / Prompt 管理 ----
