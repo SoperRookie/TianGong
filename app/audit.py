@@ -84,6 +84,8 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [(m, re.compile(p), k, a) for m
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/questions/[^/]+$", "requirement", "确认待确认事项"),
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/design$", "ai", "发起测试设计"),
     ("POST", r"^/api/v1/tasks$", "ai", "创建生成任务"),
+    ("PUT", r"^/api/v1/tasks/(?P<target>[^/]+)/project$", "task", "遗留任务归属项目"),
+    ("POST", r"^/api/v1/admin/migration/assign$", "task", "批量归属遗留任务"),
     ("POST", r"^/api/v1/projects/(?P<target>[^/]+)/manual-task$", "case", "创建人工用例集"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/cases$", "case", "人工新增用例"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/cases/[^/]+/copy$", "case", "复制用例"),
