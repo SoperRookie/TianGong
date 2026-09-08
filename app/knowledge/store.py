@@ -65,17 +65,25 @@ class KnowledgeStore:
             self._doc_table, self._docs_path,
             lambda data: {d["doc_id"]: d for d in data},
         )
-        return {k: KnowledgeDoc.model_validate(d) for k, d in raw.items()}
+        docs = {}
+        for k, d in raw.items():
+            if "level" not in d:  # 迁移期：历史 default 空间视同公共层，其余视同项目层
+                d["level"] = "public" if d.get("space") in ("default", "public") else "project"
+            docs[k] = KnowledgeDoc.model_validate(d)
+        return docs
 
     def _save_docs(self) -> None:
         if self._docs_path is None:
             return
         self._doc_table.replace_all({d.doc_id: d.model_dump() for d in self._docs.values()})
 
-    def list_docs(self, space: str | None = None, category: str | None = None) -> list[KnowledgeDoc]:
+    def list_docs(self, space: str | None = None, category: str | None = None,
+                  level: str | None = None) -> list[KnowledgeDoc]:
         docs = list(self._docs.values())
         if space:
             docs = [d for d in docs if d.space == space]
+        if level:
+            docs = [d for d in docs if d.level == level]
         if category:
             docs = [d for d in docs if d.category == category]
         return sorted(docs, key=lambda d: d.created_at, reverse=True)
@@ -99,6 +107,8 @@ class KnowledgeStore:
                     "source": doc.source,
                     "category": doc.category,
                     "space": doc.space,
+                    "level": doc.level,
+                    "module": doc.module,
                     "chunk_index": i,
                     "text": chunk,
                 },
@@ -109,6 +119,23 @@ class KnowledgeStore:
         self._docs[doc.doc_id] = doc
         self._save_docs()
 
+    @staticmethod
+    def _scope_filter(category: str | None, space: str | None):
+        """检索范围（16 章三层）：space 指定项目时 = 该项目（含模块层）+ 公共层（public / 历史 default）；
+        space 为 None 时不限（仅管理员全局检索用）。项目知识绝不跨项目命中。"""
+        from app.knowledge.schemas import DEFAULT_SPACE, PUBLIC_SPACE
+
+        must = []
+        if category:
+            must.append(FieldCondition(key="category", match=MatchValue(value=category)))
+        should = None
+        if space:
+            should = [FieldCondition(key="space", match=MatchValue(value=s))
+                      for s in dict.fromkeys([space, PUBLIC_SPACE, DEFAULT_SPACE])]
+        if not must and not should:
+            return None
+        return Filter(must=must or None, should=should)
+
     def search(
         self,
         vector: list[float],
@@ -116,16 +143,11 @@ class KnowledgeStore:
         category: str | None = None,
         space: str | None = None,
     ) -> list[SearchHit]:
-        conditions = []
-        if category:
-            conditions.append(FieldCondition(key="category", match=MatchValue(value=category)))
-        if space:
-            conditions.append(FieldCondition(key="space", match=MatchValue(value=space)))
         result = self._client.query_points(
             collection_name=_COLLECTION,
             query=vector,
             limit=top_k,
-            query_filter=Filter(must=conditions) if conditions else None,
+            query_filter=self._scope_filter(category, space),
         )
         return [
             SearchHit(
@@ -135,6 +157,8 @@ class KnowledgeStore:
                 source=p.payload["source"],
                 category=p.payload["category"],
                 space=p.payload["space"],
+                level=p.payload.get("level", "project"),
+                module=p.payload.get("module", ""),
                 chunk_index=p.payload["chunk_index"],
             )
             for p in result.points
@@ -145,17 +169,12 @@ class KnowledgeStore:
     ) -> list[SearchHit]:
         """遍历范围内全部切片（关键词侧检索用）。当前规模全量扫描可行；
         语料到万级后关键词侧迁移 Elasticsearch（PRD 选型），此接口即废弃。"""
-        conditions = []
-        if category:
-            conditions.append(FieldCondition(key="category", match=MatchValue(value=category)))
-        if space:
-            conditions.append(FieldCondition(key="space", match=MatchValue(value=space)))
         hits: list[SearchHit] = []
         offset = None
         while True:
             points, offset = self._client.scroll(
                 collection_name=_COLLECTION,
-                scroll_filter=Filter(must=conditions) if conditions else None,
+                scroll_filter=self._scope_filter(category, space),
                 limit=256,
                 offset=offset,
                 with_payload=True,
@@ -169,6 +188,8 @@ class KnowledgeStore:
                     source=p.payload["source"],
                     category=p.payload["category"],
                     space=p.payload["space"],
+                    level=p.payload.get("level", "project"),
+                    module=p.payload.get("module", ""),
                     chunk_index=p.payload["chunk_index"],
                 )
                 for p in points

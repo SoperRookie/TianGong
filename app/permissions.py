@@ -34,6 +34,8 @@ ACTIONS = frozenset({
     "exec.view", "exec.run", "exec.attach",
     # 日志：项目日志与 AI 操作日志查看
     "log.view",
+    # 知识库（16 章）：项目/模块层查看与维护；公共层仅系统管理员
+    "knowledge.view", "knowledge.manage",
 })
 
 _VIEW_ACTIONS = frozenset(a for a in ACTIONS if a.endswith(".view"))

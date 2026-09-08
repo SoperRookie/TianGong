@@ -197,6 +197,100 @@ def _execution_summary(
     }
 
 
+def _ai_quality(rows: list[TaskRecord]) -> dict:
+    """AI 质量统计（完整需求 20 章）：按测试点 / 用例分别统计
+    采纳率（最终通过 / AI 产出）、直接通过率（未经驳回或修改即通过）、修改率（人工或 AI 定点修改过）、
+    驳回率（被驳回过）、驳回原因分布（驳回类型 + 原因文本 Top）。"""
+    from app.tasks.points import iter_points
+
+    def fresh():
+        return {"total": 0, "approved": 0, "direct": 0, "modified": 0, "rejected": 0, "deleted": 0}
+
+    stats = {"point": fresh(), "case": fresh()}
+    reject_types: Counter = Counter()
+    reject_reasons: Counter = Counter()
+    for r in rows:
+        # ---- 测试点 ----
+        ents: dict[str, dict] = {}
+        for _, p in iter_points((r.analysis or {}).get("test_points", [])):
+            if p.get("source", "ai") in ("ai", "gap", "supplement"):
+                ents[p["tp_id"]] = {"status": p.get("status"), "rej": 0, "mod": 0, "deleted": False}
+        for e in r.point_review_log:
+            tp = e.get("tp_id")
+            if not tp:
+                continue
+            ent = ents.setdefault(tp, {"status": None, "rej": 0, "mod": 0, "deleted": False})
+            a = e.get("action")
+            if a == "reject":
+                ent["rej"] += 1
+                for t in e.get("reject_types") or []:
+                    reject_types[t] += 1
+                if e.get("comment"):
+                    reject_reasons[str(e["comment"])[:40]] += 1
+            elif a in ("modify", "restore"):
+                ent["mod"] += 1
+            elif a == "delete":
+                ent["deleted"] = True
+        for f in r.fix_log:
+            if f.get("kind") == "points":
+                for d in f.get("diff") or []:
+                    if d.get("tp_id") in ents:
+                        ents[d["tp_id"]]["mod"] += 1
+        _fold(stats["point"], ents)
+        # ---- 用例 ----
+        cents: dict[str, dict] = {}
+        for c in (r.result or {}).get("cases", []):
+            uid = str(c.get("uid") or "")
+            if c.get("source", "ai") in ("ai", "ai_fix"):
+                cents[uid] = {"status": (r.case_reviews.get(uid) or {}).get("status"), "rej": 0,
+                              "mod": max(0, int(c.get("version", 1) or 1) - 1), "deleted": False}
+        for e in r.review_log:
+            uid = str(e.get("uid") or "")
+            if not uid:
+                continue
+            ent = cents.setdefault(uid, {"status": None, "rej": 0, "mod": 0, "deleted": False})
+            a = e.get("action")
+            if a == "reject":
+                ent["rej"] += 1
+                for t in e.get("reject_types") or []:
+                    reject_types[t] += 1
+                if e.get("comment"):
+                    reject_reasons[str(e["comment"])[:40]] += 1
+            elif a == "modify":
+                ent["mod"] += 1
+            elif a == "delete":
+                ent["deleted"] = True
+        _fold(stats["case"], cents)
+
+    def rates(s: dict) -> dict:
+        t = s["total"]
+        return {**s, "adoption_rate": round(s["approved"] / t, 3) if t else None,
+                "direct_pass_rate": round(s["direct"] / t, 3) if t else None,
+                "modify_rate": round(s["modified"] / t, 3) if t else None,
+                "reject_rate": round(s["rejected"] / t, 3) if t else None}
+
+    return {
+        "point": rates(stats["point"]), "case": rates(stats["case"]),
+        "reject_types": [{"type": k, "count": v} for k, v in reject_types.most_common(12)],
+        "reject_reasons": [{"reason": k, "count": v} for k, v in reject_reasons.most_common(8)],
+    }
+
+
+def _fold(agg: dict, ents: dict[str, dict]) -> None:
+    for ent in ents.values():
+        agg["total"] += 1
+        if ent["deleted"]:
+            agg["deleted"] += 1
+        if ent["status"] == "approved":
+            agg["approved"] += 1
+            if not ent["rej"] and not ent["mod"]:
+                agg["direct"] += 1
+        if ent["mod"]:
+            agg["modified"] += 1
+        if ent["rej"]:
+            agg["rejected"] += 1
+
+
 def summarize(
     records: list[TaskRecord], days: int = 30, project: str | None = None,
     plans: list[dict] | None = None,
@@ -290,4 +384,5 @@ def summarize(
             key=lambda x: -x["tasks"],
         )[:10],
         "execution": _execution_summary(plans or [], project, since),
+        "ai_quality": _ai_quality(rows),
     }

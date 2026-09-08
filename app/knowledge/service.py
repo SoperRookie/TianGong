@@ -29,43 +29,51 @@ class KnowledgeService:
         self.chunk_max_chars = chunk_max_chars
 
     async def ingest_file(
-        self, path: str | Path, category: str, space: str = DEFAULT_SPACE
+        self, path: str | Path, category: str, space: str = DEFAULT_SPACE, **meta
     ) -> KnowledgeDoc:
         doc = parse_file(path)
-        return await self._ingest(doc.full_text, source=doc.source, category=category, space=space)
+        return await self._ingest(doc.full_text, source=doc.source, category=category, space=space, **meta)
 
     async def ingest_text(
-        self, text: str, source: str, category: str, space: str = DEFAULT_SPACE
+        self, text: str, source: str, category: str, space: str = DEFAULT_SPACE, **meta
     ) -> KnowledgeDoc:
         parsed = parse_text(text)
-        return await self._ingest(parsed.full_text, source=source, category=category, space=space)
+        return await self._ingest(parsed.full_text, source=source, category=category, space=space, **meta)
 
-    async def ingest_cases(self, path: str | Path, space: str = DEFAULT_SPACE) -> KnowledgeDoc:
+    async def ingest_cases(self, path: str | Path, space: str = DEFAULT_SPACE, **meta) -> KnowledgeDoc:
         """历史用例入库（F-7-2）：Excel/CSV/XMind → 测试用例库，每条用例一个切片。"""
         from app.knowledge.importers import parse_cases_file, render_case_chunk
 
         path = Path(path)
         chunks = [render_case_chunk(c) for c in parse_cases_file(path)]
         vectors = await self.embedder.embed(chunks)
-        record = self._new_doc(source=path.name, category="test_cases", space=space, chunk_count=len(chunks))
+        record = self._new_doc(source=path.name, category="test_cases", space=space, chunk_count=len(chunks), **meta)
         self.store.upsert_chunks(record, chunks, vectors)
         return record
 
-    async def _ingest(self, text: str, source: str, category: str, space: str) -> KnowledgeDoc:
+    async def _ingest(self, text: str, source: str, category: str, space: str, **meta) -> KnowledgeDoc:
         if category not in CATEGORIES:
             raise InvalidCategoryError(category)
         chunks = split_knowledge(text, self.chunk_max_chars)
         if not chunks:
             raise ValueError(f"文档 {source} 无有效内容，未入库")
         vectors = await self.embedder.embed(chunks)
-        record = self._new_doc(source=source, category=category, space=space, chunk_count=len(chunks))
+        record = self._new_doc(source=source, category=category, space=space, chunk_count=len(chunks), **meta)
         self.store.upsert_chunks(record, chunks, vectors)
         return record
 
-    def _new_doc(self, source: str, category: str, space: str, chunk_count: int) -> KnowledgeDoc:
+    def _new_doc(self, source: str, category: str, space: str, chunk_count: int,
+                 level: str | None = None, module: str = "", created_by: str | None = None) -> KnowledgeDoc:
+        from app.knowledge.schemas import DEFAULT_SPACE as _DEF, PUBLIC_SPACE
+
+        if level is None:
+            level = "public" if space in (_DEF, PUBLIC_SPACE) else ("module" if module else "project")
         return KnowledgeDoc(
             doc_id=uuid.uuid4().hex[:12],
             space=space,
+            level=level,
+            module=module or "",
+            created_by=created_by,
             category=category,
             source=source,
             chunk_count=chunk_count,

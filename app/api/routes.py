@@ -877,36 +877,70 @@ async def clear_memories(
 
 @router.get("/api/v1/knowledge/categories")
 async def list_categories() -> dict:
-    """三大知识分类枚举，供上传时选择。"""
+    """三大知识分类枚举 + 三层枚举，供上传时选择。"""
     from app.knowledge import CATEGORIES
+    from app.knowledge.schemas import LEVELS
 
-    return {"categories": CATEGORIES}
+    return {"categories": CATEGORIES, "levels": LEVELS}
+
+
+def _knowledge_scope(request: Request, level: str, project: str, module: str) -> tuple[str, str, str]:
+    """入库/删除的层级校验：公共层仅系统管理员；项目/模块层需项目 knowledge.manage。返回 (space, level, module)。"""
+    from app.knowledge.schemas import LEVELS, PUBLIC_SPACE
+
+    if level not in LEVELS:
+        raise HTTPException(status_code=400, detail=f"未知知识层级: {level}（可用 {'/'.join(LEVELS)}）")
+    if level == "public":
+        _require_admin(request)
+        return PUBLIC_SPACE, "public", ""
+    project = (project or "").strip()
+    if not project:
+        raise HTTPException(status_code=400, detail="项目/模块层知识必须指定项目")
+    _require_project(request, project, "knowledge.manage")
+    if request.app.state.projects.get(project) is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {project}")
+    module = (module or "").strip()
+    if level == "module" and not module:
+        raise HTTPException(status_code=400, detail="模块层知识必须指定模块")
+    return project, level, module if level == "module" else ""
+
+
+def _knowledge_visible(request: Request, doc) -> bool:
+    from app.knowledge.schemas import DEFAULT_SPACE, PUBLIC_SPACE
+
+    if doc.level == "public" or doc.space in (PUBLIC_SPACE, DEFAULT_SPACE):
+        return True
+    return _record_visible(request, doc.space)
 
 
 @router.post("/api/v1/knowledge/docs")
 async def ingest_knowledge(
     request: Request,
     category: str = Form(...),
-    space: str = Form(default="default"),
+    level: str = Form(default="project"),
+    project: str = Form(default=""),
+    module: str = Form(default=""),
     files: list[UploadFile] = File(default=[]),
     text: str = Form(default=""),
     source: str = Form(default="text"),
 ) -> dict:
-    """知识文档入库：解析 → 切片 → 向量化 → 入库；支持文件与粘贴文本。"""
+    """知识文档入库（16 章三层）：公共 / 项目 / 模块；解析 → 切片 → 向量化 → 入库。"""
     import openai as _openai
 
     from app.knowledge import InvalidCategoryError
 
     settings = get_settings()
+    space, level, module = _knowledge_scope(request, level, project, module)
+    meta = {"level": level, "module": module, "created_by": _operator(request)}
     service = _knowledge_service(request.app)
     save_dir = request.app.state.tasks.output_dir / "_knowledge_uploads"
     docs = []
     try:
         for upload in files:
             saved = await _read_upload(upload, save_dir, settings.max_upload_size_mb * 1024 * 1024)
-            docs.append(await service.ingest_file(saved, category=category, space=space))
+            docs.append(await service.ingest_file(saved, category=category, space=space, **meta))
         if text.strip():
-            docs.append(await service.ingest_text(text, source=source, category=category, space=space))
+            docs.append(await service.ingest_text(text, source=source, category=category, space=space, **meta))
     except (InvalidCategoryError, UnsupportedFormatError, ScannedPDFError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except (MissingAPIKeyError, _openai.APIConnectionError, _openai.APIStatusError) as e:
@@ -920,21 +954,25 @@ async def ingest_knowledge(
 async def ingest_history_cases(
     request: Request,
     files: list[UploadFile] = File(...),
-    space: str = Form(default="default"),
+    level: str = Form(default="project"),
+    project: str = Form(default=""),
+    module: str = Form(default=""),
 ) -> dict:
-    """历史用例入库（F-7-2）：Excel/CSV/XMind 存量用例导入测试用例库。"""
+    """历史用例入库（F-7-2）：Excel/CSV/XMind 存量用例导入测试用例库（按三层归属）。"""
     import openai as _openai
 
     from app.knowledge.importers import CaseImportError
 
     settings = get_settings()
+    space, level, module = _knowledge_scope(request, level, project, module)
+    meta = {"level": level, "module": module, "created_by": _operator(request)}
     service = _knowledge_service(request.app)
     save_dir = request.app.state.tasks.output_dir / "_knowledge_uploads"
     docs = []
     try:
         for upload in files:
             saved = await _read_upload(upload, save_dir, settings.max_upload_size_mb * 1024 * 1024)
-            docs.append(await service.ingest_cases(saved, space=space))
+            docs.append(await service.ingest_cases(saved, space=space, **meta))
     except CaseImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except (MissingAPIKeyError, _openai.APIConnectionError, _openai.APIStatusError) as e:
@@ -944,17 +982,28 @@ async def ingest_history_cases(
 
 @router.get("/api/v1/knowledge/docs")
 async def list_knowledge_docs(
-    request: Request, space: str | None = None, category: str | None = None
+    request: Request, space: str | None = None, category: str | None = None, level: str | None = None,
 ) -> dict:
+    """知识台账：公共层人人可见；项目/模块层只对项目成员可见。"""
+    from app.knowledge.schemas import LEVELS
+
     service = _knowledge_service(request.app)
-    return {"documents": [d.model_dump() for d in service.store.list_docs(space, category)]}
+    docs = [d for d in service.store.list_docs(space, category, level) if _knowledge_visible(request, d)]
+    return {"documents": [{**d.model_dump(), "level_label": LEVELS.get(d.level, d.level)} for d in docs],
+            "levels": LEVELS}
 
 
 @router.delete("/api/v1/knowledge/docs/{doc_id}")
 async def delete_knowledge_doc(request: Request, doc_id: str) -> dict:
     service = _knowledge_service(request.app)
-    if not service.store.delete_doc(doc_id):
+    doc = service.store.get_doc(doc_id)
+    if doc is None:
         raise HTTPException(status_code=404, detail=f"知识文档不存在: {doc_id}")
+    if doc.level == "public" or doc.space in ("public", "default"):
+        _require_admin(request)
+    else:
+        _require_project(request, doc.space, "knowledge.manage")
+    service.store.delete_doc(doc_id)
     return {"deleted": doc_id}
 
 
@@ -972,10 +1021,17 @@ async def search_knowledge(request: Request, body: KnowledgeSearchBody) -> dict:
 
     from app.knowledge import InvalidCategoryError
 
+    from app.knowledge.schemas import PUBLIC_SPACE
+
     service = _knowledge_service(request.app)
+    space = (body.space or "").strip() or None
+    if space and space not in (PUBLIC_SPACE, "default"):
+        _require_project(request, space, "knowledge.view")
+    elif space is None and not _is_admin(request):
+        space = PUBLIC_SPACE  # 非管理员无项目上下文时只检索公共层
     try:
         hits = await service.search(
-            body.query, top_k=body.top_k, category=body.category, space=body.space
+            body.query, top_k=body.top_k, category=body.category, space=space
         )
     except InvalidCategoryError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1043,6 +1099,7 @@ async def _launch_task(
     _ai_ctx(request, project=project, requirement_id=(extra_context or {}).get("requirement_id"))
     from app.llm.calllog import set_ai_context
     set_ai_context(task_id=task_id)
+    knowledge_space = (knowledge_space or "").strip() or project  # 16 章：检索范围 = 本项目 + 公共层
     task_context = {
         "requirement": requirement,
         "confirm_points": confirm_points,
@@ -1508,7 +1565,7 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
         state = record.case_reviews.setdefault(
             uid, {"status": "pending", "comment": "", "reject_count": 0, "locked": False}
         )
-        entry: dict = {"case_id": item.case_id, "action": action, "by": _operator(request),
+        entry: dict = {"case_id": item.case_id, "uid": uid, "action": action, "by": _operator(request),
                        "comment": item.comment, "feedback": item.feedback, "at": now}
         if action == "approve":
             state.update(status="approved", locked=True)

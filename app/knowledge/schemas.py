@@ -9,7 +9,9 @@ CATEGORIES: dict[str, str] = {
     "business_rules": "玩法与业务规则库",
 }
 
-DEFAULT_SPACE = "default"
+DEFAULT_SPACE = "default"   # 历史空间：视同公共知识（迁移期兼容）
+PUBLIC_SPACE = "public"     # 公共知识库（完整需求 16 章 / 核心规则 24）：显式标记方可跨项目使用
+LEVELS = {"public": "公共知识库", "project": "项目知识库", "module": "模块知识库"}
 
 
 class InvalidCategoryError(ValueError):
@@ -21,7 +23,10 @@ class KnowledgeDoc(BaseModel):
     """已入库的知识文档元数据（切片与向量存于向量库，此处只记台账）。"""
 
     doc_id: str
-    space: str = Field(description="知识空间：按项目/业务线隔离检索范围（F-7-4）")
+    space: str = Field(description="知识空间：项目名（项目/模块层）或 public（公共层）；历史 default 视同公共")
+    level: str = Field(default="project", description="分层：public / project / module")
+    module: str = Field(default="", description="模块层：模块路径（如 登录/密码找回）")
+    created_by: str | None = Field(default=None)
     category: str = Field(description="三大分类之一")
     source: str = Field(description="来源文件名或 'text'")
     chunk_count: int
@@ -38,4 +43,6 @@ class SearchHit(BaseModel):
     source: str
     category: str
     space: str
+    level: str = "project"
+    module: str = ""
     chunk_index: int

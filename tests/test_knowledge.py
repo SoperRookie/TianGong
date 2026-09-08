@@ -123,7 +123,7 @@ async def test_knowledge_api_roundtrip(service):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/knowledge/docs",
-                data={"category": "business_rules", "text": "牌型判定与赔率结算规则", "source": "规则.md"},
+                data={"category": "business_rules", "text": "牌型判定与赔率结算规则", "source": "规则.md", "level": "public"},
             )
             assert resp.status_code == 200, resp.text
             doc_id = resp.json()["ingested"][0]["doc_id"]

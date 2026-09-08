@@ -112,26 +112,15 @@ class KnowledgeSteward:
     async def _layered_search(
         self, query: str, category: str, space: str | None
     ) -> list[SearchHit]:
-        """分层检索（需求二十六）：当前项目空间优先，同类/全局知识空间兜底。
+        """分层检索（完整需求 16 章 / 核心规则 24）：检索范围 = 当前项目（含模块层）+ 公共层。
 
-        第一层：当前项目知识空间（space 指定时）；
-        第二层：全部知识空间的相似内容，去重后按序补足候选。
-        避免无关历史知识大量进入上下文：全局兜底仅在项目层候选不足时补充。
+        项目知识库禁止跨项目污染：不再做「全部知识空间」兜底；space 为空（无项目上下文）时只用公共层。
         """
-        hits = await self.service.search(
-            query, top_k=_CANDIDATES_PER_CATEGORY, category=category, space=space
+        from app.knowledge.schemas import PUBLIC_SPACE
+
+        return await self.service.search(
+            query, top_k=_CANDIDATES_PER_CATEGORY, category=category, space=space or PUBLIC_SPACE
         )
-        if space and len(hits) < _CANDIDATES_PER_CATEGORY:
-            seen = {(h.doc_id, h.chunk_index) for h in hits}
-            global_hits = await self.service.search(
-                query, top_k=_CANDIDATES_PER_CATEGORY, category=category, space=None
-            )
-            hits.extend(
-                h for h in global_hits
-                if (h.doc_id, h.chunk_index) not in seen
-            )
-            hits = hits[:_CANDIDATES_PER_CATEGORY]
-        return hits
 
     @staticmethod
     def _fill(

@@ -438,6 +438,9 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <button id="nav-aicenter" onclick="switchView('aicenter')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 20h8M12 18v2M7 9l3 3-3 3M13 15h4"/></svg>
       AI 任务中心</button>
+    <button id="nav-knowledge" onclick="switchView('knowledge')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+      知识库</button>
     <div id="sedimentMenu" style="display:none">
     <button id="nav-prompts" onclick="switchView('prompts')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16M4 12h10M4 19h7"/><path d="M17 15l2 2 4-4"/></svg>
@@ -483,6 +486,31 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <div class="layout" id="view-projects" style="display:none">
   <div class="page" style="max-width:1420px" id="projArea"></div>
 </div>
+
+<!-- 知识库（M5：公共 / 项目 / 模块 三层） -->
+<div class="layout" id="view-knowledge" style="display:none"><div class="page" style="max-width:1320px" id="knowledgeArea"></div></div>
+
+<!-- 知识库上传 -->
+<dialog id="kbDlg" style="width:640px">
+  <div class="dlg-h"><h3>上传知识</h3></div>
+  <div class="dlg-b">
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">层级</label>
+        <select id="kbLevel" onchange="kbLevelChanged()"><option value="project">项目知识库</option><option value="module">模块知识库</option><option value="public">公共知识库（跨项目，仅管理员）</option></select></div>
+      <div style="flex:1"><label class="f">分类</label><select id="kbCategory"></select></div>
+    </div>
+    <div style="display:flex;gap:10px" id="kbScopeRow">
+      <div style="flex:1"><label class="f">项目</label><select id="kbProject" onchange="fillKbModules(this.value)"></select></div>
+      <div style="flex:1" id="kbModuleWrap"><label class="f">模块</label><select id="kbModule"><option value="">—</option></select></div>
+    </div>
+    <label class="f">文件<span class="hint">（Word / PDF / Markdown / TXT；分类为测试用例库时用「导入历史用例」）</span></label>
+    <input type="file" id="kbFiles" multiple>
+    <label class="f">或粘贴文本</label><textarea id="kbText" rows="5" placeholder="规则 / 需求 / 术语…"></textarea>
+    <label class="f">文本来源名<span class="hint">（可选）</span></label><input type="text" id="kbSource" placeholder="如 赔率规则.md">
+    <label class="check" style="margin-top:8px"><input type="checkbox" id="kbAsCases"> 文件是历史用例（Excel / CSV / XMind），导入测试用例库</label>
+  </div>
+  <div class="dlg-f"><button class="btn ghost" onclick="$('kbDlg').close()">取消</button><button class="btn" id="kbSaveBtn" onclick="saveKb()">入库</button></div>
+</dialog>
 
 <!-- 操作日志（M5） -->
 <div class="layout" id="view-audit" style="display:none"><div class="page" style="max-width:1420px" id="auditArea"></div></div>
@@ -1447,6 +1475,7 @@ function setCurrentProject(name, opts = {}) {
   else if (currentView === 'requirements') { curReq = null; renderRequirements(); }
   else if (currentView === 'aicenter') renderAiCenter();
   else if (currentView === 'audit') { auditPage = 1; renderAudit(); }
+  else if (currentView === 'knowledge') renderKnowledge();
   else if (currentView === 'plans') { curPlan = null; renderPlans(); }
   else if (currentView === 'cases') { acPage = 1; renderAllCases(); }
   else if (currentView === 'reports') renderReports();
@@ -1484,7 +1513,7 @@ function renderProjMenu(q) {
 document.addEventListener('click', () => { const m = $('curProjMenu'); if (m) m.style.display = 'none'; });
 
 /* ---------- 视图切换与面包屑 ---------- */
-const VIEW_LABELS = {projects:'项目管理', requirements:'需求列表', aicenter:'AI 任务中心', prompts:'Prompt 管理', audit:'操作日志', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
+const VIEW_LABELS = {projects:'项目管理', requirements:'需求列表', aicenter:'AI 任务中心', prompts:'Prompt 管理', audit:'操作日志', knowledge:'知识库', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
 function setCrumb(html) { $('crumb').innerHTML = html; }
 function crumbForBoard() {
   if (currentTask) {
@@ -1498,7 +1527,7 @@ function switchView(v) {
     v = 'projects';
   }
   currentView = v;
-  for (const k of ['projects','requirements','aicenter','prompts','audit','board','plans','cases','reports','rules','memory','models','users']) {
+  for (const k of ['projects','requirements','aicenter','prompts','audit','knowledge','board','plans','cases','reports','rules','memory','models','users']) {
     $('view-'+k).style.display = k===v ? '' : 'none';
     $('nav-'+k).classList.toggle('on', k===v && !(k==='plans' && plansMine));
   }
@@ -1514,6 +1543,7 @@ function switchView(v) {
   if (v==='aicenter') renderAiCenter();
   if (v==='prompts') renderPrompts();
   if (v==='audit') renderAudit();
+  if (v==='knowledge') renderKnowledge();
   if (v==='plans') renderPlans();
   if (v==='cases') renderAllCases();
   if (v==='reports') renderReports();
@@ -3512,6 +3542,88 @@ async function aiStatsHtml() {
         ${d.by_purpose.map(p=>`<tr><td>${esc(p.purpose)}</td><td>${p.calls}</td><td>${p.errors?`<b style="color:var(--danger)">${p.errors}</b>`:0}</td></tr>`).join('')||'<tr><td colspan="3" class="hint">无</td></tr>'}</table></div></div></div>`;
 }
 
+/* ---- 知识库（16 章三层） ---- */
+let kbLevelFilter = '', kbCatFilter = '', _kbMeta = null, kbQuery = '';
+async function renderKnowledge() {
+  setCrumb('知识库');
+  let data, meta;
+  try {
+    [data, meta] = await Promise.all([api('/api/v1/knowledge/docs' + (curProjectName?`?space=${encodeURIComponent(curProjectName)}`:'')), _kbMeta || api('/api/v1/knowledge/categories')]);
+    _kbMeta = meta;
+  } catch (e) { return $('knowledgeArea').innerHTML = `<div class="card"><div class="card-b"><div class="empty">${esc(e.message)}</div></div></div>`; }
+  let docs = data.documents;
+  if (curProjectName) {  // 当前项目视角：本项目 + 公共
+    try { const pub = (await api('/api/v1/knowledge/docs?level=public')).documents; const ids = new Set(docs.map(d=>d.doc_id)); docs = docs.concat(pub.filter(d=>!ids.has(d.doc_id))); } catch (e) {}
+  }
+  if (kbLevelFilter) docs = docs.filter(d => d.level === kbLevelFilter);
+  if (kbCatFilter) docs = docs.filter(d => d.category === kbCatFilter);
+  const canUpload = isSysAdmin() || (curUser.projects||[]).some(p => can(p.project, 'knowledge.manage'));
+  const LV = {public:'approved', project:'candidate', module:'pending'};
+  $('knowledgeArea').innerHTML = `<div class="card">
+    <div class="card-h"><h3>知识库</h3><span class="meta">公共知识库可跨项目使用（须显式标记，仅管理员维护）；项目 / 模块知识只在本项目检索，禁止跨项目污染</span>
+      <div class="grow">
+        <select style="width:120px" onchange="kbLevelFilter=this.value;renderKnowledge()"><option value="">全部层级</option>${Object.entries(meta.levels).map(([k,v])=>`<option value="${k}" ${kbLevelFilter===k?'selected':''}>${v}</option>`).join('')}</select>
+        <select style="width:130px" onchange="kbCatFilter=this.value;renderKnowledge()"><option value="">全部分类</option>${Object.entries(meta.categories).map(([k,v])=>`<option value="${k}" ${kbCatFilter===k?'selected':''}>${v}</option>`).join('')}</select>
+        ${canUpload?`<button class="btn" onclick="openKbDlg()">＋ 上传知识</button>`:''}</div></div>
+    <div class="card-b">
+      <div class="toolbar" style="margin-bottom:10px"><input type="text" id="kbQ" placeholder="检索测试：输入关键词看命中切片（范围 = ${curProjectName?esc(curProjectName)+' + 公共':'公共'}）" value="${esc(kbQuery)}" style="flex:1" onkeydown="if(event.key==='Enter')kbSearch()"><button class="btn ghost sm" onclick="kbSearch()">检索</button></div>
+      <div id="kbHits"></div>
+      <div class="tbl-wrap" style="margin-top:0"><table>
+        <thead><tr><th>来源</th><th style="width:110px">层级</th><th style="width:130px">项目 / 模块</th><th style="width:120px">分类</th><th style="width:70px">切片</th><th style="width:120px">Embedding</th><th style="width:90px">上传人</th><th style="width:110px">时间</th><th style="width:50px"></th></tr></thead>
+        <tbody>${docs.map(d=>`<tr>
+          <td><b>${esc(d.source)}</b><div class="hint"><code>${d.doc_id}</code></div></td>
+          <td><span class="st ${LV[d.level]||'pending'}">${esc(d.level_label||d.level)}</span></td>
+          <td class="hint">${d.level==='public'?'—':esc(d.space)}${d.module?`<div>${esc(d.module)}</div>`:''}</td>
+          <td>${esc(meta.categories[d.category]||d.category)}</td><td>${d.chunk_count}</td>
+          <td class="hint">${esc(d.embedding_model)}</td><td class="hint">${esc(d.created_by||'')}</td><td class="hint">${relTime(d.created_at)}</td>
+          <td>${(d.level==='public'?isSysAdmin():can(d.space,'knowledge.manage'))?`<button class="ibtn bad" title="删除" onclick="deleteKb('${d.doc_id}','${esc(d.source)}')">${IC.trash}</button>`:''}</td></tr>`).join('')
+          || '<tr><td colspan="9"><div class="empty">暂无知识文档</div></td></tr>'}</tbody></table></div></div></div>`;
+}
+async function kbSearch() {
+  kbQuery = $('kbQ').value.trim(); if (!kbQuery) return;
+  $('kbHits').innerHTML = '<div class="hint">检索中…</div>';
+  try {
+    const r = await jpost('/api/v1/knowledge/search', {query: kbQuery, top_k: 6, space: curProjectName || null});
+    $('kbHits').innerHTML = r.hits.length ? `<div class="tbl-wrap" style="margin-bottom:12px"><table><tr><th style="width:60px">相似度</th><th style="width:140px">来源</th><th style="width:90px">层级</th><th>切片</th></tr>
+      ${r.hits.map(h=>`<tr><td>${(h.score*100).toFixed(0)}%</td><td class="hint">${esc(h.source)}<div>${esc(h.space)}${h.module?' / '+esc(h.module):''}</div></td><td><span class="tag">${esc((_kbMeta.levels||{})[h.level]||h.level)}</span></td><td class="hint" style="white-space:pre-wrap">${esc(h.text.slice(0,300))}</td></tr>`).join('')}</table></div>` : '<div class="hint" style="margin-bottom:10px">没有命中</div>';
+  } catch (e) { $('kbHits').innerHTML = `<div class="hint" style="color:var(--danger)">${esc(e.message)}</div>`; }
+}
+function kbLevelChanged() {
+  const lv = $('kbLevel').value;
+  $('kbScopeRow').style.display = lv === 'public' ? 'none' : '';
+  $('kbModuleWrap').style.display = lv === 'module' ? '' : 'none';
+}
+async function fillKbModules(project) {
+  $('kbModule').innerHTML = '<option value="">—</option>';
+  if (!project) return;
+  try { const m = await api('/api/v1/projects/' + encodeURIComponent(project) + '/modules'); $('kbModule').innerHTML += _flattenModules(m.tree).map(x=>`<option value="${esc(x.path)}">${'　'.repeat(x.depth-1)}${esc(x.path)}</option>`).join(''); } catch (e) {}
+}
+async function openKbDlg() {
+  const projects = _projectsCache.filter(p => !p.builtin && p.status !== 'archived' && can(p.project, 'knowledge.manage'));
+  $('kbLevel').innerHTML = `<option value="project">项目知识库</option><option value="module">模块知识库</option>${isSysAdmin()?'<option value="public">公共知识库（跨项目，仅管理员）</option>':''}`;
+  $('kbCategory').innerHTML = Object.entries(_kbMeta.categories).map(([k,v])=>`<option value="${k}">${v}</option>`).join('');
+  $('kbProject').innerHTML = projects.map(p=>`<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
+  if (curProjectName && projects.some(p=>p.project===curProjectName)) $('kbProject').value = curProjectName;
+  await fillKbModules($('kbProject').value);
+  $('kbFiles').value = ''; $('kbText').value = ''; $('kbSource').value = ''; $('kbAsCases').checked = false;
+  kbLevelChanged(); $('kbDlg').showModal();
+}
+async function saveKb() {
+  const fd = new FormData(); const asCases = $('kbAsCases').checked;
+  fd.append('level', $('kbLevel').value); fd.append('project', $('kbProject').value || ''); fd.append('module', $('kbModule').value || '');
+  if (!asCases) { fd.append('category', $('kbCategory').value); fd.append('text', $('kbText').value); fd.append('source', $('kbSource').value || 'text'); }
+  for (const f of $('kbFiles').files) fd.append('files', f);
+  if (!$('kbFiles').files.length && !$('kbText').value.trim()) return toast('请上传文件或粘贴文本', 'warn');
+  const btn = $('kbSaveBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 切片向量化中';
+  try { const r = await api(asCases ? '/api/v1/knowledge/cases' : '/api/v1/knowledge/docs', {method:'POST', body: fd}); $('kbDlg').close(); toast(`已入库 ${r.ingested.length} 个文档`, 'ok'); renderKnowledge(); }
+  catch (e) { toast(e.message, 'err'); }
+  btn.disabled = false; btn.textContent = '入库';
+}
+async function deleteKb(id, name) {
+  if (!await uiConfirm('删除知识文档', `删除「${name}」及其全部切片？`, true)) return;
+  try { await api('/api/v1/knowledge/docs/' + id, {method:'DELETE'}); toast('已删除', 'ok'); renderKnowledge(); } catch (e) { toast(e.message, 'err'); }
+}
+
 /* ---- 操作日志（17 章） ---- */
 let auditTab = 'all', auditKind = '', auditUser = '', auditKw = '', auditDays = 30, auditPage = 1, auditFailed = false;
 async function renderAudit() {
@@ -4466,6 +4578,16 @@ async function renderReports() {
       <tr><th>执行人</th><th>执行次数</th><th>用例数</th><th>通过</th><th>失败</th><th>阻塞</th><th>跳过</th><th>通过率</th><th>代执行</th></tr>
       ${d.execution.people.map(x => `<tr><td><b>${esc(x.username)}</b></td><td>${x.executions}</td><td>${x.cases}</td><td>${x.pass}</td><td>${x.fail?`<b style="color:var(--danger)">${x.fail}</b>`:0}</td><td>${x.blocked}</td><td>${x.skipped}</td><td>${pct(x.pass_rate)}</td><td class="hint">${x.proxied||0}</td></tr>`).join('')}
     </table></div>` : ''}
+    ${d.ai_quality ? `<div class="section-t">AI 质量统计<span class="hint">（20 章：AI 产出 → 人工评审留痕口径；直接通过 = 未经驳回或修改即通过）</span></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:10px 26px">
+      ${[['测试点', d.ai_quality.point], ['用例', d.ai_quality.case]].map(([label, q]) => `<div><div class="tbl-wrap" style="margin-top:4px"><table>
+        <tr><th>${label}</th><th>AI 产出</th><th>采纳率</th><th>直接通过率</th><th>修改率</th><th>驳回率</th></tr>
+        <tr><td class="hint">通过 ${q.approved} · 修改 ${q.modified} · 驳回 ${q.rejected} · 删除 ${q.deleted}</td><td><b>${q.total}</b></td>
+          <td><b>${pct(q.adoption_rate)}</b></td><td>${pct(q.direct_pass_rate)}</td><td>${pct(q.modify_rate)}</td><td>${q.reject_rate!=null&&q.reject_rate>0.3?`<b style="color:var(--danger)">${pct(q.reject_rate)}</b>`:pct(q.reject_rate)}</td></tr>
+      </table></div></div>`).join('')}
+      <div><div class="section-t">驳回类型分布</div>${hbarList(d.ai_quality.reject_types, 'type', 'count', '次')}</div>
+      <div><div class="section-t">驳回原因 Top</div>${hbarList(d.ai_quality.reject_reasons, 'reason', 'count', '次')}</div>
+    </div>` : ''}
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:10px 26px">
       <div><div class="section-t">项目产出 Top</div>${hbarList(d.projects, 'project', 'cases', '条')}</div>
       <div><div class="section-t">成员产出</div>
