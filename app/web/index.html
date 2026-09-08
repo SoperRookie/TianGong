@@ -434,8 +434,14 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <button id="nav-reports" onclick="switchView('reports')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/></svg>
       报表</button>
-    <div id="sedimentMenu" style="display:none">
     <div class="grp">AI 中心</div>
+    <button id="nav-aicenter" onclick="switchView('aicenter')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 20h8M12 18v2M7 9l3 3-3 3M13 15h4"/></svg>
+      AI 任务中心</button>
+    <div id="sedimentMenu" style="display:none">
+    <button id="nav-prompts" onclick="switchView('prompts')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16M4 12h10M4 19h7"/><path d="M17 15l2 2 4-4"/></svg>
+      Prompt 管理</button>
     <button id="nav-rules" onclick="switchView('rules')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.6L20 10l-6.1 1.4L12 17l-1.9-5.6L4 10l6.1-1.4z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></svg>
       学习规则</button>
@@ -473,6 +479,10 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <div class="layout" id="view-projects" style="display:none">
   <div class="page" style="max-width:1420px" id="projArea"></div>
 </div>
+
+<!-- AI 中心：AI 任务中心（任务 / 调用日志 / 统计）与 Prompt 管理（M5） -->
+<div class="layout" id="view-aicenter" style="display:none"><div class="page" style="max-width:1420px" id="aiArea"></div></div>
+<div class="layout" id="view-prompts" style="display:none"><div class="page" style="max-width:1320px" id="promptArea"></div></div>
 
 <!-- 需求中心：需求列表 ⇄ 需求详情（M2） -->
 <div class="layout" id="view-requirements" style="display:none">
@@ -1428,6 +1438,7 @@ function setCurrentProject(name, opts = {}) {
   if (currentView === 'projects') { if (curProjectName) openProject(curProjectName); else { curProject = null; renderProjects(); } }
   else if (currentView === 'board') { if (currentTask) backToList(); else renderTaskListRows(); }
   else if (currentView === 'requirements') { curReq = null; renderRequirements(); }
+  else if (currentView === 'aicenter') renderAiCenter();
   else if (currentView === 'plans') { curPlan = null; renderPlans(); }
   else if (currentView === 'cases') { acPage = 1; renderAllCases(); }
   else if (currentView === 'reports') renderReports();
@@ -1465,21 +1476,21 @@ function renderProjMenu(q) {
 document.addEventListener('click', () => { const m = $('curProjMenu'); if (m) m.style.display = 'none'; });
 
 /* ---------- 视图切换与面包屑 ---------- */
-const VIEW_LABELS = {projects:'项目管理', requirements:'需求列表', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
+const VIEW_LABELS = {projects:'项目管理', requirements:'需求列表', aicenter:'AI 任务中心', prompts:'Prompt 管理', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
 function setCrumb(html) { $('crumb').innerHTML = html; }
 function crumbForBoard() {
   if (currentTask) {
     setCrumb(`<a onclick="backToList()">任务列表</a><span class="sep">/</span>任务 <code>${currentTask.task_id}</code>`);
   } else setCrumb(VIEW_LABELS.board);
 }
-const ADMIN_VIEWS = ['rules','memory','models','users'];  // 沉淀与反哺 + 系统设置：仅管理员
+const ADMIN_VIEWS = ['rules','memory','models','users','prompts'];  // 沉淀与反哺 + 系统设置：仅管理员
 function switchView(v) {
   if (ADMIN_VIEWS.includes(v) && curUser && curUser.role !== 'admin') {
     toast('该页面需要管理员权限', 'warn');
     v = 'projects';
   }
   currentView = v;
-  for (const k of ['projects','requirements','board','plans','cases','reports','rules','memory','models','users']) {
+  for (const k of ['projects','requirements','aicenter','prompts','board','plans','cases','reports','rules','memory','models','users']) {
     $('view-'+k).style.display = k===v ? '' : 'none';
     $('nav-'+k).classList.toggle('on', k===v && !(k==='plans' && plansMine));
   }
@@ -1492,6 +1503,8 @@ function switchView(v) {
   else setCrumb(VIEW_LABELS[v]);
   if (v==='projects') renderProjects();
   if (v==='requirements') renderRequirements();
+  if (v==='aicenter') renderAiCenter();
+  if (v==='prompts') renderPrompts();
   if (v==='plans') renderPlans();
   if (v==='cases') renderAllCases();
   if (v==='reports') renderReports();
@@ -1832,7 +1845,7 @@ function renderDetail() {
         ${running?'<button class="btn ghost sm" onclick="cancelTask()">取消任务</button>':''}
         <span class="hint">${t.created_by?esc(t.created_by)+' · ':''}${(t.sources||[]).map(esc).join('、')||'-'} · ${relTime(t.created_at)}</span></div>
     </div>
-    ${t.error?'<div class="card-b" style="color:var(--danger);padding-top:0">'+esc(t.error)+'</div>':''}
+    ${t.error?'<div class="card-b" style="color:var(--danger);padding-top:0;display:flex;align-items:center;gap:10px"><span>'+esc(t.error)+'</span>'+(t.status==='failed'&&(t.context||{}).requirement?'<button class="btn ghost sm" onclick="retryTask()">重试</button>':'')+'</div>':''}
     <div class="dtabs">${tabs.map(([k,label,badge]) =>
       `<button class="${detailTab===k?'on':''}" onclick="setTab('${k}')">${label}${badge}</button>`).join('')}</div>
     <div class="card-b">${running ? renderProgress(t) + body : body}</div>
@@ -1970,6 +1983,7 @@ function renderOverview(t) {
           <div><dt>项目</dt><dd>${esc(ctx.project||'—')}</dd></div>
           <div><dt>来源需求</dt><dd>${ctx.requirement_id?`<a onclick="openRequirement('${esc(ctx.requirement_id)}')">${esc(ctx.requirement_title||ctx.requirement_id)}</a>`:'—'}</dd></div>
           <div><dt>生成模型</dt><dd>${esc(ctx.model||'默认')}</dd></div>
+          <div><dt>Prompt 版本</dt><dd>${Object.keys(t.prompt_versions||{}).length?Object.entries(t.prompt_versions).map(([k,v])=>`<code title="${esc(k)}">${esc(PROMPT_NAMES[k]||k)} v${v}</code>`).join(' '):'—'}${ctx.retry_count?`<div class="hint">已重试 ${ctx.retry_count} 次</div>`:''}</dd></div>
           <div><dt>模板</dt><dd>${esc(ctx.template_id||'—')}</dd></div>
           <div><dt>测试点</dt><dd>${pts.length||'—'}</dd></div>
           <div><dt>创建时间</dt><dd>${esc((t.created_at||'').replace('T',' ').replace('+00:00',' UTC'))}</dd></div>
@@ -3384,6 +3398,174 @@ function renderOfflineDiff(o) {
       ${o.modified.map(x=>'<span>修改：'+esc(x.title)+'（'+x.changes.map(c=>esc(c.field)).join('/')+'）</span>').join('')}
     </div></div>`;
 }
+/* ==================== AI 中心（M5）：任务中心 / 调用日志 / Prompt 管理 ==================== */
+const PROMPT_NAMES = {analyst:'需求拆解', requirement_analysis:'需求分析', generator:'用例生成', reviewer:'用例评审', fix_instruction:'定点修正指令',
+  gap_check:'覆盖查漏', dup_judge:'语义查重', point_fix:'测试点修改', case_fix:'用例修改', requirement_diff:'需求变更', learning:'修改习惯学习',
+  point_supplement:'测试点补充', vision_image:'图片理解', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
+let aiTab = 'tasks', aiStatus = '', aiMine = false, aiCallPage = 1, aiCallPurpose = '', aiCallStatus = '', aiCallModel = '', aiDays = 30;
+async function retryTask() {
+  if (!currentTask) return;
+  try { await jpost(`/api/v1/tasks/${currentTask.task_id}/retry`, {}); toast('已重新提交，后台执行中', 'ok'); await refreshList(); openTask(currentTask.task_id); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function retryFromCenter(id) {
+  try { await jpost(`/api/v1/tasks/${id}/retry`, {}); toast('已重新提交', 'ok'); renderAiCenter(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function renderAiCenter() {
+  setCrumb('AI 任务中心');
+  const tabs = [['tasks','AI 任务'],['calls','调用日志'],['stats','用量统计']];
+  let body = '';
+  try {
+    if (aiTab === 'tasks') body = await aiTasksHtml();
+    else if (aiTab === 'calls') body = await aiCallsHtml();
+    else body = await aiStatsHtml();
+  } catch (e) { body = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+  $('aiArea').innerHTML = `<div class="card">
+    <div class="card-h" style="border-bottom:none"><h3>AI 任务中心</h3>
+      <span class="meta">${curProjectName?`当前项目 ${esc(curProjectName)}`:'全部可见项目'} · 每次 AI 任务记录模型、Prompt 版本、输入、输出与发起人（核心规则 23）</span></div>
+    <div class="dtabs">${tabs.map(([k,l])=>`<button class="${aiTab===k?'on':''}" onclick="aiTab='${k}';renderAiCenter()">${l}</button>`).join('')}</div>
+    <div class="card-b">${body}</div></div>`;
+}
+async function aiTasksHtml() {
+  const q = new URLSearchParams(); if (curProjectName) q.set('project', curProjectName); if (aiStatus) q.set('status', aiStatus); if (aiMine) q.set('mine', 'true');
+  const data = await api('/api/v1/ai/tasks?' + q);
+  const c = data.counts;
+  return `<div class="toolbar" style="margin-bottom:10px">
+      <div class="seg">${[['','全部'],['queued','排队中'],['running','执行中'],['awaiting_confirmation','待确认'],['completed','完成'],['failed','失败']].map(([v,l])=>`<button class="${aiStatus===v?'on':''}" onclick="aiStatus='${v}';renderAiCenter()">${l}${v&&c[v]?` ${c[v]}`:''}</button>`).join('')}</div>
+      <label class="check">只看我发起的 <input type="checkbox" ${aiMine?'checked':''} onchange="aiMine=this.checked;renderAiCenter()"></label></div>
+    <div class="tbl-wrap" style="margin-top:0"><table>
+      <thead><tr><th style="width:100px">状态</th><th style="width:130px">类型</th><th style="width:120px">任务</th><th>来源 / 需求</th><th style="width:110px">模型</th><th>Prompt 版本</th><th>结果</th><th style="width:90px">发起人</th><th style="width:90px">时间</th><th style="width:70px">操作</th></tr></thead>
+      <tbody>${data.tasks.map(t => `<tr class="rowlink" onclick="openTaskFromProject('${t.task_id}')">
+        <td><span class="pill ${t.status}">${statusText(t.status)}</span>${t.progress?`<div class="hint">${progressText(t.progress)} <span class="spin"></span></div>`:''}</td>
+        <td>${esc(t.kind)}</td>
+        <td><span class="tid-cell">${t.task_id}</span><div class="hint">${esc(t.project||'未指定')}</div></td>
+        <td>${t.requirement_id?`<a onclick="event.stopPropagation();openRequirement('${t.requirement_id}')">${esc(t.requirement_title||t.requirement_id)}</a>`:esc((t.sources||[]).join('、'))}</td>
+        <td class="hint">${esc(t.model||'默认')}</td>
+        <td>${Object.entries(t.prompt_versions||{}).map(([k,v])=>`<code title="${esc(k)}">${esc(PROMPT_NAMES[k]||k)} v${v}</code>`).join(' ')||'<span class="hint">—</span>'}</td>
+        <td>${t.status==='completed'?`<b>${t.case_count}</b> 条${t.partial.length?`<div class="hint" style="color:var(--warn)">部分成功：${t.partial.map(esc).join('；')}</div>`:''}`
+            :t.status==='failed'?`<div class="hint" style="color:var(--danger)">${esc(t.error||'失败')}</div>`:'<span class="hint">—</span>'}${t.retry_count?`<div class="hint">已重试 ${t.retry_count} 次</div>`:''}</td>
+        <td class="hint">${esc(t.created_by||'')}</td><td class="hint">${relTime(t.created_at)}</td>
+        <td onclick="event.stopPropagation()">${t.retryable?`<button class="btn ghost sm" onclick="retryFromCenter('${t.task_id}')">重试</button>`:''}</td></tr>`).join('')
+        || '<tr><td colspan="10"><div class="empty">暂无 AI 任务</div></td></tr>'}</tbody></table></div>`;
+}
+async function aiCallsHtml() {
+  const q = new URLSearchParams({page: aiCallPage, page_size: 50, days: aiDays});
+  if (curProjectName) q.set('project', curProjectName); if (aiCallPurpose) q.set('purpose', aiCallPurpose); if (aiCallStatus) q.set('status', aiCallStatus); if (aiCallModel) q.set('model', aiCallModel);
+  const data = await api('/api/v1/ai/calls?' + q);
+  const pages = Math.max(1, Math.ceil(data.total / 50));
+  return `<div class="toolbar" style="margin-bottom:10px">
+      <select style="width:120px" onchange="aiDays=+this.value;aiCallPage=1;renderAiCenter()">${[[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${aiDays===v?'selected':''}>${l}</option>`).join('')}</select>
+      <select style="width:150px" onchange="aiCallPurpose=this.value;aiCallPage=1;renderAiCenter()"><option value="">全部用途</option>${Object.values(PROMPT_NAMES).filter(n=>!n.startsWith('注入')).map(n=>`<option ${aiCallPurpose===n?'selected':''}>${n}</option>`).join('')}<option ${aiCallPurpose==='模型连通性测试'?'selected':''}>模型连通性测试</option></select>
+      <select style="width:100px" onchange="aiCallStatus=this.value;aiCallPage=1;renderAiCenter()"><option value="">全部状态</option><option value="ok" ${aiCallStatus==='ok'?'selected':''}>成功</option><option value="error" ${aiCallStatus==='error'?'selected':''}>失败</option></select>
+      <input type="text" placeholder="模型名" value="${esc(aiCallModel)}" style="width:130px" onchange="aiCallModel=this.value;aiCallPage=1;renderAiCenter()">
+      <span class="hint">共 ${data.total} 次</span></div>
+    <div class="tbl-wrap" style="margin-top:0"><table>
+      <thead><tr><th style="width:130px">时间</th><th style="width:120px">用途</th><th style="width:130px">模型</th><th>Prompt 版本</th><th style="width:90px">项目</th><th style="width:110px">任务 / 需求</th><th style="width:80px">发起人</th><th style="width:70px">耗时</th><th style="width:100px">Token 入/出</th><th style="width:80px">状态</th></tr></thead>
+      <tbody>${data.items.map(c => `<tr class="rowlink" onclick="openAiCall(${c.id})">
+        <td class="hint">${esc((c.at||'').replace('T',' ').replace('+00:00','').slice(0,16))}</td>
+        <td>${esc(c.purpose)}</td><td class="hint">${esc(c.model)}<div>${esc(c.provider)}</div></td>
+        <td>${Object.entries(c.prompt_versions||{}).map(([k,v])=>`<code>${esc(PROMPT_NAMES[k]||k)} v${v}</code>`).join(' ')||'—'}</td>
+        <td class="hint">${esc(c.project||'—')}</td>
+        <td class="hint">${c.task_id?`<a onclick="event.stopPropagation();openTaskFromProject('${c.task_id}')">${c.task_id}</a>`:''}${c.requirement_id?`<div><a onclick="event.stopPropagation();openRequirement('${c.requirement_id}')">需求 ${c.requirement_id}</a></div>`:''}</td>
+        <td class="hint">${esc(c.by||'')}</td><td class="hint">${c.elapsed_ms} ms${c.attempts>1?`<div>${c.attempts} 次尝试</div>`:''}</td>
+        <td class="hint">${c.prompt_tokens||0} / ${c.completion_tokens||0}</td>
+        <td>${c.status==='ok'?'<span class="st approved">成功</span>':`<span class="st rejected" title="${esc(c.error)}">失败</span>`}${c.finish_reason==='length'?'<div class="hint" style="color:var(--warn)">输出截断</div>':''}</td></tr>`).join('')
+        || '<tr><td colspan="10"><div class="empty">暂无调用记录</div></td></tr>'}</tbody></table></div>
+    <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
+      <button class="btn ghost sm" ${aiCallPage<=1?'disabled':''} onclick="aiCallPage--;renderAiCenter()">上一页</button>
+      <span class="hint">${aiCallPage} / ${pages}</span>
+      <button class="btn ghost sm" ${aiCallPage>=pages?'disabled':''} onclick="aiCallPage++;renderAiCenter()">下一页</button></div>`;
+}
+async function openAiCall(id) {
+  let c; try { c = await api('/api/v1/ai/calls/' + id); } catch (e) { return toast(e.message, 'err'); }
+  $('cfTitle').textContent = `调用记录 #${id} · ${c.purpose} · ${c.model}`;
+  $('cfMsg').innerHTML = `<div class="hint" style="margin-bottom:6px">${esc(c.at)} · ${esc(c.by||'')} · ${esc(c.project||'')} · ${c.elapsed_ms} ms · token ${c.prompt_tokens}/${c.completion_tokens} · Prompt ${Object.entries(c.prompt_versions||{}).map(([k,v])=>`${PROMPT_NAMES[k]||k} v${v}`).join('，')||'—'}${c.status==='error'?`<div style="color:var(--danger)">错误：${esc(c.error)}</div>`:''}</div>
+    <div class="section-t">输入（前 3000 字）</div><pre style="white-space:pre-wrap;max-height:220px;overflow:auto;background:var(--line-2);padding:8px;border-radius:6px;font-size:12px">${esc(c.input_preview)}</pre>
+    <div class="section-t">输出（前 3000 字）</div><pre style="white-space:pre-wrap;max-height:220px;overflow:auto;background:var(--line-2);padding:8px;border-radius:6px;font-size:12px">${esc(c.output_preview||'（无）')}</pre>`;
+  $('cfOk').style.display = 'none';
+  $('confirmDlg').style.width = '860px';
+  _cfResolve = () => { $('cfOk').style.display = ''; $('confirmDlg').style.width = ''; };
+  $('confirmDlg').showModal();
+}
+async function aiStatsHtml() {
+  const q = new URLSearchParams({days: aiDays}); if (curProjectName) q.set('project', curProjectName);
+  const d = await api('/api/v1/ai/stats?' + q);
+  const totalCalls = d.by_model.reduce((a,b)=>a+b.calls,0), totalTok = d.by_model.reduce((a,b)=>a+b.tokens,0);
+  return `<div class="toolbar" style="margin-bottom:10px"><select style="width:120px" onchange="aiDays=+this.value;renderAiCenter()">${[[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${aiDays===v?'selected':''}>${l}</option>`).join('')}</select></div>
+    <div class="statrow"><div class="stat"><div class="lab">调用次数</div><div class="num">${totalCalls}</div></div>
+      <div class="stat"><div class="lab">Token 消耗</div><div class="num">${totalTok.toLocaleString()}</div><div class="sub">输入 + 输出</div></div>
+      <div class="stat"><div class="lab">失败调用</div><div class="num">${d.by_purpose.reduce((a,b)=>a+b.errors,0)}</div></div></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px 26px;margin-top:12px">
+      <div><div class="section-t">按模型</div><div class="tbl-wrap" style="margin-top:4px"><table><tr><th>模型</th><th>调用</th><th>Token</th><th>平均耗时</th></tr>
+        ${d.by_model.map(m=>`<tr><td>${esc(m.model)}</td><td>${m.calls}</td><td>${m.tokens.toLocaleString()}</td><td>${m.calls?Math.round(m.elapsed_ms/m.calls):0} ms</td></tr>`).join('')||'<tr><td colspan="4" class="hint">无</td></tr>'}</table></div></div>
+      <div><div class="section-t">按用途</div><div class="tbl-wrap" style="margin-top:4px"><table><tr><th>用途</th><th>调用</th><th>失败</th></tr>
+        ${d.by_purpose.map(p=>`<tr><td>${esc(p.purpose)}</td><td>${p.calls}</td><td>${p.errors?`<b style="color:var(--danger)">${p.errors}</b>`:0}</td></tr>`).join('')||'<tr><td colspan="3" class="hint">无</td></tr>'}</table></div></div></div>`;
+}
+
+/* ---- Prompt 管理（管理员） ---- */
+let curPromptKey = null, _promptDetail = null, _promptViewVer = null;
+async function renderPrompts() {
+  setCrumb(curPromptKey && _promptDetail ? `<a onclick="curPromptKey=null;renderPrompts()">Prompt 管理</a><span class="sep">/</span>${esc(_promptDetail.name)}` : 'Prompt 管理');
+  if (curPromptKey) return renderPromptDetail();
+  let data; try { data = await api('/api/v1/ai/prompts'); } catch (e) { return toast(e.message, 'err'); }
+  $('promptArea').innerHTML = `<div class="card">
+    <div class="card-h"><h3>Prompt 管理</h3><span class="meta">全部 Prompt 版本化：新建版本为草稿，激活后生效，可随时回滚；每次 AI 调用记录所用版本</span></div>
+    <div class="card-b"><div class="tbl-wrap" style="margin-top:0"><table>
+      <thead><tr><th style="width:170px">Prompt</th><th style="width:70px">类型</th><th>使用场景</th><th>生效内容（预览）</th><th style="width:90px">生效版本</th><th style="width:70px">版本数</th><th style="width:110px">最近更新</th></tr></thead>
+      <tbody>${data.prompts.map(p=>`<tr class="rowlink" onclick="curPromptKey='${p.key}';_promptViewVer=null;renderPrompts()">
+        <td><b>${esc(p.name)}</b><div class="hint"><code>${p.key}</code></div></td>
+        <td><span class="tag">${{system:'系统',user:'用户',block:'注入块'}[p.kind]||p.kind}</span></td>
+        <td class="hint">${esc(p.where)}${p.placeholders.length?`<div>占位符 ${p.placeholders.map(x=>`<code>{${esc(x)}}</code>`).join(' ')}</div>`:''}</td>
+        <td class="hint" style="max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.preview)}</td>
+        <td>v${p.active_version}${p.customized?' <span class="st candidate">已定制</span>':' <span class="hint">内置</span>'}${p.drafts?`<div class="hint">草稿 ${p.drafts}</div>`:''}</td>
+        <td>${p.versions}</td><td class="hint">${relTime(p.updated_at)}</td></tr>`).join('')}</tbody></table></div></div></div>`;
+}
+async function renderPromptDetail() {
+  let p; try { p = await api('/api/v1/ai/prompts/' + curPromptKey); } catch (e) { toast(e.message, 'err'); curPromptKey = null; return renderPrompts(); }
+  _promptDetail = p;
+  setCrumb(`<a onclick="curPromptKey=null;renderPrompts()">Prompt 管理</a><span class="sep">/</span>${esc(p.name)}`);
+  const viewNo = _promptViewVer || p.active_version;
+  const v = p.versions.find(x => x.version_no === viewNo);
+  const STC = {active:'approved', draft:'candidate', archived:'pending'}, STL = {active:'生效中', draft:'草稿', archived:'已归档'};
+  $('promptArea').innerHTML = `<div class="card">
+    <div class="card-h"><button class="btn ghost sm" onclick="curPromptKey=null;renderPrompts()">← Prompt 管理</button>
+      <h3>${esc(p.name)}</h3><code class="hint">${p.key}</code><span class="meta">${esc(p.where)}${p.placeholders.length?` · 必需占位符 ${p.placeholders.map(x=>`{${esc(x)}}`).join(' ')}（字面花括号写成 {{ }}）`:''}</span>
+      <div class="grow"><button class="btn sm" onclick="openPromptEditor()">＋ 基于当前查看版本新建</button></div></div>
+    <div class="card-b" style="display:grid;grid-template-columns:300px 1fr;gap:16px">
+      <div><div class="section-t">版本链</div>
+        <div class="tbl-wrap" style="margin-top:4px"><table><tr><th>版本</th><th>状态</th><th>说明</th></tr>
+        ${[...p.versions].reverse().map(x=>`<tr class="rowlink ${x.version_no===viewNo?'mine':''}" onclick="_promptViewVer=${x.version_no};renderPromptDetail()">
+          <td><b>v${x.version_no}</b></td><td><span class="st ${STC[x.status]}">${STL[x.status]}</span></td>
+          <td class="hint">${esc(x.note||'')}<div>${esc(x.created_by||'内置')} · ${relTime(x.created_at)}</div></td></tr>`).join('')}</table></div></div>
+      <div><div class="section-t" style="display:flex;align-items:center;gap:8px">v${viewNo} <span class="st ${STC[v.status]}">${STL[v.status]}</span><span class="hint">${esc(v.note||'')}</span>
+          <span style="margin-left:auto;display:flex;gap:6px">
+            ${v.status!=='active'?`<button class="btn sm" onclick="activatePrompt(${v.version_no})">${v.status==='archived'?'回滚到此版本':'激活生效'}</button>`:''}
+            ${v.status==='draft'?`<button class="btn ghost sm" onclick="archivePrompt(${v.version_no})">归档草稿</button>`:''}</span></div>
+        <pre id="promptView" style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:60vh;overflow:auto;font-size:12.5px;line-height:1.6">${esc(v.content)}</pre>
+        <div id="promptEditor" style="display:none;margin-top:10px">
+          <div class="section-t">新版本内容</div>
+          <textarea id="promptText" rows="18" style="width:100%;box-sizing:border-box;font-family:ui-monospace,Menlo,monospace;font-size:12.5px"></textarea>
+          <div class="toolbar" style="margin-top:8px"><input type="text" id="promptNote" placeholder="版本说明（改了什么、为什么）" style="flex:1">
+            <button class="btn ghost sm" onclick="savePromptVersion(false)">保存为草稿</button>
+            <button class="btn sm" onclick="savePromptVersion(true)">保存并激活</button>
+            <button class="btn ghost sm" onclick="$('promptEditor').style.display='none'">取消</button></div></div></div></div></div>`;
+}
+function openPromptEditor() { $('promptText').value = $('promptView').textContent; $('promptNote').value = ''; $('promptEditor').style.display = ''; $('promptText').focus(); }
+async function savePromptVersion(activate) {
+  try {
+    const p = await jpost(`/api/v1/ai/prompts/${curPromptKey}/versions`, {content: $('promptText').value, note: $('promptNote').value, activate});
+    toast(activate ? '新版本已激活生效' : '已保存为草稿', 'ok'); _promptViewVer = p.versions[p.versions.length-1].version_no; renderPromptDetail();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function activatePrompt(no) {
+  if (!await uiConfirm('激活版本', `将 v${no} 设为生效版本？后续 AI 调用立即使用该版本。`)) return;
+  try { await jpost(`/api/v1/ai/prompts/${curPromptKey}/versions/${no}/activate`, {}); toast(`v${no} 已生效`, 'ok'); renderPromptDetail(); } catch (e) { toast(e.message, 'err'); }
+}
+async function archivePrompt(no) {
+  try { await jpost(`/api/v1/ai/prompts/${curPromptKey}/versions/${no}/archive`, {}); renderPromptDetail(); } catch (e) { toast(e.message, 'err'); }
+}
+
 /* ==================== 需求中心（M2） ==================== */
 let curReq = null, _reqDetail = null, _reqsCache = [], reqStatus = '', reqKw = '', reqTab = 'raw';
 const REQ_ST_CLS = {draft:'pending', analyzed:'candidate', pending_confirm:'rejected', confirmed:'approved', designing:'candidate', done:'approved', archived:'pending'};

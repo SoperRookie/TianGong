@@ -52,6 +52,10 @@ async def lifespan(app: FastAPI):
     migrated = migrate_tasks(app.state.tasks, app.state.requirements)
     if migrated:
         logger.info("M2 需求迁移：{} 个历史任务已建为需求实体并回填关联", migrated)
+    from app.prompts import PromptStore, set_current
+
+    app.state.prompts = PromptStore()
+    set_current(app.state.prompts)
     app.state.auth = AuthStore(
         storage_path=settings.data_dir / "auth.json",
         session_ttl_hours=settings.session_ttl_hours,
@@ -65,6 +69,7 @@ async def lifespan(app: FastAPI):
         settings.log_dir,
     )
     yield
+    set_current(None)
     logger.info("服务关闭")
 
 

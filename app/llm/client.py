@@ -60,16 +60,21 @@ class LLMClient:
         require_vision: 消息含图片时置 True，自动路由至 Vision 模型（F-1-5）。
         overrides: 覆盖 temperature / max_tokens 等单次参数。
         """
+        from app.llm.calllog import record_call
+
         chain = self.registry.call_chain(model, require_vision=require_vision)
         attempts = 0
         last_error: Exception | None = None
+        started = time.monotonic()
         for i, cfg in enumerate(chain):
             if i > 0:
                 logger.warning("模型降级：{} → {}（原因: {}）", chain[i - 1].name, cfg.name, last_error)
             for _ in range(1 + self.registry.max_retries):
                 attempts += 1
                 try:
-                    return await self._call_once(cfg, messages, attempts, **overrides)
+                    result = await self._call_once(cfg, messages, attempts, **overrides)
+                    record_call(messages, result)
+                    return result
                 except _RETRYABLE as e:
                     last_error = e
                     logger.warning("模型调用失败（第 {} 次，{}）：{}", attempts, cfg.name, e)
@@ -81,6 +86,9 @@ class LLMClient:
                     break
         tried = " → ".join(c.name for c in chain)
         logger.error("模型全链路失败（{} 次，链路: {}）：{}", attempts, tried, last_error)
+        record_call(messages, None, error=last_error, model_name=chain[-1].name if chain else "",
+                    provider=chain[-1].provider if chain else "", attempts=attempts,
+                    elapsed_ms=int((time.monotonic() - started) * 1000))
         raise AllModelsFailedError(
             f"模型调用失败（已尝试 {attempts} 次，链路: {tried}）: {last_error}"
         ) from last_error

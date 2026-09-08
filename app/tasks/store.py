@@ -47,6 +47,7 @@ class TaskRecord(BaseModel):
     executions: list[dict] = Field(default_factory=list, description="用例执行轮次与逐条执行记录（执行留痕；M4 起挂测试计划，此字段仅存迁移前历史）")
     exec_migrated_to: str | None = Field(default=None, description="M4 执行迁移去向：历史执行轮次搬入的测试计划 plan_id")
     pending_fix: dict | None = Field(default=None, description="待确认的 AI 修改提案（完整需求 7.3/9.4 确认流）：接受/拒绝前不落地")
+    prompt_versions: dict[str, int] = Field(default_factory=dict, description="本任务用到的 Prompt 版本（核心规则 23）")
 
 
 class TaskStore:

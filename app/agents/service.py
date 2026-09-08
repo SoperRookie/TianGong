@@ -73,11 +73,12 @@ async def run_requirement_analysis(
 ) -> dict:
     """需求中心 AI 需求分析（完整需求 5.5）：11 项结构化输出。超长需求分片后逐项合并去重。"""
     from app.agents.graph import _chat_json
-    from app.agents.prompts import REQUIREMENT_ANALYSIS_KEYS, REQUIREMENT_ANALYSIS_SYSTEM
+    from app.agents.prompts import REQUIREMENT_ANALYSIS_KEYS
+    from app.prompts import prompt_text
 
     chunks = split_text(text, get_settings().chunk_max_chars)
     outputs = await asyncio.gather(*[
-        _chat_json(llm, [{"role": "system", "content": REQUIREMENT_ANALYSIS_SYSTEM},
+        _chat_json(llm, [{"role": "system", "content": prompt_text("requirement_analysis")},
                          {"role": "user", "content": f"需求原文：\n{chunk}"}], model)
         for chunk in chunks
     ])

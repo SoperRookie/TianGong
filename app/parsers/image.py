@@ -57,9 +57,13 @@ VISION_PROMPT = """你是一名资深测试分析师，请仔细观察这张需�
 
 
 async def understand_image_bytes(
-    data: bytes, mime: str, llm: LLMClient, prompt: str = VISION_PROMPT
+    data: bytes, mime: str, llm: LLMClient, prompt: str | None = None
 ) -> str:
     """Vision 模型理解图片字节，返回 Markdown 文本（自动路由 Vision 模型，F-1-5）。"""
+    if prompt is None:
+        from app.prompts import prompt_text
+
+        prompt = prompt_text("vision_image")
     payload, mime = _downscale(data, mime)
     data_url = f"data:{mime};base64,{base64.b64encode(payload).decode()}"
     result = await llm.chat(

@@ -15,14 +15,7 @@ from loguru import logger
 from pydantic import ValidationError
 
 from app.agents.graph import _chat_json
-from app.agents.prompts import (
-    CASE_FIX_SYSTEM,
-    DUP_JUDGE_SYSTEM,
-    GAP_CHECK_SYSTEM,
-    LEARNING_SYSTEM,
-    POINT_FIX_SYSTEM,
-    REQ_DIFF_SYSTEM,
-)
+from app.prompts import prompt_text
 from app.llm.client import LLMClient
 from app.tasks.points import (
     COVERAGE_STATES,
@@ -64,7 +57,7 @@ async def run_gap_check(
     data, result = await _chat_json(
         llm,
         [
-            {"role": "system", "content": GAP_CHECK_SYSTEM},
+            {"role": "system", "content": prompt_text("gap_check")},
             {
                 "role": "user",
                 "content": f"需求内容：\n{requirement}\n\n已有测试点：\n{_dump(_points_view(modules))}",
@@ -101,7 +94,7 @@ async def run_dup_judge(
         data, _ = await _chat_json(
             llm,
             [
-                {"role": "system", "content": DUP_JUDGE_SYSTEM},
+                {"role": "system", "content": prompt_text("dup_judge")},
                 {
                     "role": "user",
                     "content": f"需求内容：\n{requirement[:2000]}\n\n疑似重复测试点对：\n{_dump(pairs)}",
@@ -149,7 +142,7 @@ async def run_point_fix(
     data, result = await _chat_json(
         llm,
         [
-            {"role": "system", "content": POINT_FIX_SYSTEM},
+            {"role": "system", "content": prompt_text("point_fix")},
             {
                 "role": "user",
                 "content": f"关联需求：\n{requirement}\n\n被驳回的测试点与审核意见：\n{_dump(payload)}",
@@ -308,7 +301,7 @@ async def run_case_fix(
         dict(_strip_case(c), **_fix_directives(reviews[str(c.get("uid"))]))
         for c in rejected
     ]
-    system = CASE_FIX_SYSTEM.format(template_spec=template.prompt_spec())
+    system = prompt_text("case_fix").format(template_spec=template.prompt_spec())
     data, result = await _chat_json(
         llm,
         [
@@ -561,7 +554,7 @@ async def run_requirement_diff(
     data, result = await _chat_json(
         llm,
         [
-            {"role": "system", "content": REQ_DIFF_SYSTEM},
+            {"role": "system", "content": prompt_text("requirement_diff")},
             {
                 "role": "user",
                 "content": (
@@ -606,7 +599,7 @@ async def run_learning_analysis(
     data, _ = await _chat_json(
         llm,
         [
-            {"role": "system", "content": LEARNING_SYSTEM},
+            {"role": "system", "content": prompt_text("learning")},
             {"role": "user", "content": f"人工修改留痕样本（共 {len(samples)} 条）：\n{_dump(samples)}"},
         ],
         model,

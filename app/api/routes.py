@@ -31,6 +31,7 @@ from app.parsers import (
     parse_image,
     parse_text,
 )
+from app.prompts import prompt_text
 from app.tasks import TaskRecord
 from app.templates import CustomTemplate, TemplateParseError, recognize_template
 
@@ -152,6 +153,18 @@ def _record_visible(request: Request, project: str | None) -> bool:
     if not project or project == UNASSIGNED:
         return False
     return project in visible
+
+
+def _ai_ctx(request: Request, record: TaskRecord | None = None, project: str | None = None,
+            requirement_id: str | None = None, purpose: str | None = None) -> None:
+    """进入 AI 操作前设置调用上下文（项目 / 任务 / 需求 / 发起人），调用日志据此归属。"""
+    from app.llm.calllog import set_ai_context
+
+    ctx = (record.context or {}) if record is not None else {}
+    set_ai_context(task_id=record.task_id if record is not None else None,
+                   project=project or ctx.get("project"),
+                   requirement_id=requirement_id or ctx.get("requirement_id"),
+                   by=_operator(request), purpose=purpose)
 
 
 def _task(request: Request, task_id: str, action: str) -> TaskRecord:
@@ -496,6 +509,7 @@ class ModelTestBody(BaseModel):
 
 @router.post("/api/v1/models/test")
 async def test_model(request: Request, body: ModelTestBody) -> dict:
+    _ai_ctx(request, purpose="模型连通性测试")
     """连通性测试（管理员）：向指定模型发送一次最小请求，返回耗时与结果。"""
     _require_admin(request)
     try:
@@ -1014,8 +1028,12 @@ async def _launch_task(
     """任务启动（拆解确认 / 直接生成，同步或后台）；需求中心发起测试设计复用此函数。"""
     settings = get_settings()
     store = request.app.state.tasks
+    _ai_ctx(request, project=project, requirement_id=(extra_context or {}).get("requirement_id"))
+    from app.llm.calllog import set_ai_context
+    set_ai_context(task_id=task_id)
     task_context = {
         "requirement": requirement,
+        "confirm_points": confirm_points,
         "model": model,
         "reviewer_model": reviewer_model,
         "template_id": template.template_id,
@@ -1059,6 +1077,9 @@ async def _launch_task(
             await _run_point_quality_checks(request.app, task_id, requirement, model)
             store.set_progress(task_id, progress=None)
             record = store.get(task_id)
+            from app.llm.calllog import prompt_versions_for_task
+            record.prompt_versions = prompt_versions_for_task(task_id)
+            store.save(record)
             # 版本历史（完整需求 10 章）：拆解产出即记 AI 原始版本（查漏新增的点一并入册）
             from app.versions import ensure_versions, point_entities
             ensure_versions(task_id, "point",
@@ -1138,8 +1159,9 @@ async def _launch_task(
     except (MissingAPIKeyError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     except AllModelsFailedError as e:
-        record = TaskRecord(task_id=task_id, status="failed", sources=sources, error=str(e),
-                            created_by=_operator(request))
+        record = store.get(task_id) or TaskRecord(task_id=task_id, sources=sources, created_by=_operator(request))
+        record.status, record.error, record.progress = "failed", str(e), None
+        record.context = record.context or task_context
         store.save(record)
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -1195,6 +1217,8 @@ def _finalize_task(
         record.memories = memories
     if rules is not None:
         record.rules = rules
+    from app.llm.calllog import prompt_versions_for_task
+    record.prompt_versions = {**record.prompt_versions, **prompt_versions_for_task(task_id)}
     store.save(record)
     # 版本历史（完整需求 10 章）：为尚无版本的用例补记首版（生成产出 / 存量任务打底）
     from app.versions import case_entities, ensure_versions
@@ -1245,6 +1269,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     """确认（或修改后确认）测试点，继续生成（F-3-3 第二阶段）。多模块按模块并行生成。"""
     store = request.app.state.tasks
     record = _task(request, task_id, "point.review")
+    _ai_ctx(request, record)
     if record.status != "awaiting_confirmation":
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无待确认的拆解结果")
 
@@ -1329,6 +1354,7 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
 
     store = request.app.state.tasks
     record = _task(request, task_id, "case.ai")
+    _ai_ctx(request, record)
     if record.status != "completed" or not (record.result or {}).get("cases"):
         raise HTTPException(
             status_code=409, detail=f"任务状态为 {record.status}，无可修订的用例结果"
@@ -1656,6 +1682,7 @@ async def fix_points(request: Request, task_id: str) -> dict:
 
     store = request.app.state.tasks
     record, modules = _points_record(request, task_id, "point.ai")
+    _ai_ctx(request, record)
     if record.pending_fix:
         raise HTTPException(status_code=409, detail="存在待确认的 AI 修改提案，请先接受/拒绝后再发起新修改")
     rejected = rejected_points(modules)
@@ -1694,6 +1721,7 @@ async def add_task_points(request: Request, task_id: str, body: PointAddBody) ->
 
     store = request.app.state.tasks
     record, modules = _points_record(request, task_id, "point.edit")
+    _ai_ctx(request, record)
     if body.points:
         added = add_points(modules, body.points, source="manual")
     elif body.instruction and body.instruction.strip():
@@ -1709,7 +1737,7 @@ async def add_task_points(request: Request, task_id: str, body: PointAddBody) ->
         )
         try:
             data, _ = await _chat_json(request.app.state.llm, [
-                {"role": "system", "content": "你是资深测试分析师，负责按用户要求补充测试点。一个测试点对应一个明确验证目标。"},
+                {"role": "system", "content": prompt_text("point_supplement")},
                 {"role": "user", "content": prompt},
             ], ctx.get("model"))
         except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
@@ -1733,6 +1761,7 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
 
     store = request.app.state.tasks
     record, modules = _points_record(request, task_id, "point.ai")
+    _ai_ctx(request, record)
     ctx = record.context or {}
     try:
         gap = await run_gap_check(
@@ -1759,6 +1788,7 @@ async def dup_check_points(request: Request, task_id: str) -> dict:
 
     store = request.app.state.tasks
     record, modules = _points_record(request, task_id, "point.ai")
+    _ai_ctx(request, record)
     ctx = record.context or {}
     pairs = duplicate_candidates(modules)
     judged = await run_dup_judge(request.app.state.llm, ctx.get("requirement", ""), pairs, ctx.get("model"))
@@ -1771,7 +1801,7 @@ async def dup_check_points(request: Request, task_id: str) -> dict:
 
 
 @router.post("/api/v1/tasks/{task_id}/cases/fix")
-async def fix_cases(request: Request, task_id: str) -> dict:
+async def fix_cases(request: Request, task_id: str) -> dict:  # noqa: D401
     """AI 定点修改被驳回用例（完整需求 9.4）：只输入被驳回用例+结构化驳回信息；
     锁定用例确定性保护；产出**修改提案**，经 /fix/confirm 接受后才落地。"""
     from app.agents.quality import run_case_fix
@@ -1779,6 +1809,7 @@ async def fix_cases(request: Request, task_id: str) -> dict:
 
     store = request.app.state.tasks
     record = _task(request, task_id, "case.ai")
+    _ai_ctx(request, record)
     if record.status != "completed" or not (record.result or {}).get("cases"):
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可修改的用例结果")
     if record.pending_fix:
@@ -2135,6 +2166,7 @@ async def requirement_diff(request: Request, task_id: str, body: RequirementDiff
 
     store = request.app.state.tasks
     record = _task(request, task_id, "point.ai")
+    _ai_ctx(request, record)
     if not body.new_requirement.strip():
         raise HTTPException(status_code=400, detail="新版需求内容不能为空")
     ctx = record.context or {}
@@ -2167,10 +2199,10 @@ async def apply_requirement_diff(request: Request, task_id: str) -> dict:
     from app.agents.quality import merge_case_fix
     from app.agents import GenerationResult
     from app.agents.graph import _chat_json
-    from app.agents.prompts import CASE_FIX_SYSTEM
 
     store = request.app.state.tasks
     record = _task(request, task_id, "point.review")
+    _ai_ctx(request, record)
     rdiff = record.requirement_diff
     if not rdiff:
         raise HTTPException(status_code=409, detail="请先执行需求差异分析")
@@ -2201,7 +2233,7 @@ async def apply_requirement_diff(request: Request, task_id: str) -> dict:
             "新增需求": rdiff.get("new_requirements", []),
             "受影响用例": [{k: v for k, v in c.items() if k != "uid"} for c in affected],
         }
-        system = CASE_FIX_SYSTEM.format(template_spec=(template.prompt_spec() if template else ""))
+        system = prompt_text("case_fix").format(template_spec=(template.prompt_spec() if template else ""))
         try:
             data, _ = await _chat_json(request.app.state.llm, [
                 {"role": "system", "content": system},
@@ -3210,6 +3242,7 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
     from app.requirements import design_brief
 
     item = _req(request, req_id, "requirement.ai")
+    _ai_ctx(request, project=item["project"], requirement_id=req_id)
     text = design_brief({**item, "analysis": None, "questions": []})
     if not text.strip():
         raise HTTPException(status_code=400, detail="需求原文为空（文件解析失败时请先重新解析）")
@@ -3848,6 +3881,7 @@ class LearningAnalyzeBody(BaseModel):
 
 @router.post("/api/v1/learning/analyze")
 async def analyze_learning(request: Request, body: LearningAnalyzeBody | None = None) -> dict:
+    _ai_ctx(request, project=(body.project if body else None), purpose="修改习惯学习")
     """分析人工修改留痕，提炼规则候选（需求三十八，仅管理员）：候选须人工确认后才生效。"""
     _require_admin(request)
     from app.agents.quality import run_learning_analysis
@@ -4006,6 +4040,196 @@ async def cancel_task(request: Request, task_id: str) -> dict:
             status_code=409, detail="该任务正在前台请求中执行，无法从后台取消，请等待其完成"
         )
     return {"task_id": task_id, "status": "failed", "canceled": True}
+
+
+@router.post("/api/v1/tasks/{task_id}/retry")
+async def retry_task(request: Request, task_id: str) -> dict:
+    """失败任务重试（15 章）：沿用原需求文本/模型/模板/项目，后台重新执行。"""
+    record = _task(request, task_id, "point.ai")
+    if record.status != "failed":
+        raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，只有失败任务可重试")
+    ctx = record.context or {}
+    if not (ctx.get("requirement") or "").strip():
+        raise HTTPException(status_code=409, detail="任务缺少需求文本，无法重试（请重新创建）")
+    template = request.app.state.templates.get(ctx.get("template_id"))
+    if template is None:
+        raise HTTPException(status_code=409, detail="任务使用的模板已不存在，无法重试")
+    task_dir = request.app.state.tasks.output_dir / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    record.error = None
+    request.app.state.tasks.save(record)
+    extra = {k: ctx[k] for k in ("requirement_id", "requirement_title", "module_id", "version_id") if k in ctx}
+    extra["retried_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    extra["retry_count"] = int(ctx.get("retry_count") or 0) + 1
+    resp = await _launch_task(
+        request, task_id, task_dir, record.sources or ["text"], ctx["requirement"], template,
+        ctx.get("model"), ctx.get("reviewer_model"), ctx.get("knowledge_space"), ctx.get("project"),
+        bool(ctx.get("confirm_points")), True, extra_context=extra,
+    )
+    logger.info("任务 {} 第 {} 次重试已提交", task_id, extra["retry_count"])
+    return resp
+
+
+# ---- AI 中心（15 章）：AI 任务中心 / 调用日志 / Prompt 管理 ----
+
+
+def _task_kind(record: TaskRecord) -> str:
+    ctx = record.context or {}
+    if ctx.get("requirement_id"):
+        base = "需求测试设计"
+    else:
+        base = "用例生成"
+    if record.status == "awaiting_confirmation" or ctx.get("confirm_points"):
+        return base + "（拆解确认）"
+    return base
+
+
+def _task_partial(record: TaskRecord) -> list[str]:
+    """部分成功明示：生成通过但评审未收敛 / 有未解决问题 / 分片失败 / 模型降级。"""
+    notes = []
+    r = record.result or {}
+    if record.status == "completed":
+        if r.get("passed") is False:
+            notes.append("评审未收敛（超轮次强制出稿）")
+        if r.get("unresolved"):
+            notes.append(f"{len(r['unresolved'])} 个评审问题未解决")
+        if any("失败" in str(t.get("action", "")) or t.get("error") for t in r.get("trace", [])):
+            notes.append("部分分片失败")
+    return notes
+
+
+@router.get("/api/v1/ai/tasks")
+async def ai_tasks(request: Request, status: str = "", project: str = "", mine: bool = False, limit: int = 200) -> dict:
+    """AI 任务中心：全部生成/设计任务，附类型、失败原因、部分成功提示、Prompt 版本与可重试标记。"""
+    me = _operator(request)
+    out = []
+    for r in request.app.state.tasks.list(limit=100000):
+        ctx = r.context or {}
+        if not _record_visible(request, ctx.get("project")):
+            continue
+        if project and ctx.get("project") != project:
+            continue
+        if status and r.status != status:
+            continue
+        if mine and r.created_by != me:
+            continue
+        out.append({
+            "task_id": r.task_id, "kind": _task_kind(r), "status": r.status, "progress": r.progress,
+            "project": ctx.get("project"), "requirement_id": ctx.get("requirement_id"),
+            "requirement_title": ctx.get("requirement_title"), "model": ctx.get("model"),
+            "created_by": r.created_by, "created_at": r.created_at, "sources": r.sources,
+            "error": r.error, "partial": _task_partial(r), "prompt_versions": r.prompt_versions,
+            "retry_count": int(ctx.get("retry_count") or 0), "retryable": r.status == "failed" and bool((ctx.get("requirement") or "").strip()),
+            "case_count": len((r.result or {}).get("cases", [])),
+        })
+        if len(out) >= limit:
+            break
+    counts = {}
+    for t in out:
+        counts[t["status"]] = counts.get(t["status"], 0) + 1
+    return {"tasks": out, "counts": counts}
+
+
+@router.get("/api/v1/ai/calls")
+async def ai_calls_list(
+    request: Request, project: str = "", task_id: str = "", requirement_id: str = "", purpose: str = "",
+    model: str = "", status: str = "", by: str = "", days: int = 0, page: int = 1, page_size: int = 50,
+) -> dict:
+    from app.llm.calllog import list_calls
+
+    if project:
+        _require_project(request, project, "log.view")
+    since = None
+    if days > 0:
+        from datetime import timedelta
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    return list_calls(project=project or None, task_id=task_id or None, requirement_id=requirement_id or None,
+                      purpose=purpose or None, model=model or None, status=status or None, by=by or None,
+                      since=since, visible=_visible_projects(request), page=max(1, page), page_size=min(200, max(1, page_size)))
+
+
+@router.get("/api/v1/ai/calls/{call_id}")
+async def ai_call_detail(request: Request, call_id: int) -> dict:
+    from app.llm.calllog import get_call
+
+    row = get_call(call_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="调用记录不存在")
+    if row.get("project") and not _record_visible(request, row["project"]):
+        raise HTTPException(status_code=403, detail="无权查看该项目的调用记录")
+    return row
+
+
+@router.get("/api/v1/ai/stats")
+async def ai_stats(request: Request, days: int = 30, project: str = "") -> dict:
+    from app.llm.calllog import stats
+
+    since = None
+    if days > 0:
+        from datetime import timedelta
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    return stats(since=since, visible=_visible_projects(request), project=project or None)
+
+
+@router.get("/api/v1/ai/prompts")
+async def list_prompts(request: Request) -> dict:
+    return {"prompts": request.app.state.prompts.list()}
+
+
+@router.get("/api/v1/ai/prompts/{key}")
+async def get_prompt(request: Request, key: str) -> dict:
+    from app.prompts import PromptError
+
+    try:
+        return request.app.state.prompts.get(key)
+    except PromptError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+class PromptVersionBody(BaseModel):
+    content: str
+    note: str = ""
+    activate: bool = False
+
+
+@router.post("/api/v1/ai/prompts/{key}/versions")
+async def create_prompt_version(request: Request, key: str, body: PromptVersionBody) -> dict:
+    """新建 Prompt 版本（管理员）：默认草稿，activate=true 立即生效；占位符与默认版本一致方可保存。"""
+    from app.prompts import PromptError
+
+    user = _require_admin(request)
+    try:
+        version = request.app.state.prompts.create_version(key, body.content, note=body.note,
+                                                           by=user["username"], activate=body.activate)
+    except PromptError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("Prompt {} 新建版本 v{}（{}，激活={}）", key, version["version_no"], user["username"], body.activate)
+    return request.app.state.prompts.get(key)
+
+
+@router.post("/api/v1/ai/prompts/{key}/versions/{version_no}/activate")
+async def activate_prompt_version(request: Request, key: str, version_no: int) -> dict:
+    """激活/回滚到指定版本（管理员）。"""
+    from app.prompts import PromptError
+
+    user = _require_admin(request)
+    try:
+        item = request.app.state.prompts.activate(key, version_no, by=user["username"])
+    except PromptError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("Prompt {} 激活 v{}（{}）", key, version_no, user["username"])
+    return item
+
+
+@router.post("/api/v1/ai/prompts/{key}/versions/{version_no}/archive")
+async def archive_prompt_version(request: Request, key: str, version_no: int) -> dict:
+    from app.prompts import PromptError
+
+    _require_admin(request)
+    try:
+        return request.app.state.prompts.archive(key, version_no)
+    except PromptError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/api/v1/tasks/{task_id}")
