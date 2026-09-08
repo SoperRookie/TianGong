@@ -1335,6 +1335,7 @@ function forcePasswordChange() {
   $('pwOld').value = ''; $('pwNew').value = ''; $('pwdDlg').showModal();
 }
 const jpost = (p, b) => api(p, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b)});
+const jput = (p, b) => api(p, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b)});
 // 时间显示：后端一律 UTC ISO，前端按浏览器时区展示（用户在日本 = UTC+9）
 function fmtTime(iso, withSeconds) {
   if (!iso) return '';
@@ -2300,7 +2301,7 @@ function renderOverview(t) {
         <dl class="meta-grid">
           <div><dt>来源</dt><dd>${(t.sources||[]).map(esc).join('、')||'-'}</dd></div>
           <div><dt>创建人</dt><dd>${esc(t.created_by||'—')}</dd></div>
-          <div><dt>项目</dt><dd>${esc(ctx.project||'—')}</dd></div>
+          <div><dt>项目</dt><dd>${esc(ctx.project||'—')}${!ctx.project&&curUser&&curUser.role==='admin'?` <button class="btn ghost sm" onclick="assignTaskProject(${jsq(t.task_id)})" title="存量迁移：归属后自动建需求实体并回填关联">归属项目</button>`:''}</dd></div>
           <div><dt>来源需求</dt><dd>${ctx.requirement_id?`<a onclick="openRequirement(${jsq(ctx.requirement_id)})">${esc(ctx.requirement_title||ctx.requirement_id)}</a>`:'—'}</dd></div>
           <div><dt>生成模型</dt><dd>${esc(ctx.model||'默认')}</dd></div>
           <div><dt>Prompt 版本</dt><dd>${Object.keys(t.prompt_versions||{}).length?Object.entries(t.prompt_versions).map(([k,v])=>`<code title="${esc(k)}">${esc(PROMPT_NAMES[k]||k)} v${v}</code>`).join(' '):'—'}${ctx.retry_count?`<div class="hint">已重试 ${ctx.retry_count} 次</div>`:''}</dd></div>
@@ -4851,7 +4852,43 @@ async function purgeModule(id, path) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
+async function assignTaskProject(taskId) {
+  const names = (await getProjects()).filter(p => p.project !== '（未指定）' && p.status !== 'archived').map(p => p.project);
+  if (!names.length) return toast('还没有可归属的项目', 'warn');
+  const name = await askInput('归属项目', `项目名（${names.slice(0,6).join(' / ')}${names.length>6?' …':''}）`, names[0]);
+  if (!name) return;
+  try {
+    const r = await jput(`/api/v1/tasks/${taskId}/project`, {project: name});
+    toast(`已归属「${name}」${r.requirement_migrated?'，需求实体已建':''}${r.plans_moved?'，迁移计划已改挂':''}`, 'ok');
+    await getProjects(true); await refreshList(); if (currentTask && currentTask.task_id === taskId) await openTask(taskId, true);
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function assignSelectedTasks() {
+  const ids = [...document.querySelectorAll('.mgck:checked')].map(c => c.dataset.tid);
+  if (!ids.length) return toast('请先勾选要归属的任务', 'warn');
+  const names = (await getProjects()).filter(p => p.project !== '（未指定）' && p.status !== 'archived').map(p => p.project);
+  if (!names.length) return toast('还没有可归属的项目', 'warn');
+  const name = await askInput(`批量归属 ${ids.length} 个任务`, `项目名（${names.slice(0,6).join(' / ')}${names.length>6?' …':''}）`, names[0]);
+  if (!name) return;
+  try {
+    const r = await jpost('/api/v1/admin/migration/assign', {task_ids: ids, project: name});
+    toast(`已归属 ${r.assigned.length} 个到「${name}」${r.failed.length?`，${r.failed.length} 个失败：${r.failed.map(f=>f.reason).slice(0,2).join('；')}`:''}`, r.failed.length?'warn':'ok');
+    await getProjects(true); await refreshList(); renderProjectWorkspace();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function migrationReportHtml() {
+  let r; try { r = await api('/api/v1/admin/migration'); } catch (e) { return ''; }
+  const rows = r.unassigned.map(t => `<tr class="rowlink" onclick="openTaskFromProject(${jsq(t.task_id)})"><td onclick="event.stopPropagation()"><input type="checkbox" class="mgck" data-tid="${esc(t.task_id)}"></td><td><span class="tid-cell">${esc(t.task_id)}</span></td>
+    <td>${(t.sources||[]).map(esc).join('、')||'-'}</td><td>${esc(t.created_by||'—')}</td><td>${t.cases}</td><td>${esc(fmtTime(t.created_at))}</td>
+    <td><button class="btn ghost sm" onclick="event.stopPropagation();assignTaskProject(${jsq(t.task_id)})">归属项目</button></td></tr>`).join('');
+  return `<div class="section-t">存量迁移报告 <span class="st ${r.complete?'approved':'candidate'}">${r.complete?'已完成':'待处理'}</span></div>
+    <div class="hint" style="margin-bottom:8px">任务 ${r.tasks_total} 个：已归属项目 ${r.tasks_with_project}，未归属 ${r.tasks_unassigned}；需求实体化 ${r.requirements_migrated} 条，待实体化 ${r.tasks_without_requirement.length}；执行轮次已迁入计划 ${r.plans_migrated} 个，待迁 ${r.tasks_with_legacy_executions.length}；挂在「未指定」的计划 ${r.plans_unassigned} 个。归属项目后需求与计划自动跟随。</div>
+    ${rows?`<div class="toolbar" style="margin-bottom:6px"><label class="hint"><input type="checkbox" onclick="document.querySelectorAll('.mgck').forEach(c=>c.checked=this.checked)"> 全选</label>
+      <button class="btn ghost sm" onclick="assignSelectedTasks()">批量归属所选</button></div>
+    <div class="tbl-wrap" style="margin-top:0"><table><thead><tr><th style="width:30px"></th><th style="width:130px">任务 ID</th><th>来源</th><th style="width:90px">创建人</th><th style="width:70px">用例数</th><th style="width:110px">创建时间</th><th style="width:100px"></th></tr></thead><tbody>${rows}</tbody></table></div>`:''}`;
+}
 async function projOverviewHtml(p) {
+  if (p.project === '（未指定）' && curUser && curUser.role === 'admin') return await migrationReportHtml();
   // 用例生命周期管道（生成 → 审核 → 正式 → 执行 → 反哺）
   const failCnt = p.executed - p.exec_pass;
   const pipeline = `<div class="section-t">用例生命周期</div>

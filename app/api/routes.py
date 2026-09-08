@@ -1600,6 +1600,9 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
         from app.templates import TestCase as _TestCase
 
         result.cases.extend(_TestCase.model_validate(c) for c in locked)
+        # 锁定用例保持原有位置（编号不因修订而漂移）；新生成的用例排在原序列之后
+        order = {str(c.get("uid") or ""): i for i, c in enumerate(all_cases)}
+        result.cases.sort(key=lambda c: order.get(str(c.uid or ""), len(order)))
         _renumber(result.cases)
 
     task_dir = store.output_dir / task_id
@@ -1834,6 +1837,110 @@ async def create_manual_task(request: Request, name: str, body: ManualTaskBody) 
     store.save(record)
     logger.info("项目 {} 创建人工用例集 {}（{}）", name, task_id, title)
     return {"task_id": task_id, "status": record.status, "project": name, "title": title}
+
+
+class TaskProjectBody(BaseModel):
+    project: str
+
+
+def _assign_task_project(request: Request, record: TaskRecord, project: str) -> dict:
+    from app.reports import UNASSIGNED
+
+    ctx = dict(record.context or {})
+    if ctx.get("project"):
+        raise HTTPException(status_code=409, detail=f"任务 {record.task_id} 已归属项目「{ctx['project']}」，不允许改挂")
+    entity = request.app.state.projects.get(project)
+    if entity is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {project}")
+    if entity.get("status") == "archived":
+        raise HTTPException(status_code=409, detail="项目已归档，不能接收任务")
+    ctx["project"] = project
+    ctx.setdefault("requirement", "")
+    record.context = ctx
+    request.app.state.tasks.save(record)
+    from app.requirements import migrate_task
+    migrated = migrate_task(record, request.app.state.requirements, request.app.state.tasks)
+    moved_plans = 0
+    if record.exec_migrated_to:  # 迁移期为该任务自动生成的执行计划挂在「未指定」，随任务一起归属
+        plan = request.app.state.plans.get(record.exec_migrated_to)
+        if plan and plan.get("project") == UNASSIGNED:
+            plan["project"] = project
+            request.app.state.plans.save(plan)
+            moved_plans = 1
+    logger.info("遗留任务 {} 归属项目 {}（需求迁移 {}，改挂计划 {}）", record.task_id, project, migrated, moved_plans)
+    return {"task_id": record.task_id, "project": project, "requirement_id": (record.context or {}).get("requirement_id"),
+            "requirement_migrated": migrated, "plans_moved": moved_plans}
+
+
+@router.put("/api/v1/tasks/{task_id}/project")
+async def assign_task_project(request: Request, task_id: str, body: TaskProjectBody) -> dict:
+    """存量迁移（验收周）：把「未指定项目」的遗留任务归属到项目；归属后立即按 M2 规则建需求实体并回填关联，
+    其迁移期自动生成的执行计划一并改挂到该项目。仅系统管理员可操作，已归属任务不允许改挂（业务数据绑定项目后不漂移）。"""
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="仅系统管理员可归属遗留任务")
+    record = request.app.state.tasks.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    return _assign_task_project(request, record, body.project.strip())
+
+
+class MigrationAssignBody(BaseModel):
+    task_ids: list[str]
+    project: str
+
+
+@router.post("/api/v1/admin/migration/assign")
+async def migration_assign(request: Request, body: MigrationAssignBody) -> dict:
+    """批量归属遗留任务（存量迁移正式执行）：逐个处理，失败的行带原因返回，不影响其他行。"""
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="仅系统管理员可归属遗留任务")
+    project = body.project.strip()
+    if request.app.state.projects.get(project) is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {project}")
+    done, failed = [], []
+    for task_id in dict.fromkeys(body.task_ids):
+        record = request.app.state.tasks.get(task_id)
+        if record is None:
+            failed.append({"task_id": task_id, "reason": "任务不存在"}); continue
+        try:
+            done.append(_assign_task_project(request, record, project))
+        except HTTPException as e:
+            failed.append({"task_id": task_id, "reason": e.detail})
+    return {"assigned": done, "failed": failed}
+
+
+@router.get("/api/v1/admin/migration")
+async def migration_report(request: Request) -> dict:
+    """存量迁移报告（验收周）：任务归属 / 需求实体化 / 执行轮次迁移的完成度与待处理清单。仅系统管理员。"""
+    from app.reports import UNASSIGNED
+
+    if not _is_admin(request):
+        raise HTTPException(status_code=403, detail="仅系统管理员可查看迁移报告")
+    tasks = request.app.state.tasks.list(limit=1000000)
+    unassigned, no_requirement, legacy_exec = [], [], []
+    with_project = 0
+    for t in tasks:
+        ctx = t.context or {}
+        if not ctx.get("project"):
+            unassigned.append({"task_id": t.task_id, "sources": t.sources, "created_by": t.created_by,
+                               "created_at": t.created_at, "cases": len((t.result or {}).get("cases") or [])})
+            continue
+        with_project += 1
+        if not ctx.get("requirement_id") and (ctx.get("requirement") or "").strip() and not ctx.get("manual"):
+            no_requirement.append(t.task_id)
+        if t.executions:
+            legacy_exec.append(t.task_id)
+    plans = request.app.state.plans.list()
+    return {
+        "tasks_total": len(tasks), "tasks_with_project": with_project,
+        "tasks_unassigned": len(unassigned), "unassigned": unassigned,
+        "tasks_without_requirement": no_requirement,
+        "tasks_with_legacy_executions": legacy_exec,
+        "requirements_migrated": sum(1 for r in request.app.state.requirements.list() if r.get("source_type") == "migrated"),
+        "plans_migrated": sum(1 for t in tasks if t.exec_migrated_to),
+        "plans_unassigned": sum(1 for p in plans if p.get("project") == UNASSIGNED),
+        "complete": not unassigned and not no_requirement and not legacy_exec,
+    }
 
 
 def _case_task(request: Request, task_id: str, action: str = "case.edit") -> TaskRecord:

@@ -268,28 +268,31 @@ def design_brief(item: dict) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+def migrate_task(record, requirements: RequirementStore, tasks=None) -> bool:
+    """单个历史任务 → 需求实体（「一个任务 = 一条需求」）并回填关联；已迁移 / 无项目 / 无需求文本则跳过。"""
+    ctx = record.context or {}
+    if ctx.get("requirement_id") or not ctx.get("project") or not (ctx.get("requirement") or "").strip():
+        return False
+    title = next((s for s in record.sources if s and s != "text"), "") or \
+        (ctx["requirement"].strip().splitlines()[0][:60] if ctx["requirement"].strip() else record.task_id)
+    item = requirements.create(
+        ctx["project"], title, ctx["requirement"], created_by=record.created_by,
+        source_type="migrated", created_at=record.created_at,
+    )
+    item["status"] = "designing"
+    item["tasks"] = [record.task_id]
+    requirements._persist(item)
+    ctx["requirement_id"] = item["req_id"]
+    ctx["requirement_title"] = title
+    record.context = ctx
+    if tasks is not None:
+        tasks.save(record)
+    return True
+
+
 def migrate_tasks(tasks, requirements: RequirementStore) -> int:
     """存量迁移（M2）：项目化之前的任务按「一个任务 = 一条需求」建需求实体并回填关联，幂等。
 
-    无项目的遗留任务不迁移（仅系统管理员可见，待归属项目后再迁）。
+    无项目的遗留任务不迁移（仅系统管理员可见，待通过「归属项目」接口指定项目后再迁）。
     """
-    migrated = 0
-    for record in tasks.list(limit=1000000):
-        ctx = record.context or {}
-        if ctx.get("requirement_id") or not ctx.get("project") or not (ctx.get("requirement") or "").strip():
-            continue
-        title = next((s for s in record.sources if s and s != "text"), "") or \
-            (ctx["requirement"].strip().splitlines()[0][:60] if ctx["requirement"].strip() else record.task_id)
-        item = requirements.create(
-            ctx["project"], title, ctx["requirement"], created_by=record.created_by,
-            source_type="migrated", created_at=record.created_at,
-        )
-        item["status"] = "designing"
-        item["tasks"] = [record.task_id]
-        requirements._persist(item)
-        ctx["requirement_id"] = item["req_id"]
-        ctx["requirement_title"] = title
-        record.context = ctx
-        tasks.save(record)
-        migrated += 1
-    return migrated
+    return sum(1 for record in tasks.list(limit=1000000) if migrate_task(record, requirements, tasks))
