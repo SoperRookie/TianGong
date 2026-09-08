@@ -1682,7 +1682,7 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
     # 存量任务打底：改动前先以当前内容补记首版（新任务已在生成时记录，此处幂等跳过）
     ensure_versions(task_id, "case", case_entities(cases), by=record.created_by)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    counts = {"approve": 0, "reject": 0, "modify": 0, "delete": 0, "unlock": 0}
+    counts = {"approve": 0, "reject": 0, "modify": 0, "delete": 0, "unlock": 0, "submit": 0}
     hints: list[str] = []
     deleted_any = False
     # 批量原子性：任一条校验失败即整批不生效——内存对象回滚到快照，版本/回收站写入延迟到全部通过后执行
@@ -1700,7 +1700,13 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
           )
           entry: dict = {"case_id": item.case_id, "uid": uid, "action": action, "by": _operator(request),
                          "comment": item.comment, "feedback": item.feedback, "at": now}
-          if action == "approve":
+          if action == "submit":  # 草稿 → 待评审（14 章：人工新增/导入/复制的用例先以草稿存在）
+              if state.get("status") != "draft":
+                  raise HTTPException(status_code=400, detail=f"用例 {item.case_id} 不是草稿，无需提交评审")
+              state.update(status="pending", locked=False)
+          elif action == "approve":
+              if state.get("status") == "draft":
+                  raise HTTPException(status_code=409, detail=f"用例 {item.case_id} 是草稿，请先提交评审")
               state.update(status="approved", locked=True)
               clear_reject_fields(state)
               state.update(fields=[], steps=[])
@@ -1772,7 +1778,7 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
           else:
               raise HTTPException(
                   status_code=400,
-                  detail=f"未知评审操作: {action}（可用 approve/reject/modify/delete/unlock）",
+                  detail=f"未知评审操作: {action}（可用 approve/reject/modify/delete/unlock/submit）",
               )
           counts[action] += 1
           record.review_log.append(entry)
@@ -1794,6 +1800,309 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
                               request.app.state.templates.get((record.context or {}).get("template_id")))
     response["review"] = {**counts, "log_entries": len(record.review_log), "hints": hints}
     return response
+
+
+# ---- M4b：人工新增 / 复制 / Excel 导入五步校验 / 批量维护（完整需求 14 章）----
+
+_IMPORT_CACHE: dict[str, dict] = {}  # token -> {task_id, rows, at}
+
+
+class ManualTaskBody(BaseModel):
+    title: str = "人工用例集"
+    template_id: str | None = None
+
+
+@router.post("/api/v1/projects/{name}/manual-task")
+async def create_manual_task(request: Request, name: str, body: ManualTaskBody) -> dict:
+    """人工用例集：不经 AI 的用例容器任务（人工新增 / Excel 导入的落脚点），用例以草稿进入评审流。"""
+    _require_project(request, name, "case.edit")
+    if request.app.state.projects.get(name) is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {name}")
+    template = request.app.state.templates.get(body.template_id)
+    if template is None:
+        raise HTTPException(status_code=404, detail=f"模板不存在: {body.template_id}")
+    store = request.app.state.tasks
+    task_id, task_dir = store.new_task_dir()
+    title = (body.title or "人工用例集").strip()[:80]
+    record = TaskRecord(
+        task_id=task_id, status="completed", sources=[title], created_by=_operator(request),
+        result={"cases": [], "passed": True, "review_rounds": 0, "unresolved": [], "blind_spots": [],
+                "missing": [], "suggestions": [], "test_points": [], "trace": [], "chunks": 1},
+        context={"requirement": f"人工用例集：{title}", "project": name, "template_id": template.template_id,
+                 "manual": True, "confirm_points": False},
+    )
+    store.save(record)
+    logger.info("项目 {} 创建人工用例集 {}（{}）", name, task_id, title)
+    return {"task_id": task_id, "status": record.status, "project": name, "title": title}
+
+
+def _case_task(request: Request, task_id: str, action: str = "case.edit") -> TaskRecord:
+    record = _task(request, task_id, action)
+    if record.status != "completed" or record.result is None:
+        raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，尚无可维护的用例集")
+    return record
+
+
+def _append_cases(request: Request, record: TaskRecord, raw_cases: list[dict], source: str,
+                  version_source: str, reason: str) -> list[dict]:
+    """把新用例（人工/导入/复制）追加进任务：分配 uid、来源类型、草稿状态，重排编号，记首版，标记导出待生成。"""
+    from app.agents import GenerationResult
+    from app.agents.service import _renumber
+    from app.tasks.points import new_uid
+    from app.templates.default import TestCase
+    from app.versions import ensure_versions
+
+    added: list[TestCase] = []
+    for raw in raw_cases:
+        data = {**raw, "uid": new_uid(), "source": source, "version": 1}
+        data.setdefault("case_id", f"TC-{data.get('module') or '未分组'}-000")
+        added.append(TestCase.model_validate(data))
+    result = GenerationResult.model_validate(record.result)
+    result.cases.extend(added)
+    _renumber(result.cases)
+    record.result = result.model_dump()
+    for c in added:
+        record.case_reviews[c.uid] = {"status": "draft", "comment": "", "reject_count": 0, "locked": False}
+    record.files_dirty = True
+    request.app.state.tasks.save(record)
+    ensure_versions(record.task_id, "case", {c.uid: c.model_dump() for c in added},
+                    by=_operator(request), source=version_source, reason=reason)
+    return [c.model_dump() for c in added]
+
+
+class ManualCaseBody(BaseModel):
+    module: str
+    title: str
+    priority: str = "P2"
+    precondition: str = ""
+    steps: list[dict]
+    keywords: str = ""
+    remark: str = ""
+    extras: dict[str, str] = {}
+    point_ids: list[str] = []
+
+
+@router.post("/api/v1/tasks/{task_id}/cases")
+async def add_manual_case(request: Request, task_id: str, body: ManualCaseBody) -> dict:
+    """人工新增用例（14.2）：以草稿进入版本历史（来源 manual），提交评审后才进入待评审。"""
+    record = _case_task(request, task_id)
+    try:
+        [case] = _append_cases(request, record, [body.model_dump()], "manual", "manual", "人工新增")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"用例不合法: {e}")
+    request.state.audit_detail = f"新增 {case['case_id']}"
+    return {"task_id": task_id, "case": case, "cases": record.result["cases"]}
+
+
+@router.post("/api/v1/tasks/{task_id}/cases/{uid}/copy")
+async def copy_case(request: Request, task_id: str, uid: str) -> dict:
+    """复制用例（14.2）：副本为草稿，来源 copy，标题加「（副本）」。"""
+    record = _case_task(request, task_id)
+    origin = next((c for c in record.result["cases"] if str(c.get("uid")) == uid), None)
+    if origin is None:
+        raise HTTPException(status_code=404, detail=f"用例不存在: {uid}")
+    raw = {k: v for k, v in origin.items() if k not in ("uid", "version", "case_id", "source")}
+    raw["title"] = f"{origin.get('title', '')}（副本）"
+    [case] = _append_cases(request, record, [raw], "copy", "manual", f"复制自 {origin.get('case_id')}")
+    request.state.audit_detail = f"{origin.get('case_id')} → {case['case_id']}"
+    return {"task_id": task_id, "case": case, "cases": record.result["cases"]}
+
+
+def _validate_import_rows(record: TaskRecord, parsed: list[dict]) -> list[dict]:
+    """逐行校验：标题/步骤必填、优先级合法、文件内与任务内标题重复、模块缺省——错误行不得静默导入。"""
+    from app.templates.default import TestCase
+
+    existing_titles = {str(c.get("title", "")).strip() for c in record.result.get("cases", [])}
+    seen: dict[str, int] = {}
+    rows = []
+    for i, raw in enumerate(parsed, 1):
+        errors, warnings = [], []
+        title = str(raw.get("title", "")).strip()
+        if not title:
+            errors.append("缺少用例标题")
+        steps = [s for s in raw.get("steps") or [] if str(s.get("action", "")).strip()]
+        if not steps:
+            errors.append("缺少操作步骤")
+        else:
+            missing = [i for i, s in enumerate(steps, 1) if not str(s.get("expected", "")).strip()]
+            if missing:
+                errors.append(f"第 {', '.join(map(str, missing))} 步缺少预期结果")
+        pr = str(raw.get("priority", "")).strip().upper() or "P2"
+        if pr not in ("P0", "P1", "P2", "P3"):
+            errors.append(f"优先级 {raw.get('priority')} 不合法（P0–P3）")
+        module = str(raw.get("module", "")).strip()
+        if not module:
+            warnings.append("缺少模块，按「未分组」导入")
+            module = "未分组"
+        if title:
+            if title in existing_titles:
+                errors.append("与任务内已有用例标题重复")
+            if title in seen:
+                errors.append(f"与第 {seen[title]} 行标题重复")
+            else:
+                seen[title] = i
+        case = {"module": module, "title": title, "priority": pr, "precondition": str(raw.get("precondition", "")),
+                "steps": steps or [{"action": "", "expected": ""}], "keywords": str(raw.get("keywords", "")),
+                "remark": str(raw.get("remark", "")), "extras": raw.get("extras") or {}}
+        if not errors:
+            try:
+                TestCase.model_validate({**case, "case_id": "TC-X-001"})
+            except Exception as e:
+                errors.append(f"字段不合法: {str(e).splitlines()[0][:80]}")
+        rows.append({"row": i, "case": case, "errors": errors, "warnings": warnings})
+    return rows
+
+
+@router.post("/api/v1/tasks/{task_id}/cases/import/preview")
+async def import_cases_preview(request: Request, task_id: str, file: UploadFile = File(...)) -> dict:
+    """Excel 导入第 1~4 步：上传 → 解析 → 预览 → 逐行校验（Excel / CSV / XMind）。"""
+    import asyncio
+
+    from app.knowledge.importers import CaseImportError, parse_cases_file
+
+    record = _case_task(request, task_id)
+    save_dir = request.app.state.tasks.output_dir / "_imports" / task_id
+    saved = await _read_upload(file, save_dir, get_settings().max_upload_size_mb * 1024 * 1024)
+    try:
+        parsed = await asyncio.to_thread(parse_cases_file, saved)
+    except (CaseImportError, UnsafeFileError, UnicodeDecodeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        saved.unlink(missing_ok=True)
+    rows = _validate_import_rows(record, parsed)
+    token = uuid.uuid4().hex[:16]
+    now = datetime.now(timezone.utc)
+    for k in [k for k, v in _IMPORT_CACHE.items() if (now - v["at"]).total_seconds() > 1800]:
+        _IMPORT_CACHE.pop(k, None)
+    _IMPORT_CACHE[token] = {"task_id": task_id, "rows": rows, "at": now, "by": _operator(request)}
+    return {"token": token, "filename": _safe_filename(file.filename), "rows": rows,
+            "total": len(rows), "errors": sum(1 for r in rows if r["errors"]),
+            "warnings": sum(1 for r in rows if r["warnings"] and not r["errors"])}
+
+
+class ImportConfirmBody(BaseModel):
+    token: str
+    only_valid: bool = False  # 有错误行时必须显式选择「只导入无错误行」，否则拒绝（错误禁止静默导入）
+
+
+@router.post("/api/v1/tasks/{task_id}/cases/import/confirm")
+async def import_cases_confirm(request: Request, task_id: str, body: ImportConfirmBody) -> dict:
+    """Excel 导入第 5 步：确认导入。含错误行时须显式只导有效行；导入用例为草稿、来源 import、记首版。"""
+    record = _case_task(request, task_id)
+    cached = _IMPORT_CACHE.get(body.token)
+    if not cached or cached["task_id"] != task_id:
+        raise HTTPException(status_code=404, detail="预览已过期或不属于该任务，请重新上传")
+    rows = cached["rows"]
+    bad = [r for r in rows if r["errors"]]
+    if bad and not body.only_valid:
+        raise HTTPException(status_code=400, detail=f"{len(bad)} 行存在错误，请修正后重新上传，或选择「只导入无错误行」")
+    good = [r["case"] for r in rows if not r["errors"]]
+    if not good:
+        raise HTTPException(status_code=400, detail="没有可导入的有效行")
+    added = _append_cases(request, record, good, "import", "import", f"Excel 导入（{len(good)} 条）")
+    _IMPORT_CACHE.pop(body.token, None)
+    request.state.audit_detail = f"导入 {len(added)} 条，跳过 {len(bad)} 行"
+    logger.info("任务 {} 导入用例 {} 条（跳过错误行 {}）", task_id, len(added), len(bad))
+    return {"task_id": task_id, "imported": len(added), "skipped": len(bad), "cases": record.result["cases"]}
+
+
+@router.get("/api/v1/cases/import-template")
+async def import_template(request: Request) -> FileResponse:
+    """导入模板：按默认用例模板列头生成示例 Excel。"""
+    import asyncio
+
+    from app.templates.default import TestCase
+
+    sample = TestCase(case_id="TC-登录-001", module="登录", title="正确账号密码登录成功", priority="P1",
+                      precondition="已注册账号", steps=[{"action": "输入正确账号密码并提交", "expected": "跳转首页并展示昵称"}],
+                      keywords="登录、正常流程", remark="示例行，导入前删除")
+    path = get_settings().outputs_dir / "_imports" / "用例导入模板.xlsx"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(export_excel, [sample], path, request.app.state.templates.get(None))
+    return FileResponse(path, media_type=_MEDIA_TYPES.get("xlsx"), filename="用例导入模板.xlsx")
+
+
+class CaseBatchBody(BaseModel):
+    uids: list[str]
+    action: str                       # set_priority / set_module / set_keywords / add_keywords / submit / delete
+    value: str = ""
+    base_versions: dict[str, int] = {}  # 乐观锁：uid -> 页面看到的版本，不一致的行冲突跳过
+
+
+@router.post("/api/v1/tasks/{task_id}/cases/batch")
+async def batch_cases(request: Request, task_id: str, body: CaseBatchBody) -> dict:
+    """批量维护（14.3）：改优先级 / 模块 / 标签、提交评审、删除（入回收站）；逐行乐观锁，冲突行跳过并返回。"""
+    import copy
+
+    from app.agents import GenerationResult
+    from app.agents.service import _renumber
+    from app.recycle import add_to_bin
+    from app.versions import ensure_versions, record_version
+
+    record = _case_task(request, task_id)
+    if body.action not in ("set_priority", "set_module", "set_keywords", "add_keywords", "submit", "delete"):
+        raise HTTPException(status_code=400, detail=f"未知批量操作: {body.action}")
+    if body.action == "set_priority" and body.value.upper() not in ("P0", "P1", "P2", "P3"):
+        raise HTTPException(status_code=400, detail="优先级须为 P0–P3")
+    if body.action in ("set_module", "set_keywords", "add_keywords") and not body.value.strip():
+        raise HTTPException(status_code=400, detail="请提供要设置的值")
+    operator = _operator(request)
+    cases = copy.deepcopy(record.result["cases"])
+    by_uid = {str(c.get("uid")): c for c in cases}
+    applied, conflicts, skipped, deferred = [], [], [], []
+    for uid in body.uids:
+        c = by_uid.get(uid)
+        if c is None:
+            skipped.append({"uid": uid, "reason": "用例不存在"})
+            continue
+        base = body.base_versions.get(uid)
+        if base is not None and int(base) != int(c.get("version", 1) or 1):
+            conflicts.append({"uid": uid, "case_id": c.get("case_id"), "current": c.get("version", 1), "base": base})
+            continue
+        state = record.case_reviews.setdefault(uid, {"status": "pending", "comment": "", "reject_count": 0, "locked": False})
+        if body.action == "submit":
+            if state.get("status") != "draft":
+                skipped.append({"uid": uid, "case_id": c.get("case_id"), "reason": "不是草稿"})
+                continue
+            state.update(status="pending", locked=False)
+        elif body.action == "delete":
+            deferred.append(lambda c=c, uid=uid, st=dict(state): add_to_bin(
+                task_id, "case", uid, f"{c.get('case_id')} {c.get('title', '')}", {"case": c, "review": st}, by=operator))
+            cases.remove(c)
+            record.case_reviews.pop(uid, None)
+        else:
+            if state.get("locked"):
+                skipped.append({"uid": uid, "case_id": c.get("case_id"), "reason": "已通过并锁定，请先解锁"})
+                continue
+            if body.action == "set_priority":
+                c["priority"] = body.value.upper()
+            elif body.action == "set_module":
+                c["module"] = body.value.strip()
+            elif body.action == "set_keywords":
+                c["keywords"] = body.value.strip()
+            else:
+                have = [k.strip() for k in re.split(r"[、,，\s]+", c.get("keywords", "") or "") if k.strip()]
+                for k in re.split(r"[、,，\s]+", body.value):
+                    if k.strip() and k.strip() not in have:
+                        have.append(k.strip())
+                c["keywords"] = "、".join(have)
+            c["version"] = int(c.get("version", 1) or 1) + 1
+            deferred.append(lambda c=c, uid=uid: record_version(task_id, "case", uid, "manual", c, by=operator,
+                                                              reason=f"批量{body.action}"))
+        applied.append({"uid": uid, "case_id": c.get("case_id")})
+    if applied:
+        result = GenerationResult.model_validate({**record.result, "cases": cases})
+        if body.action in ("delete", "set_module"):  # 删除或换模块后编号随模块重排（审核状态跟随 uid）
+            _renumber(result.cases)
+        record.result = result.model_dump()
+        record.files_dirty = True
+        request.app.state.tasks.save(record)
+        ensure_versions(task_id, "case", {str(c.get("uid")): c for c in cases}, by=record.created_by)
+        for write in deferred:
+            write()
+    request.state.audit_detail = f"{body.action} 应用 {len(applied)} 条，冲突 {len(conflicts)}，跳过 {len(skipped)}"
+    return {"task_id": task_id, "applied": applied, "conflicts": conflicts, "skipped": skipped,
+            "cases": record.result["cases"], "case_reviews": record.case_reviews}
 
 
 # ---- 测试点审核工作台（生成质量核心需求 · 四十六~五十六）----

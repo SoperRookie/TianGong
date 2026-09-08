@@ -94,6 +94,12 @@ def persist_async(fn, *args, **kwargs) -> None:
     loop.run_in_executor(_persist_pool, _run)
 
 
+def wait_persist() -> None:
+    """等待队列中已提交的后台写入完成（FIFO 单线程：等一个哨兵任务即可），供随后要读库的路径使用。"""
+    if _persist_pool is not None:
+        _persist_pool.submit(lambda: None).result()
+
+
 def flush_persist() -> None:
     """等待后台写入全部完成（测试隔离 / 关闭前调用）。"""
     global _persist_pool

@@ -88,7 +88,7 @@ async def test_online_review_accept_modify_delete(client):
     assert data["case_count"] == 2
     # accept 兼容为 approve（通过并锁定）；响应含完整状态机计数与连续驳回提示
     assert data["review"] == {
-        "approve": 1, "reject": 0, "modify": 1, "delete": 1, "unlock": 0,
+        "approve": 1, "reject": 0, "modify": 1, "delete": 1, "unlock": 0, "submit": 0,
         "log_entries": 3, "hints": [],
     }
 

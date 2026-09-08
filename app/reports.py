@@ -76,7 +76,7 @@ def project_rollup(records: list[TaskRecord]) -> list[dict]:
         name = (r.context or {}).get("project") or UNASSIGNED
         p = projects.setdefault(name, {
             "project": name, "tasks": 0, "cases": 0,
-            "pending": 0, "rejected": 0, "approved": 0,
+            "pending": 0, "rejected": 0, "approved": 0, "draft": 0,
             "executed": 0, "exec_pass": 0, "last_activity": "",
         })
         p["tasks"] += 1
@@ -86,7 +86,7 @@ def project_rollup(records: list[TaskRecord]) -> list[dict]:
         for c in cases:
             uid = str(c.get("uid") or "")
             state = (r.case_reviews.get(uid) or {}).get("status", "pending")
-            p[state if state in ("pending", "rejected", "approved") else "pending"] += 1
+            p[state if state in ("pending", "rejected", "approved", "draft") else "pending"] += 1
             exec_result = _case_exec(r, uid)
             if exec_result:
                 p["executed"] += 1

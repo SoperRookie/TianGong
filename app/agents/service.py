@@ -359,10 +359,10 @@ def _merge(outcomes: list) -> GenerationResult:
 
 
 def _renumber(cases: list[TestCase]) -> None:
-    """模块内重编号：合并后保证各模块 case_id 从 001 连续（沿用原编号前缀风格）。"""
-    counters: dict[str, int] = {}
-    for case in cases:
-        counters[case.module] = counters.get(case.module, 0) + 1
-        m = _CASE_ID_PREFIX_RE.match(case.case_id)
-        prefix = m.group(1) if m else f"TC-{case.module}-"
-        case.case_id = f"{prefix}{counters[case.module]:03d}"
+    """模块内重编号：与 graph.renumber_case_ids 同一规则（前缀由模块派生、全局唯一），作用于 TestCase 对象。"""
+    from app.agents.graph import renumber_case_ids
+
+    dicts = [{"case_id": c.case_id, "module": c.module} for c in cases]
+    renumber_case_ids(dicts)
+    for case, d in zip(cases, dicts):
+        case.case_id, case.module = d["case_id"], d["module"]

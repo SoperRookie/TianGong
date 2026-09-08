@@ -182,6 +182,9 @@ def get_call(call_id: int) -> dict | None:
 
 def prompt_versions_for_task(task_id: str) -> dict[str, int]:
     """任务用到的 Prompt 版本汇总（核心规则 23：AI 任务记录 Prompt 版本）。"""
+    from app.db import wait_persist
+
+    wait_persist()  # 调用日志走后台写入，先等它落库再汇总
     out: dict[str, int] = {}
     with get_engine().begin() as conn:
         rows = conn.execute(select(ai_calls.c.prompt_versions).where(ai_calls.c.task_id == task_id)).all()
