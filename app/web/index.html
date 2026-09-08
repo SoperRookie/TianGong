@@ -382,17 +382,63 @@ dialog::backdrop { background:rgba(15,22,36,.45); backdrop-filter:blur(2px); }
 .pipeline .stage.s-bad { border-color:#f2cfcb; background:#fdf7f6; }
 
 /* ================= 登录页 ================= */
-.login-wrap { position:fixed; inset:0; z-index:200; display:grid; place-items:center;
-  background:linear-gradient(160deg,#151d2e 0%,#1d2942 55%,#232f52 100%); }
-.login-card { width:380px; max-width:92vw; background:#fff; border-radius:16px;
-  box-shadow:var(--shadow-lg); padding:34px 34px 30px; }
-.login-card .brand { display:flex; align-items:center; gap:12px; margin-bottom:22px; }
-.login-card .brand .mark { width:40px; height:40px; border-radius:11px; flex:none;
-  background:linear-gradient(135deg,#4c6fe8,#7a4ce8); display:grid; place-items:center;
-  color:#fff; font-size:19px; font-weight:650; }
-.login-card .brand b { font-size:17px; }
-.login-card .brand .sub { color:var(--ink-3); font-size:12px; }
-.login-err { color:var(--danger); font-size:12.5px; margin-top:10px; min-height:18px; }
+/* ================= 登录页：深空科技风 ================= */
+.login-wrap { position:fixed; inset:0; z-index:200; overflow:hidden; color:#dfe6f5;
+  background:radial-gradient(1200px 700px at 15% 10%, #16244a 0%, transparent 60%),
+             radial-gradient(900px 600px at 90% 90%, #241c4d 0%, transparent 55%), #0a0f1f; }
+.login-wrap canvas { position:absolute; inset:0; width:100%; height:100%; }
+.login-wrap .grid { position:absolute; inset:-1px; pointer-events:none;
+  background-image:linear-gradient(rgba(96,140,255,.07) 1px, transparent 1px), linear-gradient(90deg, rgba(96,140,255,.07) 1px, transparent 1px);
+  background-size:56px 56px; mask-image:radial-gradient(ellipse at 50% 40%, #000 20%, transparent 75%); }
+.login-stage { position:relative; z-index:2; height:100%; display:grid; grid-template-columns:minmax(0,1.15fr) minmax(400px,.85fr);
+  align-items:center; gap:40px; padding:0 8vw; max-width:1400px; margin:0 auto; }
+.login-hero { max-width:560px; }
+.login-hero .eyebrow { display:inline-flex; align-items:center; gap:8px; font-size:12px; letter-spacing:.22em; color:#8fb0ff;
+  text-transform:uppercase; margin-bottom:22px; }
+.login-hero .eyebrow i { width:26px; height:1px; background:linear-gradient(90deg,#8fb0ff,transparent); }
+.login-hero h1 { font-size:48px; line-height:1.12; margin:0 0 14px; font-weight:750; letter-spacing:-.5px; color:#fff; text-wrap:balance; }
+.login-hero h1 span { background:linear-gradient(92deg,#8fb0ff 0%,#c2a6ff 50%,#79e0ff 100%); -webkit-background-clip:text; background-clip:text; color:transparent; }
+.login-hero p { color:#9aa9c7; font-size:15px; line-height:1.75; margin:0 0 30px; max-width:46ch; }
+.flow { display:flex; align-items:center; gap:0; margin-top:6px; }
+.flow .node { position:relative; display:flex; flex-direction:column; align-items:center; gap:8px; min-width:74px; }
+.flow .node .dot { width:12px; height:12px; border-radius:50%; background:#1b2a52; border:2px solid #3f66d9; box-shadow:0 0 0 0 rgba(120,160,255,.6); }
+.flow .node .lab { font-size:12px; color:#9aa9c7; letter-spacing:.04em; white-space:nowrap; }
+.flow .link { flex:1; height:2px; min-width:34px; margin-bottom:24px; background:linear-gradient(90deg,#2b4290,#2b4290); position:relative; overflow:hidden; }
+.flow .link::after { content:""; position:absolute; top:0; left:-40%; width:40%; height:100%; background:linear-gradient(90deg,transparent,#8fb0ff,transparent); animation:flowdash 2.4s linear infinite; }
+.flow .node.on .dot { background:#4a6ff0; border-color:#8fb0ff; animation:pulse 2.4s ease-out infinite; }
+@keyframes flowdash { to { left:100%; } }
+@keyframes pulse { 0% { box-shadow:0 0 0 0 rgba(120,160,255,.55); } 100% { box-shadow:0 0 0 14px rgba(120,160,255,0); } }
+.login-stats { display:flex; gap:26px; margin-top:34px; }
+.login-stats div { font-size:12px; color:#7f8fb0; }
+.login-stats b { display:block; font-size:22px; color:#e9eefc; font-variant-numeric:tabular-nums; letter-spacing:-.3px; }
+.login-card { position:relative; width:420px; max-width:92vw; margin-left:auto; padding:36px 36px 30px; border-radius:20px;
+  background:linear-gradient(160deg, rgba(20,29,54,.82), rgba(12,18,38,.88)); backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px);
+  border:1px solid rgba(143,176,255,.18); box-shadow:0 30px 80px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.06); }
+.login-card::before { content:""; position:absolute; inset:-1px; border-radius:21px; padding:1px; pointer-events:none;
+  background:linear-gradient(135deg, rgba(143,176,255,.55), transparent 35%, transparent 65%, rgba(194,166,255,.5));
+  -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude; }
+.login-card .brand { display:flex; align-items:center; gap:12px; margin-bottom:26px; }
+.login-card .brand .mark { width:42px; height:42px; border-radius:12px; flex:none; display:grid; place-items:center;
+  background:linear-gradient(135deg,#4c6fe8,#7a4ce8); color:#fff; font-size:20px; font-weight:650; box-shadow:0 8px 24px rgba(88,110,240,.45); }
+.login-card .brand b { font-size:18px; color:#fff; }
+.login-card .brand .sub { color:#8b9ac0; font-size:12px; margin-top:2px; }
+.login-card label.f { color:#aebbd9; font-size:12.5px; letter-spacing:.04em; }
+.login-card label.f .hint { color:#6f7fa3; }
+.login-card input[type=text], .login-card input[type=password] { width:100%; box-sizing:border-box; background:rgba(9,14,30,.7);
+  border:1px solid rgba(143,176,255,.18); color:#eef2ff; border-radius:10px; padding:11px 13px; font-size:14px; transition:border-color .2s, box-shadow .2s; }
+.login-card input:focus { outline:none; border-color:#6f93ff; box-shadow:0 0 0 3px rgba(111,147,255,.18), 0 0 24px rgba(111,147,255,.15); }
+.login-card input::placeholder { color:#5a6a90; }
+.login-card .btn.block { margin-top:6px; padding:12px 14px; font-size:14.5px; font-weight:650; letter-spacing:.06em; border:none; border-radius:11px;
+  background:linear-gradient(92deg,#3b63f0,#6b4de8 60%,#3b63f0); background-size:200% 100%; color:#fff; box-shadow:0 10px 28px rgba(80,100,240,.4);
+  transition:transform .15s, box-shadow .2s, background-position .5s; }
+.login-card .btn.block:hover { background-position:100% 0; transform:translateY(-1px); box-shadow:0 14px 34px rgba(80,100,240,.5); }
+.login-card .btn.block:disabled { opacity:.7; transform:none; }
+.login-err { color:#ff8b8b; font-size:12.5px; margin-top:10px; min-height:18px; }
+.login-foot { margin-top:18px; display:flex; justify-content:space-between; font-size:11.5px; color:#5f6f95; }
+.login-foot .live { display:inline-flex; align-items:center; gap:6px; }
+.login-foot .live i { width:7px; height:7px; border-radius:50%; background:#37d39a; box-shadow:0 0 10px #37d39a; animation:pulse 2s infinite; }
+@media (max-width:900px) { .login-stage { grid-template-columns:1fr; padding:24px 6vw; align-content:center; } .login-hero { display:none; } .login-card { margin:0 auto; } }
+@media (prefers-reduced-motion: reduce) { .flow .link::after, .flow .node.on .dot, .login-foot .live i { animation:none; } }
 
 .switch { position:relative; display:inline-block; width:38px; height:21px; flex:none; cursor:pointer; }
 .switch input { opacity:0; width:0; height:0; }
@@ -633,13 +679,34 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 
 <!-- 登录页 -->
 <div class="login-wrap" id="loginView" style="display:none">
+  <canvas id="loginFx"></canvas>
+  <div class="grid"></div>
+  <div class="login-stage">
+    <div class="login-hero">
+      <div class="eyebrow"><i></i>AI Test Design Platform</div>
+      <h1>让测试设计<br><span>从需求直达执行</span></h1>
+      <p>多 Agent 协作拆解需求、生成与评审用例，知识库沉淀团队规则，人工评审留痕反哺下一次生成。需求、测试点、用例、计划、执行全链路可追溯。</p>
+      <div class="flow">
+        <div class="node on"><div class="dot"></div><div class="lab">需求</div></div><div class="link"></div>
+        <div class="node on"><div class="dot"></div><div class="lab">测试点</div></div><div class="link"></div>
+        <div class="node on"><div class="dot"></div><div class="lab">用例</div></div><div class="link"></div>
+        <div class="node on"><div class="dot"></div><div class="lab">计划</div></div><div class="link"></div>
+        <div class="node on"><div class="dot"></div><div class="lab">执行</div></div>
+      </div>
+      <div class="login-stats">
+        <div><b>17</b>可管理 Prompt</div>
+        <div><b>3 层</b>知识库隔离</div>
+        <div><b>4 类</b>项目角色</div>
+        <div><b>≤3 轮</b>生成评审回环</div>
+      </div>
+    </div>
   <div class="login-card">
     <div class="brand"><span class="mark">天</span>
       <div><b>天工</b><div class="sub">AI 测试用例平台 · 登录</div></div></div>
     <label class="f">用户名</label>
-    <input type="text" id="loginUser" autocomplete="username">
+    <input type="text" id="loginUser" autocomplete="username" placeholder="登录账号">
     <label class="f">密码</label>
-    <input type="password" id="loginPwd" autocomplete="current-password"
+    <input type="password" id="loginPwd" autocomplete="current-password" placeholder="••••••••"
       onkeydown="if(event.key==='Enter')doLogin()">
     <div id="loginOtpWrap" style="display:none">
       <label class="f">动态验证码<span class="hint">（Google Authenticator / 海月盾等验证器中的 6 位数字）</span></label>
@@ -649,6 +716,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     </div>
     <div class="login-err" id="loginErr"></div>
     <button class="btn block" id="loginBtn" onclick="doLogin()">登 录</button>
+    <div class="login-foot"><span class="live"><i></i>内网部署 · 数据不出域</span><span>DeepSeek · bge-m3</span></div>
+  </div>
   </div>
 </div>
 
@@ -1395,12 +1464,45 @@ function resetState() {
     const el = $(id); if (el) el.innerHTML = '';
   }
 }
+/* 登录页背景：粒子星网 + 缓慢漂移，登录页隐藏时停止渲染；尊重减少动效偏好 */
+let _fxRaf = null;
+function startLoginFx() {
+  const c = $('loginFx'); if (!c || _fxRaf) return;
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const ctx = c.getContext('2d'); let W, H, pts = [];
+  const resize = () => { W = c.width = c.clientWidth * devicePixelRatio; H = c.height = c.clientHeight * devicePixelRatio; };
+  resize(); window.addEventListener('resize', resize);
+  const N = Math.min(140, Math.floor(W * H / (28000 * devicePixelRatio * devicePixelRatio)));
+  for (let i = 0; i < N; i++) pts.push({x: Math.random()*W, y: Math.random()*H, vx: (Math.random()-.5)*.25*devicePixelRatio, vy: (Math.random()-.5)*.25*devicePixelRatio, r: (Math.random()*1.4+.6)*devicePixelRatio, h: Math.random()<.2?270:222});
+  const LINK = 150 * devicePixelRatio;
+  let mouse = {x: -9999, y: -9999};
+  c.addEventListener('mousemove', e => { const b = c.getBoundingClientRect(); mouse = {x: (e.clientX-b.left)*devicePixelRatio, y: (e.clientY-b.top)*devicePixelRatio}; });
+  const frame = () => {
+    ctx.clearRect(0, 0, W, H);
+    for (const p of pts) {
+      if (!reduce) { p.x += p.vx; p.y += p.vy; if (p.x < 0 || p.x > W) p.vx *= -1; if (p.y < 0 || p.y > H) p.vy *= -1; }
+    }
+    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+      const a = pts[i], b = pts[j], dx = a.x-b.x, dy = a.y-b.y, d = Math.hypot(dx, dy);
+      if (d < LINK) { ctx.strokeStyle = `hsla(${a.h},90%,72%,${(1-d/LINK)*.28})`; ctx.lineWidth = devicePixelRatio*.8; ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+    }
+    for (const p of pts) {
+      const md = Math.hypot(p.x-mouse.x, p.y-mouse.y), glow = md < 160*devicePixelRatio ? 1 : 0;
+      ctx.fillStyle = `hsla(${p.h},90%,${glow?85:72}%,${glow?.95:.7})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r*(glow?1.8:1), 0, Math.PI*2); ctx.fill();
+    }
+    if (reduce) { _fxRaf = 1; return; }
+    _fxRaf = requestAnimationFrame(frame);
+  };
+  frame();
+}
+function stopLoginFx() { if (_fxRaf && _fxRaf !== 1) cancelAnimationFrame(_fxRaf); _fxRaf = null; }
 function showLogin() {
   resetState();
   if ($('loginView').style.display !== 'none') return;  // 已在登录页：不重复抢焦点
   $('loginView').style.display = '';
   $('loginErr').textContent = '';
-  setTimeout(() => $('loginUser').focus(), 50);
+  setTimeout(() => { $('loginUser').focus(); startLoginFx(); }, 50);
 }
 async function doLogin() {
   const btn = $('loginBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 登录中';
@@ -1419,7 +1521,7 @@ async function doLogin() {
     curUser = data.user;
     if (curUser.must_change_password) { $('loginView').style.display = 'none'; forcePasswordChange(); btn.disabled = false; btn.textContent = '登 录'; return; }
     await init();  // 初始化成功后再隐藏登录页，失败时留在登录页并给出原因
-    $('loginView').style.display = 'none'; $('loginPwd').value = '';
+    $('loginView').style.display = 'none'; stopLoginFx(); $('loginPwd').value = '';
     $('loginOtpWrap').style.display = 'none'; $('loginOtp').value = '';
   } catch (e) { $('loginErr').textContent = e.message; }
   btn.disabled = false; btn.textContent = '登 录';
