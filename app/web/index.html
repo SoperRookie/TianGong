@@ -1709,6 +1709,28 @@ const _renderSeq = {};
 const tick = k => (_renderSeq[k] = (_renderSeq[k] || 0) + 1);
 const stale = (k, v) => _renderSeq[k] !== v;
 
+/* ---------- 夜枭表情（任务状态可视化）：idle / generating / pass / fail ---------- */
+function owlSvg(mood, size, extraClass) {
+  const eyes = mood === 'generating'
+    ? `<path d="M20.5 32 A3.5 3.5 0 0 1 27.5 32 M36.5 32 A3.5 3.5 0 0 1 43.5 32" fill="none" stroke="#5fe3ff" stroke-width="2.2" stroke-linecap="round" filter="url(#owlGlow)"/><rect class="owl-scan" x="17" y="31" width="30" height="1.6" fill="#5fe3ff" opacity=".9"/>`
+    : mood === 'fail'
+    ? `<path d="M21 29 L27 35 M27 29 L21 35 M37 29 L43 35 M43 29 L37 35" stroke="#ff6b6b" stroke-width="2.2" stroke-linecap="round" filter="url(#owlGlow)"/>`
+    : `<g class="owl-eye"><circle cx="24" cy="32" r="2.4" fill="${mood==='pass'?'#7cf5c2':'#7cf5c2'}" filter="url(#owlGlow)"/><circle cx="40" cy="32" r="2.4" fill="#7cf5c2" filter="url(#owlGlow)"/></g><rect class="owl-scan" x="17" y="31" width="30" height="1.6" fill="#5fe3ff" opacity=".35"/>`;
+  const mouth = mood === 'pass'
+    ? `<path d="M22 49 Q32 56 42 49" fill="none" stroke="#7cf5c2" stroke-opacity=".85" stroke-width="1.8" stroke-linecap="round"/>`
+    : `<path d="M22 48 L26 52 L30 48 M34 48 L38 52 L42 48" fill="none" stroke="${mood==='fail'?'#ff6b6b':'#5fe3ff'}" stroke-opacity=".6" stroke-width="1.6" stroke-linecap="round"/>`;
+  return `<svg class="owl ${extraClass||''}" viewBox="0 0 64 64" width="${size}" height="${size}" aria-label="${mood}" style="flex:none">
+    <rect width="64" height="64" rx="16" fill="#0b1226"/><rect x="1" y="1" width="62" height="62" rx="15" fill="none" stroke="#2b3d6b"/>
+    <path d="M13 22 L20 12 L26 20 H38 L44 12 L51 22 V42 A19 19 0 0 1 13 42 Z" fill="url(#owlSkin)" stroke="#5fe3ff" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M20 12 L26 20 M44 12 L38 20" stroke="#b79cff" stroke-width="2" stroke-linecap="round"/>
+    <rect x="15" y="25" width="34" height="14" rx="7" fill="#0b1226" stroke="#5fe3ff" stroke-width="1.6"/>
+    <circle cx="24" cy="32" r="5.2" fill="#0b1226" stroke="#5fe3ff" stroke-width="1.6"/><circle cx="40" cy="32" r="5.2" fill="#0b1226" stroke="#5fe3ff" stroke-width="1.6"/>
+    ${eyes}<path d="M29.5 41 L32 46 L34.5 41 Z" fill="#ff7ad9"/>${mouth}</svg>`;
+}
+const owlMoodOf = t => ['queued','running'].includes(t.status) || (t.status==='awaiting_confirmation' && t.progress) ? 'generating'
+  : t.status === 'failed' ? 'fail'
+  : (t.status === 'completed' && t.result && (t.result.passed || (t.result.cases||[]).length && (t.result.cases||[]).every(c => caseState(t, c).status === 'approved'))) ? 'pass' : 'idle';
+
 /* ---------- 视图切换与面包屑 ---------- */
 const VIEW_LABELS = {projects:'项目管理', requirements:'需求列表', aicenter:'AI 任务中心', prompts:'Prompt 管理', audit:'操作日志', knowledge:'知识库', workbench:'我的工作台', search:'搜索结果', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
 function setCrumb(html) { $('crumb').innerHTML = html; }
@@ -2015,8 +2037,8 @@ function renderTaskListRows() {
       <td>${t.case_count ? `<b>${t.case_count}</b> 条` : '<span class="hint">—</span>'}</td>
       <td>${t.revision_count ? t.revision_count + ' 轮' : '<span class="hint">—</span>'}</td>
       <td class="hint" title="${esc(t.created_at||'')}">${relTime(t.created_at)}</td>
-    </tr>`).join('') || `<tr><td colspan="8"><div class="empty">
-      ${_tasksCache.length ? '当前筛选下无任务' : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
+    </tr>`).join('') || `<tr><td colspan="8"><div class="empty" style="display:flex;flex-direction:column;align-items:center;gap:10px;padding:34px 0">
+      ${owlSvg('idle', 64)}${_tasksCache.length ? '当前筛选下无任务' : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
 }
 function backToList() {
   currentTask = null;
@@ -2092,6 +2114,7 @@ function renderDetail() {
   $('detail').innerHTML = `<div class="card">
     <div class="card-h" style="border-bottom:none">
       <button class="btn ghost sm" onclick="backToList()" title="返回任务列表">← 列表</button>
+      ${owlSvg(owlMoodOf(t), 30)}
       <h3>任务 <code>${t.task_id}</code></h3>
       <span class="pill ${t.status}">${statusText(t.status)}</span>
       ${t.progress?'<span class="hint">'+progressText(t.progress)+' <span class="spin"></span></span>':''}
@@ -2128,10 +2151,11 @@ function renderProgress(t) {
   const idx = Math.max(0, STAGES.findIndex(s => s[0] === stage));
   const elapsed = t.created_at ? Math.max(0, Math.floor((Date.now() - new Date(t.created_at).getTime())/1000)) : 0;
   const mm = String(Math.floor(elapsed/60)), ss = String(elapsed%60).padStart(2,'0');
-  return `<div class="box accent" style="margin:0 0 14px">
-    正在生成 <span class="spin"></span>
+  return `<div class="box accent" style="margin:0 0 14px;display:flex;gap:14px;align-items:flex-start">
+    ${owlSvg('generating', 56)}
+    <div style="flex:1;min-width:0">正在生成 <span class="spin"></span>
     <span class="hint">已耗时 ${mm}:${ss} · 生成与评审为主要耗时阶段（多模块并行）</span>
-    ${stepperHtml(idx)}</div>`;
+    ${stepperHtml(idx)}</div></div>`;
 }
 
 /* ==================== 概览 ==================== */
