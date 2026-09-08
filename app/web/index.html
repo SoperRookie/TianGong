@@ -28,14 +28,17 @@ body { margin:0; font:13.5px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",
 /* ================= 应用框架：左侧菜单 + 右侧内容 ================= */
 .shell { display:flex; min-height:100vh; }
 .sidebar { width:212px; flex:none; background:#151d2e; display:flex; flex-direction:column;
-  position:sticky; top:0; height:100vh; }
+  position:sticky; top:0; height:100vh; overflow:hidden; }
+/* 菜单项变多后在侧边栏内部滚动，底部用户区固定；深色背景始终铺满视口 */
+.menu::-webkit-scrollbar { width:6px; }
+.menu::-webkit-scrollbar-thumb { background:#2a3550; border-radius:3px; }
 .s-logo { display:flex; align-items:center; gap:10px; padding:18px 18px 16px; color:#fff;
   font-size:15px; font-weight:650; letter-spacing:.3px; border-bottom:1px solid #222c42; }
 .s-logo .mark { width:28px; height:28px; border-radius:8px; flex:none;
   background:linear-gradient(135deg,#4c6fe8,#7a4ce8); display:grid; place-items:center; font-size:14px; }
 .s-logo .sub { font-size:11px; font-weight:400; color:#7484a0; letter-spacing:.5px; margin-top:1px; }
-.menu { padding:12px 10px; display:flex; flex-direction:column; gap:3px; }
-.menu .grp { font-size:11px; color:#5d6b84; letter-spacing:1px; padding:12px 12px 4px; }
+.menu { padding:12px 10px; display:flex; flex-direction:column; gap:2px; flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; }
+.menu .grp { font-size:11px; color:#5d6b84; letter-spacing:1px; padding:10px 12px 3px; }
 .menu button { display:flex; align-items:center; gap:10px; border:none; background:transparent;
   color:#9aa6bd; padding:9px 12px; border-radius:8px; font:inherit; font-size:13.5px;
   cursor:pointer; text-align:left; transition:background .12s, color .12s; }
