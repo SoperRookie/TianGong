@@ -45,22 +45,29 @@ def record_version(
     task_id: str, kind: str, entity_id: str, source: str, content: dict,
     by: str | None = None, reason: str = "",
 ) -> int:
-    """追加一条版本记录，返回版本号（同实体内自增）。"""
-    with get_engine().begin() as conn:
-        current = conn.execute(
-            select(func.max(entity_versions.c.version_no)).where(
-                entity_versions.c.task_id == task_id,
-                entity_versions.c.kind == kind,
-                entity_versions.c.entity_id == entity_id,
-            )
-        ).scalar()
-        version_no = (current or 0) + 1
-        conn.execute(entity_versions.insert().values(
-            task_id=task_id, kind=kind, entity_id=str(entity_id), version_no=version_no,
-            source=source, reason=(reason or "")[:500], created_by=by, created_at=_now(),
-            payload=json.dumps(content, ensure_ascii=False),
-        ))
-    return version_no
+    """追加一条版本记录，返回版本号（同实体内自增）；并发写同一实体撞号时靠唯一约束重试。"""
+    from sqlalchemy.exc import IntegrityError
+
+    for _ in range(5):
+        with get_engine().begin() as conn:
+            current = conn.execute(
+                select(func.max(entity_versions.c.version_no)).where(
+                    entity_versions.c.task_id == task_id,
+                    entity_versions.c.kind == kind,
+                    entity_versions.c.entity_id == entity_id,
+                )
+            ).scalar()
+            version_no = (current or 0) + 1
+            try:
+                conn.execute(entity_versions.insert().values(
+                    task_id=task_id, kind=kind, entity_id=str(entity_id), version_no=version_no,
+                    source=source, reason=(reason or "")[:500], created_by=by, created_at=_now(),
+                    payload=json.dumps(content, ensure_ascii=False),
+                ))
+                return version_no
+            except IntegrityError:
+                continue
+    raise RuntimeError(f"版本记录写入冲突：{kind} {entity_id}")
 
 
 def ensure_versions(
@@ -81,13 +88,16 @@ def ensure_versions(
                 )
             )
         }
-    added = 0
-    for entity_id, content in entities.items():
-        if str(entity_id) in known or not entity_id:
-            continue
-        record_version(task_id, kind, entity_id, source, content, by=by, reason=reason)
-        added += 1
-    return added
+    rows = [
+        {"task_id": task_id, "kind": kind, "entity_id": str(entity_id), "version_no": 1, "source": source,
+         "reason": (reason or "")[:500], "created_by": by, "created_at": _now(),
+         "payload": json.dumps(content, ensure_ascii=False)}
+        for entity_id, content in entities.items() if entity_id and str(entity_id) not in known
+    ]
+    if rows:  # 批量一次事务写入（存量任务 N 条用例不再 N 次事务）
+        with get_engine().begin() as conn:
+            conn.execute(entity_versions.insert(), rows)
+    return len(rows)
 
 
 def latest_version_no(task_id: str, kind: str, entity_id: str) -> int:

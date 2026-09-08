@@ -215,6 +215,13 @@ def stats(since: str | None = None, visible: set[str] | None = None, project: st
     }
 
 
+def rename_project(old: str, new: str) -> int:
+    from sqlalchemy import update
+
+    with get_engine().begin() as conn:
+        return conn.execute(update(ai_calls).where(ai_calls.c.project == old).values(project=new)).rowcount
+
+
 def purge_before(at: str) -> int:
     with get_engine().begin() as conn:
         return conn.execute(delete(ai_calls).where(ai_calls.c.at < at)).rowcount

@@ -92,6 +92,15 @@ class RuleStore:
             self._persist()
         return added
 
+    def rename_project(self, old: str, new: str) -> None:
+        changed = False
+        for r in self._rules.values():
+            if r.project == old:
+                r.project = new
+                changed = True
+        if changed:
+            self._persist()
+
     def list(self, status: str | None = None, project: str | None = None) -> list[Rule]:
         rules = [
             r for r in self._rules.values()

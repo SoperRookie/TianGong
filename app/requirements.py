@@ -213,6 +213,19 @@ class RequirementStore:
                 r["project"] = new
                 self._persist(r)
 
+    def purge_project(self, project: str) -> int:
+        """清理项目下已逻辑删除的需求（删除空项目时调用）。"""
+        import shutil
+
+        from app.config import get_settings
+
+        gone = [k for k, r in self._items.items() if r["project"] == project and r.get("deleted_at")]
+        for k in gone:
+            self._items.pop(k)
+            self._doc.remove(k)
+            shutil.rmtree(get_settings().outputs_dir / "requirements" / k, ignore_errors=True)
+        return len(gone)
+
     # ---- 内部 ----
 
     def _get_alive(self, req_id: str) -> dict:

@@ -16,7 +16,8 @@ from typing import Callable
 
 from loguru import logger
 from sqlalchemy import (
-    Column, Index, Integer, MetaData, String, Table, Text, create_engine, delete, insert, select,
+    Column, Index, Integer, MetaData, String, Table, Text, UniqueConstraint, create_engine, delete, insert,
+    select,
 )
 from sqlalchemy.dialects.mysql import LONGTEXT
 
@@ -47,6 +48,7 @@ entity_versions = Table(
     Column("created_at", String(32), nullable=False),
     Column("payload", Text().with_variant(LONGTEXT, "mysql"), nullable=False),
     Index("ix_ev_entity", "task_id", "kind", "entity_id"),
+    UniqueConstraint("task_id", "kind", "entity_id", "version_no", name="uq_ev_version"),
 )
 
 # 回收站（完整需求 14.4）：核心数据默认逻辑删除——删除即移入此表，可恢复；管理员永久删除才落地
@@ -135,4 +137,9 @@ def load_with_migration(
     if docs:
         doc.replace_all(docs)
         logger.info("已将旧文件 {} 迁移入库（{} 条 → {}）", legacy_path.name, len(docs), doc._name)
+    # 迁移完成即改名，避免命名空间被清空后重启再次迁移"复活"已删数据
+    try:
+        legacy_path.rename(legacy_path.with_name(legacy_path.name + ".migrated"))
+    except OSError as e:  # pragma: no cover
+        logger.warning("旧文件 {} 改名失败：{}", legacy_path.name, e)
     return docs

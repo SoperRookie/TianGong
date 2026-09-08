@@ -100,6 +100,17 @@ def check_zip_safety(path: str | Path, max_uncompressed_mb: int | None = None, m
         raise UnsafeFileError(f"{path.name} 内含 {len(infos)} 个条目，超过上限，拒绝解析")
 
 
+def read_text_any(path: str | Path) -> str:
+    """文本文件按 utf-8-sig → gb18030 依次尝试（国内 Windows 导出的 txt/csv 多为 GBK）。"""
+    raw = Path(path).read_bytes()
+    for enc in ("utf-8-sig", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError("utf-8", raw[:16], 0, 1, f"{Path(path).name} 不是 UTF-8 或 GBK 编码的文本文件")
+
+
 def parse_file(path: str | Path) -> ParsedDocument:
     """按扩展名分发解析器（格式白名单校验，F-2-8 的一部分）；zip 类先做安全校验。"""
     path = Path(path)

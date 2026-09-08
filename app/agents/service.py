@@ -322,8 +322,14 @@ def _merge(outcomes: list) -> GenerationResult:
     seen_notes: dict[str, set[str]] = {"blind_spots": set(), "missing": set(), "suggestions": set()}
     module_points: dict[str, list[str]] = {}
 
+    from app.agents.json_utils import LLMOutputError
+    from app.llm.client import AllModelsFailedError
+    from app.llm.schemas import MissingAPIKeyError
+
     for i, outcome in enumerate(outcomes, 1):
         if isinstance(outcome, BaseException):
+            if isinstance(outcome, (asyncio.CancelledError, TypeError, KeyError, AttributeError, IndexError, NameError)):
+                raise outcome  # 取消 / 编程错误：不能伪装成"分片失败"以 completed 出稿
             # 分片失败不阻塞整体交付，显式标注缺失范围（PRD 异常流程）
             merged.passed = False
             merged.unresolved.append({"case_id": f"<分片{i}>", "problem": f"分片处理失败: {outcome}"})

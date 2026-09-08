@@ -222,8 +222,16 @@ class ProjectStore:
         self._persist()
         return project
 
+    def sole_admin_projects(self, username: str) -> list[str]:
+        """该用户是唯一项目管理员的项目（删除用户前须先转移）。"""
+        return [p["name"] for p in self._projects.values()
+                if p["members"].get(username) == "project_admin" and self._admin_count(p) <= 1]
+
     def remove_user_everywhere(self, username: str) -> None:
         """用户被删除时清理其成员关系（保留负责人字段文本作历史）。"""
+        blocked = self.sole_admin_projects(username)
+        if blocked:
+            raise ProjectError(f"{username} 是项目 {', '.join(blocked)} 的唯一项目管理员，请先指定其他项目管理员")
         changed = False
         for p in self._projects.values():
             if username in p["members"]:

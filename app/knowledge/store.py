@@ -197,6 +197,22 @@ class KnowledgeStore:
             if offset is None:
                 return hits
 
+    def rename_space(self, old: str, new: str) -> int:
+        """项目改名联动：台账 space 与向量切片 payload 一并更新。"""
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        docs = [d for d in self._docs.values() if d.space == old]
+        if not docs:
+            return 0
+        for d in docs:
+            d.space = new
+        self._client.set_payload(
+            collection_name=_COLLECTION, payload={"space": new},
+            points=Filter(must=[FieldCondition(key="space", match=MatchValue(value=old))]),
+        )
+        self._save_docs()
+        return len(docs)
+
     def delete_doc(self, doc_id: str) -> bool:
         if doc_id not in self._docs:
             return False

@@ -689,6 +689,13 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 
 <div id="toasts"></div>
 
+<!-- AI 调用记录详情 -->
+<dialog id="aiCallDlg" style="width:860px">
+  <div class="dlg-h"><h3 id="acTitle"></h3></div>
+  <div class="dlg-b" id="acBody"></div>
+  <div class="dlg-f"><button class="btn ghost" onclick="$('aiCallDlg').close()">关闭</button></div>
+</dialog>
+
 <!-- 通用确认 -->
 <dialog id="confirmDlg">
   <div class="dlg-h"><h3 id="cfTitle"></h3></div>
@@ -965,7 +972,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 </dialog>
 
 <!-- 项目版本 -->
-<dialog id="versionDlg" style="width:560px">
+<dialog id="projVersionDlg" style="width:560px">
   <div class="dlg-h"><h3 id="vsTitle">新建版本</h3></div>
   <div class="dlg-b">
     <div style="display:flex;gap:10px">
@@ -983,7 +990,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <textarea id="vsDesc" rows="3"></textarea>
   </div>
   <div class="dlg-f">
-    <button class="btn ghost" onclick="$('versionDlg').close()">取消</button>
+    <button class="btn ghost" onclick="$('projVersionDlg').close()">取消</button>
     <button class="btn" onclick="saveVersion()">保存</button>
   </div>
 </dialog>
@@ -1190,6 +1197,13 @@ function forcePasswordChange() {
   $('pwOld').value = ''; $('pwNew').value = ''; $('pwdDlg').showModal();
 }
 const jpost = (p, b) => api(p, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b)});
+// 时间显示：后端一律 UTC ISO，前端按浏览器时区展示（用户在日本 = UTC+9）
+function fmtTime(iso, withSeconds) {
+  if (!iso) return '';
+  const d = new Date(iso); if (isNaN(d)) return String(iso);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}${withSeconds ? ':' + p(d.getSeconds()) : ''}`;
+}
 const esc = s => String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // 放进内联事件属性里的 JS 字符串字面量：先 JSON 转义（引号/反斜杠/控制字符），再 HTML 转义整体
 const jsq = s => esc(JSON.stringify(String(s??'')));
@@ -1296,7 +1310,7 @@ function renderVersion(v, kind, total) {
   return `<div class="box">
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <b>v${v.version_no}</b><span class="tag">${esc(v.source_label||v.source)}</span>
-      <span class="hint">${esc(v.created_by||'')} · ${esc((v.created_at||'').replace('T',' ').slice(0,16))}</span>
+      <span class="hint">${esc(v.created_by||'')} · ${esc(fmtTime(v.created_at))}</span>
       ${v.reason?`<span class="hint">· ${esc(v.reason)}</span>`:''}
       ${v.version_no<total?`<button class="btn ghost sm" style="margin-left:auto" onclick="restoreVersion(${v.version_no})">恢复此版</button>`:''}
     </div>${body}${changes}</div>`;
@@ -1369,8 +1383,17 @@ const IC = {
 };
 
 /* ---------- 登录认证 ---------- */
+function resetState() {
+  // 登出/会话失效：清空内存态与各视图 DOM，避免共享电脑上下一个用户看到上一个用户的数据
+  curUser = null; currentTask = null; _tasksCache = []; _tasksSig = ''; _planDetail = null; curPlan = null;
+  _projCases = []; curProject = null; curReq = null; _reqDetail = null; _reqsCache = []; _usersCache = [];
+  _projectsCache = []; curPromptKey = null; plansMine = false; planExecFilter = '';
+  for (const id of ['detail','plansArea','projArea','reqArea','casesArea','wbArea','searchArea','aiArea','promptArea','auditArea','knowledgeArea','usersList','reportsBody','ruleList']) {
+    const el = $(id); if (el) el.innerHTML = '';
+  }
+}
 function showLogin() {
-  curUser = null;
+  resetState();
   if ($('loginView').style.display !== 'none') return;  // 已在登录页：不重复抢焦点
   $('loginView').style.display = '';
   $('loginErr').textContent = '';
@@ -1392,9 +1415,9 @@ async function doLogin() {
     authToken = data.token; localStorage.setItem('tg_token', authToken);
     curUser = data.user;
     if (curUser.must_change_password) { $('loginView').style.display = 'none'; forcePasswordChange(); btn.disabled = false; btn.textContent = '登 录'; return; }
+    await init();  // 初始化成功后再隐藏登录页，失败时留在登录页并给出原因
     $('loginView').style.display = 'none'; $('loginPwd').value = '';
     $('loginOtpWrap').style.display = 'none'; $('loginOtp').value = '';
-    await init();
   } catch (e) { $('loginErr').textContent = e.message; }
   btn.disabled = false; btn.textContent = '登 录';
 }
@@ -1409,7 +1432,7 @@ function openProfileDlg() {
   $('pfUser').textContent = curUser.username;
   $('pfName').value = curUser.name || ''; $('pfEmail').value = curUser.email || ''; $('pfPhone').value = curUser.phone || '';
   renderAvatarPreview(curUser.avatar);
-  const fmt = t => (t||'').replace('T',' ').replace('+00:00','').slice(0,16);
+  const fmt = t => fmtTime(t);
   $('pfMeta').innerHTML = `系统角色 ${esc(curUser.role)} · 最后登录 ${esc(fmt(curUser.last_login_at)||'—')}${curUser.last_login_ip?` · IP ${esc(curUser.last_login_ip)}`:''}<br>
     所属项目：${(curUser.projects||[]).length ? curUser.projects.map(p => `<span class="tag">${esc(p.project)} · ${esc(PROJECT_ROLES[p.role]||p.role)}</span>`).join(' ') : '—'}`;
   $('profileDlg').showModal();
@@ -1460,8 +1483,8 @@ async function changePassword() {
 }
 async function boot() {
   if (!authToken) return showLogin();
-  try { curUser = await api('/api/v1/auth/me'); await init(); }
-  catch (e) { /* 401 已由 api() 转入登录页 */ }
+  try { curUser = await api('/api/v1/auth/me'); if (curUser.must_change_password) return forcePasswordChange(); await init(); }
+  catch (e) { if (curUser) toast('初始化失败：' + e.message, 'err'); /* 401 已由 api() 转入登录页 */ }
 }
 
 /* ---------- 项目级权限（与后端 app/permissions.py 同一矩阵，仅用于界面显隐；后端为准） ---------- */
@@ -1538,16 +1561,22 @@ function renderProjMenu(q) {
   const recentNames = prefs.recent.map(r => r.project);
   const recents = recentNames.map(n => all.find(p => p.project === n)).filter(p => p && !p.favorite && match(p)).slice(0, 5);
   const rest = all.filter(p => !p.favorite && !recents.includes(p) && match(p));
-  $('curProjMenu').innerHTML = `<input type="text" id="cpSearch" placeholder="搜索项目名 / 编码" value="${esc(q||'')}" oninput="renderProjMenu(this.value)" onclick="event.stopPropagation()">
-    <div class="list">
+  const listHtml = `<div class="list">
       <div class="it ${!curProjectName?'on':''}" onclick="setCurrentProject('')"><span class="star"></span><span>全部项目</span><span class="role">不限定</span></div>
       ${favs.length?`<div class="grp">收藏</div>${favs.map(item).join('')}`:''}
       ${recents.length?`<div class="grp">最近访问</div>${recents.map(item).join('')}`:''}
       ${rest.length?`<div class="grp">${favs.length||recents.length?'其他项目':'项目'}</div>${rest.map(item).join('')}`:''}
       ${!all.length?'<div class="empty" style="padding:14px">暂无可访问的项目</div>':''}
     </div>`;
+  if ($('cpSearch') && $('cpList')) { $('cpList').innerHTML = listHtml; return; }  // 输入中只重绘列表，输入框不重建
+  $('curProjMenu').innerHTML = `<input type="text" id="cpSearch" placeholder="搜索项目名 / 编码" value="${esc(q||'')}" oninput="renderProjMenu(this.value)" onclick="event.stopPropagation()"><div id="cpList">${listHtml}</div>`;
 }
 document.addEventListener('click', () => { const m = $('curProjMenu'); if (m) m.style.display = 'none'; });
+
+/* ---------- 异步渲染竞态守卫：同一容器只接受最后一次发起的渲染结果 ---------- */
+const _renderSeq = {};
+const tick = k => (_renderSeq[k] = (_renderSeq[k] || 0) + 1);
+const stale = (k, v) => _renderSeq[k] !== v;
 
 /* ---------- 视图切换与面包屑 ---------- */
 const VIEW_LABELS = {projects:'项目管理', requirements:'需求列表', aicenter:'AI 任务中心', prompts:'Prompt 管理', audit:'操作日志', knowledge:'知识库', workbench:'我的工作台', search:'搜索结果', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
@@ -1620,7 +1649,7 @@ async function init() {
     window._pollStarted = true;
     setInterval(refreshList, 3000);
     setInterval(() => {
-      if (curUser && currentTask && taskBusy(currentTask)) renderDetail();
+      if (curUser && currentTask && taskBusy(currentTask) && !editingInDetail()) renderDetail();
     }, 1000);
     document.addEventListener('change', e => {
       if (e.target.matches && (e.target.matches('.ptck') || e.target.matches('.cck') || e.target.matches('.allck'))) renderBatchBar();
@@ -1759,11 +1788,23 @@ function relTime(iso) {
 }
 let _tasksCache = [];
 let listQuery = '', listStatus = '', listProject = '', listCreator = '';
+let _listInflight = false, _tasksSig = '';
 async function refreshList() {
-  if (!curUser) return;  // 未登录暂停轮询，避免 401 循环
-  try { const data = await api('/api/v1/tasks'); _tasksCache = data.tasks; } catch (e) { return; }
-  if (currentView === 'board' && !currentTask) renderTaskListPage();
-  if (currentTask && taskBusy(currentTask)) openTask(currentTask.task_id, true);
+  if (!curUser || _listInflight) return;  // 未登录暂停轮询；上一轮未返回则跳过（不叠加请求）
+  _listInflight = true;
+  let data;
+  try { data = await api('/api/v1/tasks'); } catch (e) { return; } finally { _listInflight = false; }
+  const sig = JSON.stringify(data.tasks);
+  const changed = sig !== _tasksSig;
+  _tasksSig = sig; _tasksCache = data.tasks;
+  if (currentView === 'board' && !currentTask && (changed || !$('taskTbody'))) renderTaskListPage();
+  if (currentTask && taskBusy(currentTask) && !editingInDetail()) {
+    try { const t = await api('/api/v1/tasks/' + currentTask.task_id); currentTask = t; renderDetail(); } catch (e) {}
+  }
+}
+function editingInDetail() {
+  const a = document.activeElement;
+  return !!(a && $('detail') && $('detail').contains(a) && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT' || a.tagName === 'SELECT'));
 }
 const taskBusy = t => ['queued','running'].includes(t.status) ||
   (t.status === 'awaiting_confirmation' && t.progress);
@@ -1886,7 +1927,6 @@ async function openTask(id, keepLocal) {
       : (currentTask.result && currentTask.result.cases && currentTask.result.cases.length) ? 'cases' : 'overview';
   }
   renderDetail();
-  refreshList();
 }
 function setTab(tab) { detailTab = tab; renderDetail(); }
 
@@ -2063,7 +2103,7 @@ function renderOverview(t) {
           <div><dt>Prompt 版本</dt><dd>${Object.keys(t.prompt_versions||{}).length?Object.entries(t.prompt_versions).map(([k,v])=>`<code title="${esc(k)}">${esc(PROMPT_NAMES[k]||k)} v${v}</code>`).join(' '):'—'}${ctx.retry_count?`<div class="hint">已重试 ${ctx.retry_count} 次</div>`:''}</dd></div>
           <div><dt>模板</dt><dd>${esc(ctx.template_id||'—')}</dd></div>
           <div><dt>测试点</dt><dd>${pts.length||'—'}</dd></div>
-          <div><dt>创建时间</dt><dd>${esc((t.created_at||'').replace('T',' ').replace('+00:00',' UTC'))}</dd></div>
+          <div><dt>创建时间</dt><dd>${esc(fmtTime(t.created_at, true))}</dd></div>
         </dl>
         ${hasCases ? `<div class="section-t">导出下载</div><div class="toolbar" style="margin-top:4px">
           ${Object.keys(t.files||{}).map(f=>`<a class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/files/'+f)}, ${jsq('测试用例.'+f)})">${esc(f)}</a>`).join('')}</div>` : ''}
@@ -2432,6 +2472,7 @@ function mountMinder(elId, json, {readonly = true} = {}) {
     return;
   }
   el.innerHTML = '';
+  try { if (_minder && typeof _minder.destroy === 'function') _minder.destroy(); } catch (e) {}
   const minder = new kityminder.Minder({renderTo: el});
   minder.importJson(json);
   // 首次导入时文本测量尚未就绪会导致节点堆叠：布局收敛前用遮罩盖住，多轮 refresh→layout 后揭开
@@ -2442,7 +2483,7 @@ function mountMinder(elId, json, {readonly = true} = {}) {
   el.appendChild(veil);
   (async () => {
     await new Promise(r => setTimeout(r, 80));
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 4 && el.isConnected && _minder === minder; i++) {
       try { minder.refresh(); } catch (e) {}
       await new Promise(r => setTimeout(r, 340));
       try { minder.layout(); } catch (e) {}
@@ -2460,8 +2501,8 @@ function mountMinder(elId, json, {readonly = true} = {}) {
   } else {
     minder.on('dblclick', () => mEditText());
   }
-  try { minder.execCommand('camera', minder.getRoot(), 100); } catch (e) {}
   _minder = minder;
+  try { minder.execCommand('camera', minder.getRoot(), 100); } catch (e) {}
 }
 
 /* 可编辑脑图（任务详情 · 用例审核）：工具栏命令 + 保存回写既有评审接口 */
@@ -2745,7 +2786,7 @@ async function projRecycleHtml() {
         <td>${esc(i.label)}</td>
         <td style="width:110px"><a onclick="openTaskFromProject('${i.task_id}')"><code>${esc(i.task_id)}</code></a></td>
         <td style="width:90px" class="hint">${esc(i.deleted_by||'')}</td>
-        <td style="width:130px" class="hint">${esc((i.deleted_at||'').replace('T',' ').slice(0,16))}</td>
+        <td style="width:130px" class="hint">${esc(fmtTime(i.deleted_at))}</td>
         <td style="width:150px"><div class="rowops">
           <button class="btn ghost sm" onclick="projRecycleRestore('${i.task_id}',${i.id})">恢复</button>
           ${isAdmin?`<button class="btn ghost sm" style="color:var(--danger)" onclick="projRecyclePurge('${i.task_id}',${i.id})">永久删除</button>`:''}
@@ -2788,14 +2829,16 @@ function _openPlan(pid) { curPlan = pid; planRunId = null; switchView('plans'); 
 async function renderPlans() {
   if (curPlan) return renderPlanDetail();
   crumbForPlans();
+  const _s = tick('plans');
   let data;
   const q = new URLSearchParams();
   if (plansProject) q.set('project', plansProject);
   if (plansMine) q.set('mine', 'true');
   try { data = await api('/api/v1/plans' + (q.toString() ? '?' + q : '')); }
   catch (e) { return toast(e.message, 'err'); }
+  if (stale('plans', _s)) return;
   let projects = [];
-  try { projects = (await api('/api/v1/projects')).projects.filter(p => !p.builtin); } catch (e) {}
+  try { projects = (await getProjects()).filter(p => !p.builtin); } catch (e) {}
   const rows = data.plans.map(p => {
     const lr = p.summary.latest_run;
     const st = PLAN_ST[p.status] || [p.status, 'pending'];
@@ -2857,7 +2900,7 @@ async function renderPlans() {
 
 async function openPlanDlg() {
   let projects = [];
-  try { projects = (await api('/api/v1/projects')).projects.filter(p => !p.builtin && p.status !== 'archived' && can(p.project, 'plan.manage')); } catch (e) {}
+  try { projects = (await getProjects()).filter(p => !p.builtin && p.status !== 'archived' && can(p.project, 'plan.manage')); } catch (e) {}
   if (!projects.length) return toast('没有可创建计划的项目（需要测试负责人及以上项目角色）', 'warn');
   $('plProject').innerHTML = projects.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
   if (plansProject) $('plProject').value = plansProject;
@@ -2885,9 +2928,11 @@ function curPlanRun(p) {
 }
 
 async function renderPlanDetail() {
+  const _s = tick('plans');
   let p;
   try { p = await api('/api/v1/plans/' + curPlan); }
   catch (e) { toast(e.message, 'err'); return backToPlans(); }
+  if (stale('plans', _s)) return;
   _planDetail = p;
   crumbForPlans();
   const st = PLAN_ST[p.status] || [p.status, 'pending'];
@@ -2987,7 +3032,7 @@ async function renderPlanDetail() {
       <td>${({image:'图片',video:'视频',log:'日志',archive:'压缩包'})[a.kind] || a.kind}</td>
       <td class="hint">${(a.size/1024).toFixed(1)} KB</td>
       <td>${item ? `<span class="cid">${esc(item.case_id)}</span>` : '<span class="hint">整轮</span>'}</td>
-      <td class="hint">${esc(a.by)} · ${esc((a.at||'').replace('T',' ').slice(0,16))}</td>
+      <td class="hint">${esc(a.by)} · ${esc(fmtTime(a.at))}</td>
     </tr>`;
   }).join('');
   const runsCard = `<div class="card" style="margin-top:14px"><div class="card-h">
@@ -3276,7 +3321,7 @@ async function renderAllCases() {
   catch (e) { return toast(e.message, 'err'); }
   acPage = data.page;  // 后端已按总页数收敛
   let projects = [];
-  try { projects = (await api('/api/v1/projects')).projects; } catch (e) {}
+  try { projects = await getProjects(); } catch (e) {}
 
   const rows = data.cases.map(c => {
     const [label, cls] = REVIEW_STAGE[c.review] || REVIEW_STAGE.pending;
@@ -3450,7 +3495,7 @@ function renderHistory(t) {
     </div>
     ${t.offline_review ? renderOfflineDiff(t.offline_review) : '<div class="hint" style="margin-top:6px">下载导出文件离线评审后，回传定稿自动计算差异，作为学习语料（「学习规则」页可提炼规则）</div>'}
     ${t.fix_log && t.fix_log.length ? `<div class="section-t">定点修改留痕</div>${t.fix_log.slice().reverse().map(f=>
-      `<div class="hint">· ${esc((f.at||'').replace('T',' ').slice(0,16))}　${fixKind[f.kind]||esc(f.kind)}　${(f.diff||[]).length} 处改动${f.added&&f.added.length?` · 新增 ${f.added.length}`:''}</div>`).join('')}` : ''}`;
+      `<div class="hint">· ${esc(fmtTime(f.at))}　${fixKind[f.kind]||esc(f.kind)}　${(f.diff||[]).length} 处改动${f.added&&f.added.length?` · 新增 ${f.added.length}`:''}</div>`).join('')}` : ''}`;
 }
 async function reviseGo() {
   const instruction = $('reviseInput').value.trim();
@@ -3540,7 +3585,7 @@ async function aiCallsHtml() {
     <div class="tbl-wrap" style="margin-top:0"><table>
       <thead><tr><th style="width:130px">时间</th><th style="width:120px">用途</th><th style="width:130px">模型</th><th>Prompt 版本</th><th style="width:90px">项目</th><th style="width:110px">任务 / 需求</th><th style="width:80px">发起人</th><th style="width:70px">耗时</th><th style="width:100px">Token 入/出</th><th style="width:80px">状态</th></tr></thead>
       <tbody>${data.items.map(c => `<tr class="rowlink" onclick="openAiCall(${c.id})">
-        <td class="hint">${esc((c.at||'').replace('T',' ').replace('+00:00','').slice(0,16))}</td>
+        <td class="hint">${esc(fmtTime(c.at))}</td>
         <td>${esc(c.purpose)}</td><td class="hint">${esc(c.model)}<div>${esc(c.provider)}</div></td>
         <td>${Object.entries(c.prompt_versions||{}).map(([k,v])=>`<code>${esc(PROMPT_NAMES[k]||k)} v${v}</code>`).join(' ')||'—'}</td>
         <td class="hint">${esc(c.project||'—')}</td>
@@ -3556,14 +3601,11 @@ async function aiCallsHtml() {
 }
 async function openAiCall(id) {
   let c; try { c = await api('/api/v1/ai/calls/' + id); } catch (e) { return toast(e.message, 'err'); }
-  $('cfTitle').textContent = `调用记录 #${id} · ${c.purpose} · ${c.model}`;
-  $('cfMsg').innerHTML = `<div class="hint" style="margin-bottom:6px">${esc(c.at)} · ${esc(c.by||'')} · ${esc(c.project||'')} · ${c.elapsed_ms} ms · token ${c.prompt_tokens}/${c.completion_tokens} · Prompt ${Object.entries(c.prompt_versions||{}).map(([k,v])=>`${PROMPT_NAMES[k]||k} v${v}`).join('，')||'—'}${c.status==='error'?`<div style="color:var(--danger)">错误：${esc(c.error)}</div>`:''}</div>
+  $('acTitle').textContent = `调用记录 #${id} · ${c.purpose} · ${c.model}`;
+  $('acBody').innerHTML = `<div class="hint" style="margin-bottom:6px">${esc(fmtTime(c.at, true))} · ${esc(c.by||'')} · ${esc(c.project||'')} · ${c.elapsed_ms} ms · token ${c.prompt_tokens}/${c.completion_tokens} · Prompt ${Object.entries(c.prompt_versions||{}).map(([k,v])=>`${PROMPT_NAMES[k]||k} v${v}`).join('，')||'—'}${c.status==='error'?`<div style="color:var(--danger)">错误：${esc(c.error)}</div>`:''}</div>
     <div class="section-t">输入（前 3000 字）</div><pre style="white-space:pre-wrap;max-height:220px;overflow:auto;background:var(--line-2);padding:8px;border-radius:6px;font-size:12px">${esc(c.input_preview)}</pre>
     <div class="section-t">输出（前 3000 字）</div><pre style="white-space:pre-wrap;max-height:220px;overflow:auto;background:var(--line-2);padding:8px;border-radius:6px;font-size:12px">${esc(c.output_preview||'（无）')}</pre>`;
-  $('cfOk').style.display = 'none';
-  $('confirmDlg').style.width = '860px';
-  _cfResolve = () => { $('cfOk').style.display = ''; $('confirmDlg').style.width = ''; };
-  $('confirmDlg').showModal();
+  $('aiCallDlg').showModal();
 }
 async function aiStatsHtml() {
   const q = new URLSearchParams({days: aiDays}); if (curProjectName) q.set('project', curProjectName);
@@ -3583,7 +3625,9 @@ async function aiStatsHtml() {
 /* ---- 我的工作台（18 章） ---- */
 async function renderWorkbench() {
   setCrumb('我的工作台');
+  const _s = tick('wb');
   let d; try { d = await api('/api/v1/workbench'); } catch (e) { return $('wbArea').innerHTML = `<div class="card"><div class="card-b"><div class="empty">${esc(e.message)}</div></div></div>`; }
+  if (stale('wb', _s)) return;
   const card = (title, count, body, more) => `<div class="card wb-card"><div class="card-h"><h3>${title}${count!=null?`<span class="cnt ${count?'hot':''}">${count}</span>`:''}</h3>${more?`<div class="grow"><a class="hint" onclick="${more}">查看全部 ›</a></div>`:''}</div><div class="card-b">${body}</div></div>`;
   const empty = t => `<div class="hint" style="padding:6px 0">${t}</div>`;
   const li = (html, onclick) => `<li><span class="t" onclick="${onclick}">${html}</span></li>`;
@@ -3593,7 +3637,7 @@ async function renderWorkbench() {
   const exec = d.to_execute.items.length ? `<ul class="wb-list">${d.to_execute.items.map(i=>li(`<span class="cid">${esc(i.case_id)}</span> ${esc(i.title)} <span class="hint">${esc(i.plan_name)} · ${esc(i.project)}${i.run_active?'':' · 轮次未开始'}</span>`, `openPlan('${i.plan_id}','__me')`)).join('')}</ul>` : empty('没有分配给我的待执行用例');
   const reqs = d.pending_requirements.items.length ? `<ul class="wb-list">${d.pending_requirements.items.map(r=>li(`<span class="st candidate">待确认 ${r.open_questions}</span> ${esc(r.title)} <span class="hint">${esc(r.project)}</span>`, `openRequirement('${r.req_id}','questions')`)).join('')}</ul>` : empty('没有待确认的需求');
   const ai = d.my_ai_tasks.items.length ? `<ul class="wb-list">${d.my_ai_tasks.items.map(t=>li(`<span class="pill ${t.status}">${statusText(t.status)}</span> ${esc(t.requirement_title||(t.sources||[]).join('、')||t.task_id)} <span class="hint">${esc(t.project||'')} · ${relTime(t.created_at)}${t.error?` · <span style="color:var(--danger)">${esc(t.error.slice(0,40))}</span>`:''}${t.status==='completed'?` · ${t.case_count} 条`:''}</span>`, `openTaskFromProject('${t.task_id}')`)).join('')}</ul>` : empty('还没有发起过 AI 任务');
-  const ops = d.recent_ops.length ? `<ul class="wb-list">${d.recent_ops.map(o=>`<li><span class="hint" style="width:100px;flex:none">${esc((o.at||'').replace('T',' ').slice(5,16))}</span><span class="tag">${esc(o.kind_label)}</span><span class="t" style="cursor:default">${esc(o.action)}${o.target?` <code>${esc(o.target)}</code>`:''}${o.detail?` <span class="hint">${esc(o.detail)}</span>`:''}</span><span class="hint">${esc(o.project||'')}</span></li>`).join('')}</ul>` : empty('暂无操作记录');
+  const ops = d.recent_ops.length ? `<ul class="wb-list">${d.recent_ops.map(o=>`<li><span class="hint" style="width:100px;flex:none">${esc(fmtTime(o.at).slice(5))}</span><span class="tag">${esc(o.kind_label)}</span><span class="t" style="cursor:default">${esc(o.action)}${o.target?` <code>${esc(o.target)}</code>`:''}${o.detail?` <span class="hint">${esc(o.detail)}</span>`:''}</span><span class="hint">${esc(o.project||'')}</span></li>`).join('')}</ul>` : empty('暂无操作记录');
   $('wbArea').innerHTML = `<div class="wb-grid">
     ${card('我的项目', d.projects.length, projects, `switchView('projects')`)}
     ${card('待评审', d.pending_review.count, review, `switchView('board')`)}
@@ -3712,9 +3756,11 @@ async function renderAudit() {
   if (auditTab === 'security') q.set('security', 'true');
   if (curProjectName && auditTab !== 'security') q.set('project', curProjectName);
   if (auditKind) q.set('kind', auditKind); if (auditUser) q.set('user', auditUser); if (auditKw) q.set('keyword', auditKw); if (auditFailed) q.set('failed_only', 'true');
+  const _s = tick('audit');
   let d; try { d = await api('/api/v1/audit?' + q); } catch (e) { return $('auditArea').innerHTML = `<div class="card"><div class="card-b"><div class="empty">${esc(e.message)}</div></div></div>`; }
+  if (stale('audit', _s)) return;
   const pages = Math.max(1, Math.ceil(d.total / 50));
-  const fmt = t => esc((t||'').replace('T',' ').replace('+00:00','').slice(0,19));
+  const fmt = t => esc(fmtTime(t, true));
   $('auditArea').innerHTML = `<div class="card">
     <div class="card-h" style="border-bottom:none"><h3>操作日志</h3><span class="meta">全部写操作自动留痕（操作人 / IP / 对象 / 结果）；安全日志含登录、用户与角色变更、系统配置</span></div>
     ${isSysAdmin()?`<div class="dtabs"><button class="${auditTab==='all'?'on':''}" onclick="auditTab='all';auditPage=1;renderAudit()">业务操作</button><button class="${auditTab==='security'?'on':''}" onclick="auditTab='security';auditPage=1;renderAudit()">系统安全</button></div>`:''}
@@ -3816,12 +3862,14 @@ function openRequirement(id, tab) { curReq = id; reqTab = tab || 'raw'; switchVi
 async function renderRequirements() {
   if (curReq) return renderRequirementDetail();
   crumbForReqs();
+  const _s = tick('reqs');
   const q = new URLSearchParams();
   if (curProjectName) q.set('project', curProjectName);
   if (reqStatus) q.set('status', reqStatus);
   if (reqKw.trim()) q.set('keyword', reqKw.trim());
   let data;
   try { data = await api('/api/v1/requirements?' + q); } catch (e) { return toast(e.message, 'err'); }
+  if (stale('reqs', _s)) return;
   _reqsCache = data.requirements;
   const canEdit = curProjectName ? can(curProjectName, 'requirement.edit') : (isSysAdmin() || (curUser.projects||[]).some(p => can(p.project, 'requirement.edit')));
   const rows = data.requirements.map(r => `<tr class="rowlink" onclick="openRequirement('${r.req_id}')">
@@ -3884,8 +3932,10 @@ async function saveReqDlg() {
   btn.disabled = false; btn.textContent = '创建';
 }
 async function renderRequirementDetail() {
+  const _s = tick('reqs');
   let r;
   try { r = await api('/api/v1/requirements/' + curReq); } catch (e) { toast(e.message, 'err'); curReq = null; return renderRequirements(); }
+  if (stale('reqs', _s)) return;
   _reqDetail = r; crumbForReqs();
   const canEdit = can(r.project, 'requirement.edit'), canAI = can(r.project, 'requirement.ai'), canDesign = can(r.project, 'point.ai');
   const labels = r.analysis_labels;
@@ -3927,7 +3977,7 @@ async function renderRequirementDetail() {
   const analysisTab = `<div class="toolbar" style="margin-bottom:10px">
       ${canAI?`<select id="rqAnalyzeModel" style="width:150px">${[...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('')}</select>
       <button class="btn sm" id="rqAnalyzeBtn" onclick="analyzeReq()">${an?'重新 AI 分析':'AI 需求分析'}</button>`:''}
-      ${r.analysis_meta?`<span class="hint">上次分析：${esc(r.analysis_meta.model||'')} · ${esc(r.analysis_meta.by||'')} · ${esc((r.analysis_meta.at||'').replace('T',' ').slice(0,16))}</span>`:'<span class="hint">尚未分析。AI 只整理需求已写明的内容，缺失规则会列入「待确认事项」而不是脑补</span>'}</div>
+      ${r.analysis_meta?`<span class="hint">上次分析：${esc(r.analysis_meta.model||'')} · ${esc(r.analysis_meta.by||'')} · ${esc(fmtTime(r.analysis_meta.at))}</span>`:'<span class="hint">尚未分析。AI 只整理需求已写明的内容，缺失规则会列入「待确认事项」而不是脑补</span>'}</div>
     ${an?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px 24px">
       ${Object.keys(labels).filter(k=>k!=='open_questions').map(k=>`<div><div class="section-t">${esc(labels[k])}<span class="cnt" style="margin-left:6px">${(an[k]||[]).length}</span></div>
         ${(an[k]||[]).length?`<ul style="margin:4px 0 0 18px;padding:0;line-height:1.7">${an[k].map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<div class="hint">无</div>'}</div>`).join('')}
@@ -3942,7 +3992,7 @@ async function renderRequirementDetail() {
         <td class="hint">${i+1}</td><td>${esc(q.question)}${q.source==='manual'?' <span class="tag">人工</span>':''}</td>
         <td>${q.status==='open'?'<span class="st rejected">待确认</span>':'<span class="st approved">已确认</span>'}</td>
         <td>${q.status==='open'?(canEdit?`<input type="text" id="qa-${q.q_id}" placeholder="填写确认结论（产品/开发口径）" style="width:100%;box-sizing:border-box">`:'<span class="hint">—</span>'):esc(q.answer)}</td>
-        <td class="hint">${q.status==='open'?'':`${esc(q.by||'')}<div>${esc((q.at||'').replace('T',' ').slice(0,16))}</div>`}</td>
+        <td class="hint">${q.status==='open'?'':`${esc(q.by||'')}<div>${esc(fmtTime(q.at))}</div>`}</td>
         <td><div class="rowops">${canEdit?(q.status==='open'?`<button class="btn sm" onclick="answerReqQuestion('${q.q_id}')">确认</button>`:`<button class="btn ghost sm" onclick="answerReqQuestion('${q.q_id}',true)">重新打开</button>`):''}</div></td></tr>`).join('')}
     </table></div>`:'<div class="empty">暂无待确认事项</div>'}`;
 
@@ -4030,8 +4080,18 @@ async function submitDesign() {
 }
 
 /* ==================== 项目管理 ==================== */
+let _projectsAt = 0, _projectsPending = null;
+async function getProjects(force) {
+  // 15 秒内复用缓存；并发调用共用同一请求
+  if (!force && _projectsCache.length && Date.now() - _projectsAt < 15000) return _projectsCache;
+  if (!_projectsPending) {
+    _projectsPending = api('/api/v1/projects').then(d => { _projectsCache = d.projects; _projectsAt = Date.now(); return _projectsCache; })
+      .finally(() => { _projectsPending = null; });
+  }
+  return _projectsPending;
+}
 async function fillProjectSelect(keep) {
-  try { _projectsCache = (await api('/api/v1/projects')).projects; } catch (e) { return; }
+  try { _projectsCache = await getProjects(true); } catch (e) { return; }
   const sel = $('projectInput');
   const cur = keep !== undefined ? keep : sel.value;
   const allowed = _projectsCache.filter(p => !p.builtin && p.status !== 'archived' && can(p.project, 'point.ai'));
@@ -4133,7 +4193,9 @@ function backToProjects() { curProject = null; renderProjects(); }
 async function renderProjects() {
   crumbForProjects();
   if (curProject) return renderProjectWorkspace();
-  try { _projectsCache = (await api('/api/v1/projects')).projects; } catch (e) { return toast(e.message, 'err'); }
+  const _s = tick('projects');
+  try { _projectsCache = await getProjects(true); } catch (e) { return toast(e.message, 'err'); }
+  if (stale('projects', _s)) return;
   const kw = projListKw.trim().toLowerCase();
   const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus)
     && (!kw || p.project.toLowerCase().includes(kw) || (p.code||'').toLowerCase().includes(kw) || (p.owner||'').toLowerCase().includes(kw)));
@@ -4166,7 +4228,7 @@ async function renderProjects() {
   $('projArea').innerHTML = `<div class="card">
     <div class="card-h"><h3>项目管理</h3><span class="meta">共 ${_projectsCache.filter(p=>!p.builtin).length} 个 · 收藏置顶 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
       <div class="grow">
-        <input type="text" placeholder="搜索名称 / 编码 / 负责人" value="${esc(projListKw)}" style="width:190px" oninput="projListKw=this.value;renderProjects()">
+        <input type="text" placeholder="搜索名称 / 编码 / 负责人（回车）" value="${esc(projListKw)}" style="width:190px" onchange="projListKw=this.value;renderProjects()">
         <select style="width:120px" onchange="projListStatus=this.value;renderProjects()">
           <option value="">全部状态</option>
           ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>`<option value="${v}" ${projListStatus===v?'selected':''}>${l}</option>`).join('')}
@@ -4194,6 +4256,7 @@ function setProjTab(tab) { projTab = tab; renderProjectWorkspace(); }
 
 async function renderProjectWorkspace() {
   crumbForProjects();
+  const _s = tick('projects');
   const p = _projectsCache.find(x => x.project === curProject) ||
     {project: curProject, tasks:0, cases:0, pending:0, rejected:0, approved:0, executed:0, exec_pass:0};
   const legacy = curProject === '（未指定）';
@@ -4206,6 +4269,7 @@ async function renderProjectWorkspace() {
   else if (projTab === 'modules') body = await projModulesHtml();
   else if (projTab === 'recycle') body = await projRecycleHtml();
   else if (projTab === 'coverage') body = await projCoverageHtml();
+  if (stale('projects', _s)) return;
   const STATUS_CLS = {active:'approved', paused:'candidate', archived:'pending'};
   $('projArea').innerHTML = `<div class="card">
     <div class="card-h" style="border-bottom:none">
@@ -4349,7 +4413,7 @@ function openVersionDlg(id) {
   $('vsStatus').value = v ? v.status : 'not_started';
   $('vsStart').value = v ? v.start_date : ''; $('vsPlanned').value = v ? v.planned_end : ''; $('vsActual').value = v ? v.actual_end : '';
   $('vsDesc').value = v ? v.description : '';
-  $('versionDlg').showModal();
+  $('projVersionDlg').showModal();
 }
 async function saveVersion() {
   const body = {name: $('vsName').value.trim(), code: $('vsCode').value.trim(), status: $('vsStatus').value,
@@ -4359,7 +4423,7 @@ async function saveVersion() {
   try {
     if (_versionEditing) await api(base + '/' + _versionEditing, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     else await jpost(base, body);
-    $('versionDlg').close(); toast('已保存', 'ok'); renderProjectWorkspace();
+    $('projVersionDlg').close(); toast('已保存', 'ok'); renderProjectWorkspace();
   } catch (e) { toast(e.message, 'err'); }
 }
 async function deleteVersion(id, name) {
@@ -4403,7 +4467,7 @@ async function projModulesHtml() {
     ${_modShowDeleted?`<div class="section-t" style="margin-top:16px">回收站</div>
       <div class="tbl-wrap"><table><thead><tr><th>模块路径</th><th style="width:90px">删除人</th><th style="width:130px">删除时间</th><th style="width:100px">用例引用</th><th style="width:150px">操作</th></tr></thead>
       <tbody>${data.deleted.map(m => `<tr><td>${esc(m.path)}</td><td class="hint">${esc(m.deleted_by||'')}</td>
-        <td class="hint">${esc((m.deleted_at||'').replace('T',' ').slice(0,16))}</td>
+        <td class="hint">${esc(fmtTime(m.deleted_at))}</td>
         <td>${m.referenced?'<span class="st candidate">有引用</span>':'<span class="hint">无</span>'}</td>
         <td><div class="rowops">${manage?`<button class="btn ghost sm" onclick="restoreModule('${m.module_id}')">恢复</button>`:''}
           ${isPA&&!m.referenced?`<button class="btn ghost sm" style="color:var(--danger)" onclick="purgeModule('${m.module_id}',${jsq(m.path)})">永久删除</button>`:''}</div></td></tr>`).join('')
@@ -4829,7 +4893,7 @@ async function refreshUsers() {
     if ($('totpPolicySwitch')) $('totpPolicySwitch').checked = (window._authSettings||{}).totp_enabled !== false;
     const data = await api('/api/v1/auth/users');
     _usersCache = data.users;
-    const fmt = t => esc((t||'').replace('T',' ').replace('+00:00','').slice(0,16));
+    const fmt = t => esc(fmtTime(t));
     $('usersList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
       <tr><th>用户名</th><th>姓名</th><th>邮箱 / 手机</th><th>系统角色</th><th>状态</th><th>所属项目</th><th>两步验证</th><th>最后登录</th><th>创建时间</th><th style="width:110px">操作</th></tr>
       ${data.users.map(u => `<tr style="${u.status==='disabled'?'opacity:.6':''}">
@@ -4973,7 +5037,8 @@ async function uploadFinal() {
   try {
     await api(`/api/v1/tasks/${currentTask.task_id}/final`, {method:'POST', body:fd});
     await openTask(currentTask.task_id, true);
-    detailTab = 'history'; renderDetail();
+    detailTab = 'overview'; renderDetail();
+    setTimeout(() => { const d = document.querySelector('#detail details.fold:nth-of-type(2)'); if (d) { d.open = true; d.scrollIntoView({block:'start'}); } }, 50);
     toast('终稿对比完成', 'ok');
   } catch (e) { toast('上传失败：' + e.message, 'err'); }
 }

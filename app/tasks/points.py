@@ -124,10 +124,10 @@ def normalize_points(modules: list[dict]) -> list[dict]:
     return normalized
 
 
-def assign_entities(modules: list[dict]) -> list[dict]:
+def assign_entities(modules: list[dict], seq_floor: int = 0) -> list[dict]:
     """将归一化测试点升级为实体：补齐 tp_id / status / locked / 审核字段（幂等）。"""
     modules = normalize_points(modules)
-    seq = _max_tp_seq(modules)
+    seq = _max_tp_seq(modules, seq_floor)
     for entry in modules:
         for p in entry["points"]:
             if not p.get("tp_id"):
@@ -147,14 +147,24 @@ def assign_entities(modules: list[dict]) -> list[dict]:
     return modules
 
 
-def _max_tp_seq(modules: list[dict]) -> int:
-    seq = 0
+def _max_tp_seq(modules: list[dict], floor: int = 0) -> int:
+    """当前最大 tp 序号；floor 为任务持久化的历史最大值（删除的编号不复用，避免版本/回收站串号）。"""
+    seq = int(floor or 0)
     for entry in modules:
         for p in entry["points"]:
             m = re.match(r"^TP(\d+)", str(p.get("tp_id", "")))
             if m:
                 seq = max(seq, int(m.group(1)))
     return seq
+
+
+def tp_seq_of(analysis: dict | None) -> int:
+    return int((analysis or {}).get("tp_seq") or 0)
+
+
+def bump_tp_seq(analysis: dict) -> None:
+    """把当前最大序号持久化到 analysis.tp_seq（每次新增测试点后调用）。"""
+    analysis["tp_seq"] = _max_tp_seq(analysis.get("test_points", []), tp_seq_of(analysis))
 
 
 def iter_points(modules: list[dict]):
@@ -266,12 +276,13 @@ def confirmable_points(modules: list[dict]) -> list[dict]:
     return result
 
 
-def add_points(modules: list[dict], additions: list[dict], source: str) -> list[dict]:
+def add_points(modules: list[dict], additions: list[dict], source: str, seq_floor: int = 0,
+               skipped: list | None = None) -> list[dict]:
     """只允许新增（需求十/五十六）：新测试点以待审核状态追加，存量不动。
 
     additions: [{module, point, dimension?}]；模块不存在则新建分组。
     """
-    seq = _max_tp_seq(modules)
+    seq = _max_tp_seq(modules, seq_floor)
     added: list[dict] = []
     for item in additions:
         module = str(item.get("module", "")).strip() or "未分组"
@@ -279,6 +290,8 @@ def add_points(modules: list[dict], additions: list[dict], source: str) -> list[
         if not text:
             continue
         if _has_similar_point(modules, text):  # 生成前查重（需求十四）：高度匹配则跳过
+            if skipped is not None:
+                skipped.append({"module": module, "point": text, "reason": "与已有测试点高度相似，已跳过"})
             continue
         seq += 1
         point = {

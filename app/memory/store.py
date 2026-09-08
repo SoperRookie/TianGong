@@ -105,6 +105,15 @@ class MemoryStore:
         self._persist()
         return entry
 
+    def rename_project(self, old: str, new: str) -> None:
+        changed = False
+        for e in self._entries.values():
+            if e.project == old:
+                e.project = new
+                changed = True
+        if changed:
+            self._persist()
+
     def list(self, scope: str | None = None, project: str | None = None) -> list[MemoryEntry]:
         entries = [
             e

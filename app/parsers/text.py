@@ -12,7 +12,9 @@ class TextParser:
     suffixes = (".txt", ".md", ".markdown")
 
     def parse(self, path: Path) -> ParsedDocument:
-        doc = self.parse_string(path.read_text(encoding="utf-8"))
+        from app.parsers.base import read_text_any
+
+        doc = self.parse_string(read_text_any(path))
         doc.source = path.name
         return doc
 

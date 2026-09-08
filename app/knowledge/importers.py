@@ -85,7 +85,9 @@ def _parse_xlsx(path: Path) -> list[dict]:
 
 
 def _parse_csv(path: Path) -> list[dict]:
-    text = path.read_text(encoding="utf-8-sig")
+    from app.parsers.base import read_text_any
+
+    text = read_text_any(path)
     rows = [list(row) for row in csv.reader(io.StringIO(text))]
     return _rows_to_cases(rows, path.name)
 

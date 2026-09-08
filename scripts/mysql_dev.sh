@@ -5,6 +5,7 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DATADIR="$DIR/data/mysql"
+mkdir -p "$DIR/logs"
 SOCK="/tmp/tiangong-mysql.sock"
 PORT=3306
 

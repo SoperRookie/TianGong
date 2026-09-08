@@ -13,7 +13,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from app.llm.registry import ModelRegistry
-from app.llm.schemas import ModelConfig, UsageInfo
+from app.llm.schemas import MissingAPIKeyError, ModelConfig, UsageInfo
 
 # 可重试的暂时性错误：网络/超时/限流/服务端 5xx；鉴权与参数错误不重试
 _RETRYABLE = (openai.APIConnectionError, openai.RateLimitError, openai.InternalServerError)
@@ -78,8 +78,8 @@ class LLMClient:
                 except _RETRYABLE as e:
                     last_error = e
                     logger.warning("模型调用失败（第 {} 次，{}）：{}", attempts, cfg.name, e)
-                except openai.OpenAIError as e:
-                    # 配置/服务级错误（模型不存在、鉴权失败、参数非法）：重试无意义，
+                except (openai.OpenAIError, MissingAPIKeyError) as e:
+                    # 配置/服务级错误（模型不存在、鉴权失败、密钥未配、参数非法）：重试无意义，
                     # 换链路下一个模型；不再向上抛裸异常（曾致 500）
                     last_error = e
                     logger.error("模型不可用（{}）：{}，跳过重试", cfg.name, e)
@@ -120,6 +120,8 @@ class LLMClient:
             "LLM 调用完成：{} {}ms tokens={}（输入 {} / 输出 {}）",
             cfg.name, elapsed_ms, usage.total_tokens, usage.prompt_tokens, usage.completion_tokens,
         )
+        if not resp.choices:
+            raise openai.APIError("模型返回空 choices（可能被内容安全策略拦截）", request=None, body=None)
         return ChatResult(
             content=resp.choices[0].message.content or "",
             model_name=cfg.name,

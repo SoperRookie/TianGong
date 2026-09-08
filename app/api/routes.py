@@ -34,6 +34,7 @@ from app.parsers import (
 )
 from app.prompts import prompt_text
 from app.tasks import TaskRecord
+from app.tasks.points import bump_tp_seq, tp_seq_of
 from app.templates import CustomTemplate, TemplateParseError, recognize_template
 
 router = APIRouter()
@@ -432,12 +433,20 @@ async def auth_update_user(request: Request, username: str, body: UserUpdateBody
 async def auth_delete_user(request: Request, username: str) -> dict:
     from app.auth import AuthError
 
+    from app.projects import ProjectError
+
     operator = _require_admin(request)
+    blocked = request.app.state.projects.sole_admin_projects(username)
+    if blocked:
+        raise HTTPException(status_code=400, detail=f"{username} 是项目 {', '.join(blocked)} 的唯一项目管理员，请先指定其他项目管理员")
     try:
         request.app.state.auth.delete_user(username, operator=operator["username"])
     except AuthError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    request.app.state.projects.remove_user_everywhere(username)
+    try:
+        request.app.state.projects.remove_user_everywhere(username)
+    except ProjectError as e:  # 前置已校验，双保险
+        raise HTTPException(status_code=400, detail=str(e))
     return {"deleted": username}
 
 
@@ -647,10 +656,14 @@ async def preview_parse(
         raise HTTPException(status_code=403, detail="解析预览需要至少一个项目的 AI 生成权限")
     _ai_ctx(request, purpose="解析预览")
     settings = get_settings()
-    preview_dir = request.app.state.tasks.output_dir / "_previews"
-    docs = await _parse_inputs(
-        files, text, preview_dir, settings.max_upload_size_mb * 1024 * 1024, request.app.state.llm
-    )
+    import shutil
+    preview_dir = request.app.state.tasks.output_dir / "_previews" / uuid.uuid4().hex[:12]
+    try:
+        docs = await _parse_inputs(
+            files, text, preview_dir, settings.max_upload_size_mb * 1024 * 1024, request.app.state.llm
+        )
+    finally:
+        shutil.rmtree(preview_dir, ignore_errors=True)  # 预览文件用后即删
     merged = _merge_docs(docs)
     return {
         "documents": [
@@ -842,8 +855,9 @@ async def _run_point_quality_checks(app, task_id: str, requirement: str, model: 
             modules,
             [{"module": a.get("module", ""), "point": a.get("point", ""),
               "dimension": a.get("dimension", "")} for a in gap["additions"]],
-            source="gap",
+            source="gap", seq_floor=tp_seq_of(record.analysis),
         )
+        bump_tp_seq(record.analysis)
         if added:
             logger.info("独立查漏新增 {} 条待审核测试点", len(added))
     except Exception as e:
@@ -1189,8 +1203,12 @@ async def _launch_task(
 
             analysis_data = analysis.model_dump()
             # 测试点实体化：tp_id + 审核状态机（通过/驳回/锁定），支撑逐条与批量审核
-            analysis_data["test_points"] = assign_entities(analysis_data["test_points"])
-            record = store.get(task_id) or TaskRecord(task_id=task_id)
+            prior = store.get(task_id)
+            analysis_data["test_points"] = assign_entities(
+                analysis_data["test_points"], seq_floor=tp_seq_of(prior.analysis if prior else None)
+            )
+            bump_tp_seq(analysis_data)
+            record = prior or TaskRecord(task_id=task_id)
             record.created_by = record.created_by or _operator(request)
             record.status = "awaiting_confirmation"
             record.progress = "quality_check"  # 拆解已可审核，查漏/查重继续后台补充
@@ -1225,18 +1243,20 @@ async def _launch_task(
             }
 
         if async_mode:
-            store.save(TaskRecord(task_id=task_id, status="queued", sources=sources,
-                                  context=task_context, created_by=_operator(request)))
+            store.save(_queued_record(store, task_id, sources, task_context, _operator(request)))
             store.submit(task_id, _analyze)
             return {"task_id": task_id, "status": "queued", "poll_url": f"/api/v1/tasks/{task_id}"}
         try:
             return await _analyze()
-        except (UnknownModelError,) as e:
+        except UnknownModelError as e:
+            _mark_failed(store, task_id, e, sources, task_context, _operator(request))
             raise HTTPException(status_code=400, detail=str(e))
-        except (MissingAPIKeyError, AllModelsFailedError) as e:
-            store.save(TaskRecord(task_id=task_id, status="failed", sources=sources,
-                                  context=task_context, error=str(e), created_by=_operator(request)))
+        except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+            _mark_failed(store, task_id, e, sources, task_context, _operator(request))
             raise HTTPException(status_code=502, detail=str(e))
+        except Exception as e:  # 任何未预期异常：不能让任务"消失"或卡在中间态
+            _mark_failed(store, task_id, e, sources, task_context, _operator(request))
+            raise
 
     # 2. 编排生成（超长需求自动分片并行，F-2-6）；知识管家按时机注入（F-7-6）
 
@@ -1275,23 +1295,37 @@ async def _launch_task(
 
     # 异步模式（F-6-1/2）：立即返回 task_id，后台执行，GET /tasks/{id} 轮询进度
     if async_mode:
-        store.save(TaskRecord(task_id=task_id, status="queued", sources=sources,
-                              context=task_context, created_by=_operator(request)))
+        store.save(_queued_record(store, task_id, sources, task_context, creator))
         store.submit(task_id, _generate)
         return {"task_id": task_id, "status": "queued", "poll_url": f"/api/v1/tasks/{task_id}"}
 
     try:
         return await _generate()
     except UnknownModelError as e:
+        _mark_failed(store, task_id, e, sources, task_context, creator)
         raise HTTPException(status_code=400, detail=str(e))
-    except (MissingAPIKeyError, LLMOutputError) as e:
+    except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError) as e:
+        _mark_failed(store, task_id, e, sources, task_context, creator)
         raise HTTPException(status_code=502, detail=str(e))
-    except AllModelsFailedError as e:
-        record = store.get(task_id) or TaskRecord(task_id=task_id, sources=sources, created_by=_operator(request))
-        record.status, record.error, record.progress = "failed", str(e), None
-        record.context = record.context or task_context
-        store.save(record)
-        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:  # 未预期异常：标记失败而不是永远 running
+        _mark_failed(store, task_id, e, sources, task_context, creator)
+        raise
+
+
+def _queued_record(store, task_id: str, sources: list[str], context: dict, creator: str) -> TaskRecord:
+    """排队记录：重试时复用既有记录（保留创建人/时间/审核留痕），只重置状态与上下文。"""
+    record = store.get(task_id) or TaskRecord(task_id=task_id, created_by=creator)
+    record.status, record.progress, record.error = "queued", None, None
+    record.sources, record.context = sources, context
+    record.created_by = record.created_by or creator
+    return record
+
+
+def _mark_failed(store, task_id: str, error: Exception, sources: list[str], context: dict, creator: str) -> None:
+    record = store.get(task_id) or TaskRecord(task_id=task_id, sources=sources, created_by=creator)
+    record.status, record.error, record.progress = "failed", str(error)[:1000], None
+    record.context = record.context or context
+    store.save(record)
 
 
 def _finalize_task(
@@ -1321,6 +1355,22 @@ def _finalize_task(
 
     logger.info("任务 {} 导出完成：{} 条用例，格式={}", task_id, len(result.cases), list(files_map))
     record = store.get(task_id) or TaskRecord(task_id=task_id)
+    # AI 修订/需求变更等改了内容的用例：追加 ai_fix 版本，保证计划快照引用与内容一致（需求 12/10 章）
+    from app.versions import latest_version_no as _lv
+    from app.versions import record_version as _rv
+    previous = {str(c.get("uid")): c for c in ((record.result or {}).get("cases") or []) if c.get("uid")}
+    for case in result.cases:
+        old = previous.get(case.uid)
+        if old is None:
+            continue
+        old_content = {k: v for k, v in old.items() if k not in ("uid", "version", "case_id")}
+        new_content = {k: v for k, v in case.model_dump().items() if k not in ("uid", "version", "case_id")}
+        if old_content != new_content:
+            if case.version <= int(old.get("version", 1) or 1):
+                case.version = int(old.get("version", 1) or 1) + 1
+            # 人工修改/恢复等路径已自行记版本（版本表已达当前号）；AI 修订/需求变更路径这里补记
+            if _lv(task_id, "case", case.uid) < case.version:
+                _rv(task_id, "case", case.uid, "ai_fix", case.model_dump(), by=record.created_by, reason="AI 修订/需求变更更新")
     record.status = "completed"
     record.progress = None
     record.error = None
@@ -1400,6 +1450,8 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     _ai_ctx(request, record)
     if record.status != "awaiting_confirmation":
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无待确认的拆解结果")
+    if record.progress == "quality_check":
+        raise HTTPException(status_code=409, detail="查漏/查重仍在后台进行，请稍候再确认（避免新增测试点漏生成）")
 
     from app.tasks.points import confirmable_points, normalize_points
 
@@ -1447,11 +1499,17 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
         # 可重试的故障：恢复待确认状态，用户可再次点击确认
         store.set_progress(task_id, status="awaiting_confirmation", progress=None)
         raise HTTPException(status_code=502, detail=str(e))
+    except UnknownModelError as e:
+        store.set_progress(task_id, status="awaiting_confirmation", progress=None)
+        raise HTTPException(status_code=400, detail=str(e))
     except AllModelsFailedError as e:
         record.status = "failed"
         record.error = str(e)
         store.save(record)
         raise HTTPException(status_code=502, detail=str(e))
+    except Exception:
+        store.set_progress(task_id, status="awaiting_confirmation", progress=None)
+        raise
 
     task_dir = store.output_dir / task_id
     response = _finalize_task(
@@ -1606,6 +1664,9 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
 
     from app.versions import case_entities, ensure_versions, record_version
 
+    import copy
+    from functools import partial
+
     cases: list[dict] = list(record.result["cases"])
     by_id = {str(c.get("case_id")): c for c in cases}
     operator = _operator(request)
@@ -1615,93 +1676,102 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
     counts = {"approve": 0, "reject": 0, "modify": 0, "delete": 0, "unlock": 0}
     hints: list[str] = []
     deleted_any = False
-    for item in body.items:
-        action = "approve" if item.action == "accept" else item.action
-        origin = by_id.get(item.case_id)
-        if origin is None:
-            raise HTTPException(status_code=400, detail=f"用例不存在: {item.case_id}")
-        uid = str(origin.get("uid") or "")
-        state = record.case_reviews.setdefault(
-            uid, {"status": "pending", "comment": "", "reject_count": 0, "locked": False}
-        )
-        entry: dict = {"case_id": item.case_id, "uid": uid, "action": action, "by": _operator(request),
-                       "comment": item.comment, "feedback": item.feedback, "at": now}
-        if action == "approve":
-            state.update(status="approved", locked=True)
-            clear_reject_fields(state)
-            state.update(fields=[], steps=[])
-            # 版本历史：评审通过即记终稿版本（需求 10.1）
-            record_version(task_id, "case", uid, "final", origin, by=operator, reason="评审通过")
-        elif action == "reject":
-            try:
-                rejection = validate_rejection(
-                    {**item.model_dump(), "comment": item.comment.strip() or item.feedback.strip()},
-                    f"用例 {item.case_id}",
-                )
-            except PointReviewError as e:
-                raise HTTPException(status_code=400, detail=str(e))
-            bad_fields = [f for f in item.fields if f not in CASE_REJECT_FIELDS]
-            if bad_fields:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"驳回用例 {item.case_id} 的指定字段不合法: {'、'.join(bad_fields)}"
-                           f"（可用 {'/'.join(CASE_REJECT_FIELDS)}）",
-                )
-            step_total = len(origin.get("steps") or [])
-            bad_steps = [n for n in item.steps if n < 1 or n > step_total]
-            if bad_steps:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"驳回用例 {item.case_id} 的指定步骤越界: {bad_steps}（共 {step_total} 步）",
-                )
-            state.update(status="rejected", locked=False, **rejection,
-                         fields=list(item.fields), steps=list(item.steps))
-            entry.update(rejection, fields=list(item.fields), steps=list(item.steps))
-            state["reject_count"] = int(state.get("reject_count", 0)) + 1
-            if state["reject_count"] >= REJECT_HINT_THRESHOLD:
-                hints.append(
-                    f"{item.case_id} 已连续 {state['reject_count']} 次未通过审核，"
-                    "建议检查：1) 需求是否存在歧义 2) 是否需要人工直接修改 3) 是否需要补充需求信息"
-                )
-        elif action == "delete":
-            entry["before"] = origin
-            # 逻辑删除（需求 14.4）：完整快照移入回收站，可恢复；管理员永久删除才抹掉
-            from app.recycle import add_to_bin
-            add_to_bin(task_id, "case", uid, f"{item.case_id} {origin.get('title', '')}",
-                       {"case": origin, "review": dict(state)}, by=operator)
-            cases.remove(origin)
-            record.case_reviews.pop(uid, None)
-            deleted_any = True
-        elif action == "modify":
-            if not item.case:
-                raise HTTPException(status_code=400, detail=f"修改操作需提交 case 字段: {item.case_id}")
-            try:  # 乐观锁（需求 11）：并发修改冲突拦截
-                check_base_version(item.model_dump(), origin.get("version", 1), f"用例 {item.case_id}")
-            except ConcurrencyError as e:
-                raise HTTPException(status_code=409, detail=str(e))
-            try:
-                updated = TestCase.model_validate({**item.case, "uid": uid}).model_dump()
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"修改后的用例不合法: {e}")
-            updated["version"] = int(origin.get("version", 1)) + 1
-            entry["before"], entry["after"] = origin, updated
-            cases[cases.index(origin)] = updated
-            by_id[item.case_id] = updated
-            record_version(task_id, "case", uid, "manual", updated, by=operator,
-                           reason=item.feedback.strip() or item.comment.strip() or "人工修改")
-            # 人工定稿即通过并锁定（人工修改优于 AI 再改）
-            state.update(status="approved", locked=True)
-            clear_reject_fields(state)
-            state.update(fields=[], steps=[])
-        elif action == "unlock":
-            state.update(status="pending", locked=False)
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"未知评审操作: {action}（可用 approve/reject/modify/delete/unlock）",
-            )
-        counts[action] += 1
-        record.review_log.append(entry)
+    # 批量原子性：任一条校验失败即整批不生效——内存对象回滚到快照，版本/回收站写入延迟到全部通过后执行
+    snapshot = copy.deepcopy((record.result, record.case_reviews, record.review_log))
+    deferred: list = []
+    try:
+      for item in body.items:
+          action = "approve" if item.action == "accept" else item.action
+          origin = by_id.get(item.case_id)
+          if origin is None:
+              raise HTTPException(status_code=400, detail=f"用例不存在: {item.case_id}")
+          uid = str(origin.get("uid") or "")
+          state = record.case_reviews.setdefault(
+              uid, {"status": "pending", "comment": "", "reject_count": 0, "locked": False}
+          )
+          entry: dict = {"case_id": item.case_id, "uid": uid, "action": action, "by": _operator(request),
+                         "comment": item.comment, "feedback": item.feedback, "at": now}
+          if action == "approve":
+              state.update(status="approved", locked=True)
+              clear_reject_fields(state)
+              state.update(fields=[], steps=[])
+              # 版本历史：评审通过即记终稿版本（需求 10.1）
+              deferred.append(partial(record_version, task_id, "case", uid, "final", origin, by=operator, reason="评审通过"))
+          elif action == "reject":
+              try:
+                  rejection = validate_rejection(
+                      {**item.model_dump(), "comment": item.comment.strip() or item.feedback.strip()},
+                      f"用例 {item.case_id}",
+                  )
+              except PointReviewError as e:
+                  raise HTTPException(status_code=400, detail=str(e))
+              bad_fields = [f for f in item.fields if f not in CASE_REJECT_FIELDS]
+              if bad_fields:
+                  raise HTTPException(
+                      status_code=400,
+                      detail=f"驳回用例 {item.case_id} 的指定字段不合法: {'、'.join(bad_fields)}"
+                             f"（可用 {'/'.join(CASE_REJECT_FIELDS)}）",
+                  )
+              step_total = len(origin.get("steps") or [])
+              bad_steps = [n for n in item.steps if n < 1 or n > step_total]
+              if bad_steps:
+                  raise HTTPException(
+                      status_code=400,
+                      detail=f"驳回用例 {item.case_id} 的指定步骤越界: {bad_steps}（共 {step_total} 步）",
+                  )
+              state.update(status="rejected", locked=False, **rejection,
+                           fields=list(item.fields), steps=list(item.steps))
+              entry.update(rejection, fields=list(item.fields), steps=list(item.steps))
+              state["reject_count"] = int(state.get("reject_count", 0)) + 1
+              if state["reject_count"] >= REJECT_HINT_THRESHOLD:
+                  hints.append(
+                      f"{item.case_id} 已连续 {state['reject_count']} 次未通过审核，"
+                      "建议检查：1) 需求是否存在歧义 2) 是否需要人工直接修改 3) 是否需要补充需求信息"
+                  )
+          elif action == "delete":
+              entry["before"] = origin
+              # 逻辑删除（需求 14.4）：完整快照移入回收站，可恢复；管理员永久删除才抹掉
+              from app.recycle import add_to_bin
+              deferred.append(partial(add_to_bin, task_id, "case", uid, f"{item.case_id} {origin.get('title', '')}",
+                                      {"case": origin, "review": dict(state)}, by=operator))
+              cases.remove(origin)
+              record.case_reviews.pop(uid, None)
+              deleted_any = True
+          elif action == "modify":
+              if not item.case:
+                  raise HTTPException(status_code=400, detail=f"修改操作需提交 case 字段: {item.case_id}")
+              try:  # 乐观锁（需求 11）：并发修改冲突拦截
+                  check_base_version(item.model_dump(), origin.get("version", 1), f"用例 {item.case_id}")
+              except ConcurrencyError as e:
+                  raise HTTPException(status_code=409, detail=str(e))
+              try:
+                  updated = TestCase.model_validate({**item.case, "uid": uid}).model_dump()
+              except Exception as e:
+                  raise HTTPException(status_code=400, detail=f"修改后的用例不合法: {e}")
+              updated["version"] = int(origin.get("version", 1)) + 1
+              entry["before"], entry["after"] = origin, updated
+              cases[cases.index(origin)] = updated
+              by_id[item.case_id] = updated
+              deferred.append(partial(record_version, task_id, "case", uid, "manual", updated, by=operator,
+                                      reason=item.feedback.strip() or item.comment.strip() or "人工修改"))
+              # 人工定稿即通过并锁定（人工修改优于 AI 再改）
+              state.update(status="approved", locked=True)
+              clear_reject_fields(state)
+              state.update(fields=[], steps=[])
+          elif action == "unlock":
+              state.update(status="pending", locked=False)
+          else:
+              raise HTTPException(
+                  status_code=400,
+                  detail=f"未知评审操作: {action}（可用 approve/reject/modify/delete/unlock）",
+              )
+          counts[action] += 1
+          record.review_log.append(entry)
+    except HTTPException:
+        record.result, record.case_reviews, record.review_log = snapshot
+        raise
+    for write in deferred:
+        write()
 
     logger.info(
         "任务 {} 在线评审：通过 {} / 驳回 {} / 修改 {} / 删除 {} / 解锁 {}",
@@ -1761,12 +1831,16 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
     operator = _operator(request)
     # 存量任务打底：改动前补记首版（新任务已在拆解时记录，幂等跳过）
     ensure_versions(task_id, "point", point_entities(modules), by=record.created_by)
+    import copy
+
+    working = copy.deepcopy(modules)  # 批量原子性：任一条失败整批不生效（原对象不被部分修改）
     try:
-        outcome = apply_point_review(modules, [i.model_dump() for i in body.items])
+        outcome = apply_point_review(working, [i.model_dump() for i in body.items])
     except ConcurrencyError as e:  # 乐观锁冲突（需求 11）：不落任何改动
         raise HTTPException(status_code=409, detail=str(e))
     except PointReviewError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    modules[:] = working
     # 版本历史（需求 10.1）：人工修改记 manual，通过记 final；删除移入回收站（需求 14.4）
     from app.recycle import add_to_bin
 
@@ -1852,8 +1926,9 @@ async def add_task_points(request: Request, task_id: str, body: PointAddBody) ->
     store = request.app.state.tasks
     record, modules = _points_record(request, task_id, "point.edit")
     _ai_ctx(request, record)
+    skipped: list = []
     if body.points:
-        added = add_points(modules, body.points, source="manual")
+        added = add_points(modules, body.points, source="manual", seq_floor=tp_seq_of(record.analysis), skipped=skipped)
     elif body.instruction and body.instruction.strip():
         ctx = record.context or {}
         import json as _json
@@ -1875,12 +1950,13 @@ async def add_task_points(request: Request, task_id: str, body: PointAddBody) ->
         added = add_points(
             modules,
             [a for a in data.get("additions", []) if isinstance(a, dict)],
-            source="supplement",
+            source="supplement", seq_floor=tp_seq_of(record.analysis), skipped=skipped,
         )
     else:
         raise HTTPException(status_code=400, detail="请提供 points（手工新增）或 instruction（AI 补充）")
+    bump_tp_seq(record.analysis)
     store.save(record)
-    return {"task_id": task_id, "added": added, "test_points": modules}
+    return {"task_id": task_id, "added": added, "skipped": skipped, "test_points": modules}
 
 
 @router.post("/api/v1/tasks/{task_id}/points/gap-check")
@@ -1904,8 +1980,9 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
         modules,
         [{"module": a.get("module", ""), "point": a.get("point", ""),
           "dimension": a.get("dimension", "")} for a in gap["additions"]],
-        source="gap",
+        source="gap", seq_floor=tp_seq_of(record.analysis),
     )
+    bump_tp_seq(record.analysis)
     store.save(record)
     return {"task_id": task_id, "coverage": gap["coverage"], "added": added, "test_points": modules}
 
@@ -1921,7 +1998,10 @@ async def dup_check_points(request: Request, task_id: str) -> dict:
     _ai_ctx(request, record)
     ctx = record.context or {}
     pairs = duplicate_candidates(modules)
-    judged = await run_dup_judge(request.app.state.llm, ctx.get("requirement", ""), pairs, ctx.get("model"))
+    try:
+        judged = await run_dup_judge(request.app.state.llm, ctx.get("requirement", ""), pairs, ctx.get("model"))
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
     record.dup_report = {"points": judged, "resolved": (record.dup_report or {}).get("resolved", [])}
     store.save(record)
     return {"task_id": task_id, "duplicates": judged}
@@ -2008,6 +2088,18 @@ async def confirm_fix(request: Request, task_id: str, body: FixConfirmBody) -> d
     operator = _operator(request)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     record.pending_fix = None
+    try:
+        return await _apply_fix_confirm(request, store, record, task_id, pf, accepted, rejected_count, operator, now)
+    except HTTPException:
+        record.pending_fix = pf  # 校验失败：提案保留，不丢
+        raise
+
+
+async def _apply_fix_confirm(request, store, record, task_id, pf, accepted, rejected_count, operator, now) -> dict:
+    from app.agents import GenerationResult
+    from app.agents.quality import apply_case_proposals, apply_point_proposals
+    from app.tasks.points import find_point
+    from app.versions import ensure_versions, point_entities, record_version
 
     if not accepted:
         record.fix_log.append({"kind": pf["kind"], "at": now, "by": operator, "diff": [],
@@ -2946,50 +3038,57 @@ async def record_plan_results(
     operator = _operator(request)
     can_proxy = _project_role(request, plan.get("project")) in ("project_admin", "test_lead")
     proxied: dict[str, str] = {}
-    for entry in body.items:
-        item = by_id.get(entry.item_id)
-        if item is None:
-            raise HTTPException(status_code=400, detail=f"用例不在计划中: {entry.item_id}")
-        assignee = item.get("assignee")
-        if assignee and assignee != operator:
-            if not can_proxy:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"{item['case_id']} 已分配给 {assignee}，只能由本人执行（负责人可代执行）",
-                )
-            proxied[entry.item_id] = assignee
-        elif not assignee:
-            # 未分配的用例：执行即认领，分配留痕记为执行人自己
-            item.setdefault("assign_log", []).append(
-                {"prev": None, "assignee": operator, "by": operator, "at": now, "note": "执行时认领"}
-            )
-            item["assignee"] = operator
-        if entry.status not in PLAN_EXEC_STATUSES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"未知执行状态: {entry.status}（可用 {'/'.join(PLAN_EXEC_STATUSES)}）",
-            )
-        if entry.status in ("fail", "blocked") and not entry.note.strip():
-            raise HTTPException(
-                status_code=400,
-                detail=f"{item['case_id']} 标记{'失败' if entry.status == 'fail' else '阻塞'}须填写原因/缺陷号",
-            )
-        if entry.status == "fail" and entry.reason not in FAIL_REASONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{item['case_id']} 标记失败须选择失败分类（可用 {'/'.join(FAIL_REASONS)}）",
-            )
-        prev = run["results"].get(entry.item_id)
-        run["results"][entry.item_id] = {
-            "case_id": item["case_id"], "title": item["title"],
-            "status": entry.status, "note": entry.note.strip(),
-            "reason": entry.reason if entry.status == "fail" else "",
-            "by": operator, "at": now,
-            "on_behalf_of": proxied.get(entry.item_id),  # 代执行：记录被代的执行人
-            "history": (prev.get("history", []) + [
-                {k: prev.get(k, "") for k in ("status", "note", "reason", "by", "at", "on_behalf_of")}
-            ]) if prev else [],
-        }
+    import copy
+    rollback = copy.deepcopy((plan["items"], run["results"]))
+    try:
+      for entry in body.items:
+          item = by_id.get(entry.item_id)
+          if item is None:
+              raise HTTPException(status_code=400, detail=f"用例不在计划中: {entry.item_id}")
+          assignee = item.get("assignee")
+          if assignee and assignee != operator:
+              if not can_proxy:
+                  raise HTTPException(
+                      status_code=403,
+                      detail=f"{item['case_id']} 已分配给 {assignee}，只能由本人执行（负责人可代执行）",
+                  )
+              proxied[entry.item_id] = assignee
+          elif not assignee:
+              # 未分配的用例：执行即认领，分配留痕记为执行人自己
+              item.setdefault("assign_log", []).append(
+                  {"prev": None, "assignee": operator, "by": operator, "at": now, "note": "执行时认领"}
+              )
+              item["assignee"] = operator
+          if entry.status not in PLAN_EXEC_STATUSES:
+              raise HTTPException(
+                  status_code=400,
+                  detail=f"未知执行状态: {entry.status}（可用 {'/'.join(PLAN_EXEC_STATUSES)}）",
+              )
+          if entry.status in ("fail", "blocked") and not entry.note.strip():
+              raise HTTPException(
+                  status_code=400,
+                  detail=f"{item['case_id']} 标记{'失败' if entry.status == 'fail' else '阻塞'}须填写原因/缺陷号",
+              )
+          if entry.status == "fail" and entry.reason not in FAIL_REASONS:
+              raise HTTPException(
+                  status_code=400,
+                  detail=f"{item['case_id']} 标记失败须选择失败分类（可用 {'/'.join(FAIL_REASONS)}）",
+              )
+          prev = run["results"].get(entry.item_id)
+          run["results"][entry.item_id] = {
+              "case_id": item["case_id"], "title": item["title"],
+              "status": entry.status, "note": entry.note.strip(),
+              "reason": entry.reason if entry.status == "fail" else "",
+              "by": operator, "at": now,
+              "on_behalf_of": proxied.get(entry.item_id),  # 代执行：记录被代的执行人
+              "history": (prev.get("history", []) + [
+                  {k: prev.get(k, "") for k in ("status", "note", "reason", "by", "at", "on_behalf_of")}
+              ]) if prev else [],
+          }
+    except HTTPException:
+        plan["items"][:], run["results"] = rollback[0], rollback[1]
+        by_id_new = {i["item_id"]: i for i in plan["items"]}
+        raise
     request.app.state.plans.save(plan)
     summary = run_summary(plan, run)
     logger.info("计划 {} 轮次 {} 记录执行 {} 条（{}，代执行 {}）", plan_id, run_id, len(body.items), summary, len(proxied))
@@ -3260,8 +3359,9 @@ async def create_requirement(
         else:
             raise HTTPException(status_code=403, detail="无权访问该项目")
     rstore = request.app.state.requirements
-    if module_id and (request.app.state.modules.get(module_id) or {}).get("project") != project:
-        raise HTTPException(status_code=400, detail="模块不属于该项目")
+    if module_id and ((request.app.state.modules.get(module_id) or {}).get("project") != project
+                      or (request.app.state.modules.get(module_id) or {}).get("deleted_at")):
+        raise HTTPException(status_code=400, detail="模块不属于该项目或已删除")
     if version_id and (request.app.state.versions.get(version_id) or {}).get("project") != project:
         raise HTTPException(status_code=400, detail="版本不属于该项目")
     try:
@@ -3302,8 +3402,9 @@ async def update_requirement(request: Request, req_id: str, body: RequirementUpd
     item = _req(request, req_id, "requirement.edit")
     if body.status and body.status not in ("done", "archived", "designing"):
         raise HTTPException(status_code=400, detail="状态只能人工流转为 设计中 / 已完成 / 已归档")
-    if body.module_id and (request.app.state.modules.get(body.module_id) or {}).get("project") != item["project"]:
-        raise HTTPException(status_code=400, detail="模块不属于该项目")
+    if body.module_id and ((request.app.state.modules.get(body.module_id) or {}).get("project") != item["project"]
+                           or (request.app.state.modules.get(body.module_id) or {}).get("deleted_at")):
+        raise HTTPException(status_code=400, detail="模块不属于该项目或已删除")
     if body.version_id and (request.app.state.versions.get(body.version_id) or {}).get("project") != item["project"]:
         raise HTTPException(status_code=400, detail="版本不属于该项目")
     fields = body.model_dump(exclude_none=True)
@@ -3476,11 +3577,11 @@ async def design_from_requirement(request: Request, req_id: str, body: DesignBod
     request.app.state.memory.record_usage("template", template.template_id)
     extra = {"requirement_id": req_id, "requirement_title": item["title"],
              "module_id": item.get("module_id"), "version_id": item.get("version_id")}
-    rstore.link_task(req_id, task_id)
     resp = await _launch_task(
         request, task_id, task_dir, sources, design_brief(item), template, body.model, body.reviewer_model,
         body.knowledge_space, item["project"], body.confirm_points, body.async_mode, extra_context=extra,
     )
+    rstore.link_task(req_id, task_id)  # 任务已入库/已提交后再关联，失败不会留下悬空任务
     logger.info("需求 {} 发起测试设计：任务 {}（确认拆解={} 异步={}）", req_id, task_id, body.confirm_points, body.async_mode)
     return {**resp, "requirement_id": req_id}
 
@@ -3600,30 +3701,49 @@ async def update_project(request: Request, name: str, body: ProjectUpdateBody) -
             and not request.app.state.auth.exists(body.owner.strip()):
         raise HTTPException(status_code=400, detail=f"负责人不存在: {body.owner}")
     store = request.app.state.tasks
+    pstore = request.app.state.projects
+    new_name = (body.name or "").strip()
+    renaming = bool(new_name and new_name != name)
+    if renaming:
+        # 先校验新名可用，再逐一联动引用，最后改项目实体——任何一步失败项目名保持不变
+        from app.projects import ProjectError, check_name
+
+        try:
+            check_name(new_name, "项目名")
+        except ProjectError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if pstore.get(new_name) is not None:
+            raise HTTPException(status_code=400, detail=f"项目已存在: {new_name}")
+        renamed = 0
+        for r in store.list(limit=100000):
+            if (r.context or {}).get("project") == name:
+                r.context["project"] = new_name
+                store.save(r)
+                renamed += 1
+        plans = request.app.state.plans
+        for plan in plans.list(project=name):
+            plan["project"] = new_name
+            plans.save(plan)
+        request.app.state.versions.rename_project(name, new_name)
+        request.app.state.modules.rename_project(name, new_name)
+        request.app.state.user_prefs.rename_project(name, new_name)
+        request.app.state.requirements.rename_project(name, new_name)
+        request.app.state.memory.rename_project(name, new_name)
+        request.app.state.rules.rename_project(name, new_name)
+        if getattr(request.app.state, "knowledge", None) is not None:
+            request.app.state.knowledge.store.rename_space(name, new_name)
+        from app.audit import rename_project as _rename_audit
+        from app.llm.calllog import rename_project as _rename_calls
+        _rename_calls(name, new_name)
+        _rename_audit(name, new_name)
+        logger.info("项目改名 {} → {}：联动更新 {} 个任务及计划/版本/模块/需求/知识/记忆/规则/日志", name, new_name, renamed)
     try:
-        project = request.app.state.projects.update(
+        project = pstore.update(
             name, body.name, body.description, code=body.code, owner=body.owner,
             status=body.status, operator=_operator(request),
         )
     except ProjectError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    if body.name and body.name.strip() and body.name.strip() != name:
-        # 改名联动：任务上下文、测试计划、版本、模块、个人偏好
-        renamed = 0
-        for r in store.list(limit=100000):
-            if (r.context or {}).get("project") == name:
-                r.context["project"] = project["name"]
-                store.save(r)
-                renamed += 1
-        plans = request.app.state.plans
-        for plan in plans.list(project=name):
-            plan["project"] = project["name"]
-            plans.save(plan)
-        request.app.state.versions.rename_project(name, project["name"])
-        request.app.state.modules.rename_project(name, project["name"])
-        request.app.state.user_prefs.rename_project(name, project["name"])
-        request.app.state.requirements.rename_project(name, project["name"])
-        logger.info("项目改名 {} → {}：联动更新 {} 个任务", name, project["name"], renamed)
     return _project_view(request, project)
 
 
@@ -3641,8 +3761,9 @@ async def delete_project(request: Request, name: str) -> dict:
         raise HTTPException(status_code=400, detail=f"项目下仍有 {referenced} 个任务，不可删除")
     if request.app.state.plans.list(project=name):
         raise HTTPException(status_code=400, detail="项目下仍有测试计划，不可删除")
-    if request.app.state.requirements.list(name, include_deleted=True):
+    if request.app.state.requirements.list(name):
         raise HTTPException(status_code=400, detail="项目下仍有需求，不可删除")
+    request.app.state.requirements.purge_project(name)  # 回收站里的需求随空项目一并清理
     try:
         request.app.state.projects.delete(name)
     except ProjectError as e:
@@ -3693,6 +3814,9 @@ async def set_member(request: Request, name: str, body: MemberBody) -> dict:
     _require_project(request, name, "project.members")
     if get_settings().auth_enabled and not request.app.state.auth.exists(body.username.strip()):
         raise HTTPException(status_code=400, detail=f"用户不存在: {body.username}")
+    if request.app.state.auth.exists(body.username.strip()) \
+            and request.app.state.auth.public_user(body.username.strip()).get("status") == "disabled":
+        raise HTTPException(status_code=400, detail=f"用户 {body.username} 已禁用，不能加入项目")
     try:
         p = request.app.state.projects.set_member(name, body.username, body.role, operator=_operator(request))
     except ProjectError as e:
@@ -3782,6 +3906,9 @@ async def update_version(request: Request, name: str, version_id: str, body: Ver
 @router.delete("/api/v1/projects/{name}/versions/{version_id}")
 async def delete_version(request: Request, name: str, version_id: str) -> dict:
     _version_of(request, name, version_id, "version.manage")
+    used = [r["title"] for r in request.app.state.requirements.list(name, include_deleted=True) if r.get("version_id") == version_id]
+    if used:
+        raise HTTPException(status_code=400, detail=f"版本仍被 {len(used)} 条需求引用（如「{used[0]}」），请先解除关联")
     request.app.state.versions.delete(version_id)
     return {"deleted": version_id}
 
@@ -4156,9 +4283,9 @@ async def list_tasks(
     records = [r for r in records if _record_visible(request, (r.context or {}).get("project"))]
     if project is not None:
         records = [r for r in records if (r.context or {}).get("project") == project]
-    records = records[:limit]
     if created_by is not None:
         records = [r for r in records if r.created_by == created_by]
+    records = records[:limit]
     return {
         "tasks": [
             {

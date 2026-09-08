@@ -212,6 +212,20 @@ def list_logs(*, project: str | None = None, kind: str | None = None, user: str 
             "items": [{**dict(r), "kind_label": KINDS.get(r["kind"], r["kind"])} for r in rows]}
 
 
+def rename_project(old: str, new: str) -> int:
+    from sqlalchemy import update
+
+    with get_engine().begin() as conn:
+        return conn.execute(update(audit_log).where(audit_log.c.project == old).values(project=new)).rowcount
+
+
+def purge_before(at: str) -> int:
+    from sqlalchemy import delete
+
+    with get_engine().begin() as conn:
+        return conn.execute(delete(audit_log).where(audit_log.c.at < at)).rowcount
+
+
 def recent_by_user(user: str, limit: int = 10) -> list[dict]:
     with get_engine().begin() as conn:
         rows = conn.execute(select(audit_log).where(audit_log.c.user == user, audit_log.c.status < 400)

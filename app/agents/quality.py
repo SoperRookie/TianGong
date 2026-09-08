@@ -210,7 +210,7 @@ def apply_point_proposals(modules: list[dict], accepted: list[dict]) -> dict:
     return apply_point_fixes(modules, data, allowed={p["tp_id"] for p in accepted if p.get("tp_id")})
 
 
-def apply_point_fixes(modules: list[dict], data: dict, allowed: set[str]) -> dict:
+def apply_point_fixes(modules: list[dict], data: dict, allowed: set[str], seq_floor: int = 0) -> dict:
     """确定性合并测试点修改：只允许改动被驳回项（铁律兜底），产出 Diff（需求三十四）。
 
     修改后的测试点回到 pending 待再审核（需求六十一：局部修改 → 再审核），保留驳回计数。
@@ -270,7 +270,7 @@ def apply_point_fixes(modules: list[dict], data: dict, allowed: set[str]) -> dic
     added = add_points(
         modules,
         [a for a in data.get("additions", []) if isinstance(a, dict)],
-        source="ai_fix",
+        source="ai_fix", seq_floor=seq_floor,
     )
     return {"diff": diff, "added": added}
 
@@ -576,8 +576,8 @@ async def run_requirement_diff(
         changes.append({
             "type": str(ch.get("type", "修改")),
             "description": str(ch.get("description", "")),
-            "affected_points": [t for t in ch.get("affected_points", []) if t in known_points],
-            "affected_cases": [c for c in ch.get("affected_cases", []) if str(c) in known_cases],
+            "affected_points": [str(t) for t in (ch.get("affected_points") or []) if isinstance(t, (str, int)) and str(t) in known_points],
+            "affected_cases": [str(c) for c in (ch.get("affected_cases") or []) if isinstance(c, (str, int)) and str(c) in known_cases],
             "action_hint": str(ch.get("action_hint", "")),
         })
     return {

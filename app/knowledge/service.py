@@ -58,9 +58,19 @@ class KnowledgeService:
         if not chunks:
             raise ValueError(f"文档 {source} 无有效内容，未入库")
         vectors = await self.embedder.embed(chunks)
+        self._check_dims(vectors)
+        # 同空间同分类同来源重复入库：先删旧文档，避免重复切片挤占检索配额
+        for old in self.store.list_docs(space, category):
+            if old.source == source:
+                self.store.delete_doc(old.doc_id)
         record = self._new_doc(source=source, category=category, space=space, chunk_count=len(chunks), **meta)
         self.store.upsert_chunks(record, chunks, vectors)
         return record
+
+    def _check_dims(self, vectors: list[list[float]]) -> None:
+        expected = self.embedder.registry.get().dimensions
+        if vectors and len(vectors[0]) != expected:
+            raise ValueError(f"Embedding 返回维度 {len(vectors[0])} 与配置 {expected} 不一致，请检查模型配置")
 
     def _new_doc(self, source: str, category: str, space: str, chunk_count: int,
                  level: str | None = None, module: str = "", created_by: str | None = None) -> KnowledgeDoc:
