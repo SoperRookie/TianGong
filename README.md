@@ -93,6 +93,12 @@ open http://localhost:8000/
 | POST | `/api/v1/requirements/{id}/analyze` | AI 需求分析（11 项结构化输出，待确认事项进入确认流） |
 | POST | `/api/v1/requirements/{id}/questions[/{qid}]` | 待确认事项：人工补充 / 确认结论 / 重新打开 |
 | POST | `/api/v1/requirements/{id}/design` | 从需求发起测试设计（任务回挂需求/模块/版本；未确认事项未清则 409） |
+| GET | `/api/v1/ai/tasks` / `/ai/calls[/{id}]` / `/ai/stats` | AI 任务中心、调用日志（用途/模型/Prompt 版本/输入输出/发起人）、用量统计 |
+| GET/POST | `/api/v1/ai/prompts[/{key}/versions[/{n}/activate\|archive]]` | Prompt 版本化管理（管理员） |
+| POST | `/api/v1/tasks/{id}/retry` | 失败任务重试 |
+| GET | `/api/v1/audit` | 操作日志 / 系统安全日志（管理员看全部，成员看所属项目与自己） |
+| GET | `/api/v1/workbench` / `/search?q=` / `/projects/{name}/coverage` | 我的工作台、全局搜索、覆盖追溯视图 |
+| POST | `/api/v1/knowledge/docs` | 知识入库：level=public/project/module + project + module |
 
 完整接口文档见服务启动后的 `/docs`（OpenAPI）。
 
@@ -127,7 +133,7 @@ V1.0 排期见 `docs/AI测试用例管理平台_V1.0_排期.md`（按需求 25 �
 | M4 测试计划与执行 | 计划实体、用例快照、任务分配、执行挂计划、执行附件 | ✅ 已完成 |
 | M1 平台底座与权限 | 用户资料/禁用、系统级与项目级角色分离、项目成员、接口级项目隔离、项目字段与收藏/最近访问、版本与模块树、页面结构对齐 | ✅ 已完成 |
 | M2 需求中心与追溯链 | 需求实体化（原文永久保留、附件逐文件解析失败显式提示、人工补充独立保存）、AI 需求分析 11 项输出、待确认事项确认后才能测试设计、需求→测试点→用例→计划→执行追溯与覆盖识别、存量任务自动迁移为需求 | ✅ 已完成 |
-| M5 AI 中心、统计与审计 | Prompt 版本化、AI 任务中心与调用日志、AI 质量五指标、操作/安全日志、工作台与全局搜索 | 排期 10 月 |
+| M5 AI 中心、统计与审计 | 全部 Prompt 版本化（草稿/激活/回滚）、AI 调用日志与任务 Prompt 版本留痕、AI 任务中心（失败重试、部分成功明示）、知识库公共/项目/模块三层与跨项目隔离、AI 质量五指标、操作日志与系统安全日志、我的工作台、全局搜索、覆盖追溯视图 | ✅ 已完成 |
 | M4b 用例导入与批量维护 | Excel 导入五步校验、人工新增/复制、批量补齐 | 排期 10 月底 |
 
 ### 权限模型（M1）

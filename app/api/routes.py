@@ -3090,7 +3090,7 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
 def _req_trace(request: Request, item: dict) -> dict:
     """需求 → 测试点 → 用例 → 计划 → 执行 的正向追溯与覆盖识别（21 章）。"""
     from app.reports import plan_exec_index
-    from app.tasks.points import iter_points
+    from app.tasks.points import iter_point_dicts as iter_points
 
     tstore = request.app.state.tasks
     plans = request.app.state.plans.list(project=item["project"])
@@ -4143,6 +4143,164 @@ async def retry_task(request: Request, task_id: str) -> dict:
     )
     logger.info("任务 {} 第 {} 次重试已提交", task_id, extra["retry_count"])
     return resp
+
+
+# ---- 我的工作台 / 全局搜索 / 覆盖追溯视图（18 章 / 21 章）----
+
+
+@router.get("/api/v1/workbench")
+async def workbench(request: Request) -> dict:
+    """我的工作台：我的项目、待评审、待修改、待执行、待确认需求、我的 AI 任务、最近操作。"""
+    from app.audit import recent_by_user
+    from app.permissions import PROJECT_ROLES
+    from app.tasks.points import iter_point_dicts as iter_points
+
+    me = _operator(request)
+    pstore = request.app.state.projects
+    visible = _visible_projects(request)
+    projects = [{"project": p["name"], "role": "project_admin" if _is_admin(request) else pstore.role_of(p["name"], me),
+                 "status": p["status"]}
+                for p in pstore.list() if visible is None or p["name"] in visible]
+    for p in projects:
+        p["role_label"] = PROJECT_ROLES.get(p["role"], p["role"] or "")
+    can_review = {p["project"] for p in projects if _project_role(request, p["project"]) in ("project_admin", "test_lead")}
+
+    pending_review, to_fix, my_ai = [], [], []
+    for r in request.app.state.tasks.list(limit=100000):
+        ctx = r.context or {}
+        proj = ctx.get("project")
+        if not _record_visible(request, proj):
+            continue
+        pts = list(iter_points((r.analysis or {}).get("test_points", [])))
+        cases = (r.result or {}).get("cases", [])
+        pt_pending = sum(1 for _, p in pts if p.get("status", "pending") == "pending")
+        pt_rejected = sum(1 for _, p in pts if p.get("status") == "rejected")
+        case_states = [(r.case_reviews.get(str(c.get("uid") or "")) or {}).get("status", "pending") for c in cases]
+        c_pending, c_rejected = case_states.count("pending"), case_states.count("rejected")
+        base = {"task_id": r.task_id, "project": proj, "requirement_title": ctx.get("requirement_title"),
+                "sources": r.sources, "status": r.status, "created_by": r.created_by, "created_at": r.created_at}
+        if proj in can_review or (proj is None and _is_admin(request)):
+            if r.status == "awaiting_confirmation" and pt_pending:
+                pending_review.append({**base, "kind": "point", "count": pt_pending})
+            elif r.status == "completed" and c_pending:
+                pending_review.append({**base, "kind": "case", "count": c_pending})
+        if (pt_rejected or c_rejected) and (r.created_by == me or _project_role(request, proj) in ("project_admin", "test_lead", "tester")):
+            to_fix.append({**base, "points": pt_rejected, "cases": c_rejected, "has_proposal": bool(r.pending_fix)})
+        if r.created_by == me:
+            my_ai.append({**base, "error": r.error, "progress": r.progress, "case_count": len(cases)})
+    pending_review.sort(key=lambda x: x["created_at"], reverse=True)
+    to_fix.sort(key=lambda x: x["created_at"], reverse=True)
+    my_ai.sort(key=lambda x: x["created_at"], reverse=True)
+
+    mine = await my_plan_items(request)
+    reqs = [
+        {"req_id": q["req_id"], "title": q["title"], "project": q["project"],
+         "open_questions": len(request.app.state.requirements.open_questions(q)), "updated_at": q["updated_at"]}
+        for q in request.app.state.requirements.list()
+        if q["status"] == "pending_confirm" and _record_visible(request, q["project"])
+        and can(request, q["project"], "requirement.edit")
+    ]
+    return {
+        "projects": projects,
+        "pending_review": {"count": len(pending_review), "items": pending_review[:8]},
+        "to_fix": {"count": len(to_fix), "items": to_fix[:8]},
+        "to_execute": {"count": mine["pending"], "items": mine["items"][:8]},
+        "pending_requirements": {"count": len(reqs), "items": reqs[:8]},
+        "my_ai_tasks": {"running": sum(1 for t in my_ai if t["status"] in ("queued", "running")),
+                        "failed": sum(1 for t in my_ai if t["status"] == "failed"),
+                        "awaiting": sum(1 for t in my_ai if t["status"] == "awaiting_confirmation"),
+                        "items": my_ai[:8]},
+        "recent_ops": recent_by_user(me, 10),
+    }
+
+
+def can(request: Request, project: str | None, action: str) -> bool:
+    from app.permissions import role_allows
+
+    return role_allows(_project_role(request, project), action)
+
+
+@router.get("/api/v1/search")
+async def global_search(request: Request, q: str, limit: int = 8) -> dict:
+    """全局搜索（18 章）：需求 / 任务 / 测试点 / 用例 / 计划 / 知识文档，按成员关系过滤。"""
+    from app.reports import project_cases
+    from app.tasks.points import iter_point_dicts as iter_points
+
+    kw = q.strip().lower()
+    if not kw:
+        return {"q": q, "groups": []}
+    lim = max(1, min(limit, 30))
+    tstore = request.app.state.tasks
+    records = [r for r in tstore.list(limit=100000) if _record_visible(request, (r.context or {}).get("project"))]
+
+    def hit(text: str) -> bool:
+        return kw in (text or "").lower()
+
+    reqs = [{"req_id": r["req_id"], "title": r["title"], "project": r["project"], "status": r["status"]}
+            for r in request.app.state.requirements.list()
+            if _record_visible(request, r["project"]) and (hit(r["title"]) or hit(r["raw_text"]) or hit(r.get("description", "")))]
+    tasks = [{"task_id": r.task_id, "project": (r.context or {}).get("project"), "status": r.status,
+              "sources": r.sources, "requirement_title": (r.context or {}).get("requirement_title")}
+             for r in records
+             if hit(r.task_id) or any(hit(x) for x in r.sources) or hit((r.context or {}).get("requirement_title", ""))]
+    points = []
+    for r in records:
+        for module, p in iter_points((r.analysis or {}).get("test_points", [])):
+            if hit(p.get("point", "")) or hit(p.get("tp_id", "")):
+                points.append({"task_id": r.task_id, "project": (r.context or {}).get("project"), "tp_id": p.get("tp_id"),
+                               "point": p.get("point"), "module": module.get("module", "") if isinstance(module, dict) else str(module),
+                               "status": p.get("status")})
+                if len(points) >= lim:
+                    break
+        if len(points) >= lim:
+            break
+    cases = [{"task_id": c["task_id"], "project": c["project"], "case_id": c["case_id"], "title": c["title"],
+              "module": c["module"], "review": c["review"]}
+             for c in project_cases(records, None)
+             if hit(c["case_id"]) or hit(c["title"]) or hit(c["keywords"])][:lim]
+    plans = [{"plan_id": p["plan_id"], "name": p["name"], "project": p["project"], "status": p["status"]}
+             for p in request.app.state.plans.list()
+             if _record_visible(request, p.get("project")) and (hit(p["name"]) or hit(p["plan_id"]))]
+    docs = []
+    if getattr(request.app.state, "knowledge", None) is not None:
+        docs = [{"doc_id": d.doc_id, "source": d.source, "space": d.space, "level": d.level}
+                for d in request.app.state.knowledge.store.list_docs()
+                if _knowledge_visible(request, d) and hit(d.source)]
+    groups = [
+        {"kind": "requirement", "label": "需求", "items": reqs[:lim], "total": len(reqs)},
+        {"kind": "task", "label": "任务", "items": tasks[:lim], "total": len(tasks)},
+        {"kind": "point", "label": "测试点", "items": points, "total": len(points)},
+        {"kind": "case", "label": "用例", "items": cases, "total": len(cases)},
+        {"kind": "plan", "label": "测试计划", "items": plans[:lim], "total": len(plans)},
+        {"kind": "knowledge", "label": "知识文档", "items": docs[:lim], "total": len(docs)},
+    ]
+    return {"q": q, "groups": [g for g in groups if g["items"]]}
+
+
+@router.get("/api/v1/projects/{name}/coverage")
+async def project_coverage(request: Request, name: str) -> dict:
+    """覆盖追溯视图（21.1）：项目内每条需求的 测试点 → 用例 → 计划 → 执行 覆盖情况，及未挂需求的任务。"""
+    _require_project(request, name, "project.view")
+    rstore = request.app.state.requirements
+    rows = []
+    linked: set[str] = set()
+    for req in rstore.list(name):
+        t = _req_trace(request, req)
+        linked.update(req["tasks"])
+        rows.append({"req_id": req["req_id"], "title": req["title"], "status": req["status"],
+                     "module_id": req.get("module_id"), "version_id": req.get("version_id"),
+                     "tasks": len(req["tasks"]), **t["totals"], "coverage": t["coverage"]})
+    unlinked = [{"task_id": r.task_id, "sources": r.sources, "status": r.status, "created_at": r.created_at}
+                for r in request.app.state.tasks.list(limit=100000)
+                if (r.context or {}).get("project") == name and r.task_id not in linked]
+    summary = {
+        "requirements": len(rows),
+        "with_points": sum(1 for r in rows if r["coverage"]["has_points"]),
+        "with_cases": sum(1 for r in rows if r["coverage"]["has_cases"]),
+        "in_plan": sum(1 for r in rows if r["coverage"]["in_plan"]),
+        "executed": sum(1 for r in rows if r["coverage"]["executed"]),
+    }
+    return {"project": name, "summary": summary, "requirements": rows, "unlinked_tasks": unlinked}
 
 
 # ---- 操作日志与安全日志（17 章）----

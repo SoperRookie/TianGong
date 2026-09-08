@@ -163,6 +163,16 @@ def iter_points(modules: list[dict]):
             yield entry, p
 
 
+def iter_point_dicts(modules: list[dict]):
+    """只读遍历：兼容实体化之前的字符串测试点（统计/追溯/搜索用，不用于修改）。"""
+    for entry in modules or []:
+        for p in entry.get("points", []):
+            if isinstance(p, dict):
+                yield entry, p
+            elif isinstance(p, str):
+                yield entry, {"point": p, "status": "approved", "source": "ai"}
+
+
 def find_point(modules: list[dict], tp_id: str) -> tuple[dict, dict] | None:
     for entry, p in iter_points(modules):
         if p.get("tp_id") == tp_id:

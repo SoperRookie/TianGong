@@ -201,7 +201,7 @@ def _ai_quality(rows: list[TaskRecord]) -> dict:
     """AI 质量统计（完整需求 20 章）：按测试点 / 用例分别统计
     采纳率（最终通过 / AI 产出）、直接通过率（未经驳回或修改即通过）、修改率（人工或 AI 定点修改过）、
     驳回率（被驳回过）、驳回原因分布（驳回类型 + 原因文本 Top）。"""
-    from app.tasks.points import iter_points
+    from app.tasks.points import iter_point_dicts as iter_points
 
     def fresh():
         return {"total": 0, "approved": 0, "direct": 0, "modified": 0, "rejected": 0, "deleted": 0}
