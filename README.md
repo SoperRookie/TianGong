@@ -59,6 +59,10 @@ open http://localhost:8000/
 
 运行测试：`pytest`（222 项，LLM 调用以桩件隔离，无需网络）。
 
+### 品牌资源
+
+吉祥物「夜枭」（戴扫描护目镜的机械猫头鹰）：`app/web/brand/` 下有 `owl.svg`（应用图标 / favicon）、`owl-idle / owl-generating / owl-pass / owl-fail.svg`（四种表情）、`owl-mono.svg`（单色，随 currentColor）、`lockup.svg`（横版组合），运行时经 `/brand/*` 访问。
+
 ### 部署须知
 
 - **单进程运行**：用户/项目/任务等为进程内内存态 + 数据库回写，`uvicorn` 不要加 `--workers`；启动时会在 `outputs/.instance.lock` 加文件锁，第二个实例会直接拒绝启动。

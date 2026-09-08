@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>天工 · AI 测试用例平台</title>
+<link rel="icon" type="image/svg+xml" href="/brand/owl.svg">
 <style>
 /* ================= 设计令牌 ================= */
 :root {
@@ -34,6 +35,12 @@ body { margin:0; font:13.5px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",
 .menu::-webkit-scrollbar-thumb { background:#2a3550; border-radius:3px; }
 .s-logo { display:flex; align-items:center; gap:10px; padding:18px 18px 16px; color:#fff;
   font-size:15px; font-weight:650; letter-spacing:.3px; border-bottom:1px solid #222c42; }
+.s-logo .mark svg, .login-card .brand .mark svg { width:100%; height:100%; display:block; }
+.owl-eye { transform-origin:center; animation:owlblink 5.5s infinite; }
+@keyframes owlblink { 0%,92%,100% { transform:scaleY(1); } 95% { transform:scaleY(.15); } }
+.owl-scan { animation:owlscan 2.6s ease-in-out infinite; }
+@keyframes owlscan { 0%,100% { transform:translateY(-4px); opacity:.25; } 50% { transform:translateY(4px); opacity:.9; } }
+@media (prefers-reduced-motion: reduce) { .owl-eye, .owl-scan { animation:none; } }
 .s-logo .mark { width:28px; height:28px; border-radius:8px; flex:none;
   background:linear-gradient(135deg,#4c6fe8,#7a4ce8); display:grid; place-items:center; font-size:14px; }
 .s-logo .sub { font-size:11px; font-weight:400; color:#7484a0; letter-spacing:.5px; margin-top:1px; }
@@ -461,9 +468,27 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 </head>
 <body>
 
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="owlSkin" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#25335e"/><stop offset="1" stop-color="#121b38"/></linearGradient>
+    <filter id="owlGlow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <!-- 天工吉祥物「夜枭」：戴扫描护目镜的机械猫头鹰（源文件 /brand/owl*.svg） -->
+    <symbol id="owlMark" viewBox="0 0 64 64">
+      <path d="M13 22 L20 12 L26 20 H38 L44 12 L51 22 V42 A19 19 0 0 1 13 42 Z" fill="url(#owlSkin)" stroke="#5fe3ff" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M20 12 L26 20 M44 12 L38 20" stroke="#b79cff" stroke-width="2" stroke-linecap="round"/>
+      <rect x="15" y="25" width="34" height="14" rx="7" fill="#0b1226" stroke="#5fe3ff" stroke-width="1.6"/>
+      <circle cx="24" cy="32" r="5.2" fill="#0b1226" stroke="#5fe3ff" stroke-width="1.6"/>
+      <circle cx="40" cy="32" r="5.2" fill="#0b1226" stroke="#5fe3ff" stroke-width="1.6"/>
+      <g class="owl-eye"><circle cx="24" cy="32" r="2.4" fill="#7cf5c2" filter="url(#owlGlow)"/><circle cx="40" cy="32" r="2.4" fill="#7cf5c2" filter="url(#owlGlow)"/></g>
+      <rect class="owl-scan" x="17" y="31" width="30" height="1.6" fill="#5fe3ff" opacity=".35"/>
+      <path d="M29.5 41 L32 46 L34.5 41 Z" fill="#ff7ad9"/>
+      <path d="M22 48 L26 52 L30 48 M34 48 L38 52 L42 48" fill="none" stroke="#5fe3ff" stroke-opacity=".6" stroke-width="1.6" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+</svg>
 <div class="shell">
 <aside class="sidebar">
-  <div class="s-logo"><span class="mark">天</span>
+  <div class="s-logo"><span class="mark" style="background:#0b1226;border:1px solid #2b3d6b"><svg viewBox="0 0 64 64"><use href="#owlMark"/></svg></span>
     <div>天工<div class="sub">AI 测试用例平台</div></div></div>
   <nav class="menu">
     <div class="grp">工作台 · 项目</div>
@@ -683,6 +708,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="grid"></div>
   <div class="login-stage">
     <div class="login-hero">
+      <svg class="hero-owl" viewBox="0 0 64 64" width="132" height="132" style="display:block;margin:0 0 18px -6px;filter:drop-shadow(0 0 26px rgba(95,227,255,.28))"><use href="#owlMark"/></svg>
       <div class="eyebrow"><i></i>AI Test Design Platform</div>
       <h1>让测试设计<br><span>从需求直达执行</span></h1>
       <p>多 Agent 协作拆解需求、生成与评审用例，知识库沉淀团队规则，人工评审留痕反哺下一次生成。需求、测试点、用例、计划、执行全链路可追溯。</p>
@@ -701,7 +727,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       </div>
     </div>
   <div class="login-card">
-    <div class="brand"><span class="mark">天</span>
+    <div class="brand"><span class="mark" style="background:#0b1226;border:1px solid #2b3d6b;box-shadow:0 8px 24px rgba(95,227,255,.18)"><svg viewBox="0 0 64 64"><use href="#owlMark"/></svg></span>
       <div><b>天工</b><div class="sub">AI 测试用例平台 · 登录</div></div></div>
     <label class="f">用户名</label>
     <input type="text" id="loginUser" autocomplete="username" placeholder="登录账号">

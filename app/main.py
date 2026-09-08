@@ -146,6 +146,7 @@ app.include_router(router)
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 app.mount("/vendor", StaticFiles(directory=BASE_DIR / "app" / "web" / "vendor"), name="vendor")
+app.mount("/brand", StaticFiles(directory=BASE_DIR / "app" / "web" / "brand"), name="brand")  # 夜枭标志与表情
 
 # 无需登录即可访问：登录接口、健康检查（Web 首页为静态壳，登录态由前端接口驱动）
 _PUBLIC_API_PATHS = {"/api/v1/auth/login", "/health"}
