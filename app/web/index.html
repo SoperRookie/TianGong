@@ -182,6 +182,7 @@ input[type=checkbox] { accent-color:var(--primary); width:14px; height:14px; }
 .st.approved { background:var(--ok-bg); color:var(--ok); }
 .st.rejected { background:var(--danger-bg); color:var(--danger); }
 .st.candidate { background:var(--warn-bg); color:var(--warn); }
+.st.draft { background:var(--line-2); color:var(--ink-3); border:1px dashed var(--ink-3); }
 .tag { display:inline-block; padding:0 7px; border-radius:5px; background:var(--line-2);
   color:var(--ink-2); font-size:11.5px; line-height:19px; }
 .chips { display:flex; flex-wrap:wrap; gap:5px; }
@@ -351,8 +352,9 @@ tr.rowlink td { transition:background .1s; }
   padding:9px 10px 9px 18px; box-shadow:var(--shadow-lg); transition:transform .2s ease; font-size:13px; }
 .batchbar.on { transform:translateX(-50%); }
 .batchbar .n { font-weight:700; color:#8fb0ff; }
-.batchbar button { border:none; border-radius:8px; font:inherit; font-size:12.5px; padding:6px 13px; cursor:pointer; }
+.batchbar button { border:none; border-radius:8px; font:inherit; font-size:12.5px; padding:6px 13px; cursor:pointer; white-space:nowrap; flex-shrink:0; }
 .batchbar .b-ok { background:#1f6e44; color:#fff; }
+.batchbar select { border:1px solid #3a4658; background:#2a3442; color:#fff; border-radius:8px; font:inherit; font-size:12.5px; padding:5px 8px; }
 .batchbar .b-rej { background:#93362e; color:#fff; }
 .batchbar .b-x { background:#2c3648; color:#c6cede; }
 
@@ -782,6 +784,16 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <span>已选 <span class="n" id="bbCount">0</span> 条<span id="bbKind"></span></span>
   <button class="b-ok" onclick="batchGo('approve')">批量通过</button>
   <button class="b-rej" onclick="batchGo('reject')">批量驳回</button>
+  <select id="bbMore" onchange="batchMore(this.value);this.value=''" style="display:none">
+    <option value="">更多操作…</option>
+    <option value="submit">提交评审（草稿）</option>
+    <option value="set_priority">改优先级</option>
+    <option value="set_module">改模块</option>
+    <option value="add_keywords">追加标签</option>
+    <option value="set_keywords">替换标签</option>
+    <option value="plan">加入测试计划</option>
+    <option value="delete">删除（入回收站）</option>
+  </select>
   <button class="b-x" onclick="clearChecks()">取消选择</button>
 </div>
 
@@ -1033,6 +1045,34 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <button class="btn ghost" onclick="$('designDlg').close()">取消</button>
     <button class="btn" id="dsGoBtn" onclick="submitDesign()">开始</button>
   </div>
+</dialog>
+
+<!-- 人工新增用例 -->
+<dialog id="manualCaseDlg" style="width:720px">
+  <div class="dlg-h"><h3>新建用例</h3><span class="meta">以草稿保存，提交评审后进入待评审</span></div>
+  <div class="dlg-b">
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">模块</label><input type="text" id="mcModule" list="mcModules" placeholder="如 登录"><datalist id="mcModules"></datalist></div>
+      <div style="width:110px"><label class="f">优先级</label><select id="mcPriority"><option>P0</option><option>P1</option><option selected>P2</option><option>P3</option></select></div>
+    </div>
+    <label class="f">用例标题</label><input type="text" id="mcTitle" placeholder="验证…">
+    <label class="f">前置条件<span class="hint">（可选）</span></label><input type="text" id="mcPre">
+    <label class="f">操作步骤与预期结果</label>
+    <div id="mcSteps"></div>
+    <button class="btn ghost sm" onclick="mcAddStep()" style="margin-top:6px">＋ 添加步骤</button>
+    <div style="display:flex;gap:10px;margin-top:8px">
+      <div style="flex:1"><label class="f">标签<span class="hint">（顿号分隔）</span></label><input type="text" id="mcKw" placeholder="登录、异常"></div>
+      <div style="flex:1"><label class="f">备注</label><input type="text" id="mcRemark"></div>
+    </div>
+  </div>
+  <div class="dlg-f"><button class="btn ghost" onclick="$('manualCaseDlg').close()">取消</button><button class="btn" onclick="saveManualCase()">保存草稿</button></div>
+</dialog>
+
+<!-- Excel 导入五步 -->
+<dialog id="importDlg" style="width:900px">
+  <div class="dlg-h"><h3>导入用例</h3><span class="meta" id="imMeta">上传 → 解析 → 预览 → 校验 → 确认</span></div>
+  <div class="dlg-b" id="imBody"></div>
+  <div class="dlg-f" id="imFoot"></div>
 </dialog>
 
 <!-- 计划分配：执行人 / 模块下拉 -->
@@ -1997,6 +2037,7 @@ function renderTaskListPage() {
             <input type="text" id="taskSearch" placeholder="搜索任务 / 项目 / 来源…" value="${esc(listQuery)}"
               oninput="listQuery=this.value;renderTaskListRows()">
           </div>
+          ${curProjectName&&can(curProjectName,'case.edit')?`<button class="btn ghost" onclick="createManualTask(curProjectName)" title="不经 AI，直接人工新增或 Excel 导入用例">＋ 人工用例集</button>`:''}
           <button class="btn" onclick="openDrawer()">＋ 新建任务</button>
         </div></div>
       <div class="card-b">
@@ -2083,7 +2124,7 @@ async function openTask(id, keepLocal) {
     hiddenDupPairs = new Set(); lastPointDiff = null; lastCaseDiff = null; lastHints = [];
     caseTab = 'all'; caseModule = ''; expandedSteps = new Set();
     detailTab = currentTask.status === 'awaiting_confirmation' ? 'points'
-      : (currentTask.result && currentTask.result.cases && currentTask.result.cases.length) ? 'cases' : 'overview';
+      : ((currentTask.result && currentTask.result.cases && currentTask.result.cases.length) || ((currentTask.context||{}).manual && currentTask.status==='completed')) ? 'cases' : 'overview';
   }
   renderDetail();
 }
@@ -2096,13 +2137,14 @@ function renderDetail() {
   const hasCases = t.result && t.result.cases && t.result.cases.length;
   const pts = allPoints(t);
   const nRejCases = hasCases ? Object.values(t.case_reviews||{}).filter(s=>s.status==='rejected').length : 0;
+  const manual = !!(t.context||{}).manual && t.status === 'completed' && t.result;
   const running = ['queued','running'].includes(t.status);
 
   // 任务详情只保留生成+评审主线：浏览走「测试用例」、执行走「测试计划」、回收站在项目工作区
   const tabs = [
     ['overview', '概览', ''],
     ...(pts.length ? [['points', '测试点审核', `<span class="cnt">${pts.length}</span>`]] : []),
-    ...(hasCases ? [['cases', '用例审核', `<span class="cnt ${nRejCases?'hot':''}">${nRejCases?nRejCases+' 待修改':t.result.cases.length}</span>`]] : []),
+    ...(hasCases || manual ? [['cases', manual ? '用例维护' : '用例审核', `<span class="cnt ${nRejCases?'hot':''}">${nRejCases?nRejCases+' 待修改':(hasCases?t.result.cases.length:0)}</span>`]] : []),
   ];
   if (!tabs.some(x => x[0]===detailTab)) detailTab = tabs[0][0];
 
@@ -2525,14 +2567,16 @@ async function confirmPointsGo() {
 function caseState(t, c) {
   return (t.case_reviews||{})[c.uid] || {status:'pending', comment:'', reject_count:0, locked:false};
 }
-const cStatusText = {pending:'未审核', approved:'已通过', rejected:'已驳回'};
+const cStatusText = {pending:'未审核', approved:'已通过', rejected:'已驳回', draft:'草稿'};
 
 function renderCases(t) {
-  const r = t.result;
+  const r = t.result; r.cases = r.cases || [];
   const states = r.cases.map(c => caseState(t, c));
   const nRejected = states.filter(s=>s.status==='rejected').length;
   const nApproved = states.filter(s=>s.status==='approved').length;
-  const nPending = r.cases.length - nRejected - nApproved;
+  const nDraft = states.filter(s=>s.status==='draft').length;
+  const nPending = r.cases.length - nRejected - nApproved - nDraft;
+  const canEditCases = can((t.context||{}).project, 'case.edit') && t.status === 'completed';
   const modules = [...new Set(r.cases.map(c=>c.module))];
   const visible = r.cases.filter(c =>
     (caseTab==='all' || caseState(t, c).status===caseTab) &&
@@ -2553,8 +2597,9 @@ function renderCases(t) {
       ${stepCells(c.uid, c.steps, 230)}
       <td style="width:92px"><span class="st ${s.status}">${cStatusText[s.status]}</span>
         ${s.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${s.reject_count} 次</div>`:''}</td>
-      <td style="width:132px"><div class="rowops">
-        <button class="ibtn ok" title="通过（锁定）" onclick="caseAct(${jsq(c.case_id)},'approve')">${IC.check}</button>
+      <td style="width:150px"><div class="rowops">
+        ${s.status==='draft'?`<button class="btn ghost sm" title="提交评审" onclick="caseAct(${jsq(c.case_id)},'submit')">提交</button>`:`<button class="ibtn ok" title="通过（锁定）" onclick="caseAct(${jsq(c.case_id)},'approve')">${IC.check}</button>`}
+        ${canEditCases?`<button class="ibtn" title="复制为新用例（草稿）" onclick="copyCase(${jsq(c.uid)})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg></button>`:''}
         <button class="ibtn" title="版本历史" onclick="openVersions('case',${jsq(c.uid)},${jsq(c.case_id)})">${IC.clock}</button>
         <button class="ibtn" title="修改" onclick="openEdit(${jsq(c.case_id)})">${IC.edit}</button>
         <button class="ibtn bad" title="驳回" onclick="caseReject(${jsq(c.case_id)})">${IC.x}</button>
@@ -2568,6 +2613,7 @@ function renderCases(t) {
         <button class="${caseTab==='all'?'on':''}" onclick="caseTab='all';renderDetail()">全部 ${r.cases.length}</button>
         <button class="${caseTab==='rejected'?'on':''}" onclick="caseTab='rejected';renderDetail()">待修改 ${nRejected}</button>
         <button class="${caseTab==='approved'?'on':''}" onclick="caseTab='approved';renderDetail()">已通过 ${nApproved}</button>
+        ${nDraft?`<button class="${caseTab==='draft'?'on':''}" onclick="caseTab='draft';renderDetail()">草稿 ${nDraft}</button>`:''}
         <button class="${caseTab==='pending'?'on':''}" onclick="caseTab='pending';renderDetail()">未审核 ${nPending}</button>
       </div>
       <select onchange="caseModule=this.value;renderDetail()" style="width:150px">
@@ -2578,7 +2624,9 @@ function renderCases(t) {
         <button class="${caseView==='table'?'on':''}" onclick="caseView='table';renderDetail()">表格</button>
         <button class="${caseView==='mind'?'on':''}" onclick="caseView='mind';renderDetail()">脑图</button>
       </div>
-      <div style="margin-left:auto">
+      <div style="margin-left:auto;display:flex;gap:6px">
+        ${canEditCases?`<button class="btn ghost sm" onclick="openManualCaseDlg()">＋ 新建用例</button>
+        <button class="btn ghost sm" onclick="openImportDlg()">导入 Excel</button>`:''}
         ${nRejected&&!(t.pending_fix&&t.pending_fix.kind==='cases')?`<button class="btn soft sm" onclick="fixCases()" id="fixCaseBtn">AI 修改驳回用例（${nRejected}）</button>`:''}
       </div></div>
     ${t.pending_fix&&t.pending_fix.kind==='cases'?renderFixProposals(t.pending_fix):''}
@@ -2589,6 +2637,76 @@ function renderCases(t) {
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
     <div class="hint" style="margin-top:10px">通过即锁定退出 AI 修改队列；驳回须填审核意见供 AI 定点修改；人工修改视为定稿直接通过</div>
     ${lastCaseDiff?renderCaseDiff(lastCaseDiff):''}`;
+}
+
+/* ---- 人工新增用例（14.2） ---- */
+function mcAddStep(action, expected) {
+  const n = $('mcSteps').children.length + 1;
+  const row = document.createElement('div'); row.className = 'mc-step'; row.style.cssText = 'display:flex;gap:6px;margin-top:6px;align-items:center';
+  row.innerHTML = `<span class="hint" style="width:22px">${n}.</span><input type="text" class="mc-a" placeholder="操作步骤" style="flex:1" value="${esc(action||'')}"><input type="text" class="mc-e" placeholder="预期结果" style="flex:1" value="${esc(expected||'')}"><button class="ibtn bad" onclick="this.parentElement.remove();[...$('mcSteps').children].forEach((r,i)=>r.firstChild.textContent=(i+1)+'.')">${IC.x}</button>`;
+  $('mcSteps').appendChild(row);
+}
+function openManualCaseDlg() {
+  const modules = [...new Set((currentTask.result.cases||[]).map(c => c.module))];
+  $('mcModules').innerHTML = modules.map(m => `<option value="${esc(m)}">`).join('');
+  $('mcModule').value = caseModule || modules[0] || ''; $('mcTitle').value = ''; $('mcPre').value = ''; $('mcKw').value = ''; $('mcRemark').value = ''; $('mcPriority').value = 'P2';
+  $('mcSteps').innerHTML = ''; mcAddStep(); mcAddStep();
+  $('manualCaseDlg').showModal(); setTimeout(() => $('mcTitle').focus(), 50);
+}
+async function saveManualCase() {
+  const steps = [...document.querySelectorAll('#mcSteps .mc-step')].map(r => ({action: r.querySelector('.mc-a').value.trim(), expected: r.querySelector('.mc-e').value.trim()})).filter(s => s.action || s.expected);
+  const body = {module: $('mcModule').value.trim(), title: $('mcTitle').value.trim(), priority: $('mcPriority').value, precondition: $('mcPre').value.trim(), steps, keywords: $('mcKw').value.trim(), remark: $('mcRemark').value.trim()};
+  if (!body.module || !body.title) return toast('模块与标题必填', 'warn');
+  if (!steps.length || steps.some(s => !s.action || !s.expected)) return toast('至少一步，且每步都要有操作与预期', 'warn');
+  try { const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/cases`, body); $('manualCaseDlg').close(); toast(`已保存草稿 ${r.case.case_id}`, 'ok'); caseTab = 'all'; await openTask(currentTask.task_id, true); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- Excel 导入五步（14.1） ---- */
+let _importPreview = null;
+function openImportDlg() {
+  _importPreview = null;
+  $('imMeta').textContent = '第 1 步 · 上传文件（Excel / CSV / XMind）';
+  $('imBody').innerHTML = `<div class="hint" style="margin-bottom:10px">按模板列头准备文件：用例编号、模块、用例标题、优先级、前置条件、操作步骤（每行一步）、预期结果（与步骤逐行对应）、关键词、备注。<a onclick="downloadFile('/api/v1/cases/import-template','用例导入模板.xlsx')">下载导入模板</a></div>
+    <input type="file" id="imFile" accept=".xlsx,.csv,.xmind">
+    <div class="hint" style="margin-top:8px">解析后逐行校验：标题与步骤必填、优先级须为 P0–P3、标题不得与任务内或文件内重复；有错误的行不会被静默导入。</div>`;
+  $('imFoot').innerHTML = `<button class="btn ghost" onclick="$('importDlg').close()">取消</button><button class="btn" id="imNext" onclick="importPreview()">解析并预览</button>`;
+  $('importDlg').showModal();
+}
+async function importPreview() {
+  const f = $('imFile').files[0]; if (!f) return toast('请选择文件', 'warn');
+  const fd = new FormData(); fd.append('file', f);
+  const btn = $('imNext'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 解析中';
+  try {
+    const pv = await api(`/api/v1/tasks/${currentTask.task_id}/cases/import/preview`, {method:'POST', body: fd});
+    _importPreview = pv;
+    $('imMeta').textContent = `第 3/4 步 · 预览与校验：${pv.filename} · 共 ${pv.total} 行，错误 ${pv.errors} 行，警告 ${pv.warnings} 行`;
+    $('imBody').innerHTML = `<div class="tbl-wrap" style="max-height:50vh;margin-top:0"><table>
+      <tr><th style="width:40px">行</th><th style="width:90px">模块</th><th>标题</th><th style="width:60px">优先级</th><th style="width:60px">步骤</th><th>校验结果</th></tr>
+      ${pv.rows.map(r => `<tr style="${r.errors.length?'background:var(--danger-bg)':''}">
+        <td>${r.row}</td><td>${esc(r.case.module)}</td><td>${esc(r.case.title)||'<span class="hint">（空）</span>'}</td><td>${esc(r.case.priority)}</td><td>${(r.case.steps||[]).filter(s=>s.action).length}</td>
+        <td>${r.errors.length?`<span style="color:var(--danger)">${r.errors.map(esc).join('；')}</span>`:r.warnings.length?`<span style="color:var(--warn)">${r.warnings.map(esc).join('；')}</span>`:'<span class="st approved">通过</span>'}</td></tr>`).join('')}
+    </table></div>`;
+    $('imFoot').innerHTML = `<button class="btn ghost" onclick="openImportDlg()">重新上传</button>
+      ${pv.errors ? `<button class="btn ghost" onclick="importConfirm(true)">只导入无错误的 ${pv.total - pv.errors} 行</button><button class="btn" disabled title="有错误行时不能整体导入">导入全部（有 ${pv.errors} 行错误）</button>`
+                  : `<button class="btn" onclick="importConfirm(false)">确认导入 ${pv.total} 行</button>`}`;
+  } catch (e) { toast(e.message, 'err'); btn.disabled = false; btn.textContent = '解析并预览'; }
+}
+async function importConfirm(onlyValid) {
+  if (!_importPreview) return;
+  try {
+    const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/cases/import/confirm`, {token: _importPreview.token, only_valid: onlyValid});
+    $('importDlg').close(); toast(`已导入 ${r.imported} 条草稿${r.skipped?`，跳过 ${r.skipped} 行错误`:''}`, 'ok');
+    caseTab = 'all'; await openTask(currentTask.task_id, true);
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function createManualTask(project) {
+  const title = await askInput('新建人工用例集', '名称（如：登录模块手工用例）', '人工用例集');
+  if (!title) return;
+  try {
+    const r = await jpost('/api/v1/projects/' + encodeURIComponent(project) + '/manual-task', {title, template_id: $('templateSel').value || null});
+    toast('已创建，可在其中新建或导入用例', 'ok'); await refreshList(); openTaskFromProject(r.task_id, 'cases');
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 /* ==================== 用例脑图（kity + kityminder-core，MeterSphere 同款内核） ==================== */
@@ -3568,6 +3686,45 @@ function renderBatchBar() {
   $('bbKind').textContent = pts.length ? '测试点' : cs.length ? '用例' : '';
   const rej = document.querySelector('.batchbar .b-rej');
   if (rej) rej.textContent = '批量驳回';
+  const more = $('bbMore'); if (more) more.style.display = cs.length ? '' : 'none';
+}
+async function batchMore(action) {
+  if (!action || !currentTask) return;
+  const uids = checkedOf('.cck').map(c => { const cid = c.dataset.cid; const cse = currentTask.result.cases.find(x => x.case_id === cid); return cse && cse.uid; }).filter(Boolean);
+  if (!uids.length) return toast('请先勾选用例', 'warn');
+  const base = {}; for (const c of currentTask.result.cases) if (uids.includes(c.uid)) base[c.uid] = c.version || 1;
+  let value = '';
+  if (action === 'plan') return batchAddToPlan(uids);
+  if (action === 'set_priority') { value = await askInput('批量改优先级', 'P0 / P1 / P2 / P3', 'P1'); if (!value) return; }
+  if (action === 'set_module') { value = await askInput('批量改模块', '模块名', ''); if (!value) return; }
+  if (action === 'add_keywords') { value = await askInput('批量追加标签', '标签，逗号或顿号分隔', ''); if (!value) return; }
+  if (action === 'set_keywords') { value = await askInput('批量替换标签', '标签，逗号或顿号分隔（清空则填 -）', ''); if (!value) return; if (value === '-') value = ' '; }
+  if (action === 'delete' && !await uiConfirm('批量删除', `删除选中的 ${uids.length} 条用例？将移入回收站，可恢复。`, true)) return;
+  try {
+    const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/cases/batch`, {uids, action, value, base_versions: base});
+    let msg = `已处理 ${r.applied.length} 条`;
+    if (r.conflicts.length) msg += `，${r.conflicts.length} 条被他人修改过已跳过（请刷新后重试）`;
+    if (r.skipped.length) msg += `，${r.skipped.length} 条跳过：${r.skipped.map(x => x.reason).filter((v,i,a)=>a.indexOf(v)===i).join('；')}`;
+    toast(msg, r.conflicts.length || r.skipped.length ? 'warn' : 'ok');
+    clearChecks(); await openTask(currentTask.task_id, true);
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function batchAddToPlan(uids) {
+  const project = (currentTask.context||{}).project;
+  let plans = [];
+  try { plans = (await api('/api/v1/plans?project=' + encodeURIComponent(project||''))).plans.filter(p => p.status !== 'archived'); } catch (e) {}
+  if (!plans.length) return toast('该项目还没有测试计划，请先在「测试计划」中创建', 'warn');
+  const name = await askInput('加入测试计划', `计划名（${plans.map(p=>p.name).join(' / ')}）`, plans[0].name);
+  if (!name) return;
+  const plan = plans.find(p => p.name === name); if (!plan) return toast('计划不存在', 'warn');
+  try {
+    const r = await jpost(`/api/v1/plans/${plan.plan_id}/cases`, {task_id: currentTask.task_id, uids});
+    toast(`已加入 ${r.added != null ? r.added : uids.length} 条（只有已通过的正式用例会被加入）`, 'ok'); clearChecks();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function copyCase(uid) {
+  try { const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/cases/${uid}/copy`, {}); toast(`已复制为 ${r.case.case_id}（草稿）`, 'ok'); await openTask(currentTask.task_id, true); }
+  catch (e) { toast(e.message, 'err'); }
 }
 function clearChecks() {
   document.querySelectorAll('.ptck:checked,.cck:checked,.allck:checked').forEach(c=>c.checked=false);
@@ -4274,7 +4431,7 @@ async function drawerNewProject() {
 }
 let curProject = null, projTab = 'overview';
 let _projectsCache = [], _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
-const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved']};
+const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved'], draft:['草稿','candidate']};
 let _editingProject = null;
 async function fillUserNames() {
   if (!isSysAdmin() && !(curUser && curUser.projects && curUser.projects.some(p => p.role === 'project_admin'))) return;
@@ -4446,6 +4603,7 @@ async function renderProjectWorkspace() {
         ${!legacy&&can(curProject,'project.edit')?`<button class="btn ghost sm" onclick="openProjDlg(${jsq(curProject)})">编辑项目</button>`:''}
         ${!legacy&&p.status!=='archived'&&myRole(curProject)==='project_admin'?`<button class="btn ghost sm" onclick="setProjectStatus(${jsq(curProject)},'archived')">归档</button>`:''}
         ${!legacy&&p.status==='archived'&&myRole(curProject)==='project_admin'?`<button class="btn ghost sm" onclick="setProjectStatus(${jsq(curProject)},'active')">恢复</button>`:''}
+        ${!legacy&&can(curProject,'case.edit')&&p.status!=='archived'?`<button class="btn ghost sm" onclick="createManualTask(curProject)">＋ 人工用例集</button>`:''}
         ${can(curProject,'point.ai')&&p.status!=='archived'?`<button class="btn sm" onclick="$('projectInput').value=curProject==='（未指定）'?'':curProject;openDrawer()">＋ 新建任务</button>`:''}</div>
     </div>
     <div class="dtabs">
