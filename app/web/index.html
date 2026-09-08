@@ -814,6 +814,21 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<!-- 计划分配：执行人 / 模块下拉 -->
+<dialog id="assignDlg">
+  <div class="dlg-h"><h3 id="asTitle">分配执行人</h3><span class="meta" id="asMeta"></span></div>
+  <div class="dlg-b">
+    <div id="asModuleWrap"><label class="f">模块</label><select id="asModule" onchange="assignDlgMeta()"></select></div>
+    <label class="f">执行人<span class="hint">（仅项目成员与系统管理员可选，只读人员除外）</span></label>
+    <select id="asUser"></select>
+    <div class="hint" id="asHint" style="margin-top:8px"></div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('assignDlg').close()">取消</button>
+    <button class="btn" onclick="submitAssignDlg()">分配</button>
+  </div>
+</dialog>
+
 <!-- 项目成员 -->
 <dialog id="memberDlg">
   <div class="dlg-h"><h3 id="mbTitle">添加成员</h3></div>
@@ -2852,9 +2867,40 @@ async function pcAdd(all) {
 }
 
 /* ---- 分配（13 章：按用例 / 按模块，重新分配留痕；多人同时分配条目级冲突拦截） ---- */
+let _asItemIds = null, _asData = null;
+async function openAssignDlg(mode, itemIds) {
+  try { _asData = await api(`/api/v1/plans/${curPlan}/assignees`); } catch (e) { return toast(e.message, 'err'); }
+  if (!_asData.assignees.length) return toast('项目暂无可分配的成员，请先在「项目管理 → 成员」中添加', 'warn');
+  _asItemIds = mode === 'module' ? null : itemIds;
+  $('asTitle').textContent = mode === 'module' ? '按模块分配' : '分配选中用例';
+  $('asModuleWrap').style.display = mode === 'module' ? '' : 'none';
+  $('asModule').innerHTML = _asData.modules.map(m =>
+    `<option value="${esc(m.module)}">${esc(m.module || '（无模块）')} · ${m.count} 条</option>`).join('');
+  const cur = {};
+  for (const it of _planDetail.items) if (it.assignee) cur[it.assignee] = (cur[it.assignee] || 0) + 1;
+  $('asUser').innerHTML = '<option value="">请选择执行人</option>' + _asData.assignees.map(a =>
+    `<option value="${esc(a.username)}">${esc(a.name ? `${a.name}（${a.username}）` : a.username)} · ${esc(a.role_label)}${cur[a.username] ? ` · 已有 ${cur[a.username]} 条` : ''}</option>`).join('');
+  if (curUser && _asData.assignees.some(a => a.username === curUser.username) && _asData.assignees.length === 1) $('asUser').value = curUser.username;
+  assignDlgMeta();
+  $('assignDlg').showModal();
+}
+function assignDlgMeta() {
+  const ids = _asItemIds || _planDetail.items.filter(i => (i.module || '') === $('asModule').value).map(i => i.item_id);
+  const items = _planDetail.items.filter(i => ids.includes(i.item_id));
+  const assigned = items.filter(i => i.assignee).length;
+  $('asMeta').textContent = `${items.length} 条用例`;
+  $('asHint').textContent = assigned ? `其中 ${assigned} 条已有执行人，分配后将改派（留痕原执行人与操作人）` : '';
+}
+function submitAssignDlg() {
+  const assignee = $('asUser').value;
+  if (!assignee) return toast('请选择执行人', 'warn');
+  const ids = _asItemIds || _planDetail.items.filter(i => (i.module || '') === $('asModule').value).map(i => i.item_id);
+  if (!ids.length) return toast('该模块下没有用例', 'warn');
+  $('assignDlg').close();
+  planAssign(ids, assignee);
+}
 async function planAssign(itemIds, assignee) {
-  assignee = assignee || await askInput('分配执行人', '登录用户名');
-  if (!assignee) return;
+  if (!assignee) return openAssignDlg('items', itemIds);
   // 页面快照：当前看到的各条执行人——他人先行分配的条目服务端不覆盖、返回冲突
   const expected = {};
   for (const it of _planDetail.items) if (itemIds.includes(it.item_id)) expected[it.item_id] = it.assignee;
@@ -2878,13 +2924,9 @@ function planAssignChecked() {
   if (!ids.length) return toast('请先勾选要分配的用例', 'warn');
   planAssign(ids);
 }
-async function planAssignModule() {
-  const modules = [...new Set(_planDetail.items.map(i => i.module))];
-  const mod = await askInput('按模块分配', `模块名（${modules.join(' / ')}）`, modules[0] || '');
-  if (!mod) return;
-  const ids = _planDetail.items.filter(i => i.module === mod).map(i => i.item_id);
-  if (!ids.length) return toast('该模块下没有用例', 'warn');
-  planAssign(ids);
+function planAssignModule() {
+  if (!_planDetail.items.length) return toast('计划内还没有用例', 'warn');
+  openAssignDlg('module');
 }
 async function planRemoveItem(itemId) {
   if (!await uiConfirm('移出计划', '将该用例快照移出计划？有执行记录的用例不可移出。', true)) return;

@@ -2594,13 +2594,43 @@ class PlanAssignBody(BaseModel):
     expected: dict[str, str | None] | None = None  # 页面快照 item_id -> 当时执行人：多人同时分配的冲突拦截依据
 
 
+def _plan_assignees(request: Request, plan: dict) -> list[dict]:
+    """可被分配的执行人：计划所属项目的正常状态成员 + 系统管理员（附姓名与项目角色）。"""
+    from app.permissions import PROJECT_ROLES
+
+    auth = request.app.state.auth
+    project = request.app.state.projects.get(plan.get("project") or "")
+    members = dict((project or {}).get("members", {}))
+    out = []
+    for u in auth.list_users():
+        role = members.get(u["username"])
+        if role is None and u["role"] != "admin":
+            continue
+        if u.get("status", "active") != "active" or role == "viewer":
+            continue
+        out.append({"username": u["username"], "name": u.get("name", ""),
+                    "role": role, "role_label": PROJECT_ROLES.get(role, "系统管理员" if role is None else role)})
+    return out
+
+
+@router.get("/api/v1/plans/{plan_id}/assignees")
+async def list_plan_assignees(request: Request, plan_id: str) -> dict:
+    """分配弹窗数据：候选执行人（项目成员）与计划内模块及其用例数。"""
+    plan = _plan(request, plan_id, "plan.view")
+    modules: dict[str, int] = {}
+    for it in plan["items"]:
+        modules[it.get("module") or ""] = modules.get(it.get("module") or "", 0) + 1
+    return {"assignees": _plan_assignees(request, plan),
+            "modules": [{"module": m, "count": c} for m, c in sorted(modules.items())]}
+
+
 @router.post("/api/v1/plans/{plan_id}/assign")
 async def assign_plan_cases(request: Request, plan_id: str, body: PlanAssignBody) -> dict:
     """任务分配（13 章）：按用例 / 按模块，重新分配留痕原执行人、新执行人与操作人。
 
     多人同时分配：不同用例的并发分配互不影响；同一用例被他人先行分配时不覆盖，
     以 conflicts 返回由操作人确认后再改派（重新提交时不带 expected 即为明确改派）。
-    M4 先基于现有用户体系（admin/member）分配；M1 项目成员落地后收紧为仅项目成员。
+    执行人限定为计划所属项目的成员（系统管理员亦可）——M1 项目成员落地后收紧。
     """
     from app.plans import PlanError, assign_items
 
@@ -2608,9 +2638,8 @@ async def assign_plan_cases(request: Request, plan_id: str, body: PlanAssignBody
     if plan["status"] == "archived":
         raise HTTPException(status_code=409, detail="计划已归档，不可再分配")
     assignee = body.assignee.strip()
-    known = {u["username"] for u in request.app.state.auth.list_users()}
-    if known and assignee not in known:
-        raise HTTPException(status_code=400, detail=f"执行人不存在: {assignee}")
+    if assignee not in {a["username"] for a in _plan_assignees(request, plan)}:
+        raise HTTPException(status_code=400, detail=f"执行人不存在或不是项目成员: {assignee}")
     item_ids = body.item_ids or [
         i["item_id"] for i in plan["items"] if not body.module or i["module"] == body.module
     ]

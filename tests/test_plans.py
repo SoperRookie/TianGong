@@ -163,6 +163,14 @@ async def test_assign_by_case_and_module_with_trace(client):
     assert resp.status_code == 400
 
     app.state.auth.add_user("tester", "pw123456")
+    # 非项目成员不可被分配（M1 收紧）；加入项目后可分配，候选接口列出成员与模块
+    resp = await client.post(f"/api/v1/plans/{pid}/assign",
+                             json={"assignee": "tester", "item_ids": [login_item["item_id"]]})
+    assert resp.status_code == 400 and "成员" in resp.json()["detail"]
+    await client.put("/api/v1/projects/P端/members", json={"username": "tester", "role": "tester"})
+    cand = (await client.get(f"/api/v1/plans/{pid}/assignees")).json()
+    assert {a["username"] for a in cand["assignees"]} >= {"tester", "admin"}
+    assert cand["modules"] == [{"module": "下单", "count": 1}, {"module": "登录", "count": 1}]
     # 按用例分配
     resp = await client.post(f"/api/v1/plans/{pid}/assign",
                              json={"assignee": "tester", "item_ids": [login_item["item_id"]]})
@@ -204,6 +212,7 @@ async def test_concurrent_assignment_conflict(client):
     items = (await client.get(f"/api/v1/plans/{pid}")).json()["items"]
     i0, i1 = items[0]["item_id"], items[1]["item_id"]
     app.state.auth.add_user("tester", "pw123456")
+    await client.put("/api/v1/projects/P端/members", json={"username": "tester", "role": "tester"})
 
     # 甲乙同时打开页面（都看到两条未分配）；乙先提交：i0 → tester
     resp = await client.post(f"/api/v1/plans/{pid}/assign",
