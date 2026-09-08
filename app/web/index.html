@@ -420,12 +420,12 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6a2 2 0 012 2v14a2 2 0 01-2 2H9a2 2 0 01-2-2V5a2 2 0 012-2z"/><path d="M9 3v18M13 8h2M13 12h2M13 16h2"/></svg>
       测试用例</button>
     <div class="grp">测试计划 · 执行</div>
-    <button id="nav-plans" onclick="switchView('plans')">
+    <button id="nav-plans" onclick="plansMine=false;curPlan=null;switchView('plans')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 3v4M16 3v4M4 11h16M9 15.5l2 2 4-4"/></svg>
       测试计划</button>
     <button id="nav-mytasks" onclick="plansMine=true;curPlan=null;switchView('plans')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.5"/><path d="M5.5 20c.8-3.4 3.4-5 6.5-5s5.7 1.6 6.5 5"/><path d="M16 4l2 2 3-3"/></svg>
-      我的执行任务</button>
+      执行任务</button>
     <div class="grp">数据统计</div>
     <button id="nav-reports" onclick="switchView('reports')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/></svg>
@@ -2630,7 +2630,7 @@ const PLAN_ST = {not_started:['未开始','pending'], in_progress:['进行中','
 
 function crumbForPlans() {
   if (curPlan && _planDetail) setCrumb(`<a onclick="backToPlans()">测试计划</a><span class="sep">/</span>${esc(_planDetail.name)}`);
-  else setCrumb(plansMine ? '我的执行任务' : '测试计划');
+  else setCrumb(plansMine ? '执行任务' : '测试计划');
 }
 function backToPlans() { curPlan = null; _planDetail = null; planRunId = null; renderPlans(); }
 function openPlan(id, filter) { planExecFilter = filter || ''; return _openPlan(id); }
@@ -2686,13 +2686,13 @@ async function renderPlans() {
                 <button class="btn ghost sm" onclick="myExecAct('${pid}','${it.run_id}','${it.item_id}','skipped')">跳过</button>` : ''}
                 <button class="btn ghost sm" onclick="openPlan('${pid}','__me')">进计划</button></div></td></tr>`; }).join('')}
           </table></div>`).join('') : '<div class="empty">当前没有分配给我的待执行用例</div>'}</div></div>`;
-    } catch (e) { myCard = `<div class="card" style="margin-bottom:14px"><div class="card-b"><div class="empty">加载我的执行任务失败：${esc(e.message)}</div></div></div>`; }
+    } catch (e) { myCard = `<div class="card" style="margin-bottom:14px"><div class="card-b"><div class="empty">加载执行任务失败：${esc(e.message)}</div></div></div>`; }
   }
   $('plansArea').innerHTML = myCard + `<div class="card">
     <div class="card-h"><h3>${plansMine ? '我参与的测试计划' : '测试计划'}</h3>
       <span class="meta">只能加入已通过评审的正式用例 · 加入即快照 · 执行与附件挂计划</span>
       <div class="grow">
-        <label class="check">只看我的执行任务
+        <label class="check">只看分配给我的
           <span class="switch"><input type="checkbox" ${plansMine?'checked':''} onchange="plansMine=this.checked;switchView('plans')"><i></i></span></label>
         <select style="width:160px" onchange="plansProject=this.value;renderPlans()">
           <option value="">全部项目</option>
@@ -2760,10 +2760,11 @@ async function renderPlanDetail() {
   const me = curUser ? curUser.username : '';
   const execOf = it => (results[it.item_id] || {}).by || '';
   const matchExec = it => planExecFilter === '' ? true
-    : planExecFilter === '__me' ? (it.assignee === me || execOf(it) === me)
+    : planExecFilter === '__me' ? it.assignee === me
+    : planExecFilter === '__byme' ? execOf(it) === me
     : planExecFilter === '__unassigned' ? !it.assignee
     : planExecFilter === '__pending' ? !results[it.item_id]
-    : (it.assignee === planExecFilter || execOf(it) === planExecFilter);
+    : it.assignee === planExecFilter;
   const shownItems = p.items.filter(matchExec);
   const myItems = p.items.filter(it => it.assignee === me);
   const myDone = myItems.filter(it => results[it.item_id]).length;
@@ -2802,10 +2803,11 @@ async function renderPlanDetail() {
     <div class="grow">
       <select style="width:150px" onchange="planExecFilter=this.value;renderPlanDetail()" title="按执行人筛选">
         <option value="">全部执行人</option>
-        <option value="__me" ${planExecFilter==='__me'?'selected':''}>我的（分配给我 / 我执行的）</option>
+        <option value="__me" ${planExecFilter==='__me'?'selected':''}>分配给我的</option>
+        <option value="__byme" ${planExecFilter==='__byme'?'selected':''}>我执行的（含代执行）</option>
         <option value="__pending" ${planExecFilter==='__pending'?'selected':''}>本轮未执行</option>
         <option value="__unassigned" ${planExecFilter==='__unassigned'?'selected':''}>未分配</option>
-        ${(p.people||[]).filter(x=>x.username!==me).map(x => `<option value="${esc(x.username)}" ${planExecFilter===x.username?'selected':''}>${esc(x.username)} · 分配 ${x.assigned} / 已执行 ${x.executed}</option>`).join('')}
+        ${(p.people||[]).filter(x=>x.username!==me).map(x => `<option value="${esc(x.username)}" ${planExecFilter===x.username?'selected':''}>${esc(x.username)} · 分配 ${x.assigned}</option>`).join('')}
       </select>
       ${editable ? `<button class="btn ghost sm" onclick="planAssignChecked()">分配选中</button>
       <button class="btn ghost sm" onclick="planAssignModule()">按模块分配</button>
