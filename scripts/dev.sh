@@ -18,5 +18,6 @@ esac
 
 PY="$DIR/.venv/bin/python"
 [ -x "$PY" ] || PY=python
-if [ $# -eq 0 ]; then set -- --reload; fi
+# 优雅关闭最多等 10 秒：热重载 / Ctrl+C 时不再被长请求（大 PDF 图片 Vision 理解）卡住几分钟
+if [ $# -eq 0 ]; then set -- --reload --timeout-graceful-shutdown 10; fi
 exec "$PY" -m uvicorn app.main:app "$@"

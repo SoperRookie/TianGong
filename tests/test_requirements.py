@@ -52,6 +52,16 @@ async def test_需求实体_原文保护_人工补充(client):
     assert (await client.post(f"/api/v1/requirements/{r['req_id']}/restore")).status_code == 200
 
 
+async def _wait_parsed(client, req_id: str) -> dict:
+    import asyncio
+    for _ in range(200):
+        r = (await client.get(f"/api/v1/requirements/{req_id}")).json()
+        if not r["parsing"]:
+            return r
+        await asyncio.sleep(0.02)
+    raise AssertionError("附件解析未在预期时间内完成")
+
+
 async def test_附件解析失败显式记录并可重新解析(client):
     await client.post("/api/v1/projects", json={"name": "P"})
     resp = await client.post("/api/v1/requirements", data={"project": "P", "title": "带附件"},
@@ -59,13 +69,25 @@ async def test_附件解析失败显式记录并可重新解析(client):
                                     ("files", ("坏文件.xyz", b"???", "application/octet-stream"))])
     assert resp.status_code == 200, resp.text
     r = resp.json()
-    assert r["source_type"] == "file" and r["parse_failed"] == 1
+    # 上传立即返回：附件处于「解析中」，解析在后台进行；解析中不能发起 AI 分析 / 测试设计
+    assert r["source_type"] == "file" and r["parsing"] == 2 and r["parse_failed"] == 0
+    assert all(a["parsing"] for a in r["attachments"])
+    r = await _wait_parsed(client, r["req_id"])
+    assert r["parsing"] == 0 and r["parse_failed"] == 1
     atts = {a["filename"]: a for a in r["attachments"]}
+    # 解析中不能发起 AI 分析 / 测试设计（把一个附件置回解析中模拟）
+    app.state.requirements.replace_attachment(r["req_id"], atts["需求.txt"]["att_id"], {"parsing": True})
+    resp = await client.post(f"/api/v1/requirements/{r['req_id']}/analyze", json={})
+    assert resp.status_code == 409 and "解析中" in resp.json()["detail"]
+    assert (await client.post(f"/api/v1/requirements/{r['req_id']}/design", json={})).status_code == 409
+    app.state.requirements.replace_attachment(r["req_id"], atts["需求.txt"]["att_id"], {"parsing": False})
     assert atts["需求.txt"]["parsed"] and atts["需求.txt"]["chars"] > 0
     assert not atts["坏文件.xyz"]["parsed"] and atts["坏文件.xyz"]["error"]
-    # 重新解析仍失败：原因保留；详情带解析预览
+    # 重新解析（后台）仍失败：原因保留；详情带解析预览
     resp = await client.post(f"/api/v1/requirements/{r['req_id']}/attachments/{atts['坏文件.xyz']['att_id']}/reparse")
-    assert resp.status_code == 200 and resp.json()["parse_failed"] == 1
+    assert resp.status_code == 200 and resp.json()["parsing"] == 1
+    r = await _wait_parsed(client, r["req_id"])
+    assert r["parse_failed"] == 1 and r["parsing"] == 0
     detail = (await client.get(f"/api/v1/requirements/{r['req_id']}")).json()
     assert next(a for a in detail["attachments"] if a["filename"] == "需求.txt")["preview"] == "登录需求原文"
 
