@@ -605,24 +605,34 @@ async def _read_upload(upload: UploadFile, task_dir: Path, max_bytes: int, uniqu
     return dest
 
 
-async def _parse_inputs(
-    files: list[UploadFile], text: str, save_dir: Path, max_bytes: int, llm
-) -> list:
-    """解析多文件 + 粘贴文本（F-2-5 混合上传），返回 ParsedDocument 列表。
+async def _save_uploads(files: list[UploadFile], text: str, save_dir: Path, max_bytes: int) -> list[tuple[Path, str]]:
+    """上传落盘（请求内完成，快）：返回 [(落盘路径, 原始文件名)]；无文件也无文本时 400。"""
+    try:
+        saved = [(await _read_upload(upload, save_dir, max_bytes), _safe_filename(upload.filename)) for upload in files]
+    except UnsafeFileError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not saved and not text.strip():
+        raise HTTPException(status_code=400, detail="请上传需求文件或粘贴需求文本")
+    return saved
 
-    图片文件走 Vision 模型多模态理解（F-2-3），其余格式走本地解析器。
+
+async def _parse_saved(saved: list[tuple[Path, str]], text: str, llm) -> list:
+    """解析已落盘的文件 + 粘贴文本（F-2-5 混合上传），返回 ParsedDocument 列表。
+
+    图片文件走 Vision 模型多模态理解（F-2-3），其余格式走本地解析器。大文件 / 多图片可能耗时数分钟，
+    后台模式下在任务入库之后执行（进度阶段 parsing），列表随时可见。
     """
+    import asyncio
+
     docs = []
     try:
-        for upload in files:
-            saved = await _read_upload(upload, save_dir, max_bytes)
-            if saved.suffix.lower() in IMAGE_SUFFIXES:
-                doc = await parse_image(saved, llm)
+        for path, source in saved:
+            if path.suffix.lower() in IMAGE_SUFFIXES:
+                doc = await parse_image(path, llm)
             else:
                 # 文档解析是 CPU 密集同步代码：放线程池；内嵌图片经 Vision 理解后回填原位置
-                import asyncio
-                doc = await enrich_images(await asyncio.to_thread(parse_file, saved), llm)
-            doc.source = _safe_filename(upload.filename)  # 来源显示原始文件名（落盘名带随机前缀）
+                doc = await enrich_images(await asyncio.to_thread(parse_file, path), llm)
+            doc.source = source  # 来源显示原始文件名（落盘名带随机前缀）
             docs.append(doc)
         if text.strip():
             docs.append(parse_text(text))
@@ -633,6 +643,13 @@ async def _parse_inputs(
     if not docs:
         raise HTTPException(status_code=400, detail="请上传需求文件或粘贴需求文本")
     return docs
+
+
+async def _parse_inputs(
+    files: list[UploadFile], text: str, save_dir: Path, max_bytes: int, llm
+) -> list:
+    """落盘 + 解析一步完成（同步路径 / 解析预览 / 需求附件）。"""
+    return await _parse_saved(await _save_uploads(files, text, save_dir, max_bytes), text, llm)
 
 
 def _merge_docs(docs: list) -> str:
@@ -1136,30 +1153,56 @@ async def create_task(
         request.app.state.projects.ensure([project], created_by=_operator(request))
     _require_project(request, project, "point.ai")
     task_id, task_dir = store.new_task_dir()
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
 
-    # 1. 解析输入（文件 + 粘贴文本可混合 F-2-5；图片走 Vision F-2-3）
+    # 1. 上传落盘（请求内，快）；解析（PDF 提取 / 图片 Vision 理解，可能数分钟）后台模式下入库后再做
     try:
-        docs = await _parse_inputs(
-            files, text, task_dir, settings.max_upload_size_mb * 1024 * 1024, request.app.state.llm
-        )
+        saved = await _save_uploads(files, text, task_dir, max_bytes)
     except HTTPException:
         import shutil
         shutil.rmtree(task_dir, ignore_errors=True)
         raise
-    sources = [doc.source for doc in docs]
-    requirement = _merge_docs(docs)
+    sources = [name for _, name in saved] + (["text"] if text.strip() else [])
     # 使用习惯沉淀（F-8-2）：直接生成与拆解确认两条路径统一在此记录模板/模型使用
     request.app.state.memory.record_usage("template", template.template_id)
     if model:
         request.app.state.memory.record_usage("model", model)
     logger.info(
-        "任务 {} 创建：来源={} 共 {} 字（项目={} 模板={} 确认拆解={} 异步={}）",
-        task_id, sources, len(requirement), project or "-", template.template_id, confirm_points, async_mode,
+        "任务 {} 创建：来源={}（项目={} 模板={} 确认拆解={} 异步={}）",
+        task_id, sources, project or "-", template.template_id, confirm_points, async_mode,
     )
+    launch_args = (template, model, reviewer_model, knowledge_space, project, confirm_points)
 
+    if async_mode:
+        # 任务立即入库（进度 parsing），列表 / 详情随时可见；解析失败也留痕为失败任务而不是"消失"
+        creator = _operator(request)
+        context = {"requirement": "", "confirm_points": confirm_points, "model": model, "reviewer_model": reviewer_model,
+                   "template_id": template.template_id, "knowledge_space": knowledge_space, "project": project}
+        record = _queued_record(store, task_id, sources, context, creator)
+        record.progress = "parsing"
+        store.save(record)
+
+        async def _parse_then_launch() -> None:
+            store.set_progress(task_id, progress="parsing")
+            try:
+                docs = await _parse_saved(saved, text, request.app.state.llm)
+            except HTTPException as e:
+                _mark_failed(store, task_id, Exception(e.detail), sources, context, creator)
+                return
+            requirement = _merge_docs(docs)
+            logger.info("任务 {} 解析完成：{} 个来源共 {} 字，进入拆解 / 生成", task_id, len(docs), len(requirement))
+            try:
+                await _launch_task(request, task_id, task_dir, sources, requirement, *launch_args, async_mode=False)
+            except HTTPException as e:  # 同步路径已把任务标为失败，这里只吞掉响应异常
+                logger.warning("任务 {} 后台执行失败：{}", task_id, e.detail)
+
+        store.submit(task_id, _parse_then_launch)
+        return {"task_id": task_id, "status": "queued", "poll_url": f"/api/v1/tasks/{task_id}"}
+
+    docs = await _parse_saved(saved, text, request.app.state.llm)
+    requirement = _merge_docs(docs)
     return await _launch_task(
-        request, task_id, task_dir, sources, requirement, template, model, reviewer_model,
-        knowledge_space, project, confirm_points, async_mode,
+        request, task_id, task_dir, sources, requirement, *launch_args, async_mode=False,
     )
 
 

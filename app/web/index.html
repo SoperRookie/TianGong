@@ -2005,7 +2005,7 @@ async function clearMemories() {
 
 /* ---------- 任务列表 ---------- */
 const statusText = s => ({completed:'完成', failed:'失败', running:'执行中', queued:'排队中', awaiting_confirmation:'审核测试点'}[s]||s);
-const progressText = p => ({analyzing:'需求分析', generating_reviewing:'生成与评审', exporting:'导出', quality_check:'查漏与查重'}[p]||p);
+const progressText = p => ({parsing:'解析需求文件', analyzing:'需求分析', generating_reviewing:'生成与评审', exporting:'导出', quality_check:'查漏与查重'}[p]||p);
 function relTime(iso) {
   if (!iso) return '';
   const s = Math.max(0, (Date.now() - new Date(iso).getTime())/1000);
@@ -2210,7 +2210,7 @@ async function cancelTask() {
   } catch (e) { toast('取消失败：' + e.message, 'err'); }
 }
 
-const STAGES = [['queued','排队'], ['analyzing','需求分析'], ['generating_reviewing','生成与评审'], ['exporting','导出']];
+const STAGES = [['queued','排队'], ['parsing','解析文件'], ['analyzing','需求分析'], ['generating_reviewing','生成与评审'], ['exporting','导出']];
 function stepperHtml(idx) {
   return `<div class="stepper">${STAGES.map((s,i) => `
     <div class="node ${i<idx?'done':i===idx?'on':''}">
@@ -2224,8 +2224,8 @@ function renderProgress(t) {
   const mm = String(Math.floor(elapsed/60)), ss = String(elapsed%60).padStart(2,'0');
   return `<div class="box accent" style="margin:0 0 14px;display:flex;gap:14px;align-items:flex-start">
     ${owlSvg('generating', 56)}
-    <div style="flex:1;min-width:0">正在生成 <span class="spin"></span>
-    <span class="hint">已耗时 ${mm}:${ss} · 生成与评审为主要耗时阶段（多模块并行）</span>
+    <div style="flex:1;min-width:0">${stage==='parsing'?'正在解析需求文件':'正在生成'} <span class="spin"></span>
+    <span class="hint">已耗时 ${mm}:${ss} · ${stage==='parsing'?'PDF 提取与图片理解（Vision）按页/按图进行，大文件需要几分钟':'生成与评审为主要耗时阶段（多模块并行）'}</span>
     ${stepperHtml(idx)}</div></div>`;
 }
 
