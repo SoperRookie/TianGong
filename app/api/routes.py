@@ -3669,21 +3669,58 @@ def _attachment_record(saved: Path, doc=None, error: str | None = None) -> dict:
     }
 
 
-async def _parse_attachments(request: Request, files: list[UploadFile], save_dir: Path) -> list[dict]:
-    """逐文件解析：失败不中断、逐条记录失败原因（5.4 禁止部分失败无提示）。"""
+async def _save_attachments(files: list[UploadFile], save_dir: Path) -> list[dict]:
+    """附件落盘（请求内，快）：返回附件记录，状态「解析中」；超限 / 不安全文件逐条记失败（5.4 禁止部分失败无提示）。"""
     settings = get_settings()
-    llm = request.app.state.llm
     out = []
     for upload in files:
         try:
             saved = await _read_upload(upload, save_dir, settings.max_upload_size_mb * 1024 * 1024)
         except HTTPException as e:
             out.append({"att_id": uuid.uuid4().hex[:8], "filename": upload.filename or "文件", "stored": "",
-                        "size": 0, "parsed": False, "error": str(e.detail), "text": "", "chars": 0,
+                        "size": 0, "parsed": False, "parsing": False, "error": str(e.detail), "text": "", "chars": 0,
                         "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
             continue
-        out.append(await _parse_saved_attachment(saved, llm))
+        rec = _attachment_record(saved, None)
+        rec.update(parsing=True, error=None)
+        out.append(rec)
     return out
+
+
+def _schedule_attachment_parse(request: Request, req_id: str, atts: list[dict]) -> None:
+    """后台解析附件（PDF 提取 / 图片 Vision 理解可能数分钟）：上传立即返回，逐个解析完成即回写，页面轮询可见。"""
+    import asyncio
+
+    app = request.app
+    todo = [(a["att_id"], Path(a["stored"])) for a in atts if a.get("parsing") and a.get("stored")]
+    if not todo:
+        return
+
+    async def _run() -> None:
+        from app.requirements import RequirementError
+
+        for att_id, path in todo:
+            parsed = await _parse_saved_attachment(path, app.state.llm)
+            parsed.update(att_id=att_id, parsing=False)
+            try:
+                app.state.requirements.replace_attachment(req_id, att_id, parsed)
+            except RequirementError:
+                return  # 需求已被删除
+            logger.info("需求 {} 附件 {} 解析{}：{}", req_id, path.name, "完成" if parsed["parsed"] else "失败",
+                        f"{parsed['chars']} 字" if parsed["parsed"] else parsed.get("error"))
+
+    jobs = getattr(app.state, "bg_jobs", None)
+    if jobs is None:
+        jobs = app.state.bg_jobs = set()
+    task = asyncio.create_task(_run())
+    jobs.add(task)
+    task.add_done_callback(jobs.discard)
+
+
+def _require_attachments_ready(item: dict) -> None:
+    parsing = [a["filename"] for a in item.get("attachments") or [] if a.get("parsing")]
+    if parsing:
+        raise HTTPException(status_code=409, detail=f"附件仍在解析中（{'、'.join(parsing[:3])}），解析完成后再操作")
 
 
 async def _parse_saved_attachment(saved: Path, llm) -> dict:
@@ -3722,7 +3759,8 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
         "open_questions": len(rstore.open_questions(item)),
         "task_count": len(item["tasks"]),
         "analysis_labels": REQUIREMENT_ANALYSIS_LABELS,
-        "parse_failed": sum(1 for a in item["attachments"] if not a.get("parsed")),
+        "parse_failed": sum(1 for a in item["attachments"] if not a.get("parsed") and not a.get("parsing")),
+        "parsing": sum(1 for a in item["attachments"] if a.get("parsing")),
     }
     mstore = request.app.state.modules
     if item.get("module_id"):
@@ -3844,9 +3882,10 @@ async def create_requirement(
     except RequirementError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if files:
-        atts = await _parse_attachments(request, files, _req_dir(item["req_id"]))
+        atts = await _save_attachments(files, _req_dir(item["req_id"]))
         rstore.add_attachments(item["req_id"], atts, operator=_operator(request))
-    logger.info("需求已创建：{}「{}」（{}，附件 {}）", item["req_id"], item["title"], project, len(files))
+        _schedule_attachment_parse(request, item["req_id"], atts)
+    logger.info("需求已创建：{}「{}」（{}，附件 {}，后台解析）", item["req_id"], item["title"], project, len(files))
     return _req_view(request, rstore.get(item["req_id"]))
 
 
@@ -3920,8 +3959,9 @@ async def add_requirement_attachments(
     item = _req(request, req_id, "requirement.edit")
     if not files:
         raise HTTPException(status_code=400, detail="请选择文件")
-    atts = await _parse_attachments(request, files, _req_dir(req_id))
+    atts = await _save_attachments(files, _req_dir(req_id))
     item = request.app.state.requirements.add_attachments(req_id, atts, operator=_operator(request))
+    _schedule_attachment_parse(request, req_id, atts)
     return _req_view(request, item)
 
 
@@ -3936,12 +3976,14 @@ async def reparse_requirement_attachment(request: Request, req_id: str, att_id: 
         raise HTTPException(status_code=404, detail=f"附件不存在: {att_id}")
     if not att.get("stored") or not Path(att["stored"]).exists():
         raise HTTPException(status_code=409, detail="原文件已不存在，请重新上传")
-    parsed = await _parse_saved_attachment(Path(att["stored"]), request.app.state.llm)
-    parsed["att_id"] = att_id
+    if att.get("parsing"):
+        raise HTTPException(status_code=409, detail="该附件正在解析中")
     try:
-        item = request.app.state.requirements.replace_attachment(req_id, att_id, parsed)
+        item = request.app.state.requirements.replace_attachment(
+            req_id, att_id, {"parsing": True, "parsed": False, "error": None})
     except RequirementError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _schedule_attachment_parse(request, req_id, [{"att_id": att_id, "stored": att["stored"], "parsing": True}])
     return _req_view(request, item)
 
 
@@ -3965,6 +4007,7 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
     from app.requirements import design_brief
 
     item = _req(request, req_id, "requirement.ai")
+    _require_attachments_ready(item)
     _ai_ctx(request, project=item["project"], requirement_id=req_id)
     text = design_brief({**item, "analysis": None, "questions": []})
     if not text.strip():
@@ -4035,6 +4078,7 @@ async def design_from_requirement(request: Request, req_id: str, body: DesignBod
 
     body = body or DesignBody()
     item = _req(request, req_id, "point.ai")
+    _require_attachments_ready(item)
     rstore = request.app.state.requirements
     if rstore.open_questions(item):
         raise HTTPException(status_code=409, detail=f"仍有 {len(rstore.open_questions(item))} 项待确认事项未确认，确认后才能开始测试设计")

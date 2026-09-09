@@ -4381,7 +4381,7 @@ async function renderRequirements() {
     <td class="hint">${esc(r.module_path||'—')}</td>
     <td><span class="st ${REQ_ST_CLS[r.status]||'pending'}">${esc(r.status_label)}</span>
       ${r.open_questions?`<div class="hint" style="color:var(--warn)">待确认 ${r.open_questions}</div>`:''}
-      ${r.parse_failed?`<div class="hint" style="color:var(--danger)">${r.parse_failed} 个附件解析失败</div>`:''}</td>
+      ${r.parse_failed?`<div class="hint" style="color:var(--danger)">${r.parse_failed} 个附件解析失败</div>`:''}${r.parsing?`<div class="hint">${r.parsing} 个附件解析中 <span class="spin"></span></div>`:''}</td>
     <td class="hint">${esc(r.source_label)}${r.attachments.length?` · ${r.attachments.length} 附件`:''}</td>
     <td>${r.task_count?`<b>${r.task_count}</b> 个任务`:'<span class="hint">未设计</span>'}</td>
     <td class="hint">${esc(r.created_by||'')}<div>${relTime(r.created_at)}</div></td>
@@ -4429,7 +4429,7 @@ async function saveReqDlg() {
   try {
     const r = await api('/api/v1/requirements', {method:'POST', body: fd});
     $('reqDlg').close();
-    toast(r.parse_failed ? `需求已创建，${r.parse_failed} 个附件解析失败，请在详情中查看原因` : '需求已创建', r.parse_failed ? 'warn' : 'ok');
+    toast(r.parse_failed ? `需求已创建，${r.parse_failed} 个文件不合法，请在详情中查看原因` : (r.parsing ? `需求已创建，${r.parsing} 个附件正在后台解析` : '需求已创建'), r.parse_failed ? 'warn' : 'ok');
     openRequirement(r.req_id);
   } catch (e) { toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '创建';
@@ -4440,6 +4440,10 @@ async function renderRequirementDetail() {
   try { r = await api('/api/v1/requirements/' + curReq); } catch (e) { toast(e.message, 'err'); curReq = null; return renderRequirements(); }
   if (stale('reqs', _s)) return;
   _reqDetail = r; crumbForReqs();
+  if (r.parsing) {  // 附件后台解析中：3 秒后自动刷新（仍停留在本需求时）
+    clearTimeout(window._reqParsePoll);
+    window._reqParsePoll = setTimeout(() => { if (curReq === r.req_id && currentView === 'requirements') renderRequirementDetail(); }, 3000);
+  }
   const canEdit = can(r.project, 'requirement.edit'), canAI = can(r.project, 'requirement.ai'), canDesign = can(r.project, 'point.ai');
   const labels = r.analysis_labels;
   const t = r.trace, tot = t.totals;
@@ -4464,8 +4468,8 @@ async function renderRequirementDetail() {
   const attRows = r.attachments.map(a => `<tr>
     <td>${a.stored?`<a onclick="downloadFile(${jsq('/api/v1/requirements/'+r.req_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a>`:esc(a.filename)}</td>
     <td class="hint">${(a.size/1024).toFixed(1)} KB</td>
-    <td>${a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>`:`<span class="st rejected">解析失败</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
-    <td>${canEdit&&a.stored?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">重新解析</button>`:''}</td>
+    <td>${a.parsing?`<span class="st candidate">解析中</span> <span class="spin"></span><div class="hint">PDF 提取 / 图片理解在后台进行，可离开页面</div>`:a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>`:`<span class="st rejected">解析失败</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
+    <td>${canEdit&&a.stored&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">重新解析</button>`:''}</td>
     <td class="hint" style="white-space:pre-wrap;max-width:420px">${a.parsed?esc((a.preview||'').slice(0,300))+((a.preview||'').length>300?'…':''):''}</td></tr>`).join('');
   const rawTab = `<div class="section-t">需求原文<span class="hint">（永久保留，AI 结果不覆盖）</span></div>
     <pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:420px;overflow:auto;font:inherit">${esc(r.raw_text||'（原文来自附件）')}</pre>
@@ -4514,7 +4518,7 @@ async function renderRequirementDetail() {
         ${canDesign?`<button class="btn sm" ${designDisabled?'disabled':''} title="${openN?`还有 ${openN} 项待确认事项`:''}" onclick="openDesignDlg()">开始测试设计</button>`:''}
       </div></div>
     <div class="dtabs">
-      <button class="${reqTab==='raw'?'on':''}" onclick="reqTab='raw';renderRequirementDetail()">原文与附件${r.parse_failed?`<span class="cnt hot">${r.parse_failed}</span>`:''}</button>
+      <button class="${reqTab==='raw'?'on':''}" onclick="reqTab='raw';renderRequirementDetail()">原文与附件${r.parse_failed?`<span class="cnt hot">${r.parse_failed}</span>`:''}${r.parsing?` <span class="spin"></span>`:''}</button>
       <button class="${reqTab==='analysis'?'on':''}" onclick="reqTab='analysis';renderRequirementDetail()">AI 需求分析</button>
       <button class="${reqTab==='questions'?'on':''}" onclick="reqTab='questions';renderRequirementDetail()">待确认事项<span class="cnt ${openN?'hot':''}">${openN}</span></button>
       <button class="${reqTab==='trace'?'on':''}" onclick="reqTab='trace';renderRequirementDetail()">测试设计与追溯<span class="cnt">${r.task_count}</span></button>
@@ -4538,12 +4542,11 @@ async function setReqStatus(status) {
 async function uploadReqAtt(input) {
   const fd = new FormData(); for (const f of input.files) fd.append('files', f);
   toast('解析中…');
-  try { const r = await api(`/api/v1/requirements/${curReq}/attachments`, {method:'POST', body: fd}); toast(r.parse_failed?`已上传，${r.parse_failed} 个附件解析失败`:'已上传并解析', r.parse_failed?'warn':'ok'); renderRequirementDetail(); }
+  try { const r = await api(`/api/v1/requirements/${curReq}/attachments`, {method:'POST', body: fd}); toast(r.parse_failed?`已上传，${r.parse_failed} 个文件不合法`:'已上传，正在后台解析', r.parse_failed?'warn':'ok'); renderRequirementDetail(); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function reparseAtt(attId) {
-  toast('重新解析中…');
-  try { await jpost(`/api/v1/requirements/${curReq}/attachments/${attId}/reparse`, {}); renderRequirementDetail(); }
+  try { await jpost(`/api/v1/requirements/${curReq}/attachments/${attId}/reparse`, {}); toast('已开始重新解析'); renderRequirementDetail(); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function analyzeReq() {

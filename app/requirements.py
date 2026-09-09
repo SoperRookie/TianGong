@@ -42,6 +42,15 @@ class RequirementStore:
 
         self._doc = DocStore("requirements")
         self._items: dict[str, dict] = self._doc.load_all()
+        # 后台解析中的附件遇服务重启会永远停在「解析中」：启动时标为失败并给出可重解析的提示
+        for item in self._items.values():
+            dirty = False
+            for att in item.get("attachments") or []:
+                if att.get("parsing"):
+                    att.update(parsing=False, parsed=False, error="服务重启导致解析中断，请点「重新解析」")
+                    dirty = True
+            if dirty:
+                self._persist(item)
 
     def _persist(self, item: dict) -> None:
         self._doc.put(item["req_id"], item)
