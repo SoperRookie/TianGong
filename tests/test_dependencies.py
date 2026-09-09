@@ -168,3 +168,39 @@ async def test_需求依赖启发式建议(client):
     await client.post("/api/v1/projects/P/dependencies/edges", json=_edge("requirement", login, sms, "depends"))
     g = (await client.get("/api/v1/projects/P/dependencies", params={"kind": "requirement"})).json()
     assert g["hints"] == []   # 已建边不再提示
+
+
+async def test_自动识别_逐模块_输入含原文摘要与模块(client):
+    await client.post("/api/v1/projects", json={"name": "P"})
+    r1 = await _req(client, "P", "30086115.pdf")   # 迁移来的需求：标题只是文件名
+    r2 = await _req(client, "P", "登录")
+    await _cases_task(client, "P",
+                      make_case(case_id="TC-登录-001", title="验证注册新账号成功", module="登录"),
+                      make_case(case_id="TC-登录-002", title="验证正确账号密码登录成功", module="登录", precondition="已注册账号"),
+                      make_case(case_id="TC-下注-001", title="验证登录后可下注", module="下注", precondition="已登录"),
+                      make_case(case_id="TC-下注-002", title="验证余额不足不能下注", module="下注", precondition="已登录"))
+    # 需求图：未自动跑过 → auto_done=False；识别输入含原文摘要
+    g = (await client.get("/api/v1/projects/P/dependencies", params={"kind": "requirement"})).json()
+    assert g["auto_done"] is False
+    app.state.llm = StubLLM([json.dumps({"edges": [{"from": r2, "to": r1, "relation": "depends", "reason": "原文"}]}, ensure_ascii=False)])
+    r = (await client.post("/api/v1/projects/P/dependencies/infer", json={"kind": "requirement"})).json()
+    sent = app.state.llm.calls[0]["messages"][1]["content"]
+    assert "原文摘要：30086115.pdf的需求原文" in sent and len(r["proposed"]) == 1
+    g = (await client.get("/api/v1/projects/P/dependencies", params={"kind": "requirement"})).json()
+    assert g["auto_done"] is True and g["display_levels"][r2] == 1 and g["levels"] == {}   # 草稿参与布局、不参与链路
+    # 用例图「全部模块」：两个模块都未跑过 → 逐模块识别，各一次调用；第一步进入输入
+    g = (await client.get("/api/v1/projects/P/dependencies", params={"kind": "case"})).json()
+    assert g["auto_done"] is False and g["pending_modules"] == ["下注", "登录"] and g["modules"] == ["下注", "登录"]
+    app.state.llm = StubLLM([json.dumps({"edges": []}), json.dumps({"edges": []})])
+    r = (await client.post("/api/v1/projects/P/dependencies/infer", json={"kind": "case", "all_modules": True})).json()
+    assert r["modules"] == ["下注", "登录"] and r["remaining"] == 0 and len(app.state.llm.calls) == 2
+    assert "第一步：输入正确账号密码并提交" in app.state.llm.calls[1]["messages"][1]["content"]
+    g = (await client.get("/api/v1/projects/P/dependencies", params={"kind": "case"})).json()
+    assert g["auto_done"] is True and g["pending_modules"] == []
+    # 再次 all_modules 不重复调用；force 才重跑
+    app.state.llm = StubLLM([])
+    r = (await client.post("/api/v1/projects/P/dependencies/infer", json={"kind": "case", "all_modules": True})).json()
+    assert r["modules"] == []
+    app.state.llm = StubLLM([json.dumps({"edges": []}), json.dumps({"edges": []})])
+    r = (await client.post("/api/v1/projects/P/dependencies/infer", json={"kind": "case", "all_modules": True, "force": True})).json()
+    assert r["modules"] == ["下注", "登录"]
