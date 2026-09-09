@@ -209,6 +209,7 @@ async def test_自动识别_逐模块_输入含原文摘要与模块(client):
 async def test_旧任务字符串测试点不致图接口报错(client):
     await client.post("/api/v1/projects", json={"name": "P"})
     r1 = await _req(client, "P", "老需求")
+    await _req(client, "P", "另一条需求")   # 识别至少需要 2 个节点
     await _cases_task(client, "P", make_case())
     # 模拟项目化之前的任务：analysis.test_points 的 points 是纯字符串，且关联到需求
     tid = app.state.tasks.list(limit=10, project="P")[0].task_id
