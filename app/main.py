@@ -49,6 +49,8 @@ async def lifespan(app: FastAPI):
     from app.requirements import RequirementStore, migrate_tasks
 
     app.state.requirements = RequirementStore()
+    from app.dependencies import DependencyStore
+    app.state.dependencies = DependencyStore()
     migrated = migrate_tasks(app.state.tasks, app.state.requirements)
     if migrated:
         logger.info("M2 需求迁移：{} 个历史任务已建为需求实体并回填关联", migrated)
