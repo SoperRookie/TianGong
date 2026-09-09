@@ -5,6 +5,7 @@
 - uvicorn / fastapi 等标准库 logging 输出统一路由进 Loguru，格式一致。
 """
 
+import atexit
 import inspect
 import logging
 import sys
@@ -33,12 +34,28 @@ class InterceptHandler(logging.Handler):
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
+_file_handler: dict[str, int | None] = {"id": None}
+
+
+def close_file_handler() -> None:
+    """清空日志队列并移除文件 handler（释放 multiprocessing 信号量）；控制台输出保留。幂等。"""
+    hid = _file_handler.get("id")
+    if hid is None:
+        return
+    _file_handler["id"] = None
+    try:
+        logger.complete()
+        logger.remove(hid)
+    except Exception:
+        pass
+
+
 def setup_logging(level: str = "INFO", log_dir: Path | None = None) -> None:
     logger.remove()
     logger.add(sys.stderr, level=level.upper(), format=_FORMAT)
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
-        logger.add(
+        _file_handler["id"] = logger.add(
             log_dir / "tiangong_{time:YYYY-MM-DD}.log",
             level="DEBUG",
             format=_FORMAT,
@@ -47,6 +64,11 @@ def setup_logging(level: str = "INFO", log_dir: Path | None = None) -> None:
             encoding="utf-8",
             enqueue=True,  # 后台线程写文件，异步任务下不阻塞事件循环
         )
+        # enqueue 队列底层是 8 个 multiprocessing 信号量。uvicorn --reload 的服务子进程在收到 SIGTERM 后
+        # 会在服务结束时重新抛出信号自杀，不执行 atexit / finalizer，每重载一次就向资源追踪器留下
+        # 8 个「leaked semaphore」告警；因此文件 handler 在 lifespan 关闭阶段显式关闭（见 app/main.py），
+        # atexit 兜底覆盖非 reload 的正常退出。
+        atexit.register(close_file_handler)
 
     # 接管标准库与 uvicorn 的日志，统一走 Loguru。
     # 阈值取 INFO：openai/httpx 等三方库的 DEBUG 会携带完整请求体（含 base64 图片），
