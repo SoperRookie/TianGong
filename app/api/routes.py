@@ -4560,11 +4560,14 @@ def _dep_nodes(request: Request, project: str, kind: str, module: str = "", requ
                 if t is None:
                     continue
                 for m in ((t.analysis or {}).get("test_points") or []):
+                    if not isinstance(m, dict):
+                        continue
                     if m.get("module") and m["module"] not in modules:
                         modules.append(m["module"])
                     for pt in m.get("points") or []:
-                        if len(points) < 8 and pt.get("point"):
-                            points.append(str(pt["point"]))
+                        text = pt.get("point") if isinstance(pt, dict) else pt   # 旧任务的测试点是纯字符串
+                        if len(points) < 8 and text:
+                            points.append(str(text))
                 for c in ((t.result or {}).get("cases") or []):
                     if c.get("module") and c["module"] not in modules:
                         modules.append(c["module"])
