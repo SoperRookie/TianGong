@@ -13,7 +13,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from loguru import logger
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.agents import run_analysis, run_generation
 from app.agents.json_utils import LLMOutputError
@@ -4540,6 +4540,179 @@ async def list_all_cases(
         "total": total, "page": page, "page_size": page_size, "pages": pages,
         "modules": modules,
     }
+
+
+# ---- 项目依赖关系（项目知识库：需求功能依赖 / 用例依赖链路，项目级隔离）----
+
+
+def _dep_nodes(request: Request, project: str, kind: str, module: str = "", requirement_id: str = "") -> dict[str, dict]:
+    """依赖图节点全集（本项目）：需求实体 或 正式用例；用例可按模块 / 需求缩小范围。"""
+    if kind == "requirement":
+        nodes = {}
+        for r in request.app.state.requirements.list(project=project):
+            a = r.get("analysis") or {}
+            nodes[r["req_id"]] = {"id": r["req_id"], "title": r["title"], "status": r.get("status"),
+                                  "module_id": r.get("module_id"), "tasks": len(r.get("tasks") or []),
+                                  "features": a.get("features") or [], "dependencies": a.get("dependencies") or []}
+        return nodes
+    from app.reports import project_cases
+    records = request.app.state.tasks.list(limit=100000, project=project)
+    preconditions = {str(c.get("uid") or ""): c.get("precondition", "")
+                     for r in records for c in ((r.result or {}).get("cases") or [])}
+    nodes = {}
+    for row in project_cases(records, project):
+        if module and row["module"] != module:
+            continue
+        if requirement_id and row.get("requirement_id") != requirement_id:
+            continue
+        nodes[row["uid"]] = {"id": row["uid"], "case_id": row["case_id"], "title": row["title"], "module": row["module"],
+                             "task_id": row["task_id"], "requirement_id": row.get("requirement_id"),
+                             "requirement_title": row.get("requirement_title"), "review": row["review"],
+                             "priority": row["priority"], "precondition": preconditions.get(row["uid"], "")}
+    return nodes
+
+
+def _dep_kind(kind: str) -> str:
+    from app.dependencies import KINDS
+    if kind not in KINDS:
+        raise HTTPException(status_code=400, detail=f"kind 仅支持 {'/'.join(KINDS)}")
+    return kind
+
+
+@router.get("/api/v1/projects/{name}/dependencies")
+async def dependency_graph(request: Request, name: str, kind: str = "requirement", module: str = "",
+                           requirement_id: str = "") -> dict:
+    """项目依赖图：节点 + 边（含 AI 待确认草稿）+ 拓扑分层 / 最长链路 / 成环告警 + 免 AI 启发式建议。只含本项目数据。"""
+    from app.dependencies import KINDS, analyze_graph, requirement_hints
+
+    _require_project(request, name, "knowledge.view")
+    kind = _dep_kind(kind)
+    all_nodes = _dep_nodes(request, name, kind)
+    store = request.app.state.dependencies
+    edges = [e for e in store.edges(name, kind) if e["from"] in all_nodes and e["to"] in all_nodes]
+    if kind == "case" and (module or requirement_id):
+        scope = _dep_nodes(request, name, kind, module=module, requirement_id=requirement_id)
+        edges = [e for e in edges if e["from"] in scope or e["to"] in scope]
+        keep = set(scope) | {e["from"] for e in edges} | {e["to"] for e in edges}
+        all_nodes = {k: v for k, v in all_nodes.items() if k in keep}
+    graph = analyze_graph(all_nodes, edges)
+    hints = []
+    if kind == "requirement":
+        hints = requirement_hints(list(request.app.state.requirements.list(project=name)), edges)
+    nodes_out = {k: {kk: vv for kk, vv in v.items() if kk not in ("features", "dependencies", "precondition")}
+                 for k, v in all_nodes.items()}
+    return {"project": name, "kind": kind, "relations": KINDS[kind], "nodes": nodes_out, "edges": edges,
+            **graph, "hints": hints, "can_manage": _can_do(request, name, "knowledge.manage")}
+
+
+def _can_do(request: Request, project: str, action: str) -> bool:
+    from app.permissions import role_allows
+    return _is_admin(request) or role_allows(_project_role(request, project), action)
+
+
+class DependencyEdgeBody(BaseModel):
+    kind: str = "requirement"
+    src: str = Field(alias="from")
+    dst: str = Field(alias="to")
+    relation: str = "depends"
+    note: str = ""
+
+    model_config = {"populate_by_name": True}
+
+
+@router.post("/api/v1/projects/{name}/dependencies/edges")
+async def dependency_add(request: Request, name: str, body: DependencyEdgeBody) -> dict:
+    """人工新增依赖（立即生效）。两端必须都是本项目的需求 / 用例，前置关系不能成环。"""
+    from app.dependencies import DependencyError
+
+    _require_project(request, name, "knowledge.manage")
+    kind = _dep_kind(body.kind)
+    nodes = _dep_nodes(request, name, kind)
+    for nid in (body.src, body.dst):
+        if nid not in nodes:
+            raise HTTPException(status_code=400, detail=f"节点不属于项目「{name}」或不存在: {nid}")
+    try:
+        edge = request.app.state.dependencies.add(name, kind, body.src, body.dst, body.relation, body.note,
+                                                  by=_operator(request))
+    except DependencyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"edge": edge}
+
+
+@router.post("/api/v1/projects/{name}/dependencies/edges/{edge_id}/confirm")
+async def dependency_confirm(request: Request, name: str, edge_id: str, kind: str = "requirement") -> dict:
+    from app.dependencies import DependencyError
+
+    _require_project(request, name, "knowledge.manage")
+    try:
+        edge = request.app.state.dependencies.confirm(name, _dep_kind(kind), edge_id, by=_operator(request))
+    except DependencyError as e:
+        raise HTTPException(status_code=400 if "循环" in str(e) else 404, detail=str(e))
+    return {"edge": edge}
+
+
+@router.delete("/api/v1/projects/{name}/dependencies/edges/{edge_id}")
+async def dependency_delete(request: Request, name: str, edge_id: str, kind: str = "requirement") -> dict:
+    from app.dependencies import DependencyError
+
+    _require_project(request, name, "knowledge.manage")
+    try:
+        edge = request.app.state.dependencies.remove(name, _dep_kind(kind), edge_id)
+    except DependencyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"removed": edge}
+
+
+class DependencyInferBody(BaseModel):
+    kind: str = "requirement"
+    module: str = ""            # 用例图：按模块圈定范围（避免一次送入整库）
+    requirement_id: str = ""    # 用例图：按需求圈定范围
+    model: str | None = None
+
+
+@router.post("/api/v1/projects/{name}/dependencies/infer")
+async def dependency_infer(request: Request, name: str, body: DependencyInferBody) -> dict:
+    """AI 识别依赖：只在本项目节点间识别，结果以草稿（proposed）入库，人工确认后生效。用例图须圈定模块或需求。"""
+    from app.agents.graph import _chat_json
+    from app.agents.prompts import wrap_data
+    from app.dependencies import KINDS, DependencyError, build_infer_input
+    from app.prompts import prompt_text
+
+    _require_project(request, name, "knowledge.manage")
+    kind = _dep_kind(body.kind)
+    nodes = _dep_nodes(request, name, kind, module=body.module, requirement_id=body.requirement_id)
+    if kind == "case" and not (body.module or body.requirement_id):
+        raise HTTPException(status_code=400, detail="用例依赖识别请先选择模块或需求，避免一次送入整个用例库")
+    if len(nodes) < 2:
+        raise HTTPException(status_code=400, detail="范围内节点不足 2 个，无需识别")
+    if len(nodes) > 200:
+        raise HTTPException(status_code=400, detail=f"范围内节点 {len(nodes)} 个，超过单次识别上限 200，请缩小模块范围")
+    _ai_ctx(request, project=name, requirement_id=body.requirement_id or None,
+            purpose="需求依赖识别" if kind == "requirement" else "用例依赖识别")
+    label = "需求列表" if kind == "requirement" else "用例列表"
+    messages = [{"role": "system", "content": prompt_text("dependency_infer")},
+                {"role": "user", "content": f"{label}（同一项目「{name}」）：\n{wrap_data(label, build_infer_input(kind, list(nodes.values())))}"}]
+    try:
+        data, result = await _chat_json(request.app.state.llm, messages, body.model)
+    except UnknownModelError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    store = request.app.state.dependencies
+    proposed, skipped = [], []
+    for raw in data.get("edges") or []:
+        src, dst, rel = str(raw.get("from") or "").strip(), str(raw.get("to") or "").strip(), str(raw.get("relation") or "").strip()
+        if src not in nodes or dst not in nodes:
+            skipped.append({"from": src, "to": dst, "reason": "编号不在范围内"}); continue
+        if rel not in KINDS[kind]:
+            skipped.append({"from": src, "to": dst, "reason": f"关系类型不合法: {rel}"}); continue
+        try:
+            proposed.append(store.add(name, kind, src, dst, rel, by=_operator(request), source="ai",
+                                      reason=str(raw.get("reason") or "")))
+        except DependencyError as e:
+            skipped.append({"from": src, "to": dst, "reason": str(e)})
+    logger.info("项目 {} {}依赖识别：提案 {} 条，跳过 {} 条（{}）", name, kind, len(proposed), len(skipped), result.model_name)
+    return {"proposed": proposed, "skipped": skipped, "model": result.model_name, "nodes": len(nodes)}
 
 
 # ---- 报表 ----

@@ -318,6 +318,22 @@ tr.rowlink td { transition:background .1s; }
 .seg button { border:none; background:transparent; padding:4px 13px; border-radius:6px; font:inherit;
   font-size:12.5px; font-weight:550; color:var(--ink-2); cursor:pointer; }
 .seg button.on { background:#fff; color:var(--ink); box-shadow:var(--shadow); }
+.depgraph { width:100%; overflow:auto; border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+.depgraph svg { display:block; font-size:12px; }
+.depgraph .node rect { fill:#fff; stroke:var(--line); stroke-width:1.2; rx:8; cursor:pointer; }
+.depgraph .node:hover rect { stroke:var(--primary); }
+.depgraph .node.cyc rect { stroke:var(--danger); stroke-width:1.6; }
+.depgraph .node text { fill:var(--ink); }
+.depgraph .node .sub { fill:var(--ink-3); font-size:10.5px; }
+.depgraph .edge { fill:none; stroke:#7c8aa6; stroke-width:1.5; }
+.depgraph .edge.related { stroke:#b8c2d6; stroke-dasharray:4 3; }
+.depgraph .edge.data { stroke:#2f8f6f; }
+.depgraph .edge.proposed { stroke:var(--warn); stroke-dasharray:6 4; }
+.depgraph .lvl { fill:var(--ink-3); font-size:11px; letter-spacing:.08em; }
+.chain { display:flex; flex-wrap:wrap; align-items:center; gap:4px; padding:6px 0; border-bottom:1px dashed var(--line); font-size:12.5px; }
+.chain .cn { background:var(--line-2); border-radius:6px; padding:2px 8px; cursor:pointer; }
+.chain .cn:hover { background:var(--primary-50); color:var(--primary); }
+.chain .arr { color:var(--ink-3); }
 .stepper { display:flex; align-items:center; margin:16px 4px 6px; }
 .stepper .node { display:flex; flex-direction:column; align-items:center; gap:6px; width:90px; flex:none; }
 .stepper .dot { width:26px; height:26px; border-radius:50%; display:grid; place-items:center;
@@ -582,6 +598,18 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 
 <!-- 知识库（M5：公共 / 项目 / 模块 三层） -->
 <div class="layout" id="view-knowledge" style="display:none"><div class="page" style="max-width:1320px" id="knowledgeArea"></div></div>
+
+<!-- 依赖关系：添加 -->
+<dialog id="depDlg" style="width:620px">
+  <div class="dlg-h"><h3>添加依赖</h3><span class="meta" id="depHint"></span></div>
+  <div class="dlg-b">
+    <label class="f">下游（依赖方）</label><select id="depFrom"></select>
+    <label class="f">关系</label><select id="depRel"></select>
+    <label class="f">上游（被依赖 / 前置）</label><select id="depTo"></select>
+    <label class="f">说明<span class="hint">（可选）</span></label><input type="text" id="depNote" placeholder="如：下注前必须完成登录并有余额">
+  </div>
+  <div class="dlg-f"><button class="btn ghost" onclick="$('depDlg').close()">取消</button><button class="btn" onclick="saveDep()">保存</button></div>
+</dialog>
 
 <!-- 知识库上传 -->
 <dialog id="kbDlg" style="width:640px">
@@ -3987,8 +4015,10 @@ async function runSearch(q) {
 
 /* ---- 知识库（16 章三层） ---- */
 let kbLevelFilter = '', kbCatFilter = '', _kbMeta = null, kbQuery = '';
+let kbMode = 'docs', depKind = 'requirement', depModule = '', depFocus = null, _depGraph = null;
 async function renderKnowledge() {
   setCrumb('知识库');
+  if (kbMode === 'deps') return renderDependencies();
   let data, meta;
   try {
     [data, meta] = await Promise.all([api('/api/v1/knowledge/docs' + (curProjectName?`?space=${encodeURIComponent(curProjectName)}`:'')), _kbMeta || api('/api/v1/knowledge/categories')]);
@@ -4003,7 +4033,7 @@ async function renderKnowledge() {
   const canUpload = isSysAdmin() || (curUser.projects||[]).some(p => can(p.project, 'knowledge.manage'));
   const LV = {public:'approved', project:'candidate', module:'pending'};
   $('knowledgeArea').innerHTML = `<div class="card">
-    <div class="card-h"><h3>知识库</h3><span class="meta">公共知识库可跨项目使用（须显式标记，仅管理员维护）；项目 / 模块知识只在本项目检索，禁止跨项目污染</span>
+    <div class="card-h"><h3>知识库</h3>${kbModeSeg()}<span class="meta">公共知识库可跨项目使用（须显式标记，仅管理员维护）；项目 / 模块知识只在本项目检索，禁止跨项目污染</span>
       <div class="grow">
         <select style="width:120px" onchange="kbLevelFilter=this.value;renderKnowledge()"><option value="">全部层级</option>${Object.entries(meta.levels).map(([k,v])=>`<option value="${k}" ${kbLevelFilter===k?'selected':''}>${v}</option>`).join('')}</select>
         <select style="width:130px" onchange="kbCatFilter=this.value;renderKnowledge()"><option value="">全部分类</option>${Object.entries(meta.categories).map(([k,v])=>`<option value="${k}" ${kbCatFilter===k?'selected':''}>${v}</option>`).join('')}</select>
@@ -4021,6 +4051,131 @@ async function renderKnowledge() {
           <td class="hint">${esc(d.embedding_model)}</td><td class="hint">${esc(d.created_by||'')}</td><td class="hint">${relTime(d.created_at)}</td>
           <td>${(d.level==='public'?isSysAdmin():can(d.space,'knowledge.manage'))?`<button class="ibtn bad" title="删除" onclick="deleteKb('${d.doc_id}',${jsq(d.source)})">${IC.trash}</button>`:''}</td></tr>`).join('')
           || '<tr><td colspan="9"><div class="empty">暂无知识文档</div></td></tr>'}</tbody></table></div></div></div>`;
+}
+function kbModeSeg() {
+  return `<div class="seg" style="margin-left:10px"><button class="${kbMode==='docs'?'on':''}" onclick="kbMode='docs';renderKnowledge()">知识文档</button><button class="${kbMode==='deps'?'on':''}" onclick="kbMode='deps';renderKnowledge()">依赖关系</button></div>`;
+}
+const DEP_KIND_LABEL = {requirement:'需求功能依赖', case:'用例依赖链路'};
+async function renderDependencies() {
+  const head = `<div class="card-h"><h3>知识库</h3>${kbModeSeg()}<span class="meta">同一项目内的需求功能依赖与用例依赖链路；数据按项目隔离，AI 识别结果为草稿，确认后才生效</span></div>`;
+  if (!curProjectName) {
+    $('knowledgeArea').innerHTML = `<div class="card">${head}<div class="card-b"><div class="empty">请先在顶部「当前项目」选择一个项目，依赖关系按项目隔离展示</div></div></div>`; return;
+  }
+  const _s = tick('knowledge');
+  let g;
+  try {
+    const q = new URLSearchParams({kind: depKind}); if (depKind === 'case' && depModule) q.set('module', depModule);
+    g = await api(`/api/v1/projects/${encodeURIComponent(curProjectName)}/dependencies?` + q);
+  } catch (e) { $('knowledgeArea').innerHTML = `<div class="card">${head}<div class="card-b"><div class="empty">${esc(e.message)}</div></div></div>`; return; }
+  if (stale('knowledge', _s)) return;
+  _depGraph = g;
+  const nodes = g.nodes, edges = g.edges;
+  const label = id => { const n = nodes[id]; if (!n) return id; return depKind === 'case' ? `${n.case_id} ${n.title}` : n.title; };
+  const confirmed = edges.filter(e => e.status === 'confirmed'), proposed = edges.filter(e => e.status === 'proposed');
+  const modules = depKind === 'case' ? [...new Set(Object.values(nodes).map(n => n.module).filter(Boolean))].sort() : [];
+  const chains = g.chains.map(c => `<div class="chain">${c.map((id, i) => `${i?'<span class="arr">→</span>':''}<span class="cn" onclick="depFocusNode(${jsq(id)})" title="${esc(label(id))}">${esc(label(id).slice(0, 28))}</span>`).join('')}</div>`).join('');
+  $('knowledgeArea').innerHTML = `<div class="card">${head}
+    <div class="card-b">
+      <div class="toolbar" style="margin-top:0;margin-bottom:10px">
+        <div class="seg">${Object.entries(DEP_KIND_LABEL).map(([k, v]) => `<button class="${depKind===k?'on':''}" onclick="depKind=${jsq(k)};depModule='';depFocus=null;renderKnowledge()">${v}</button>`).join('')}</div>
+        ${depKind === 'case' ? `<select style="width:160px" onchange="depModule=this.value;depFocus=null;renderKnowledge()"><option value="">全部模块（只画有依赖的用例）</option>${modules.map(m => `<option ${depModule===m?'selected':''}>${esc(m)}</option>`).join('')}</select>` : ''}
+        <span class="hint">${esc(curProjectName)} · 节点 ${Object.keys(nodes).length} · 已生效 ${confirmed.length} 条${proposed.length?` · <b style="color:var(--warn)">待确认 ${proposed.length} 条</b>`:''}${g.cycles.length?` · <b style="color:var(--danger)">成环 ${g.cycles.length} 个节点</b>`:''}</span>
+        <div style="margin-left:auto;display:flex;gap:6px">
+          ${g.can_manage ? `<button class="btn ghost sm" onclick="depInfer()" title="${depKind==='case'?'按当前模块范围识别':'识别本项目需求间的功能依赖'}">AI 识别依赖</button><button class="btn sm" onclick="openDepDlg()">＋ 添加依赖</button>` : ''}
+        </div>
+      </div>
+      ${g.hints && g.hints.length ? `<div class="hint" style="margin-bottom:8px">需求分析里提到的外部依赖命中了本项目需求，可一键建立：${g.hints.map(h => `<span class="tag" style="cursor:pointer" onclick="depAdd(${jsq(h.from)},${jsq(h.to)},'depends',${jsq(h.reason)})" title="${esc(h.reason)}">${esc(label(h.from))} → ${esc(label(h.to))} ＋</span>`).join(' ')}</div>` : ''}
+      ${proposed.length ? `<div class="section-t">AI 识别待确认</div><div class="tbl-wrap" style="margin-bottom:12px"><table>
+        <tr><th>下游（依赖方）</th><th style="width:30px"></th><th>上游（被依赖）</th><th style="width:110px">关系</th><th>依据</th><th style="width:120px"></th></tr>
+        ${proposed.map(e => `<tr><td>${esc(label(e.from))}</td><td class="hint">→</td><td>${esc(label(e.to))}</td><td>${esc(g.relations[e.relation]||e.relation)}</td><td class="hint">${esc(e.reason||'')}</td>
+          <td><div class="rowops"><button class="btn sm" onclick="depConfirm(${jsq(e.edge_id)})">确认</button><button class="ibtn bad" title="丢弃" onclick="depDelete(${jsq(e.edge_id)})">${IC.x}</button></div></td></tr>`).join('')}</table></div>` : ''}
+      <div class="depgraph" id="depGraph">${depGraphSvg(g)}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:14px">
+        <div><div class="section-t">依赖链路 <span class="hint">（从最上游到最下游，仅已生效的前置关系）</span></div>${chains || '<div class="hint">还没有形成链路：添加两条以上前置关系后自动生成</div>'}</div>
+        <div><div class="section-t">全部关系 <span class="hint">${confirmed.length} 条</span></div>
+          <div class="tbl-wrap" style="max-height:320px"><table><tr><th>下游</th><th style="width:22px"></th><th>上游</th><th style="width:90px">关系</th><th style="width:60px">来源</th><th style="width:36px"></th></tr>
+          ${confirmed.map(e => `<tr><td>${esc(label(e.from))}</td><td class="hint">→</td><td>${esc(label(e.to))}</td><td>${esc(g.relations[e.relation]||e.relation)}</td><td class="hint">${e.source==='ai'?'AI':'人工'}${e.note?`<div title="${esc(e.note)}">${esc(e.note.slice(0,20))}</div>`:''}</td>
+            <td>${g.can_manage?`<button class="ibtn bad" title="删除" onclick="depDelete(${jsq(e.edge_id)})">${IC.trash}</button>`:''}</td></tr>`).join('') || '<tr><td colspan="6"><div class="empty">暂无依赖关系</div></td></tr>'}</table></div></div>
+      </div>
+    </div></div>`;
+}
+function depGraphSvg(g) {
+  // 分层布局：levels 给出的层级为列（上游在左），未参与前置链但有关联边的节点放最后一列
+  const nodes = g.nodes, edges = g.edges;
+  const shown = new Set([...g.involved, ...edges.flatMap(e => [e.from, e.to])].filter(id => nodes[id]));
+  if (depFocus && nodes[depFocus]) shown.add(depFocus);
+  if (!shown.size) return `<div class="empty">还没有依赖关系${g.can_manage?'：点「＋ 添加依赖」或「AI 识别依赖」开始':''}</div>`;
+  const maxLvl = Math.max(0, ...Object.values(g.levels));
+  const col = id => (id in g.levels ? g.levels[id] : maxLvl + 1);
+  const cols = {};
+  for (const id of shown) (cols[col(id)] = cols[col(id)] || []).push(id);
+  const W = 190, H = 46, GX = 70, GY = 16, PAD = 24;
+  const pos = {};
+  const ncols = Object.keys(cols).map(Number).sort((a, b) => a - b);
+  let maxRows = 0;
+  ncols.forEach((c, ci) => { cols[c].sort((a, b) => (nodes[a].case_id||nodes[a].title).localeCompare(nodes[b].case_id||nodes[b].title)); cols[c].forEach((id, ri) => { pos[id] = {x: PAD + ci * (W + GX), y: PAD + 22 + ri * (H + GY)}; }); maxRows = Math.max(maxRows, cols[c].length); });
+  const width = PAD * 2 + ncols.length * W + (ncols.length - 1) * GX, height = PAD * 2 + 22 + maxRows * (H + GY);
+  const cyc = new Set(g.cycles);
+  const lines = edges.filter(e => pos[e.from] && pos[e.to]).map(e => {
+    // from（下游，右）→ to（上游，左）：箭头指向被依赖方
+    const a = pos[e.from], b = pos[e.to];
+    const x1 = a.x, y1 = a.y + H / 2, x2 = b.x + W, y2 = b.y + H / 2;
+    const dx = Math.max(30, Math.abs(x1 - x2) / 2);
+    const d = x1 >= x2 ? `M${x1},${y1} C${x1 - dx},${y1} ${x2 + dx},${y2} ${x2},${y2}` : `M${a.x + W},${y1} C${a.x + W + dx},${y1} ${b.x - dx},${y2} ${b.x},${y2}`;
+    const cls = `edge ${e.relation}${e.status === 'proposed' ? ' proposed' : ''}`;
+    return `<path class="${cls}" d="${d}" marker-end="url(#depArrow)"><title>${esc(e.relation)}${e.reason?'：'+esc(e.reason):''}</title></path>`;
+  }).join('');
+  const boxes = [...shown].map(id => {
+    const n = nodes[id], p = pos[id];
+    const t1 = depKind === 'case' ? n.case_id : n.title, t2 = depKind === 'case' ? n.title : (n.status ? {draft:'草稿',pending_confirm:'待确认',confirmed:'已确认',designing:'设计中',done:'完成'}[n.status] || n.status : '');
+    const focus = depFocus === id ? 'stroke:var(--primary);stroke-width:2' : '';
+    return `<g class="node ${cyc.has(id)?'cyc':''}" transform="translate(${p.x},${p.y})" onclick="depOpen(${jsq(id)})"><rect width="${W}" height="${H}" style="${focus}"><title>${esc(depKind==='case'?n.case_id+' '+n.title:n.title)}</title></rect>
+      <text x="10" y="19" font-weight="600">${esc(String(t1).slice(0, 16))}</text><text class="sub" x="10" y="36">${esc(String(t2 || n.module || '').slice(0, 22))}</text></g>`;
+  }).join('');
+  const heads = ncols.map((c, ci) => `<text class="lvl" x="${PAD + ci * (W + GX)}" y="${PAD + 4}">${c <= maxLvl ? (c === 0 ? '上游 · 无前置' : `第 ${c} 层`) : '仅关联'}</text>`).join('');
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><defs><marker id="depArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#7c8aa6"/></marker></defs>${heads}${lines}${boxes}</svg>`;
+}
+function depFocusNode(id) { depFocus = id; renderKnowledge(); const el = $('depGraph'); if (el) el.scrollIntoView({block:'nearest'}); }
+function depOpen(id) {
+  const n = _depGraph && _depGraph.nodes[id]; if (!n) return;
+  if (depKind === 'case') openTaskFromProject(n.task_id, 'cases'); else openRequirement(id);
+}
+async function depAdd(src, dst, relation, note) {
+  try { await jpost(`/api/v1/projects/${encodeURIComponent(curProjectName)}/dependencies/edges`, {kind: depKind, from: src, to: dst, relation, note: note || ''}); toast('已添加依赖', 'ok'); renderKnowledge(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function depConfirm(id) {
+  try { await jpost(`/api/v1/projects/${encodeURIComponent(curProjectName)}/dependencies/edges/${id}/confirm?kind=${depKind}`, {}); toast('已确认', 'ok'); renderKnowledge(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function depDelete(id) {
+  try { await api(`/api/v1/projects/${encodeURIComponent(curProjectName)}/dependencies/edges/${id}?kind=${depKind}`, {method:'DELETE'}); toast('已删除', 'ok'); renderKnowledge(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function depInfer() {
+  if (depKind === 'case' && !depModule) return toast('用例依赖识别请先选择一个模块（避免一次送入整个用例库）', 'warn');
+  if (!await uiConfirm('AI 识别依赖', depKind === 'case' ? `将把模块「${depModule}」内的用例（编号、标题、前置条件）发给模型识别前置/数据依赖，结果为草稿，需人工确认。继续？` : '将把本项目全部需求（标题、功能点、外部依赖）发给模型识别功能依赖，结果为草稿，需人工确认。继续？')) return;
+  toast('识别中…');
+  try {
+    const r = await jpost(`/api/v1/projects/${encodeURIComponent(curProjectName)}/dependencies/infer`, {kind: depKind, module: depModule});
+    toast(`识别完成：提案 ${r.proposed.length} 条${r.skipped.length?`，忽略 ${r.skipped.length} 条无效输出`:''}`, r.proposed.length ? 'ok' : 'warn'); renderKnowledge();
+  } catch (e) { toast(e.message, 'err'); }
+}
+function openDepDlg() {
+  const nodes = _depGraph ? _depGraph.nodes : {};
+  const opts = Object.values(nodes).sort((a, b) => (a.case_id||a.title).localeCompare(b.case_id||b.title)).map(n => `<option value="${esc(n.id)}">${esc(depKind==='case'?`${n.case_id} ${n.title}`:n.title)}</option>`).join('');
+  $('depFrom').innerHTML = opts; $('depTo').innerHTML = opts; $('depNote').value = '';
+  $('depRel').innerHTML = Object.entries(_depGraph.relations).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('');
+  $('depHint').textContent = depKind === 'case' ? '下游用例执行前必须先执行上游用例（前置用例）；用例列表为本项目全部正式用例' : '下游需求的功能以上游需求为前置；列表为本项目全部需求';
+  if (depFocus && nodes[depFocus]) $('depFrom').value = depFocus;
+  $('depDlg').showModal();
+}
+async function saveDep() {
+  const src = $('depFrom').value, dst = $('depTo').value;
+  if (!src || !dst) return toast('请选择两端', 'warn');
+  if (src === dst) return toast('不能依赖自身', 'warn');
+  try { await jpost(`/api/v1/projects/${encodeURIComponent(curProjectName)}/dependencies/edges`, {kind: depKind, from: src, to: dst, relation: $('depRel').value, note: $('depNote').value.trim()}); $('depDlg').close(); toast('已添加依赖', 'ok'); renderKnowledge(); }
+  catch (e) { toast(e.message, 'err'); }
 }
 async function kbSearch() {
   kbQuery = $('kbQ').value.trim(); if (!kbQuery) return;

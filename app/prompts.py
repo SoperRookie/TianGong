@@ -41,6 +41,8 @@ PROMPT_DEFS: list[dict] = [
     {"key": "point_supplement", "name": "测试点人工补充", "kind": "system",
      "default": "你是资深测试分析师，负责按用户要求补充测试点。一个测试点对应一个明确验证目标。",
      "where": "测试点审核 → AI 补充测试点"},
+    {"key": "dependency_infer", "name": "依赖关系识别", "kind": "system", "default": P.DEPENDENCY_INFER_SYSTEM,
+     "where": "知识库 → 依赖关系 → AI 识别（需求功能依赖 / 用例依赖链路）"},
     {"key": "vision_image", "name": "图片理解（Vision）", "kind": "user", "default": None,
      "where": "需求图片 / 文档内嵌图片解析"},
     {"key": "knowledge_cases_block", "name": "注入块：历史用例知识", "kind": "block", "default": P.KNOWLEDGE_CASES_BLOCK,
