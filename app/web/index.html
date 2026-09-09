@@ -4070,6 +4070,11 @@ async function renderDependencies() {
   if (stale('knowledge', _s)) return;
   _depGraph = g;
   const nodes = g.nodes, edges = g.edges;
+  const autoKey = `${curProjectName}|${depKind}|${depModule}`;
+  if (!g.auto_done && g.can_manage && Object.keys(nodes).length >= 2 && !_depAutoRunning.has(autoKey)) {
+    _depAutoRunning.add(autoKey);
+    depAutoInfer(autoKey, g.pending_modules);   // 不阻塞渲染；完成后重绘
+  }
   const label = id => { const n = nodes[id]; if (!n) return id; return depKind === 'case' ? `${n.case_id} ${n.title}` : n.title; };
   const confirmed = edges.filter(e => e.status === 'confirmed'), proposed = edges.filter(e => e.status === 'proposed');
   const modules = depKind === 'case' ? [...new Set(Object.values(nodes).map(n => n.module).filter(Boolean))].sort() : [];
@@ -4079,13 +4084,13 @@ async function renderDependencies() {
       <div class="toolbar" style="margin-top:0;margin-bottom:10px">
         <div class="seg">${Object.entries(DEP_KIND_LABEL).map(([k, v]) => `<button class="${depKind===k?'on':''}" onclick="depKind=${jsq(k)};depModule='';depFocus=null;renderKnowledge()">${v}</button>`).join('')}</div>
         ${depKind === 'case' ? `<select style="width:160px" onchange="depModule=this.value;depFocus=null;renderKnowledge()"><option value="">全部模块（只画有依赖的用例）</option>${modules.map(m => `<option ${depModule===m?'selected':''}>${esc(m)}</option>`).join('')}</select>` : ''}
-        <span class="hint">${esc(curProjectName)} · 节点 ${Object.keys(nodes).length} · 已生效 ${confirmed.length} 条${proposed.length?` · <b style="color:var(--warn)">待确认 ${proposed.length} 条</b>`:''}${g.cycles.length?` · <b style="color:var(--danger)">成环 ${g.cycles.length} 个节点</b>`:''}</span>
+        <span class="hint">${esc(curProjectName)} · 节点 ${Object.keys(nodes).length} · 已生效 ${confirmed.length} 条${_depAutoRunning.has(autoKey)?` · <span class="spin"></span> AI 正在自动识别${g.pending_modules&&g.pending_modules.length?`（${g.pending_modules.length} 个模块）`:''}`:''}${proposed.length?` · <b style="color:var(--warn)">待确认 ${proposed.length} 条</b>`:''}${g.cycles.length?` · <b style="color:var(--danger)">成环 ${g.cycles.length} 个节点</b>`:''}</span>
         <div style="margin-left:auto;display:flex;gap:6px">
           ${g.can_manage ? `<button class="btn ghost sm" onclick="depInfer()" title="${depKind==='case'?'按当前模块范围识别':'识别本项目需求间的功能依赖'}">AI 识别依赖</button><button class="btn sm" onclick="openDepDlg()">＋ 添加依赖</button>` : ''}
         </div>
       </div>
       ${g.hints && g.hints.length ? `<div class="hint" style="margin-bottom:8px">需求分析里提到的外部依赖命中了本项目需求，可一键建立：${g.hints.map(h => `<span class="tag" style="cursor:pointer" onclick="depAdd(${jsq(h.from)},${jsq(h.to)},'depends',${jsq(h.reason)})" title="${esc(h.reason)}">${esc(label(h.from))} → ${esc(label(h.to))} ＋</span>`).join(' ')}</div>` : ''}
-      ${proposed.length ? `<div class="section-t">AI 识别待确认</div><div class="tbl-wrap" style="margin-bottom:12px"><table>
+      ${proposed.length ? `<div class="section-t">AI 识别待确认 <span class="hint">（草稿：确认后才进入链路）</span>${g.can_manage?`<button class="btn ghost sm" style="margin-left:8px" onclick="depConfirmAll()">全部确认（${proposed.length}）</button>`:''}</div><div class="tbl-wrap" style="margin-bottom:12px"><table>
         <tr><th>下游（依赖方）</th><th style="width:30px"></th><th>上游（被依赖）</th><th style="width:110px">关系</th><th>依据</th><th style="width:120px"></th></tr>
         ${proposed.map(e => `<tr><td>${esc(label(e.from))}</td><td class="hint">→</td><td>${esc(label(e.to))}</td><td>${esc(g.relations[e.relation]||e.relation)}</td><td class="hint">${esc(e.reason||'')}</td>
           <td><div class="rowops"><button class="btn sm" onclick="depConfirm(${jsq(e.edge_id)})">确认</button><button class="ibtn bad" title="丢弃" onclick="depDelete(${jsq(e.edge_id)})">${IC.x}</button></div></td></tr>`).join('')}</table></div>` : ''}
@@ -4099,14 +4104,34 @@ async function renderDependencies() {
       </div>
     </div></div>`;
 }
+const _depAutoRunning = new Set();
+async function depAutoInfer(autoKey, pendingModules) {
+  try {
+    const body = depKind === 'case' ? (depModule ? {kind: 'case', module: depModule} : {kind: 'case', all_modules: true}) : {kind: 'requirement'};
+    const r = await jpost(`/api/v1/projects/${encodeURIComponent(curProjectName)}/dependencies/infer`, body);
+    const n = (r.proposed || []).length;
+    toast(n ? `AI 自动识别出 ${n} 条依赖，请在「待确认」区确认` : 'AI 自动识别完成：未发现明确依赖，可手动添加', n ? 'ok' : '');
+  } catch (e) { toast('自动识别失败：' + e.message, 'err'); }
+  finally { _depAutoRunning.delete(autoKey); if (currentView === 'knowledge' && kbMode === 'deps') renderKnowledge(); }
+}
+async function depConfirmAll() {
+  const ids = (_depGraph.edges || []).filter(e => e.status === 'proposed').map(e => e.edge_id);
+  let ok = 0, fail = [];
+  for (const id of ids) {
+    try { await jpost(`/api/v1/projects/${encodeURIComponent(curProjectName)}/dependencies/edges/${id}/confirm?kind=${depKind}`, {}); ok++; }
+    catch (e) { fail.push(e.message); }
+  }
+  toast(`已确认 ${ok} 条${fail.length?`，${fail.length} 条失败：${fail[0]}`:''}`, fail.length ? 'warn' : 'ok'); renderKnowledge();
+}
 function depGraphSvg(g) {
-  // 分层布局：levels 给出的层级为列（上游在左），未参与前置链但有关联边的节点放最后一列
+  // 分层布局：display_levels（含 AI 草稿）给出的层级为列（上游在左），未参与前置链但有关联边的节点放最后一列
   const nodes = g.nodes, edges = g.edges;
-  const shown = new Set([...g.involved, ...edges.flatMap(e => [e.from, e.to])].filter(id => nodes[id]));
+  const levels = g.display_levels || g.levels;
+  const shown = new Set([...edges.flatMap(e => [e.from, e.to])].filter(id => nodes[id]));
   if (depFocus && nodes[depFocus]) shown.add(depFocus);
   if (!shown.size) return `<div class="empty">还没有依赖关系${g.can_manage?'：点「＋ 添加依赖」或「AI 识别依赖」开始':''}</div>`;
-  const maxLvl = Math.max(0, ...Object.values(g.levels));
-  const col = id => (id in g.levels ? g.levels[id] : maxLvl + 1);
+  const maxLvl = Math.max(0, ...Object.values(levels));
+  const col = id => (id in levels ? levels[id] : maxLvl + 1);
   const cols = {};
   for (const id of shown) (cols[col(id)] = cols[col(id)] || []).push(id);
   const W = 190, H = 46, GX = 70, GY = 16, PAD = 24;
@@ -4153,11 +4178,15 @@ async function depDelete(id) {
   catch (e) { toast(e.message, 'err'); }
 }
 async function depInfer() {
-  if (depKind === 'case' && !depModule) return toast('用例依赖识别请先选择一个模块（避免一次送入整个用例库）', 'warn');
-  if (!await uiConfirm('AI 识别依赖', depKind === 'case' ? `将把模块「${depModule}」内的用例（编号、标题、前置条件）发给模型识别前置/数据依赖，结果为草稿，需人工确认。继续？` : '将把本项目全部需求（标题、功能点、外部依赖）发给模型识别功能依赖，结果为草稿，需人工确认。继续？')) return;
+  const msg = depKind === 'case'
+    ? (depModule ? `将把模块「${depModule}」内的用例（编号、标题、前置条件、第一步）发给模型识别前置/数据依赖，结果为草稿，需人工确认。继续？`
+                 : `将逐模块把本项目用例发给模型识别依赖（每模块一次调用，单次最多 20 个模块），结果为草稿，需人工确认。继续？`)
+    : '将把本项目全部需求（标题、原文摘要、模块、测试点、外部依赖）发给模型识别功能依赖，结果为草稿，需人工确认。继续？';
+  if (!await uiConfirm('AI 识别依赖', msg)) return;
   toast('识别中…');
   try {
-    const r = await jpost(`/api/v1/projects/${encodeURIComponent(curProjectName)}/dependencies/infer`, {kind: depKind, module: depModule});
+    const body = depKind === 'case' && !depModule ? {kind: 'case', all_modules: true, force: true} : {kind: depKind, module: depModule};
+    const r = await jpost(`/api/v1/projects/${encodeURIComponent(curProjectName)}/dependencies/infer`, body);
     toast(`识别完成：提案 ${r.proposed.length} 条${r.skipped.length?`，忽略 ${r.skipped.length} 条无效输出`:''}`, r.proposed.length ? 'ok' : 'warn'); renderKnowledge();
   } catch (e) { toast(e.message, 'err'); }
 }

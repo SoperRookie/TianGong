@@ -4547,18 +4547,39 @@ async def list_all_cases(
 
 def _dep_nodes(request: Request, project: str, kind: str, module: str = "", requirement_id: str = "") -> dict[str, dict]:
     """依赖图节点全集（本项目）：需求实体 或 正式用例；用例可按模块 / 需求缩小范围。"""
+    tasks_store = request.app.state.tasks
     if kind == "requirement":
         nodes = {}
         for r in request.app.state.requirements.list(project=project):
             a = r.get("analysis") or {}
+            # 迁移来的需求往往只有文件名标题、没有分析：用原文摘要 + 关联任务的模块/测试点补足识别输入
+            modules: list[str] = []
+            points: list[str] = []
+            for tid in r.get("tasks") or []:
+                t = tasks_store.get(tid)
+                if t is None:
+                    continue
+                for m in ((t.analysis or {}).get("test_points") or []):
+                    if m.get("module") and m["module"] not in modules:
+                        modules.append(m["module"])
+                    for pt in m.get("points") or []:
+                        if len(points) < 8 and pt.get("point"):
+                            points.append(str(pt["point"]))
+                for c in ((t.result or {}).get("cases") or []):
+                    if c.get("module") and c["module"] not in modules:
+                        modules.append(c["module"])
+            summary = " ".join((r.get("raw_text") or "").split())[:240]
             nodes[r["req_id"]] = {"id": r["req_id"], "title": r["title"], "status": r.get("status"),
                                   "module_id": r.get("module_id"), "tasks": len(r.get("tasks") or []),
-                                  "features": a.get("features") or [], "dependencies": a.get("dependencies") or []}
+                                  "features": a.get("features") or [], "dependencies": a.get("dependencies") or [],
+                                  "summary": summary, "modules": modules[:12], "points": points}
         return nodes
     from app.reports import project_cases
-    records = request.app.state.tasks.list(limit=100000, project=project)
+    records = tasks_store.list(limit=100000, project=project)
     preconditions = {str(c.get("uid") or ""): c.get("precondition", "")
                      for r in records for c in ((r.result or {}).get("cases") or [])}
+    first_steps = {str(c.get("uid") or ""): ((c.get("steps") or [{}])[0] or {}).get("action", "")
+                   for r in records for c in ((r.result or {}).get("cases") or [])}
     nodes = {}
     for row in project_cases(records, project):
         if module and row["module"] != module:
@@ -4568,8 +4589,13 @@ def _dep_nodes(request: Request, project: str, kind: str, module: str = "", requ
         nodes[row["uid"]] = {"id": row["uid"], "case_id": row["case_id"], "title": row["title"], "module": row["module"],
                              "task_id": row["task_id"], "requirement_id": row.get("requirement_id"),
                              "requirement_title": row.get("requirement_title"), "review": row["review"],
-                             "priority": row["priority"], "precondition": preconditions.get(row["uid"], "")}
+                             "priority": row["priority"], "precondition": preconditions.get(row["uid"], ""),
+                             "first_step": first_steps.get(row["uid"], "")}
     return nodes
+
+
+def _dep_scope(kind: str, module: str = "", requirement_id: str = "") -> str:
+    return f"{kind}:{module or requirement_id or '*'}"
 
 
 def _dep_kind(kind: str) -> str:
@@ -4596,13 +4622,25 @@ async def dependency_graph(request: Request, name: str, kind: str = "requirement
         keep = set(scope) | {e["from"] for e in edges} | {e["to"] for e in edges}
         all_nodes = {k: v for k, v in all_nodes.items() if k in keep}
     graph = analyze_graph(all_nodes, edges)
+    display = analyze_graph(all_nodes, edges, include_proposed=True)
     hints = []
     if kind == "requirement":
         hints = requirement_hints(list(request.app.state.requirements.list(project=name)), edges)
-    nodes_out = {k: {kk: vv for kk, vv in v.items() if kk not in ("features", "dependencies", "precondition")}
+    nodes_out = {k: {kk: vv for kk, vv in v.items()
+                     if kk not in ("features", "dependencies", "precondition", "summary", "points", "first_step")}
                  for k, v in all_nodes.items()}
+    # 自动识别状态：需求图整体一个范围；用例图按模块 / 需求各一个范围，全部模块视图看各模块是否都跑过
+    all_modules = sorted({n["module"] for n in all_nodes.values() if n.get("module")}) if kind == "case" else []
+    if kind == "case" and not (module or requirement_id):
+        pending_modules = [m for m in all_modules if not store.auto_done(name, _dep_scope(kind, module=m))]
+        auto_done = not pending_modules
+    else:
+        pending_modules = []
+        auto_done = store.auto_done(name, _dep_scope(kind, module, requirement_id)) is not None
     return {"project": name, "kind": kind, "relations": KINDS[kind], "nodes": nodes_out, "edges": edges,
-            **graph, "hints": hints, "can_manage": _can_do(request, name, "knowledge.manage")}
+            **graph, "display_levels": display["levels"], "hints": hints,
+            "auto_done": auto_done, "pending_modules": pending_modules, "modules": all_modules,
+            "can_manage": _can_do(request, name, "knowledge.manage")}
 
 
 def _can_do(request: Request, project: str, action: str) -> bool:
@@ -4667,38 +4705,37 @@ class DependencyInferBody(BaseModel):
     kind: str = "requirement"
     module: str = ""            # 用例图：按模块圈定范围（避免一次送入整库）
     requirement_id: str = ""    # 用例图：按需求圈定范围
+    all_modules: bool = False   # 用例图：逐模块识别尚未自动跑过的模块（打开「全部模块」视图时的自动生成）
+    force: bool = False         # all_modules 时忽略「已跑过」标记，全部重新识别（人工点按钮）
     model: str | None = None
 
 
-@router.post("/api/v1/projects/{name}/dependencies/infer")
-async def dependency_infer(request: Request, name: str, body: DependencyInferBody) -> dict:
-    """AI 识别依赖：只在本项目节点间识别，结果以草稿（proposed）入库，人工确认后生效。用例图须圈定模块或需求。"""
+async def _infer_scope(request: Request, name: str, kind: str, module: str, requirement_id: str,
+                       model: str | None) -> dict:
     from app.agents.graph import _chat_json
     from app.agents.prompts import wrap_data
     from app.dependencies import KINDS, DependencyError, build_infer_input
     from app.prompts import prompt_text
 
-    _require_project(request, name, "knowledge.manage")
-    kind = _dep_kind(body.kind)
-    nodes = _dep_nodes(request, name, kind, module=body.module, requirement_id=body.requirement_id)
-    if kind == "case" and not (body.module or body.requirement_id):
-        raise HTTPException(status_code=400, detail="用例依赖识别请先选择模块或需求，避免一次送入整个用例库")
+    store = request.app.state.dependencies
+    nodes = _dep_nodes(request, name, kind, module=module, requirement_id=requirement_id)
+    scope = _dep_scope(kind, module, requirement_id)
     if len(nodes) < 2:
-        raise HTTPException(status_code=400, detail="范围内节点不足 2 个，无需识别")
+        store.mark_auto(name, scope)
+        return {"proposed": [], "skipped": [], "model": None, "nodes": len(nodes), "scope": scope, "reason": "节点不足 2 个"}
     if len(nodes) > 200:
         raise HTTPException(status_code=400, detail=f"范围内节点 {len(nodes)} 个，超过单次识别上限 200，请缩小模块范围")
-    _ai_ctx(request, project=name, requirement_id=body.requirement_id or None,
-            purpose="需求依赖识别" if kind == "requirement" else "用例依赖识别")
+    _ai_ctx(request, project=name, requirement_id=requirement_id or None)
     label = "需求列表" if kind == "requirement" else "用例列表"
+    scope_text = f"「{name}」" + (f" 模块「{module}」" if module else "")
     messages = [{"role": "system", "content": prompt_text("dependency_infer")},
-                {"role": "user", "content": f"{label}（同一项目「{name}」）：\n{wrap_data(label, build_infer_input(kind, list(nodes.values())))}"}]
+                {"role": "user", "content": f"{label}（同一项目{scope_text}）：\n{wrap_data(label, build_infer_input(kind, list(nodes.values())))}"}]
     try:
-        data, result = await _chat_json(request.app.state.llm, messages, body.model)
+        data, result = await _chat_json(request.app.state.llm, messages, model)
     except UnknownModelError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError) as e:
         raise HTTPException(status_code=502, detail=str(e))
-    store = request.app.state.dependencies
     proposed, skipped = [], []
     for raw in data.get("edges") or []:
         src, dst, rel = str(raw.get("from") or "").strip(), str(raw.get("to") or "").strip(), str(raw.get("relation") or "").strip()
@@ -4711,8 +4748,35 @@ async def dependency_infer(request: Request, name: str, body: DependencyInferBod
                                       reason=str(raw.get("reason") or "")))
         except DependencyError as e:
             skipped.append({"from": src, "to": dst, "reason": str(e)})
-    logger.info("项目 {} {}依赖识别：提案 {} 条，跳过 {} 条（{}）", name, kind, len(proposed), len(skipped), result.model_name)
-    return {"proposed": proposed, "skipped": skipped, "model": result.model_name, "nodes": len(nodes)}
+    store.mark_auto(name, scope)
+    logger.info("项目 {} {} 依赖识别（{}）：提案 {} 条，跳过 {} 条（{}）", name, kind, scope, len(proposed), len(skipped), result.model_name)
+    return {"proposed": proposed, "skipped": skipped, "model": result.model_name, "nodes": len(nodes), "scope": scope}
+
+
+@router.post("/api/v1/projects/{name}/dependencies/infer")
+async def dependency_infer(request: Request, name: str, body: DependencyInferBody) -> dict:
+    """AI 识别依赖：只在本项目节点间识别，结果以草稿（proposed）入库，人工确认后生效。
+    需求图整体识别；用例图按模块 / 需求圈定，或 all_modules 逐模块识别尚未跑过的模块（前端打开视图时自动触发）。"""
+    _require_project(request, name, "knowledge.manage")
+    kind = _dep_kind(body.kind)
+    if kind == "case" and body.all_modules:
+        store = request.app.state.dependencies
+        modules = sorted({n["module"] for n in _dep_nodes(request, name, kind).values() if n.get("module")})
+        todo = [m for m in modules if body.force or store.auto_done(name, _dep_scope(kind, module=m)) is None]
+        results = []
+        for m in todo[:20]:   # 单次最多 20 个模块，其余下次打开视图继续
+            try:
+                results.append(await _infer_scope(request, name, kind, m, "", body.model))
+            except HTTPException as e:
+                results.append({"scope": _dep_scope(kind, module=m), "proposed": [], "skipped": [], "error": e.detail})
+        return {"proposed": [p for r in results for p in r["proposed"]],
+                "skipped": [x for r in results for x in r["skipped"]],
+                "modules": [r["scope"].split(":", 1)[1] for r in results],
+                "errors": [r["error"] for r in results if r.get("error")],
+                "remaining": max(0, len(todo) - 20)}
+    if kind == "case" and not (body.module or body.requirement_id):
+        raise HTTPException(status_code=400, detail="用例依赖识别请先选择模块或需求，避免一次送入整个用例库")
+    return await _infer_scope(request, name, kind, body.module, body.requirement_id, body.model)
 
 
 # ---- 报表 ----

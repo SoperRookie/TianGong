@@ -39,9 +39,25 @@ class DependencyStore:
     def _project_doc(self, project: str) -> dict:
         doc = self._docs.get(project)
         if doc is None:
-            doc = {"project": project, "requirement": [], "case": [], "updated_at": _now()}
+            doc = {"project": project, "requirement": [], "case": [], "auto": {}, "updated_at": _now()}
             self._docs[project] = doc
+        doc.setdefault("auto", {})
         return doc
+
+    # ---- 自动识别标记：同一范围只自动跑一次（人工可再次手动触发）----
+
+    def auto_done(self, project: str, scope: str) -> str | None:
+        return self._project_doc(project)["auto"].get(scope)
+
+    def mark_auto(self, project: str, scope: str) -> None:
+        self._project_doc(project)["auto"][scope] = _now()
+        self._persist(project)
+
+    def reset_auto(self, project: str, kind: str) -> None:
+        auto = self._project_doc(project)["auto"]
+        for key in [k for k in auto if k.startswith(kind + ":")]:
+            auto.pop(key)
+        self._persist(project)
 
     def _persist(self, project: str) -> None:
         doc = self._docs[project]
@@ -129,13 +145,14 @@ class DependencyStore:
 # ---- 图分析：分层、链路、环 ----
 
 
-def analyze_graph(nodes: dict[str, dict], edges: list[dict]) -> dict:
-    """对已生效的有序关系做拓扑分层（前置在上游）、最长链路与成环检测。
+def analyze_graph(nodes: dict[str, dict], edges: list[dict], include_proposed: bool = False) -> dict:
+    """对有序关系做拓扑分层（前置在上游）、最长链路与成环检测。默认只看已生效的边；
+    include_proposed=True 时把 AI 草稿也纳入（用于画图布局，链路语义仍以已生效为准）。
 
     返回 levels: {node_id: 层级}（0 = 无前置）、chains: 最长前置链（从最上游到最下游，节点 id 列表，最多 30 条）、
     cycles: 成环节点集合（数据被外部改动后仍可能出现，用于告警）。
     """
-    ordered = [e for e in edges if e["relation"] in ORDERED and e["status"] == "confirmed"
+    ordered = [e for e in edges if e["relation"] in ORDERED and (include_proposed or e["status"] == "confirmed")
                and e["from"] in nodes and e["to"] in nodes]
     # from 依赖 to：to 是上游。按 to → from 方向建拓扑（上游先）
     down: dict[str, list[str]] = defaultdict(list)   # 上游 → 下游
@@ -202,12 +219,21 @@ def build_infer_input(kind: str, nodes: list[dict]) -> str:
     lines = []
     for n in nodes:
         if kind == "requirement":
-            summary = "；".join((n.get("features") or [])[:6])
-            deps = "；".join((n.get("dependencies") or [])[:4])
-            lines.append(f"[{n['id']}] {n['title']}" + (f" | 功能点：{summary}" if summary else "")
-                         + (f" | 外部依赖：{deps}" if deps else ""))
+            parts = [f"[{n['id']}] {n['title']}"]
+            if n.get("summary"):
+                parts.append(f"原文摘要：{n['summary']}")
+            if n.get("features"):
+                parts.append("功能点：" + "；".join(n["features"][:6]))
+            if n.get("modules"):
+                parts.append("模块：" + "、".join(n["modules"][:8]))
+            if n.get("points"):
+                parts.append("测试点：" + "；".join(n["points"][:6]))
+            if n.get("dependencies"):
+                parts.append("外部依赖：" + "；".join(n["dependencies"][:4]))
+            lines.append(" | ".join(parts))
         else:
             pre = (n.get("precondition") or "").strip().replace("\n", " ")
+            first = (n.get("first_step") or "").strip().replace("\n", " ")
             lines.append(f"[{n['id']}] {n.get('case_id', '')} {n['title']} | 模块：{n.get('module', '')}"
-                         + (f" | 前置条件：{pre[:120]}" if pre else ""))
+                         + (f" | 前置条件：{pre[:120]}" if pre else "") + (f" | 第一步：{first[:80]}" if first else ""))
     return "\n".join(lines)
