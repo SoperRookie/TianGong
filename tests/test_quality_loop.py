@@ -562,3 +562,36 @@ async def test_learning_loop_候选确认与注入(client):
     assert resp.status_code == 200
     gen_prompt = app.state.llm.calls[1]["messages"][1]["content"]
     assert "步骤保持精简" in gen_prompt and "团队/项目测试规则" in gen_prompt
+
+
+async def test_后台任务先入库再解析_文件解析失败留痕(client):
+    """上传后立即可见（进度 parsing），解析失败的任务标为失败而不是消失；解析成功进入拆解。"""
+    import asyncio
+
+    # 不支持的格式：解析在后台失败，任务留痕
+    app.state.llm = StubLLM([])
+    resp = await client.post("/api/v1/tasks", files={"files": ("需求.xyz", b"???", "application/octet-stream")},
+                             data={"confirm_points": "true", "async_mode": "true"})
+    assert resp.status_code == 200 and resp.json()["status"] == "queued"
+    task_id = resp.json()["task_id"]
+    listed = (await client.get("/api/v1/tasks")).json()["tasks"]
+    assert any(t["task_id"] == task_id and t["sources"] == ["需求.xyz"] for t in listed)   # 解析前已在列表
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+        if task["status"] == "failed":
+            break
+    assert task["status"] == "failed" and task["error"] and task["progress"] is None
+    assert (await client.post(f"/api/v1/tasks/{task_id}/retry")).status_code == 409   # 无需求文本不可重试
+    # 正常文件：后台解析 → 拆解 → 待确认
+    app.state.llm = StubLLM([ANALYST_REPLY_V2, GAP_REPLY])
+    resp = await client.post("/api/v1/tasks", files={"files": ("需求.txt", "登录需求：账号密码登录".encode(), "text/plain")},
+                             data={"confirm_points": "true", "async_mode": "true"})
+    task_id = resp.json()["task_id"]
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+        if task["status"] == "awaiting_confirmation" and task["progress"] is None:
+            break
+    assert task["status"] == "awaiting_confirmation" and task["sources"] == ["需求.txt"]
+    assert "账号密码登录" in task["context"]["requirement"]
