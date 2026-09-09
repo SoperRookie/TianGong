@@ -79,6 +79,9 @@ async def lifespan(app: FastAPI):
     set_current(None)
     _release_instance_lock()
     logger.info("服务关闭")
+    from app.logging_setup import close_file_handler
+
+    close_file_handler()  # reload 子进程随后被信号终止，不会再有退出钩子：这里是释放日志队列的最后机会
 
 
 _lock_handle = None
