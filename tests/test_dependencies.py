@@ -204,3 +204,20 @@ async def test_自动识别_逐模块_输入含原文摘要与模块(client):
     app.state.llm = StubLLM([json.dumps({"edges": []}), json.dumps({"edges": []})])
     r = (await client.post("/api/v1/projects/P/dependencies/infer", json={"kind": "case", "all_modules": True, "force": True})).json()
     assert r["modules"] == ["下注", "登录"]
+
+
+async def test_旧任务字符串测试点不致图接口报错(client):
+    await client.post("/api/v1/projects", json={"name": "P"})
+    r1 = await _req(client, "P", "老需求")
+    await _cases_task(client, "P", make_case())
+    # 模拟项目化之前的任务：analysis.test_points 的 points 是纯字符串，且关联到需求
+    tid = app.state.tasks.list(limit=10, project="P")[0].task_id
+    rec = app.state.tasks.get(tid)
+    rec.analysis = {"test_points": [{"module": "登录", "points": ["正常登录", "密码错误"]}, "坏数据"]}
+    app.state.tasks.save(rec)
+    req = app.state.requirements.get(r1); req["tasks"] = [tid]; app.state.requirements._persist(req)
+    g = (await client.get("/api/v1/projects/P/dependencies", params={"kind": "requirement"})).json()
+    assert g["nodes"][r1]["modules"] == ["登录"]
+    app.state.llm = StubLLM([json.dumps({"edges": []})])
+    await client.post("/api/v1/projects/P/dependencies/infer", json={"kind": "requirement"})
+    assert "测试点：正常登录；密码错误" in app.state.llm.calls[0]["messages"][1]["content"]
