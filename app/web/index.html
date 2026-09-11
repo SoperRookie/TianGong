@@ -2741,13 +2741,13 @@ async function createManualTask(project) {
 /* ==================== 用例脑图（kity + kityminder-core，MeterSphere 同款内核） ==================== */
 let _minder = null;
 
-function minderCaseNode(c, status) {
+function minderCaseNode(c, status, light) {
   const res = [c.priority || 'P?'];
-  if (status) res.push({approved:'已通过', rejected:'已驳回', pending:'待审核'}[status] || '待审核');
+  if (status) res.push({approved:'已通过', rejected:'已驳回', pending:'待审核', draft:'草稿'}[status] || '待审核');
   return {
     data: {text: c.title || c.case_id, uid: c.uid, kind: 'case', caseId: c.case_id,
            taskId: c.task_id || null, resource: res, expandState: 'collapse'},
-    children: [
+    children: light ? [] : [
       ...(c.precondition ? [{data: {text: c.precondition, kind: 'pre', resource: ['前置条件']}}] : []),
       ...(c.steps || []).map(x => ({data: {text: x.action, kind: 'step'},
         children: (x.expected ? [{data: {text: x.expected, kind: 'expected', resource: ['预期']}}] : [])})),
@@ -2755,11 +2755,12 @@ function minderCaseNode(c, status) {
   };
 }
 
-function buildMinderJson(rootText, rows, {withProject = false, stateOf = null} = {}) {
+const MIND_LIGHT_ROWS = 150;   // 超过此数的只读脑图只画到用例层（不展开前置/步骤），否则 kityminder 布局会卡住数十秒
+function buildMinderJson(rootText, rows, {withProject = false, stateOf = null, light = false} = {}) {
   const group = (arr, key) => arr.reduce((m, c) => ((m[c[key] || ''] = m[c[key] || ''] || []).push(c), m), {});
   const moduleNodes = list => Object.entries(group(list, 'module')).map(([m, cs]) => ({
-    data: {text: m || '（未分模块）', kind: 'module'},
-    children: cs.map(c => minderCaseNode(c, stateOf ? stateOf(c) : c.review)),
+    data: {text: `${m || '（未分模块）'}${light ? `（${cs.length}）` : ''}`, kind: 'module'},
+    children: cs.map(c => minderCaseNode(c, stateOf ? stateOf(c) : c.review, light)),
   }));
   let children;
   if (withProject) {
@@ -2789,16 +2790,23 @@ function mountMinder(elId, json, {readonly = true} = {}) {
   veil.textContent = '脑图布局中…';
   el.style.position = 'relative';
   el.appendChild(veil);
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const unveil = () => { try { minder.execCommand('camera', minder.getRoot(), 100); } catch (e) {} veil.remove(); };
+  const guard = setTimeout(unveil, 8000);   // 兜底：无论收敛与否 8 秒内必揭开
   (async () => {
-    await new Promise(r => setTimeout(r, 80));
-    for (let i = 0; i < 4 && el.isConnected && _minder === minder; i++) {
-      try { minder.refresh(); } catch (e) {}
-      await new Promise(r => setTimeout(r, 340));
+    await sleep(80);
+    // 自适应收敛轮数：一次 refresh 的耗时反映节点规模，大图少跑几轮，避免遮罩长时间不揭
+    const t0 = performance.now();
+    try { minder.refresh(); } catch (e) {}
+    const cost = performance.now() - t0;
+    const rounds = cost > 800 ? 1 : cost > 250 ? 2 : 4;
+    for (let i = 0; i < rounds && el.isConnected && _minder === minder; i++) {
+      await sleep(cost > 250 ? 120 : 340);
       try { minder.layout(); } catch (e) {}
-      await new Promise(r => setTimeout(r, 320));
+      await sleep(cost > 250 ? 120 : 320);
+      if (i < rounds - 1) { try { minder.refresh(); } catch (e) {} }
     }
-    try { minder.execCommand('camera', minder.getRoot(), 100); } catch (e) {}
-    veil.remove();
+    clearTimeout(guard); unveil();
   })();
   if (readonly) {
     minder.on('dblclick', () => {
@@ -3596,10 +3604,11 @@ let _mindSeq = 0;
 function mindFromRows(rows, rootLabel, withProject) {
   if (!rows.length) return '<div class="empty">没有符合条件的用例</div>';
   const id = 'roMinder' + (++_mindSeq);
-  const json = buildMinderJson(rootLabel, rows, {withProject});
+  const light = rows.length > MIND_LIGHT_ROWS;
+  const json = buildMinderJson(rootLabel, rows, {withProject, light});
   setTimeout(() => mountMinder(id, json, {readonly: true}));
   return `<div class="minder-box" id="${id}" style="margin-top:4px"></div>
-    <div class="hint" style="margin-top:6px">只读脑图（MeterSphere 同款内核）：双击用例节点进入所属任务在线编辑；滚轮缩放、拖拽画布、节点可展开收起</div>`;
+    <div class="hint" style="margin-top:6px">只读脑图（MeterSphere 同款内核）：双击用例节点进入所属任务在线编辑；滚轮缩放、拖拽画布、节点可展开收起${light ? `。<b>当前 ${rows.length} 条用例，只展示到用例标题层</b>（超过 ${MIND_LIGHT_ROWS} 条不展开前置/步骤）；按模块或阶段筛选到 ${MIND_LIGHT_ROWS} 条以内可查看步骤与预期` : ''}</div>`;
 }
 
 /* ---------- 测试用例视图：全库用例分页浏览（20/50/100/200，默认 20） ---------- */
