@@ -515,15 +515,15 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <button id="nav-workbench" class="on" onclick="switchView('workbench')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="11" width="8" height="10" rx="1.5"/><rect x="3" y="14" width="8" height="7" rx="1.5"/></svg>
       我的工作台</button>
-    <button id="nav-projects" onclick="switchView('projects')">
+    <button id="nav-projects" onclick="curProject=null;switchView('projects')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
       项目管理</button>
     <div class="grp">需求中心</div>
-    <button id="nav-requirements" onclick="curReq=null;switchView('requirements')">
+    <button id="nav-requirements" onclick="curReq=null;reqStatus='';switchView('requirements')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>
       需求列表</button>
     <div class="grp">测试点 · 用例库</div>
-    <button id="nav-board" onclick="switchView('board')">
+    <button id="nav-board" onclick="currentTask=null;_taskOrigin=null;switchView('board')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="3.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>
       任务列表</button>
     <button id="nav-cases" onclick="switchView('cases')">
@@ -541,7 +541,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/></svg>
       报表</button>
     <div class="grp">AI 中心</div>
-    <button id="nav-aicenter" onclick="switchView('aicenter')">
+    <button id="nav-aicenter" onclick="aiMine=false;switchView('aicenter')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 20h8M12 18v2M7 9l3 3-3 3M13 15h4"/></svg>
       AI 任务中心</button>
     <button id="nav-knowledge" onclick="switchView('knowledge')">
@@ -1818,7 +1818,8 @@ const VIEW_LABELS = {projects:'项目管理', requirements:'需求列表', aicen
 function setCrumb(html) { $('crumb').innerHTML = html; }
 function crumbForBoard() {
   if (currentTask) {
-    setCrumb(`<a onclick="backToList()">任务列表</a><span class="sep">/</span>任务 <code>${currentTask.task_id}</code>`);
+    const from = _taskOrigin ? (VIEW_LABELS[_taskOrigin.view] || '返回') : '任务列表';
+    setCrumb(`<a onclick="backToList()">${esc(from)}</a><span class="sep">/</span>任务 <code>${currentTask.task_id}</code>`);
   } else setCrumb(VIEW_LABELS.board);
 }
 const ADMIN_VIEWS = ['rules','memory','models','users','prompts'];  // 沉淀与反哺 + 系统设置：仅管理员
@@ -1834,7 +1835,7 @@ function switchView(v) {
   }
   $('nav-mytasks').classList.toggle('on', v==='plans' && plansMine);
   if (v !== 'plans') plansMine = false;
-  if (v==='board') crumbForBoard();
+  if (v==='board') { crumbForBoard(); if (!currentTask && !_openingTask && (!$('taskTbody') || !$('detail').innerHTML.trim())) renderTaskListPage(); }
   else if (v==='projects') crumbForProjects();
   else if (v==='plans') crumbForPlans();
   else if (v==='requirements') crumbForReqs();
@@ -2054,7 +2055,8 @@ async function refreshList() {
   _tasksSig = sig; _tasksCache = data.tasks;
   if (currentView === 'board' && !currentTask && (changed || !$('taskTbody'))) renderTaskListPage();
   if (currentTask && taskBusy(currentTask) && !editingInDetail()) {
-    try { const t = await api('/api/v1/tasks/' + currentTask.task_id); currentTask = t; renderDetail(); } catch (e) {}
+    const tid = currentTask.task_id;
+    try { const t = await api('/api/v1/tasks/' + tid); if (currentTask && currentTask.task_id === tid) { currentTask = t; renderDetail(); } } catch (e) {}
   }
 }
 function editingInDetail() {
@@ -2140,6 +2142,12 @@ function renderTaskListRows() {
 function backToList() {
   currentTask = null;
   $('detail').innerHTML = '';
+  const origin = _taskOrigin; _taskOrigin = null;
+  if (origin && origin.view !== 'board' && $('view-' + origin.view)) {  // 从需求/计划/项目/搜索等页进入的任务，「返回」回到来源页
+    renderBatchBar();
+    switchView(origin.view);
+    return;
+  }
   renderTaskListPage();
   crumbForBoard();
   renderBatchBar();
@@ -2175,7 +2183,16 @@ async function createTask() {
 
 /* ---------- 任务详情 ---------- */
 async function openTask(id, keepLocal) {
-  currentTask = await api('/api/v1/tasks/' + id);
+  const _s = tick('opentask');
+  let t;
+  try { t = await api('/api/v1/tasks/' + id); }
+  catch (e) {  // 任务已删除 / 已改挂到无权限项目 / id 失效：给出原因并回到来源或列表，不停留在上一个任务
+    toast(`打开任务失败：${e.message}`, 'err');
+    if (currentView === 'board' && (!currentTask || currentTask.task_id === id)) { currentTask = null; backToList(); }
+    return;
+  }
+  if (stale('opentask', _s)) return;  // 连续打开多个任务时只保留最后一个
+  currentTask = t;
   if (!keepLocal) {
     hiddenDupPairs = new Set(); lastPointDiff = null; lastCaseDiff = null; lastHints = [];
     caseTab = 'all'; caseModule = ''; expandedSteps = new Set(); pointView = 'table';
@@ -2211,7 +2228,7 @@ function renderDetail() {
 
   $('detail').innerHTML = `<div class="card">
     <div class="card-h" style="border-bottom:none">
-      <button class="btn ghost sm" onclick="backToList()" title="返回任务列表">← 列表</button>
+      <button class="btn ghost sm" onclick="backToList()" title="${_taskOrigin ? '返回' + (VIEW_LABELS[_taskOrigin.view] || '来源页') : '返回任务列表'}">${_taskOrigin ? '← 返回' : '← 列表'}</button>
       ${owlSvg(owlMoodOf(t), 30)}
       <h3>任务 <code>${t.task_id}</code></h3>
       <span class="pill ${t.status}">${statusText(t.status)}</span>
@@ -4107,7 +4124,7 @@ async function runSearch(q) {
     point: i => [`<code>${esc(i.tp_id||'')}</code> ${esc(i.point)}`, `${esc(i.project||'')} · ${esc(i.module||'')} · ${esc(i.status||'')}`, `openTaskFromProject('${i.task_id}','points')`],
     case: i => [`<span class="cid">${esc(i.case_id)}</span> ${esc(i.title)}`, `${esc(i.project||'')} · ${esc(i.module||'')} · ${esc(i.review)}`, `openTaskFromProject('${i.task_id}','cases')`],
     plan: i => [`${esc(i.name)}`, `${esc(i.project)} · ${esc(i.status)}`, `openPlan('${i.plan_id}')`],
-    knowledge: i => [`${esc(i.source)}`, `${esc(i.space)} · ${esc(i.level)}`, `switchView('knowledge')`],
+    knowledge: i => [`${esc(i.source)}`, `${esc(i.space)} · ${esc(i.level)}`, `kbQuery=${jsq(q)};kbMode='docs';_kbAutoSearch=true;switchView('knowledge')`],
   };
   $('searchArea').innerHTML = d.groups.length ? `<div class="wb-grid">${d.groups.map(g=>`<div class="card wb-card"><div class="card-h"><h3>${g.label}<span class="cnt">${g.total}</span></h3></div><div class="card-b"><ul class="wb-list">
     ${g.items.map(i=>{ const [t, sub, go] = link[g.kind](i); return `<li><span class="t" onclick="${go}">${t} <span class="hint">${sub}</span></span></li>`; }).join('')}</ul></div></div>`).join('')}</div>`
@@ -4115,7 +4132,7 @@ async function runSearch(q) {
 }
 
 /* ---- 知识库（16 章三层） ---- */
-let kbLevelFilter = '', kbCatFilter = '', _kbMeta = null, kbQuery = '';
+let kbLevelFilter = '', kbCatFilter = '', _kbMeta = null, kbQuery = '', _kbAutoSearch = false;
 let kbMode = 'docs', depKind = 'requirement', depModule = '', depFocus = null, _depGraph = null;
 async function renderKnowledge() {
   setCrumb('知识库');
@@ -4152,6 +4169,7 @@ async function renderKnowledge() {
           <td class="hint">${esc(d.embedding_model)}</td><td class="hint">${esc(d.created_by||'')}</td><td class="hint">${relTime(d.created_at)}</td>
           <td>${(d.level==='public'?isSysAdmin():can(d.space,'knowledge.manage'))?`<button class="ibtn bad" title="删除" onclick="deleteKb('${d.doc_id}',${jsq(d.source)})">${IC.trash}</button>`:''}</td></tr>`).join('')
           || '<tr><td colspan="9"><div class="empty">暂无知识文档</div></td></tr>'}</tbody></table></div></div></div>`;
+  if (_kbAutoSearch) { _kbAutoSearch = false; if (kbQuery) kbSearch(); }  // 从全局搜索跳入：直接展示命中切片
 }
 function kbModeSeg() {
   return `<div class="seg" style="margin-left:10px"><button class="${kbMode==='docs'?'on':''}" onclick="kbMode='docs';renderKnowledge()">知识文档</button><button class="${kbMode==='deps'?'on':''}" onclick="kbMode='deps';renderKnowledge()">依赖关系</button></div>`;
@@ -4820,6 +4838,12 @@ function crumbForProjects() {
   } else setCrumb('项目管理');
 }
 function backToProjects() { curProject = null; renderProjects(); }
+// 从项目工作区跳到需求/计划等列表：把该项目设为当前项目（顶栏、localStorage、各列表筛选一并同步），「（未指定）」不可设为当前项目
+function enterProjectView(view) {
+  if (curProject && curProject !== '（未指定）' && curProject !== curProjectName) setCurrentProject(curProject, {silent: true});
+  curReq = null; curPlan = null; plansMine = false;
+  switchView(view);
+}
 
 async function renderProjects() {
   crumbForProjects();
@@ -5252,16 +5276,16 @@ async function projOverviewHtml(p) {
         <td style="width:90px" class="hint">${relTime(t.created_at)}</td></tr>`).join('')}</table></div>` : '<div class="hint">还没有任务</div>'}
     </div>
     <div>
-      <div class="section-t">需求 <a class="hint" onclick="curProjectName=curProject;switchView('requirements')" style="margin-left:6px;cursor:pointer">${reqs.length} 条 ›</a></div>
+      <div class="section-t">需求 <a class="hint" onclick="enterProjectView('requirements')" style="margin-left:6px;cursor:pointer">${reqs.length} 条 ›</a></div>
       <div class="chips plain" style="margin:4px 0 10px">${Object.entries(reqStat).map(([k,v]) => `<span class="st ${REQ_ST_CLS[k]||'pending'}">${esc(REQ_ST_LABEL[k]||k)} ${v}</span>`).join(' ') || '<span class="hint">暂无需求</span>'}
         ${openQ ? `<span class="st rejected">待确认事项 ${openQ}</span>` : ''}</div>
-      <div class="section-t">测试计划 <a class="hint" onclick="plansMine=false;curPlan=null;switchView('plans')" style="margin-left:6px;cursor:pointer">${plans.length} 个 ›</a></div>
+      <div class="section-t">测试计划 <a class="hint" onclick="enterProjectView('plans')" style="margin-left:6px;cursor:pointer">${plans.length} 个 ›</a></div>
       ${activePlans.length ? `<ul class="wb-list" style="margin:4px 0 10px">${activePlans.slice(0,4).map(x => { const sm = x.summary||{}, lr = sm.latest_run; return `<li onclick="openPlan('${x.plan_id}')" style="cursor:pointer">${esc(x.name)} <span class="hint">· ${sm.cases??0} 条 · 已分配 ${sm.assigned??0}${lr&&lr.pass_rate!=null?` · 通过率 ${(lr.pass_rate*100).toFixed(0)}%`:''}</span></li>`; }).join('')}</ul>` : '<div class="hint" style="margin-bottom:10px">没有进行中的计划</div>'}
       <div class="section-t">成员 <a class="hint" onclick="setProjTab('members')" style="margin-left:6px;cursor:pointer">${p.member_count||0} 人 ›</a></div>
       ${canWrite ? `<div class="toolbar" style="margin-top:8px">
-        <button class="btn ghost sm" onclick="curProjectName=curProject;switchView('requirements');setTimeout(()=>{if(typeof openReqDlg==='function')openReqDlg()},300)">＋ 新建需求</button>
+        <button class="btn ghost sm" onclick="enterProjectView('requirements');setTimeout(()=>{if(typeof openReqDlg==='function')openReqDlg()},300)">＋ 新建需求</button>
         <button class="btn ghost sm" onclick="$('projectInput').value=curProject;openDrawer()">＋ 新建任务</button>
-        <button class="btn ghost sm" onclick="plansMine=false;curPlan=null;switchView('plans');setTimeout(()=>{if(typeof openPlanDlg==='function')openPlanDlg()},300)">＋ 新建计划</button>
+        <button class="btn ghost sm" onclick="enterProjectView('plans');setTimeout(()=>{if(typeof openPlanDlg==='function')openPlanDlg()},300)">＋ 新建计划</button>
         <button class="btn ghost sm" onclick="setProjTab('members')">管理成员</button></div>` : ''}
     </div></div>`;
   return pipeline + kpi + dyn;
@@ -5285,9 +5309,18 @@ function projTasksHtml() {
     </tr>`).join('') || '<tr><td colspan="6"><div class="empty">该项目暂无任务</div></td></tr>'}</tbody>
   </table></div>`;
 }
+let _taskOrigin = null, _openingTask = '';  // 从其他页面进入任务详情时记录来源视图，「返回」回到来源；_openingTask 为加载中的任务 id
 function openTaskFromProject(id, tab) {
+  if (currentView !== 'board') _taskOrigin = {view: currentView};
+  if (!currentTask || currentTask.task_id !== id) { currentTask = null; $('detail').innerHTML = '<div class="card"><div class="card-b"><div class="hint">加载任务中…</div></div></div>'; }
+  _openingTask = id;
   switchView('board');
-  openTask(id).then(() => { if (tab) { detailTab = tab; renderDetail(); } });
+  openTask(id).finally(() => { if (_openingTask === id) _openingTask = ''; }).then(() => {
+    if (!currentTask || currentTask.task_id !== id) return;
+    const proj = (currentTask.context || {}).project || '';
+    if (listProject && proj && listProject !== proj) listProject = proj;  // 跨项目进入的任务，返回列表时能看到它
+    if (tab) { detailTab = tab; renderDetail(); }
+  });
 }
 
 async function projCasesHtml() {
