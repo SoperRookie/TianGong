@@ -1330,7 +1330,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 const $ = id => document.getElementById(id);
 const DIMENSIONS = ["正常流程","异常流程","输入校验","边界值","状态转换","权限","数据","重复操作","中断","网络"];
 let currentTask = null, editingCase = null, currentView = 'board';
-let detailTab = 'overview', caseTab = 'all', caseModule = '', caseView = 'table';
+let detailTab = 'overview', caseTab = 'all', caseModule = '', caseView = 'table', pointView = 'table';
 let hiddenDupPairs = new Set(), lastPointDiff = null, lastCaseDiff = null, lastHints = [];
 let expandedSteps = new Set();
 
@@ -2151,7 +2151,7 @@ async function openTask(id, keepLocal) {
   currentTask = await api('/api/v1/tasks/' + id);
   if (!keepLocal) {
     hiddenDupPairs = new Set(); lastPointDiff = null; lastCaseDiff = null; lastHints = [];
-    caseTab = 'all'; caseModule = ''; expandedSteps = new Set();
+    caseTab = 'all'; caseModule = ''; expandedSteps = new Set(); pointView = 'table';
     detailTab = currentTask.status === 'awaiting_confirmation' ? 'points'
       : ((currentTask.result && currentTask.result.cases && currentTask.result.cases.length) || ((currentTask.context||{}).manual && currentTask.status==='completed')) ? 'cases' : 'overview';
   }
@@ -2438,6 +2438,10 @@ function renderPointWorkbench(t) {
 
   return `<div class="toolbar" style="margin-top:0">
       <span class="hint">共 ${pts.length} 条 · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b></span>
+      <div class="seg">
+        <button class="${pointView==='table'?'on':''}" onclick="pointView='table';renderDetail()">表格</button>
+        <button class="${pointView==='mind'?'on':''}" onclick="pointView='mind';renderDetail()">脑图</button>
+      </div>
       <div style="margin-left:auto;display:flex;gap:8px">
         ${confirmable?`<button class="btn ghost sm" onclick="gapCheck()">查漏补缺</button>
         <button class="btn ghost sm" onclick="dupCheck()">重复检查</button>
@@ -2448,10 +2452,10 @@ function renderPointWorkbench(t) {
     ${renderReuseHints(t)}
     ${renderDupReport(t)}
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
-    <div class="tbl-wrap"><table>
+    ${pointView==='mind' ? renderPointMind(t, modules, confirmable) : `<div class="tbl-wrap"><table>
       <tr><th></th><th>编号</th><th>测试点</th><th>维度</th><th>来源</th><th>状态</th><th>操作</th></tr>
       ${rows}
-    </table></div>
+    </table></div>`}
     ${t.pending_fix&&t.pending_fix.kind==='points'?renderFixProposals(t.pending_fix)
       :rejected&&confirmable?`<div class="toolbar"><button class="btn soft sm" onclick="fixPoints()" id="fixPtBtn">AI 修改驳回项（${rejected}）</button>
       <span class="hint">只输入被驳回项与结构化驳回信息；产出修改提案，逐项确认后落地</span></div>`:''}
@@ -2461,6 +2465,51 @@ function renderPointWorkbench(t) {
       <span class="hint">通过 = 锁定为正式测试点；驳回项修改后需再审核，不进入生成</span>
     </div>`:'<div class="hint" style="margin-top:12px">该任务已完成生成，此页为测试点留档视图</div>'}`;
 }
+
+/* 测试点脑图：需求 → 模块 → 测试点（维度 / 状态标签）→ 驳回意见；选中节点后用工具栏审核，双击修改 */
+function buildPointMinderJson(t, modules) {
+  const label = {pending:'待审核', approved:'已通过', rejected:'已驳回'};
+  return {root: {data: {text: `${(t.sources||[])[0] || t.task_id}（${allPoints(t).length} 条）`, kind: 'root'},
+    children: modules.map(m => ({
+      data: {text: `${m.module}（${(m.points||[]).length}）`, kind: 'module'},
+      children: (m.points||[]).map(normPoint).map(p => ({
+        data: {text: p.point, kind: 'point', tpId: p.tp_id, resource: [p.tp_id, ...(p.dimension ? [p.dimension] : []), label[p.status] || p.status]},
+        children: [
+          ...(p.status === 'rejected' && (p.comment || p.fix_request) ? [{data: {text: `驳回：${p.comment || ''}${p.fix_request ? '｜要求：' + p.fix_request : ''}`, kind: 'note', resource: ['驳回意见']}}] : []),
+          ...((p.warnings||[]).map(w => ({data: {text: w, kind: 'note', resource: ['提示']}}))),
+        ],
+      })),
+    }))}, template: 'right', theme: 'fresh-blue'};
+}
+function renderPointMind(t, modules, confirmable) {
+  if (!allPoints(t).length) return '<div class="empty">暂无测试点</div>';
+  const json = buildPointMinderJson(t, modules);
+  setTimeout(() => mountMinder('pointMinder', json, {readonly: !confirmable, onDblclick: n => { const tp = n.getData('tpId'); if (tp && confirmable) pointModify(tp); }}));
+  return `<div class="minder-bar">
+      ${confirmable ? `<span class="hint">选中测试点节点后：</span>
+      <button class="btn ghost sm" onclick="pmAct('approve')">通过</button>
+      <button class="btn ghost sm" onclick="pmReject()">驳回</button>
+      <button class="btn ghost sm" onclick="pmModify()">修改</button>
+      <button class="btn ghost sm" onclick="pmDelete()">删除</button>
+      <button class="btn ghost sm" onclick="pmAct('unlock')">解锁</button>
+      <span class="sep"></span>` : ''}
+      <button class="btn ghost sm" onclick="mZoom(1)">放大</button>
+      <button class="btn ghost sm" onclick="mZoom(-1)">缩小</button>
+      <button class="btn ghost sm" onclick="mExpand()">展开全部</button>
+    </div>
+    <div class="minder-box" id="pointMinder"></div>
+    <div class="hint" style="margin-top:8px">结构：需求 → 模块 → 测试点（编号 / 维度 / 状态）→ 驳回意见与提示。${confirmable ? '选中节点后用上方按钮审核，双击节点直接修改；通过即锁定为正式测试点。' : '该任务已完成生成，脑图为留档视图。'}</div>`;
+}
+function pmNode() {
+  const n = _minder && _minder.getSelectedNode();
+  const tp = n && n.getData('tpId');
+  if (!tp) { toast('请先在脑图中选中一个测试点节点', 'warn'); return null; }
+  return tp;
+}
+function pmAct(action) { const tp = pmNode(); if (tp) pointAct(tp, action); }
+function pmReject() { const tp = pmNode(); if (tp) pointReject(tp); }
+function pmModify() { const tp = pmNode(); if (tp) pointModify(tp); }
+function pmDelete() { const tp = pmNode(); if (tp) pointDelete(tp); }
 
 function renderCoverage(t) {
   if (!t.coverage) return '';
@@ -2773,7 +2822,7 @@ function buildMinderJson(rootText, rows, {withProject = false, stateOf = null, l
           template: 'right', theme: 'fresh-blue'};
 }
 
-function mountMinder(elId, json, {readonly = true} = {}) {
+function mountMinder(elId, json, {readonly = true, onDblclick = null} = {}) {
   const el = $(elId);
   if (!el) return;
   if (typeof kityminder === 'undefined') {
@@ -2808,7 +2857,9 @@ function mountMinder(elId, json, {readonly = true} = {}) {
     }
     clearTimeout(guard); unveil();
   })();
-  if (readonly) {
+  if (onDblclick) {
+    minder.on('dblclick', () => { const n = minder.getSelectedNode(); if (n) onDblclick(n); });
+  } else if (readonly) {
     minder.on('dblclick', () => {
       const n = minder.getSelectedNode();
       const tid = n && n.getData('taskId');
