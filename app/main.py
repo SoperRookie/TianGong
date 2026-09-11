@@ -52,6 +52,10 @@ async def lifespan(app: FastAPI):
     from app.dependencies import DependencyStore
     app.state.dependencies = DependencyStore()
     migrated = migrate_tasks(app.state.tasks, app.state.requirements)
+    from app.requirements import repair_migrated_titles
+    repaired = repair_migrated_titles(app.state.requirements, app.state.tasks)
+    if repaired:
+        logger.info("迁移需求标题修复：{} 条由文件名改为正文标题", repaired)
     if migrated:
         logger.info("M2 需求迁移：{} 个历史任务已建为需求实体并回填关联", migrated)
     from app.prompts import PromptStore, set_current
