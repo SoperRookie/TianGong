@@ -114,6 +114,24 @@ class DependencyStore:
         self._persist(project)
         return edge
 
+    def remap(self, project: str, kind: str, old: str, new: str) -> int:
+        """节点合并后把依赖边从 old 改指向 new（自环与重复边丢弃）。"""
+        edges = self._project_doc(project)[kind]
+        changed, keep, seen = 0, [], set()
+        for e in edges:
+            if e["from"] == old or e["to"] == old:
+                e = {**e, "from": new if e["from"] == old else e["from"], "to": new if e["to"] == old else e["to"]}
+                changed += 1
+            key = (e["from"], e["to"], e["relation"])
+            if e["from"] == e["to"] or key in seen:
+                continue
+            seen.add(key)
+            keep.append(e)
+        if changed:
+            self._project_doc(project)[kind] = keep
+            self._persist(project)
+        return changed
+
     def prune(self, project: str, kind: str, alive: set[str]) -> int:
         """节点（需求/用例）被删除后清理悬空边。"""
         edges = self._project_doc(project)[kind]

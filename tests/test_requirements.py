@@ -194,3 +194,38 @@ async def test_存量迁移标题修复幂等(client):
     assert repair_migrated_titles(app.state.requirements, app.state.tasks) == 0
     assert (await client.get(f"/api/v1/requirements/{rid}")).json()["title"] == "0801走地德州-新手进阶"
     assert (await client.get(f"/api/v1/tasks/{tid}")).json()["context"]["requirement_title"] == "0801走地德州-新手进阶"
+
+
+async def test_合并需求_任务附件待确认并入_依赖边改指向(client):
+    await client.post("/api/v1/projects", json={"name": "P"})
+    await client.post("/api/v1/projects", json={"name": "Q"})
+    a = (await client.post("/api/v1/requirements", data={"project": "P", "title": "新手进阶", "text": "原文 A"})).json()
+    b = (await client.post("/api/v1/requirements", data={"project": "P", "title": "新手进阶", "text": "原文 B"})).json()
+    c = (await client.post("/api/v1/requirements", data={"project": "P", "title": "游戏规则", "text": "原文 C"})).json()
+    q = (await client.post("/api/v1/requirements", data={"project": "Q", "title": "别的项目", "text": "x"})).json()
+    # b 关联一个任务、一条待确认事项、一条依赖边（b 依赖 c）
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+    tid = (await client.post("/api/v1/tasks", data={"text": "登录需求", "project": "P"})).json()["task_id"]
+    rec = app.state.tasks.get(tid); rec.context = {**rec.context, "requirement_id": b["req_id"], "requirement_title": b["title"]}; app.state.tasks.save(rec)
+    item = app.state.requirements.get(b["req_id"]); item["tasks"] = [tid]; app.state.requirements._persist(item)
+    await client.post(f"/api/v1/requirements/{b['req_id']}/questions", json={"question": "限红多少？"})
+    await client.post("/api/v1/projects/P/dependencies/edges", json={"kind": "requirement", "from": b["req_id"], "to": c["req_id"], "relation": "depends"})
+    # 非法：自身 / 跨项目
+    assert (await client.post(f"/api/v1/requirements/{b['req_id']}/merge", json={"into": b["req_id"]})).status_code == 400
+    assert (await client.post(f"/api/v1/requirements/{b['req_id']}/merge", json={"into": q["req_id"]})).status_code == 400
+    r = (await client.post(f"/api/v1/requirements/{b['req_id']}/merge", json={"into": a["req_id"]})).json()
+    assert r["req_id"] == a["req_id"] and r["tasks"] == [tid] and r["raw_text"] == "原文 A" and r["status"] == "designing"
+    assert [x["question"] for x in r["questions"]] == ["限红多少？"] and r["merged_from"][0]["req_id"] == b["req_id"]
+    task = (await client.get(f"/api/v1/tasks/{tid}")).json()
+    assert task["context"]["requirement_id"] == a["req_id"]
+    # b 进回收站且标记去向、原文仍在；列表不再出现
+    assert (await client.get(f"/api/v1/requirements/{b['req_id']}")).status_code == 404
+    gone = app.state.requirements.get(b["req_id"])
+    assert gone["deleted_at"] and gone["merged_into"] == a["req_id"] and gone["raw_text"] == "原文 B"
+    listed = (await client.get("/api/v1/requirements", params={"project": "P"})).json()["requirements"]
+    assert {x["req_id"] for x in listed} == {a["req_id"], c["req_id"]}
+    # 依赖边改指向 a
+    g = (await client.get("/api/v1/projects/P/dependencies", params={"kind": "requirement"})).json()
+    assert [(e["from"], e["to"]) for e in g["edges"]] == [(a["req_id"], c["req_id"])]
+    logs = (await client.get("/api/v1/audit?days=0")).json()["items"]
+    assert any(x["action"] == "合并需求" and x["target"] == b["req_id"] for x in logs)
