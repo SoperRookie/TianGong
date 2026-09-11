@@ -3938,6 +3938,27 @@ async def delete_requirement(request: Request, req_id: str) -> dict:
     return {"deleted": req_id}
 
 
+class MergeBody(BaseModel):
+    into: str
+
+
+@router.post("/api/v1/requirements/{req_id}/merge")
+async def merge_requirement(request: Request, req_id: str, body: MergeBody) -> dict:
+    """合并需求（同一份文档重复导入的治理）：本需求的任务 / 附件 / 待确认事项并入目标需求，本需求进回收站并标记合并去向；
+    依赖关系图中的边一并改指向目标。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    _req(request, body.into, "requirement.edit")
+    try:
+        into = request.app.state.requirements.merge(req_id, body.into, operator=_operator(request), tasks=request.app.state.tasks)
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    request.app.state.dependencies.remap(into["project"], "requirement", req_id, body.into)
+    logger.info("需求 {} 已合并到 {}（{}）", req_id, body.into, into["project"])
+    return _req_view(request, into)
+
+
 @router.post("/api/v1/requirements/{req_id}/restore")
 async def restore_requirement(request: Request, req_id: str) -> dict:
     from app.requirements import RequirementError

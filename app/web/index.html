@@ -601,6 +601,17 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <!-- 知识库（M5：公共 / 项目 / 模块 三层） -->
 <div class="layout" id="view-knowledge" style="display:none"><div class="page" style="max-width:1320px" id="knowledgeArea"></div></div>
 
+<!-- 需求合并 -->
+<dialog id="mergeDlg" style="width:600px">
+  <div class="dlg-h"><h3>合并需求</h3><span class="meta">本需求的任务、附件、待确认事项并入目标；本需求进回收站并记录合并去向，原文不丢失</span></div>
+  <div class="dlg-b">
+    <label class="f">当前需求</label><div id="mergeSrc" class="hint"></div>
+    <label class="f">并入目标（同项目）</label><select id="mergeInto"></select>
+    <div class="hint" style="margin-top:8px">依赖关系图中指向本需求的边会一并改指向目标。目标需求的原文保持不变。</div>
+  </div>
+  <div class="dlg-f"><button class="btn ghost" onclick="$('mergeDlg').close()">取消</button><button class="btn" onclick="doMerge()">合并</button></div>
+</dialog>
+
 <!-- 依赖关系：添加 -->
 <dialog id="depDlg" style="width:620px">
   <div class="dlg-h"><h3>添加依赖</h3><span class="meta" id="depHint"></span></div>
@@ -1850,7 +1861,15 @@ function switchView(v) {
 }
 
 /* ---------- 抽屉 ---------- */
-function openDrawer() { $('drawer').classList.add('on'); $('drawerOverlay').classList.add('on'); }
+function openDrawer() {
+  const sel = $('projectInput');
+  if (sel && !sel.value) {  // 默认当前项目；没有当前项目但只加入了一个项目时也直接选中，避免产生「未指定项目」的遗留任务
+    const opts = [...sel.options].map(o => o.value).filter(v => v && v !== '__new__');
+    if (curProjectName && opts.includes(curProjectName)) sel.value = curProjectName;
+    else if (opts.length === 1) sel.value = opts[0];
+  }
+  $('drawer').classList.add('on'); $('drawerOverlay').classList.add('on');
+}
 function closeDrawer() { $('drawer').classList.remove('on'); $('drawerOverlay').classList.remove('on'); }
 
 /* ---------- 初始化 ---------- */
@@ -2415,6 +2434,7 @@ function renderPointWorkbench(t) {
   const rejected = pts.filter(p=>p.status==='rejected').length;
   const pending = pts.length - approved - rejected;
   const confirmable = t.status === 'awaiting_confirmation';
+  const canReviewPt = can((t.context||{}).project, 'point.review'), canEditPt = can((t.context||{}).project, 'point.edit');
 
   const rows = modules.map(m => {
     const head = `<tr class="module-head"><td colspan="7">
@@ -2433,12 +2453,12 @@ function renderPointWorkbench(t) {
         <td style="width:92px"><span class="st ${p.status}">${pStatusText[p.status]||p.status}</span>
           ${p.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${p.reject_count} 次</div>`:''}</td>
         <td style="width:132px">${p.legacy?'':`<div class="rowops">
-          <button class="ibtn ok" title="通过（锁定）" onclick="pointAct(${jsq(p.tp_id)},'approve')">${IC.check}</button>
+          ${canReviewPt?`<button class="ibtn ok" title="通过（锁定）" onclick="pointAct(${jsq(p.tp_id)},'approve')">${IC.check}</button>`:''}
           <button class="ibtn" title="版本历史" onclick="openVersions('point',${jsq(p.tp_id)},${jsq(p.tp_id)})">${IC.clock}</button>
-          <button class="ibtn" title="修改" onclick="pointModify(${jsq(p.tp_id)})">${IC.edit}</button>
-          <button class="ibtn bad" title="驳回" onclick="pointReject(${jsq(p.tp_id)})">${IC.x}</button>
-          <button class="ibtn bad" title="删除" onclick="pointDelete(${jsq(p.tp_id)})">${IC.trash}</button>
-          ${p.status==='approved'?`<button class="ibtn" title="解锁" onclick="pointAct(${jsq(p.tp_id)},'unlock')">${IC.unlock}</button>`:''}
+          ${canEditPt?`<button class="ibtn" title="修改" onclick="pointModify(${jsq(p.tp_id)})">${IC.edit}</button>`:''}
+          ${canReviewPt?`<button class="ibtn bad" title="驳回" onclick="pointReject(${jsq(p.tp_id)})">${IC.x}</button>`:''}
+          ${canEditPt?`<button class="ibtn bad" title="删除" onclick="pointDelete(${jsq(p.tp_id)})">${IC.trash}</button>`:''}
+          ${p.status==='approved'&&canReviewPt?`<button class="ibtn" title="解锁" onclick="pointAct(${jsq(p.tp_id)},'unlock')">${IC.unlock}</button>`:''}
         </div>`}</td>
       </tr>`).join('');
     return head + body;
@@ -2495,12 +2515,12 @@ function renderPointMind(t, modules, confirmable) {
   const json = buildPointMinderJson(t, modules);
   setTimeout(() => mountMinder('pointMinder', json, {readonly: !confirmable, onDblclick: n => { const tp = n.getData('tpId'); if (tp && confirmable) pointModify(tp); }}));
   return `<div class="minder-bar">
-      ${confirmable ? `<span class="hint">选中测试点节点后：</span>
-      <button class="btn ghost sm" onclick="pmAct('approve')">通过</button>
-      <button class="btn ghost sm" onclick="pmReject()">驳回</button>
-      <button class="btn ghost sm" onclick="pmModify()">修改</button>
-      <button class="btn ghost sm" onclick="pmDelete()">删除</button>
-      <button class="btn ghost sm" onclick="pmAct('unlock')">解锁</button>
+      ${confirmable && (can((t.context||{}).project,'point.review') || can((t.context||{}).project,'point.edit')) ? `<span class="hint">选中测试点节点后：</span>
+      ${can((t.context||{}).project,'point.review')?`<button class="btn ghost sm" onclick="pmAct('approve')">通过</button>
+      <button class="btn ghost sm" onclick="pmReject()">驳回</button>`:''}
+      ${can((t.context||{}).project,'point.edit')?`<button class="btn ghost sm" onclick="pmModify()">修改</button>
+      <button class="btn ghost sm" onclick="pmDelete()">删除</button>`:''}
+      ${can((t.context||{}).project,'point.review')?`<button class="btn ghost sm" onclick="pmAct('unlock')">解锁</button>`:''}
       <span class="sep"></span>` : ''}
       <button class="btn ghost sm" onclick="mZoom(1)">放大</button>
       <button class="btn ghost sm" onclick="mZoom(-1)">缩小</button>
@@ -2664,6 +2684,7 @@ function renderCases(t) {
   const nDraft = states.filter(s=>s.status==='draft').length;
   const nPending = r.cases.length - nRejected - nApproved - nDraft;
   const canEditCases = can((t.context||{}).project, 'case.edit') && t.status === 'completed';
+  const canReview = can((t.context||{}).project, 'case.review');
   const modules = [...new Set(r.cases.map(c=>c.module))];
   const visible = r.cases.filter(c =>
     (caseTab==='all' || caseState(t, c).status===caseTab) &&
@@ -2685,13 +2706,13 @@ function renderCases(t) {
       <td style="width:92px"><span class="st ${s.status}">${cStatusText[s.status]}</span>
         ${s.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${s.reject_count} 次</div>`:''}</td>
       <td style="width:150px"><div class="rowops">
-        ${s.status==='draft'?`<button class="btn ghost sm" title="提交评审" onclick="caseAct(${jsq(c.case_id)},'submit')">提交</button>`:`<button class="ibtn ok" title="通过（锁定）" onclick="caseAct(${jsq(c.case_id)},'approve')">${IC.check}</button>`}
+        ${s.status==='draft'?(canEditCases?`<button class="btn ghost sm" title="提交评审" onclick="caseAct(${jsq(c.case_id)},'submit')">提交</button>`:''):(canReview?`<button class="ibtn ok" title="通过（锁定）" onclick="caseAct(${jsq(c.case_id)},'approve')">${IC.check}</button>`:'')}
         ${canEditCases?`<button class="ibtn" title="复制为新用例（草稿）" onclick="copyCase(${jsq(c.uid)})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg></button>`:''}
         <button class="ibtn" title="版本历史" onclick="openVersions('case',${jsq(c.uid)},${jsq(c.case_id)})">${IC.clock}</button>
-        <button class="ibtn" title="修改" onclick="openEdit(${jsq(c.case_id)})">${IC.edit}</button>
-        <button class="ibtn bad" title="驳回" onclick="caseReject(${jsq(c.case_id)})">${IC.x}</button>
-        <button class="ibtn bad" title="删除" onclick="caseDelete(${jsq(c.case_id)})">${IC.trash}</button>
-        ${s.locked?`<button class="ibtn" title="解锁" onclick="caseAct(${jsq(c.case_id)},'unlock')">${IC.unlock}</button>`:''}
+        ${canEditCases?`<button class="ibtn" title="修改" onclick="openEdit(${jsq(c.case_id)})">${IC.edit}</button>`:''}
+        ${canReview?`<button class="ibtn bad" title="驳回" onclick="caseReject(${jsq(c.case_id)})">${IC.x}</button>`:''}
+        ${canEditCases?`<button class="ibtn bad" title="删除" onclick="caseDelete(${jsq(c.case_id)})">${IC.trash}</button>`:''}
+        ${s.locked&&canReview?`<button class="ibtn" title="解锁" onclick="caseAct(${jsq(c.case_id)},'unlock')">${IC.unlock}</button>`:''}
       </div></td></tr>`;
   }).join('');
 
@@ -3785,6 +3806,9 @@ function renderBatchBar() {
   const rej = document.querySelector('.batchbar .b-rej');
   if (rej) rej.textContent = '批量驳回';
   const more = $('bbMore'); if (more) more.style.display = cs.length ? '' : 'none';
+  const proj = currentTask && (currentTask.context||{}).project;
+  const canRev = pts.length ? can(proj, 'point.review') : can(proj, 'case.review');
+  document.querySelectorAll('.batchbar .b-ok, .batchbar .b-rej').forEach(b => b.style.display = canRev ? '' : 'none');
 }
 async function batchMore(action) {
   if (!action || !currentTask) return;
@@ -3980,12 +4004,20 @@ async function aiTasksHtml() {
         <td><span class="tid-cell">${t.task_id}</span><div class="hint">${esc(t.project||'未指定')}</div></td>
         <td>${t.requirement_id?`<a onclick="event.stopPropagation();openRequirement('${t.requirement_id}')">${esc(t.requirement_title||t.requirement_id)}</a>`:esc((t.sources||[]).join('、'))}</td>
         <td class="hint">${esc(t.model||'默认')}</td>
-        <td>${Object.entries(t.prompt_versions||{}).map(([k,v])=>`<code title="${esc(k)}">${esc(PROMPT_NAMES[k]||k)} v${v}</code>`).join(' ')||'<span class="hint">—</span>'}</td>
+        <td onclick="event.stopPropagation()">${promptVersionsCell(t.prompt_versions)}</td>
         <td>${t.status==='completed'?`<b>${t.case_count}</b> 条${t.partial.length?`<div class="hint" style="color:var(--warn)">部分成功：${t.partial.map(esc).join('；')}</div>`:''}`
             :t.status==='failed'?`<div class="hint" style="color:var(--danger)">${esc(t.error||'失败')}</div>`:'<span class="hint">—</span>'}${t.retry_count?`<div class="hint">已重试 ${t.retry_count} 次</div>`:''}</td>
         <td class="hint">${esc(t.created_by||'')}</td><td class="hint">${relTime(t.created_at)}</td>
         <td onclick="event.stopPropagation()">${t.retryable?`<button class="btn ghost sm" onclick="retryFromCenter('${t.task_id}')">重试</button>`:''}</td></tr>`).join('')
         || '<tr><td colspan="10"><div class="empty">暂无 AI 任务</div></td></tr>'}</tbody></table></div>`;
+}
+function promptVersionsCell(pv) {
+  const ents = Object.entries(pv || {});
+  if (!ents.length) return '<span class="hint">—</span>';
+  const codes = ents.map(([k, v]) => `<code title="${esc(k)}">${esc(PROMPT_NAMES[k]||k)} v${v}</code>`);
+  if (ents.length <= 2) return codes.join(' ');
+  const custom = ents.filter(([, v]) => v > 1).length;
+  return `<details><summary class="hint" style="cursor:pointer;list-style:none">${ents.length} 个 Prompt${custom?`（${custom} 个定制版）`:'（均内置 v1）'} ▾</summary><div style="margin-top:4px">${codes.join(' ')}</div></details>`;
 }
 async function aiCallsHtml() {
   const q = new URLSearchParams({page: aiCallPage, page_size: 50, days: aiDays});
@@ -4584,7 +4616,7 @@ async function renderRequirementDetail() {
       <div class="grow">
         ${canEdit?`<button class="btn ghost sm" onclick="editReqMeta()">编辑</button>`:''}
         ${canEdit&&r.status==='designing'?`<button class="btn ghost sm" onclick="setReqStatus('done')">标记完成</button>`:''}
-        ${canEdit&&r.status!=='archived'?`<button class="btn ghost sm" onclick="setReqStatus('archived')">归档</button>`:`${canEdit?`<button class="btn ghost sm" onclick="setReqStatus('designing')">恢复</button>`:''}`}
+        ${canEdit&&r.status!=='archived'?`<button class="btn ghost sm" onclick="openMergeDlg()" title="同一份文档重复导入时，把本需求并入另一条">合并到…</button><button class="btn ghost sm" onclick="setReqStatus('archived')">归档</button>`:`${canEdit?`<button class="btn ghost sm" onclick="setReqStatus('designing')">恢复</button>`:''}`}
         ${canDesign?`<button class="btn sm" ${designDisabled?'disabled':''} title="${openN?`还有 ${openN} 项待确认事项`:''}" onclick="openDesignDlg()">开始测试设计</button>`:''}
       </div></div>
     <div class="dtabs">
@@ -4607,6 +4639,23 @@ async function editReqMeta() {
 }
 async function setReqStatus(status) {
   try { await api('/api/v1/requirements/' + curReq, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({status})}); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function openMergeDlg() {
+  const r = _reqDetail; if (!r) return;
+  let list = [];
+  try { list = (await api('/api/v1/requirements?project=' + encodeURIComponent(r.project))).requirements.filter(x => x.req_id !== r.req_id && x.status !== 'archived'); } catch (e) { return toast(e.message, 'err'); }
+  if (!list.length) return toast('该项目没有其他需求可合并', 'warn');
+  $('mergeSrc').textContent = `${r.title}（${r.task_count} 个任务 · ${fmtTime(r.created_at)}）`;
+  const same = list.filter(x => x.title === r.title), rest = list.filter(x => x.title !== r.title);
+  const opt = x => `<option value="${esc(x.req_id)}">${esc(x.title)} · ${x.task_count} 个任务 · ${esc(fmtTime(x.created_at))}${x.title===r.title?'（同名）':''}</option>`;
+  $('mergeInto').innerHTML = [...same, ...rest].map(opt).join('');
+  $('mergeDlg').showModal();
+}
+async function doMerge() {
+  const into = $('mergeInto').value; if (!into) return;
+  if (!await uiConfirm('合并需求', '合并后本需求进入回收站，任务与附件归到目标需求。继续？', true)) return;
+  try { const r = await jpost(`/api/v1/requirements/${curReq}/merge`, {into}); $('mergeDlg').close(); toast(`已合并到「${r.title}」`, 'ok'); openRequirement(into); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function uploadReqAtt(input) {
@@ -5176,7 +5225,40 @@ async function projOverviewHtml(p) {
         <div class="sub">通过 ${d.review_actions.approve} · 修改 ${d.review_actions.modify} · 驳回 ${d.review_actions.reject}</div></div>
     </div>`;
   } catch (e) {}
-  return pipeline + kpi;
+  // 项目动态：最近任务、需求状态、测试计划、快捷入口
+  let reqs = [], plans = [];
+  try { [reqs, plans] = await Promise.all([
+    api('/api/v1/requirements?project=' + encodeURIComponent(curProject)).then(d => d.requirements).catch(() => []),
+    api('/api/v1/plans?project=' + encodeURIComponent(curProject)).then(d => d.plans).catch(() => []),
+  ]); } catch (e) {}
+  const recent = _tasksCache.filter(t => t.project === curProject).slice(0, 6);
+  const reqStat = {}; reqs.forEach(r => { reqStat[r.status] = (reqStat[r.status] || 0) + 1; });
+  const openQ = reqs.reduce((n, r) => n + (r.open_questions || 0), 0);
+  const activePlans = plans.filter(x => x.status !== 'archived' && x.status !== 'done');
+  const canWrite = can(curProject, 'requirement.edit') && p.status !== 'archived';
+  const dyn = `<div style="display:grid;grid-template-columns:1.4fr 1fr;gap:18px;margin-top:18px">
+    <div>
+      <div class="section-t">最近任务 <a class="hint" onclick="setProjTab('tasks')" style="margin-left:6px;cursor:pointer">全部 ${p.tasks} ›</a></div>
+      ${recent.length ? `<div class="tbl-wrap" style="margin-top:0"><table>${recent.map(t => `<tr class="rowlink" onclick="openTaskFromProject('${t.task_id}')">
+        <td style="width:96px"><span class="pill ${t.status}">${statusText(t.status)}</span></td>
+        <td>${t.requirement_title?esc(t.requirement_title):(srcText_(t.sources)||'-')}${t.progress?` <span class="hint">${progressText(t.progress)} <span class="spin"></span></span>`:''}</td>
+        <td style="width:70px" class="hint">${t.case_count!=null?t.case_count+' 条':'—'}</td>
+        <td style="width:90px" class="hint">${relTime(t.created_at)}</td></tr>`).join('')}</table></div>` : '<div class="hint">还没有任务</div>'}
+    </div>
+    <div>
+      <div class="section-t">需求 <a class="hint" onclick="curProjectName=curProject;switchView('requirements')" style="margin-left:6px;cursor:pointer">${reqs.length} 条 ›</a></div>
+      <div class="chips plain" style="margin:4px 0 10px">${Object.entries(reqStat).map(([k,v]) => `<span class="st ${REQ_ST_CLS[k]||'pending'}">${esc(REQ_ST_LABEL[k]||k)} ${v}</span>`).join(' ') || '<span class="hint">暂无需求</span>'}
+        ${openQ ? `<span class="st rejected">待确认事项 ${openQ}</span>` : ''}</div>
+      <div class="section-t">测试计划 <a class="hint" onclick="plansMine=false;curPlan=null;switchView('plans')" style="margin-left:6px;cursor:pointer">${plans.length} 个 ›</a></div>
+      ${activePlans.length ? `<ul class="wb-list" style="margin:4px 0 10px">${activePlans.slice(0,4).map(x => { const sm = x.summary||{}, lr = sm.latest_run; return `<li onclick="openPlan('${x.plan_id}')" style="cursor:pointer">${esc(x.name)} <span class="hint">· ${sm.cases??0} 条 · 已分配 ${sm.assigned??0}${lr&&lr.pass_rate!=null?` · 通过率 ${(lr.pass_rate*100).toFixed(0)}%`:''}</span></li>`; }).join('')}</ul>` : '<div class="hint" style="margin-bottom:10px">没有进行中的计划</div>'}
+      <div class="section-t">成员 <a class="hint" onclick="setProjTab('members')" style="margin-left:6px;cursor:pointer">${p.member_count||0} 人 ›</a></div>
+      ${canWrite ? `<div class="toolbar" style="margin-top:8px">
+        <button class="btn ghost sm" onclick="curProjectName=curProject;switchView('requirements');setTimeout(()=>{if(typeof openReqDlg==='function')openReqDlg()},300)">＋ 新建需求</button>
+        <button class="btn ghost sm" onclick="$('projectInput').value=curProject;openDrawer()">＋ 新建任务</button>
+        <button class="btn ghost sm" onclick="plansMine=false;curPlan=null;switchView('plans');setTimeout(()=>{if(typeof openPlanDlg==='function')openPlanDlg()},300)">＋ 新建计划</button>
+        <button class="btn ghost sm" onclick="setProjTab('members')">管理成员</button></div>` : ''}
+    </div></div>`;
+  return pipeline + kpi + dyn;
 }
 
 function projTasksHtml() {

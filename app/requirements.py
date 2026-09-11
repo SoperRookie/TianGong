@@ -210,6 +210,40 @@ class RequirementStore:
         self._persist(item)
         return item
 
+    def merge(self, src_id: str, into_id: str, operator: str | None = None, tasks=None) -> dict:
+        """合并需求（重复导入治理）：src 的关联任务 / 附件 / 待确认事项并入 into，src 逻辑删除并标记 merged_into。
+        原文不合并也不丢失：src 记录仍在回收站，可查看；into 的原文保持不变。"""
+        src, into = self._get_alive(src_id), self._get_alive(into_id)
+        if src_id == into_id:
+            raise RequirementError("不能合并到自身")
+        if src["project"] != into["project"]:
+            raise RequirementError("只能合并同一项目内的需求")
+        for tid in src.get("tasks") or []:
+            if tid not in into["tasks"]:
+                into["tasks"].append(tid)
+            rec = tasks.get(tid) if tasks is not None else None
+            if rec is not None:
+                rec.context = {**(rec.context or {}), "requirement_id": into_id, "requirement_title": into["title"]}
+                tasks.save(rec)
+        into["attachments"].extend(src.get("attachments") or [])
+        seen = {q["question"] for q in into.get("questions") or []}
+        for q in src.get("questions") or []:
+            if q["question"] not in seen:
+                into.setdefault("questions", []).append(q)
+                seen.add(q["question"])
+        if (src.get("description") or "").strip() and src["description"].strip() not in (into.get("description") or ""):
+            into["description"] = ((into.get("description") or "").rstrip() + "\n\n【合并自 " + src["title"] + "】\n" + src["description"].strip()).strip()
+        into.setdefault("merged_from", []).append({"req_id": src_id, "title": src["title"], "by": operator, "at": _now()})
+        if into["status"] == "draft" and into["tasks"]:
+            into["status"] = "designing"
+        into["updated_by"], into["updated_at"] = operator, _now()
+        src["tasks"], src["attachments"] = [], []
+        src["merged_into"] = into_id
+        src["deleted_at"], src["deleted_by"] = _now(), operator
+        self._persist(into)
+        self._persist(src)
+        return into
+
     def restore(self, req_id: str) -> dict:
         item = self._items.get(req_id)
         if item is None or not item.get("deleted_at"):
