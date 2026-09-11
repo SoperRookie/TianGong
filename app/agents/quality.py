@@ -357,6 +357,14 @@ def build_case_proposals(
             origin, dict(raw), review.get("fields") or [], review.get("steps") or [])
         changes = _case_field_changes(origin, restricted)
         if not changes:
+            # 模型的改动全部落在定位范围之外（已还原）或与原值相同：明确告知，而不是静默「无提案」
+            scope = []
+            if review.get("fields"):
+                scope.append("字段 " + "/".join(review["fields"]))
+            if review.get("steps"):
+                scope.append("步骤 " + ",".join(str(n) for n in review["steps"]))
+            invalid.append({"case_id": cid, "problem": ("AI 的改动不在驳回时指定的范围内（" + "、".join(scope) + "），已按原值保留；可放宽定位后重试或人工修改")
+                            if scope else "AI 返回的内容与原用例相同，没有实质修改；可补充修改要求后重试或人工修改"})
             continue
         seq += 1
         proposals.append({
@@ -439,8 +447,9 @@ def _restrict_case_fix(origin: dict, new: dict, fields: list, step_nos: list) ->
             if step_nos and i not in step_nos:
                 merged.append(o)
                 continue
+            # 「操作步骤」定位 = 整个步骤（动作 + 预期）可改；只勾「预期结果」时仅预期可改
             action = n.get("action", "") if (not fields or "steps" in fields) else o.get("action", "")
-            expected = n.get("expected", "") if (not fields or "expected" in fields) else o.get("expected", "")
+            expected = n.get("expected", "") if (not fields or "steps" in fields or "expected" in fields) else o.get("expected", "")
             merged.append({"action": action, "expected": expected})
         restricted["steps"] = merged
     return restricted

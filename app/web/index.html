@@ -3260,7 +3260,7 @@ async function renderPlans() {
         <span class="meta">分配给我、本轮尚未执行的用例，可在此直接打结果${myShowDone ? ` · 本轮已执行 ${mine.executed}` : ''}</span>
         <div class="grow"><label class="check">显示本轮已执行 <input type="checkbox" ${myShowDone?'checked':''} onchange="myShowDone=this.checked;renderPlans()"></label></div></div>
         <div class="card-b">${mine.items.length ? Object.entries(byPlan).map(([pid, g]) => `
-          <div class="section-t" style="display:flex;align-items:center;gap:8px"><a onclick="openPlan('${pid}','__me')">${esc(g.name)}</a><span class="hint">${esc(g.project)} · ${g.run ? esc(g.run) : '尚未开始执行轮次'}${g.active ? '' : ' · <span style="color:var(--warn)">轮次未开始或已结束，需负责人新建轮次后才能执行</span>'}</span></div>
+          <div class="section-t" style="display:flex;align-items:center;gap:8px"><a onclick="openPlan('${pid}','__me')">${esc(g.name)}</a><span class="hint">${esc(g.project)} · ${g.run ? esc(g.run) : '尚未开始执行轮次'}${g.active ? '' : (can(g.project,'plan.manage') ? ` · <button class="btn ghost sm" onclick="myStartRun('${pid}')">开始新一轮执行</button>` : ' · <span style="color:var(--warn)">轮次未开始或已结束，需负责人新建轮次后才能执行</span>')}</span></div>
           <div class="tbl-wrap" style="margin:4px 0 12px"><table>
             <tr><th style="width:104px">编号 / 版本</th><th>标题</th><th style="width:90px">模块</th><th style="width:44px">优先级</th><th>操作步骤</th><th>预期结果</th><th style="width:110px">执行状态</th><th style="width:150px">操作</th></tr>
             ${g.items.map(it => { const r = it.result; const c = it.snapshot || {}; return `<tr>
@@ -4307,6 +4307,12 @@ async function saveDep() {
   try { await jpost(`/api/v1/projects/${encodeURIComponent(curProjectName)}/dependencies/edges`, {kind: depKind, from: src, to: dst, relation: $('depRel').value, note: $('depNote').value.trim()}); $('depDlg').close(); toast('已添加依赖', 'ok'); renderKnowledge(); }
   catch (e) { toast(e.message, 'err'); }
 }
+async function myStartRun(pid) {
+  const name = await askInput('开始新一轮执行', '轮次名称', '第 ' + (new Date().getMonth()+1) + '/' + new Date().getDate() + ' 轮');
+  if (!name) return;
+  try { await jpost(`/api/v1/plans/${pid}/runs`, {name}); toast('轮次已开始，可直接打结果', 'ok'); renderPlans(); }
+  catch (e) { toast(e.message, 'err'); }
+}
 async function kbSearch() {
   kbQuery = $('kbQ').value.trim(); if (!kbQuery) return;
   $('kbHits').innerHTML = '<div class="hint">检索中…</div>';
@@ -4743,7 +4749,7 @@ let _editingProject = null;
 async function fillUserNames() {
   if (!isSysAdmin() && !(curUser && curUser.projects && curUser.projects.some(p => p.role === 'project_admin'))) return;
   try {
-    const users = isSysAdmin() ? (await api('/api/v1/auth/users')).users : [];
+    const users = (await api('/api/v1/auth/users/lookup')).users;
     $('userNames').innerHTML = users.map(u => `<option value="${esc(u.username)}">${esc(u.name||'')}</option>`).join('');
   } catch (e) {}
 }

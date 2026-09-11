@@ -380,6 +380,19 @@ async def auth_list_users(request: Request) -> dict:
     return {"users": users}
 
 
+@router.get("/api/v1/auth/users/lookup")
+async def auth_lookup_users(request: Request) -> dict:
+    """成员添加时的用户名联想：系统管理员或任一项目的项目管理员可用，只返回正常状态用户的用户名与姓名。"""
+    user = _current_user(request)
+    if user["role"] != "admin" and not any(
+        p.get("role") == "project_admin" for p in request.app.state.projects.projects_of(user["username"])
+    ):
+        raise HTTPException(status_code=403, detail="仅项目管理员可查询用户列表")
+    users = [{"username": u["username"], "name": u.get("name", "")}
+             for u in request.app.state.auth.list_users() if u.get("status", "active") == "active"]
+    return {"users": users}
+
+
 @router.post("/api/v1/auth/users")
 async def auth_add_user(request: Request, body: UserBody) -> dict:
     from app.auth import AuthError
@@ -2511,8 +2524,9 @@ async def fix_cases(request: Request, task_id: str) -> dict:  # noqa: D401
     except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     if not outcome["proposals"]:
+        reasons = "；".join(f"{x.get('case_id')}：{x.get('problem')}" for x in outcome.get("invalid", [])[:3])
         return {"task_id": task_id, "pending_fix": None, "invalid": outcome.get("invalid", []),
-                "message": "AI 未产出有效修改提案"}
+                "message": "AI 未产出有效修改提案" + (f"（{reasons}）" if reasons else "")}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     record.pending_fix = {"kind": "cases", "at": now, "by": operator,
                           "proposals": outcome["proposals"], "invalid": outcome.get("invalid", []),

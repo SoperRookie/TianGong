@@ -595,3 +595,21 @@ async def test_后台任务先入库再解析_文件解析失败留痕(client):
             break
     assert task["status"] == "awaiting_confirmation" and task["sources"] == ["需求.txt"]
     assert "账号密码登录" in task["context"]["requirement"]
+
+
+def test_字段级定位_操作步骤含预期_越界改动给出原因():
+    from app.agents.quality import build_case_proposals
+    origin = make_case(steps=[{"action": "输入密码", "expected": "掩码显示"}, {"action": "点击登录", "expected": "跳转首页"}])
+    origin["uid"] = "u1"
+    raw = {**origin, "steps": [{"action": "输入密码", "expected": "密码框以圆点掩码显示 8 位"}, {"action": "点击登录", "expected": "跳转首页并右上角展示昵称"}]}
+    data = {"fixes": [{"case_id": origin["case_id"], "comment_type": "预期不可验证"}], "cases": [raw], "deleted": []}
+    # 勾「操作步骤」+ 第 1 步：第 1 步的预期改动应被采纳，第 2 步还原
+    reviews = {"u1": {"status": "rejected", "fields": ["steps"], "steps": [1]}}
+    out = build_case_proposals([origin], data, {origin["case_id"]}, reviews)
+    assert len(out["proposals"]) == 1
+    steps = out["proposals"][0]["after"]["steps"]
+    assert steps[0]["expected"] == "密码框以圆点掩码显示 8 位" and steps[1]["expected"] == "跳转首页"
+    # 只允许改标题时，模型只改了步骤：不再静默无提案，而是给出原因
+    reviews = {"u1": {"status": "rejected", "fields": ["title"], "steps": []}}
+    out = build_case_proposals([origin], data, {origin["case_id"]}, reviews)
+    assert out["proposals"] == [] and "不在驳回时指定的范围内" in out["invalid"][0]["problem"]

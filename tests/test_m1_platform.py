@@ -340,3 +340,14 @@ async def test_模块被用例引用禁止物理删除(client):
     resp = await client.delete(f"/api/v1/projects/P/modules/{m['module_id']}", params={"permanent": "true"})
     assert resp.status_code == 400 and "引用" in resp.json()["detail"]
     assert (await client.post(f"/api/v1/projects/P/modules/{m['module_id']}/restore")).status_code == 200
+
+
+async def test_成员联想_项目管理员可查用户名(client, auth_on):
+    admin = await _login(client)
+    pa = await _user(client, admin, "pa")
+    t1 = await _user(client, admin, "t1")
+    await _project(client, admin, "A", {"pa": "project_admin", "t1": "tester"})
+    r = await client.get("/api/v1/auth/users/lookup", headers=pa)
+    assert r.status_code == 200 and {u["username"] for u in r.json()["users"]} >= {"admin", "pa", "t1"}
+    assert set(r.json()["users"][0]) == {"username", "name"}   # 不暴露邮箱/手机/登录信息
+    assert (await client.get("/api/v1/auth/users/lookup", headers=t1)).status_code == 403
