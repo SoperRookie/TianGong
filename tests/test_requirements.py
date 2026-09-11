@@ -161,6 +161,36 @@ async def test_存量任务迁移为需求(client):
     assert migrate_tasks(app.state.tasks, app.state.requirements) == 1
     assert migrate_tasks(app.state.tasks, app.state.requirements) == 0  # 幂等
     reqs = (await client.get("/api/v1/requirements", params={"project": "P"})).json()["requirements"]
-    assert len(reqs) == 1 and reqs[0]["title"] == "玩法.txt" and reqs[0]["source_type"] == "migrated"
+    assert len(reqs) == 1 and reqs[0]["title"] == "rule" and reqs[0]["source_type"] == "migrated"  # 标题取正文一级标题
     assert reqs[0]["status"] == "designing" and reqs[0]["task_count"] == 1
     assert app.state.tasks.get(task_id).context["requirement_id"] == reqs[0]["req_id"]
+
+
+def test_迁移需求标题从正文推导():
+    from app.requirements import derive_title
+    raw = "【文件：30086186_735e783b-170726-1503-52.pdf】\n# 0801走地德州-新手进阶\n走地德州仅在4.0新手进阶增加"
+    assert derive_title(raw, "30086186_735e783b-170726-1503-52.pdf") == "0801走地德州-新手进阶"
+    assert derive_title("用户登录功能：账号密码登录，错误 5 次锁定。\n更多说明", "需求.txt") == "需求.txt"  # 原文无标题：保留文件名
+    assert derive_title("登录模块需求说明\n正文…", "") == "登录模块需求说明"   # 纯文本需求：取首行
+    assert derive_title("## # 图片类型与整体说明\n…", "a.pdf") == "图片类型与整体说明"
+    assert derive_title("", "a.pdf") == "a.pdf"
+
+
+async def test_存量迁移标题修复幂等(client):
+    from app.requirements import repair_migrated_titles
+    await client.post("/api/v1/projects", json={"name": "P"})
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+    resp = await client.post("/api/v1/tasks", files={"files": ("30086186_xx.pdf", "# 0801走地德州-新手进阶\n规则……".encode(), "text/plain")},
+                             data={"project": "P"})
+    tid = resp.json()["task_id"]
+    from app.requirements import migrate_tasks
+    assert migrate_tasks(app.state.tasks, app.state.requirements) == 1   # 启动时的存量迁移
+    task = (await client.get(f"/api/v1/tasks/{tid}")).json()
+    rid = task["context"]["requirement_id"]
+    # 新迁移直接得到正文标题；把标题改回文件名模拟旧数据，修复后恢复并回填任务
+    assert task["context"]["requirement_title"] == "0801走地德州-新手进阶"
+    item = app.state.requirements.get(rid); item["title"] = "30086186_xx.pdf"; app.state.requirements._persist(item)
+    assert repair_migrated_titles(app.state.requirements, app.state.tasks) == 1
+    assert repair_migrated_titles(app.state.requirements, app.state.tasks) == 0
+    assert (await client.get(f"/api/v1/requirements/{rid}")).json()["title"] == "0801走地德州-新手进阶"
+    assert (await client.get(f"/api/v1/tasks/{tid}")).json()["context"]["requirement_title"] == "0801走地德州-新手进阶"

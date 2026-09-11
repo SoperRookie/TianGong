@@ -213,6 +213,8 @@ def _ai_quality(rows: list[TaskRecord]) -> dict:
         # ---- 测试点 ----
         ents: dict[str, dict] = {}
         for _, p in iter_points((r.analysis or {}).get("test_points", [])):
+            if not isinstance(p, dict) or not p.get("tp_id"):
+                continue  # 项目化之前的任务：测试点是纯字符串，无实体不计入 AI 质量
             if p.get("source", "ai") in ("ai", "gap", "supplement"):
                 ents[p["tp_id"]] = {"status": p.get("status"), "rej": 0, "mod": 0, "deleted": False}
         for e in r.point_review_log:

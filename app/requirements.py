@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import re
+
 import uuid
 from datetime import datetime, timezone
 
@@ -277,13 +279,59 @@ def design_brief(item: dict) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+_FILENAME_RE = re.compile(r"\.(pdf|docx?|xlsx?|pptx?|txt|md|markdown|png|jpe?g|xmind|csv)$", re.I)
+_HEADING_RE = re.compile(r"^\s*#{1,3}\s*(.+?)\s*$")
+
+
+def derive_title(raw_text: str, fallback: str) -> str:
+    """从需求原文推导标题：优先 Markdown 一级/二级标题，其次第一行有意义的正文；都没有则用 fallback（文件名）。"""
+    for line in (raw_text or "").splitlines()[:40]:
+        line = line.strip()
+        if not line or line.startswith("【文件："):
+            continue
+        m = _HEADING_RE.match(line)
+        if m:
+            heading = m.group(1).lstrip("# ").strip()
+            if 2 <= len(heading) <= 60:
+                return heading
+    if fallback and _FILENAME_RE.search(fallback):
+        return fallback  # 有文件名且原文无标题：保留文件名
+    for line in (raw_text or "").splitlines()[:10]:
+        line = line.strip()
+        if line and not line.startswith("【文件：") and not line.startswith("#"):
+            return line[:60]
+    return fallback
+
+
+def repair_migrated_titles(requirements: RequirementStore, tasks=None) -> int:
+    """存量修复（幂等）：迁移来的需求标题若仍是文件名，改为正文标题；关联任务的 requirement_title 一并更新。"""
+    fixed = 0
+    for item in requirements.list(include_deleted=True):
+        title_now = item.get("title") or ""
+        if item.get("source_type") != "migrated" or not (_FILENAME_RE.search(title_now) or title_now.startswith("#")):
+            continue
+        title = derive_title(item.get("raw_text") or "", item["title"])
+        if title == item["title"]:
+            continue
+        item["title"] = title
+        requirements._persist(item)
+        if tasks is not None:
+            for tid in item.get("tasks") or []:
+                rec = tasks.get(tid)
+                if rec is not None and (rec.context or {}).get("requirement_id") == item["req_id"]:
+                    rec.context = {**(rec.context or {}), "requirement_title": title}
+                    tasks.save(rec)
+        fixed += 1
+    return fixed
+
+
 def migrate_task(record, requirements: RequirementStore, tasks=None) -> bool:
     """单个历史任务 → 需求实体（「一个任务 = 一条需求」）并回填关联；已迁移 / 无项目 / 无需求文本则跳过。"""
     ctx = record.context or {}
     if ctx.get("requirement_id") or not ctx.get("project") or not (ctx.get("requirement") or "").strip():
         return False
-    title = next((s for s in record.sources if s and s != "text"), "") or \
-        (ctx["requirement"].strip().splitlines()[0][:60] if ctx["requirement"].strip() else record.task_id)
+    filename = next((s for s in record.sources if s and s != "text"), "")
+    title = derive_title(ctx["requirement"], filename or record.task_id)
     item = requirements.create(
         ctx["project"], title, ctx["requirement"], created_by=record.created_by,
         source_type="migrated", created_at=record.created_at,
