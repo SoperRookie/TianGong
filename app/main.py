@@ -217,6 +217,10 @@ async def auth_middleware(request: Request, call_next):
     response = await call_next(request)
     for k, v in _SECURITY_HEADERS.items():
         response.headers.setdefault(k, v)
+    # 页面与本地托管脚本 / 品牌资源：每次都向服务器校验（ETag 命中返 304），避免浏览器按启发式规则
+    # 长期缓存旧版脚本（脑图内核修复后页面仍加载旧 kity 的根因）
+    if path == "/" or path.startswith(("/vendor/", "/brand/")) or path.endswith(".html"):
+        response.headers["Cache-Control"] = "no-cache"
     if described is not None:
         kind, action, target = described
         user = getattr(request.state, "user", None)
