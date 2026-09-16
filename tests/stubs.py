@@ -14,14 +14,18 @@ class StubLLM:
         self.calls: list[dict] = []
 
     async def chat(self, messages, model=None, require_vision=False, **overrides):
+        from app.llm.calllog import record_call
+
         self.calls.append({"messages": messages, "model": model, "require_vision": require_vision})
-        return ChatResult(
+        result = ChatResult(
             content=self.replies.pop(0),
             model_name=model or "stub",
             provider="stub",
             usage=UsageInfo(),
             elapsed_ms=1,
         )
+        record_call(messages, result)
+        return result
 
 
 def make_case(case_id="TC-登录-001", priority="P1", **kw):

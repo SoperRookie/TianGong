@@ -33,8 +33,13 @@ class TestCase(BaseModel):
     priority: Priority
     precondition: str = Field(default="", description="前置条件")
     steps: list[TestStep] = Field(min_length=1, description="步骤与预期结果一一对应")
+    keywords: str = Field(default="", description="关键词，逗号/顿号分隔（需求六十输出格式）")
     remark: str = Field(default="", description="备注")
     extras: dict[str, str] = Field(default_factory=dict, description="自定义模板扩展字段：列名 -> 值")
+    uid: str = Field(default="", description="系统内部稳定标识：审核状态跟随 uid，不受编号重排影响")
+    point_ids: list[str] = Field(default_factory=list, description="来源测试点 tp_id（完整需求 8.2 / 21 章追溯）")
+    source: str = Field(default="ai", description="来源类型（8.2）：ai / manual / import / copy / ai_fix")
+    version: int = Field(default=1, description="乐观锁版本号（完整需求 11 章）：内容每次修改 +1，保存时比对拦截并发覆盖")
 
     @field_validator("case_id", "module", "title")
     @classmethod
@@ -63,6 +68,7 @@ DEFAULT_TEMPLATE = CaseTemplate(
         "priority": "优先级，仅允许 P0/P1/P2/P3：P0=冒烟与核心链路；P1=主功能正常流与重要异常流；P2=次要功能与边界场景；P3=极端场景、体验类、建议项",
         "precondition": "前置条件，描述执行前系统与数据状态，无则留空",
         "steps": "测试步骤数组，每步含 action（操作）与 expected（该步预期结果），一一对应，单条用例不超过 8 步",
+        "keywords": "关键词，3-6 个概括测试对象与场景的词，顿号分隔，如「登录、密码错误、账号锁定」",
         "remark": "备注，可为空",
     },
 )

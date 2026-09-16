@@ -65,6 +65,8 @@ def render_case_chunk(case: dict) -> str:
             f"{i}. {s.get('action', '')} → 预期：{s.get('expected', '')}"
             for i, s in enumerate(steps, 1)
         )
+    if case.get("keywords"):
+        lines.append(f"关键词：{case['keywords']}")
     if case.get("remark"):
         lines.append(f"备注：{case['remark']}")
     return "\n".join(lines)
@@ -74,13 +76,18 @@ def render_case_chunk(case: dict) -> str:
 
 
 def _parse_xlsx(path: Path) -> list[dict]:
+    from app.parsers.base import check_zip_safety
+
+    check_zip_safety(path)
     ws = load_workbook(path, read_only=True, data_only=True).active
     rows = [[("" if c is None else str(c)) for c in row] for row in ws.iter_rows(values_only=True)]
     return _rows_to_cases(rows, path.name)
 
 
 def _parse_csv(path: Path) -> list[dict]:
-    text = path.read_text(encoding="utf-8-sig")
+    from app.parsers.base import read_text_any
+
+    text = read_text_any(path)
     rows = [list(row) for row in csv.reader(io.StringIO(text))]
     return _rows_to_cases(rows, path.name)
 
@@ -130,6 +137,9 @@ def _pair_steps(steps_text: str, expected_text: str) -> list[dict]:
 
 
 def _parse_xmind(path: Path) -> list[dict]:
+    from app.parsers.base import check_zip_safety
+
+    check_zip_safety(path)
     try:
         with zipfile.ZipFile(path) as zf:
             sheets = json.loads(zf.read("content.json"))
@@ -160,7 +170,9 @@ def _priority_label(topic: dict) -> str | None:
     return None
 
 
-def _walk_topic(topic: dict, module_path: list[str], cases: list[dict]) -> None:
+def _walk_topic(topic: dict, module_path: list[str], cases: list[dict], depth: int = 0) -> None:
+    if depth > 64:
+        raise CaseImportError("XMind 层级过深（超过 64 级），拒绝导入")
     """递归下钻：带优先级标签或备注的节点为用例；其余带子节点的为模块层级。
 
     团队模板约定（docs/architecture/测试用例模版.xmind）：优先级在 labels、
@@ -192,4 +204,4 @@ def _walk_topic(topic: dict, module_path: list[str], cases: list[dict]) -> None:
         )
         return
     for child in children:
-        _walk_topic(child, module_path + [title], cases)
+        _walk_topic(child, module_path + [title], cases, depth + 1)

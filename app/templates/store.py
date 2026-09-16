@@ -1,6 +1,5 @@
-"""模板库管理（F-4-4）：JSON 文件持久化，M4 起可替换为数据库。"""
+"""模板库管理（F-4-4）：入库持久化（kv_docs），旧 templates.json 首启自动迁移。"""
 
-import json
 from pathlib import Path
 
 from app.templates.custom import PRIORITY_ENUM, CustomTemplate, TemplateField
@@ -13,6 +12,7 @@ _DEFAULT_COLUMNS = [
     TemplateField(name="前置条件", maps_to="precondition"),
     TemplateField(name="测试步骤", maps_to="steps", required=True),
     TemplateField(name="预期结果", maps_to="expected", required=True),
+    TemplateField(name="关键词", maps_to="keywords"),
     TemplateField(name="备注", maps_to="remark"),
 ]
 
@@ -28,26 +28,26 @@ class TemplateStore:
         self._templates: dict[str, CustomTemplate] = {}
         self.default_id = "builtin-default"
         self._load()
-        if "builtin-default" not in self._templates:
-            self._templates["builtin-default"] = builtin_default_template()
-            self._persist()
+        # 内置模板始终以代码定义为准（列结构升级后旧持久化文件自动刷新）
+        self._templates["builtin-default"] = builtin_default_template()
+        self._persist()
 
     def _load(self) -> None:
-        if not self.storage_path.exists():
-            return
-        data = json.loads(self.storage_path.read_text(encoding="utf-8"))
+        from app.db import DocStore, load_with_migration
+
+        self._doc = DocStore("templates")
+        raw = load_with_migration(self._doc, self.storage_path, lambda data: {"doc": data})
+        data = raw.get("doc") or {}
         self._templates = {
             t["template_id"]: CustomTemplate.model_validate(t) for t in data.get("templates", [])
         }
         self.default_id = data.get("default_id", "builtin-default")
 
     def _persist(self) -> None:
-        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
+        self._doc.put("doc", {
             "default_id": self.default_id,
             "templates": [t.model_dump() for t in self._templates.values()],
-        }
-        self.storage_path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        })
 
     def save(self, template: CustomTemplate) -> CustomTemplate:
         self._templates[template.template_id] = template
