@@ -100,7 +100,38 @@ async def test_鉴权错误不重试():
             )
 
     auth_fail = AuthFail()
-    client._clients["primary"] = auth_fail
-    with pytest.raises(openai.AuthenticationError):
+    client._clients = {"primary": auth_fail, "backup": FlakyOpenAI(fail_times=0)}
+    result = await client.chat([{"role": "user", "content": "hi"}])
+    # 非暂时性错误不重试，但沿降级链尝试备用模型（可能使用不同密钥/服务）
+    assert auth_fail.calls == 1
+    assert result.model_name == "backup"
+
+
+class NotFoundOpenAI:
+    """模拟 Ollama 模型被删除：持续返回 404 model not found。"""
+
+    def __init__(self):
+        self.calls = 0
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **params):
+        self.calls += 1
+        resp = httpx.Response(404, request=httpx.Request("POST", "http://x"),
+                              json={"error": {"message": "model 'm1' not found"}})
+        raise openai.NotFoundError("model 'm1' not found", response=resp, body=None)
+
+
+async def test_模型不存在等配置错误跳过重试直接降级():
+    client = LLMClient(_registry(max_retries=2))
+    broken, ok = NotFoundOpenAI(), FlakyOpenAI(fail_times=0)
+    client._clients = {"primary": broken, "backup": ok}
+    result = await client.chat([{"role": "user", "content": "hi"}])
+    assert result.model_name == "backup"
+    assert broken.calls == 1  # 404 不重试，直接换下一模型
+
+
+async def test_全链路模型不可用抛AllModelsFailedError():
+    client = LLMClient(_registry(max_retries=1))
+    client._clients = {"primary": NotFoundOpenAI(), "backup": NotFoundOpenAI()}
+    with pytest.raises(AllModelsFailedError):
         await client.chat([{"role": "user", "content": "hi"}])
-    assert auth_fail.calls == 1  # 非暂时性错误立即抛出，不重试不降级

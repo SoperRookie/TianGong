@@ -188,3 +188,26 @@ async def test_repeated_revision_precipitates_preference(client):
     await one_task_with_revision()  # 跨任务第二次提出同一修订要求 → 沉淀为偏好
     memories = (await client.get("/api/v1/memories")).json()["memories"]
     assert len(memories) == 1 and "补充兼容性用例" in memories[0]["content"]
+
+
+def test_threshold_one_precipitates_immediately(tmp_path):
+    store = MemoryStore(tmp_path / "m.json", pref_threshold=1, revision_threshold=1)
+    store.record_usage("template", "tpl-x")
+    assert store.defaults() == {"template_id": "tpl-x"}
+    store.record_usage("revision", "补充兼容性用例")
+    entries = store.list()
+    assert any("补充兼容性用例" in e.content for e in entries)
+
+
+async def test_confirm_flow_records_template_usage(client, tmp_path):
+    """拆解确认流程同样记录模板/模型使用（曾遗漏：只有直接生成路径在记）。"""
+    app.state.memory = MemoryStore(tmp_path / "m1.json", pref_threshold=1)
+    app.state.llm = StubLLM([ANALYST_REPLY])
+    resp = await client.post(
+        "/api/v1/tasks",
+        data={"text": "登录需求", "confirm_points": "true", "model": "deepseek-chat"},
+    )
+    assert resp.json()["status"] == "awaiting_confirmation"
+    data = (await client.get("/api/v1/memories")).json()
+    assert data["defaults"] == {"template_id": "builtin-default", "model": "deepseek-chat"}
+    assert any(m["kind"] == "pref:template" for m in data["memories"])

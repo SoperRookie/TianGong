@@ -119,7 +119,12 @@ async def test_run_analysis_仅拆解():
     llm = StubLLM([ANALYST_REPLY])
     analysis = await run_analysis("登录需求", llm=llm)
 
-    assert analysis.test_points == [{"module": "登录", "points": ["正常登录", "密码错误"]}]
+    # 测试点归一化为对象形态（生成质量核心需求：测试点带维度标注）
+    assert analysis.test_points == [
+        {"module": "登录", "points": [
+            {"point": "正常登录", "dimension": ""}, {"point": "密码错误", "dimension": ""},
+        ]}
+    ]
     assert analysis.blind_spots == ["未说明锁定策略"]
     assert len(llm.calls) == 1  # 只有拆解调用，无生成/评审
 

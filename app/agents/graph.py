@@ -12,15 +12,8 @@ from loguru import logger
 from pydantic import ValidationError
 
 from app.agents.json_utils import LLMOutputError, extract_json
-from app.agents.prompts import (
-    ANALYST_SYSTEM,
-    FIX_INSTRUCTION,
-    GENERATOR_SYSTEM,
-    KNOWLEDGE_CASES_BLOCK,
-    KNOWLEDGE_REFS_BLOCK,
-    MEMORY_BLOCK,
-    REVIEWER_SYSTEM,
-)
+from app.agents.prompts import DATA_GUARD, wrap_data
+from app.prompts import prompt_text
 from app.agents.state import MAX_REVIEW_ROUNDS, OrchestrationState
 from app.llm.client import LLMClient
 from app.templates import CustomTemplate, TestCase, builtin_default_template
@@ -38,32 +31,77 @@ def _compact(data) -> str:
 _CASE_ID_SEQ_RE = re.compile(r"^(.*?)(\d+)\s*$")
 
 
+_UNSAFE_ID_RE = re.compile(r"[<>\"'\\\x00-\x1f]")
+
+
 def renumber_case_ids(cases: list[dict]) -> None:
-    """模块内重编号：保证各模块 case_id 从 001 连续（沿用原编号前缀风格）。"""
+    """模块内重编号：各模块 case_id 从 001 连续。
+
+    前缀由模块名派生（TC-{模块}-），避免模型把同一模块写成不同前缀造成跨模块重号；
+    模块名中的引号/尖括号等会进入页面内联属性的字符一律替换，最后做全局唯一兜底。
+    """
     counters: dict[str, int] = {}
+    seen: set[str] = set()
     for case in cases:
-        module = str(case.get("module", ""))
+        module = _UNSAFE_ID_RE.sub("_", str(case.get("module", ""))).strip() or "未分组"
+        case["module"] = module
         counters[module] = counters.get(module, 0) + 1
         m = _CASE_ID_SEQ_RE.match(str(case.get("case_id", "")))
-        prefix = m.group(1) if m else f"TC-{module}-"
-        case["case_id"] = f"{prefix}{counters[module]:03d}"
+        prefix = m.group(1) if (m and module in m.group(1)) else f"TC-{module}-"
+        prefix = _UNSAFE_ID_RE.sub("_", prefix)
+        cid = f"{prefix}{counters[module]:03d}"
+        while cid in seen:  # 兜底：绝不允许重号（重号会让审核操作作用到错误用例）
+            counters[module] += 1
+            cid = f"{prefix}{counters[module]:03d}"
+        seen.add(cid)
+        case["case_id"] = cid
 
 
 def merge_fix(current: list[dict], data: dict) -> list[dict]:
     """增量合并定点修正结果（PRD 增量更新）：改动用例按 case_id 覆盖原用例，
     其余原样保留（不依赖模型复述——大用例集下全量回传必然超输出上限）；
     新增用例追加，deleted 列表删除，最后统一重排编号。"""
-    changed = {str(c.get("case_id")): c for c in data.get("cases", [])}
+    existing = {str(c.get("case_id")) for c in current}
+    changed: dict[str, dict] = {}
+    added: list[dict] = []
+    for c in data.get("cases", []):
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("case_id"))
+        # 只有编号存在于当前用例集才视为"修改"；其余一律按新增处理（模型算错编号不得覆盖原用例）
+        if cid in existing:
+            changed[cid] = c
+        else:
+            added.append(c)
     deleted = {str(x) for x in data.get("deleted", [])}
     merged: list[dict] = []
     for case in current:
         case_id = str(case.get("case_id"))
         if case_id in deleted:
+            changed.pop(case_id, None)  # 既删又改：按删除处理，不再加回
             continue
-        merged.append(changed.pop(case_id, case))
-    merged.extend(changed.values())  # 剩余为新增用例
+        new = changed.get(case_id)
+        if new is None:
+            merged.append(case)
+            continue
+        # 模型只覆盖内容字段；uid / 来源测试点 / 来源类型 等系统字段保留，内容有变则版本 +1
+        keep = {k: case[k] for k in ("uid", "point_ids", "source") if k in case}
+        fused = {**case, **new, **keep}
+        if _content(fused) != _content(case):
+            fused["version"] = int(case.get("version", 1) or 1) + 1
+        else:
+            fused["version"] = case.get("version", 1)
+        merged.append(fused)
+    for c in added:
+        c.setdefault("point_ids", [])
+        c.setdefault("source", "ai")
+        merged.append(c)
     renumber_case_ids(merged)
     return merged
+
+
+def _content(case: dict) -> dict:
+    return {k: v for k, v in case.items() if k not in ("uid", "version", "case_id")}
 
 
 # 输出被 max_tokens 截断或格式异常时的节点级重试次数
@@ -72,8 +110,15 @@ _JSON_RETRIES = 1
 
 async def _chat_json(llm: LLMClient, messages: list[dict], model: str | None) -> tuple[dict, "object"]:
     """调用 LLM 并解析 JSON；解析失败自动重试（输出截断/格式异常兜底）。"""
+    from app.llm.calllog import used_prompts
+
     last_error: Exception | None = None
-    for _ in range(1 + _JSON_RETRIES):
+    if messages and messages[0].get("role") == "system" and DATA_GUARD not in messages[0]["content"]:
+        messages = [{**messages[0], "content": messages[0]["content"] + DATA_GUARD}, *messages[1:]]
+    noted = dict(used_prompts.get())  # 重试时恢复 Prompt 登记，调用日志不丢版本归属
+    for attempt in range(1 + _JSON_RETRIES):
+        if attempt:
+            used_prompts.set(dict(noted))
         result = await llm.chat(messages, model=model)
         try:
             return extract_json(result.content), result
@@ -81,11 +126,11 @@ async def _chat_json(llm: LLMClient, messages: list[dict], model: str | None) ->
             last_error = e
             if result.finish_reason == "length":
                 logger.warning(
-                    "模型输出被 max_tokens 截断（{}，输出 {} 字），重试大概率仍超限——"
-                    "请检查单次生成范围是否过大", result.model_name, len(result.content),
+                    "模型输出被 max_tokens 截断（{}，输出 {} 字），不再原样重试——"
+                    "请缩小单次生成范围或调大 max_tokens", result.model_name, len(result.content),
                 )
-            else:
-                logger.warning("模型输出 JSON 解析失败（{}，输出 {} 字），重试", result.model_name, len(result.content))
+                break
+            logger.warning("模型输出 JSON 解析失败（{}，输出 {} 字），重试", result.model_name, len(result.content))
     raise last_error
 
 
@@ -148,25 +193,29 @@ async def analyze_requirement(
 
     knowledge_cases：测试用例库检索结果，拆解阶段注入做覆盖度查漏（PRD 检索时机约束）。
     """
-    user = requirement
+    user = wrap_data("需求原文", requirement)
     if knowledge_cases:
-        user += KNOWLEDGE_CASES_BLOCK.format(knowledge=knowledge_cases)
+        user += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))
     data, result = await _chat_json(
         llm,
         [
-            {"role": "system", "content": ANALYST_SYSTEM},
+            {"role": "system", "content": prompt_text("analyst")},
             {"role": "user", "content": user},
         ],
         model,
     )
-    modules = data.get("modules", [])
+    from app.tasks.points import normalize_points
+
+    modules = normalize_points(data.get("modules", []))
     logger.info(
         "需求分析完成：{} 个模块 / {} 个测试点 / {} 条盲区",
         len(modules), sum(len(m.get("points", [])) for m in modules), len(data.get("blind_spots", [])),
     )
+    if not modules:
+        raise LLMOutputError("需求拆解未输出任何测试点（模型返回结构异常）")
     return {
         "test_points": modules,
-        "blind_spots": data.get("blind_spots", []),
+        "blind_spots": [str(b).strip() for b in (data.get("blind_spots") or []) if isinstance(b, (str, int, float)) and str(b).strip()],
         "model_name": result.model_name,
     }
 
@@ -177,10 +226,12 @@ def build_graph(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
 ):
     """knowledge_refs：需求文档/规则库知识，生成前注入生成 Agent；
     knowledge_cases：历史用例，只注入拆解与评审 Agent（PRD 上下文隔离约束）；
-    memory_notes：用户偏好与项目记忆（F-8-7），独立预算注入生成 Agent。"""
+    memory_notes：用户偏好与项目记忆（F-8-7），独立预算注入生成 Agent；
+    rule_notes：学习规则库中已确认生效的团队/项目规则（需求三十九），注入生成 Agent。"""
     template = template or builtin_default_template()
     async def analyze(state: OrchestrationState) -> dict:
         analysis = await analyze_requirement(
@@ -194,24 +245,26 @@ def build_graph(
         }
 
     async def generate(state: OrchestrationState) -> dict:
-        system = GENERATOR_SYSTEM.format(template_spec=template.prompt_spec())
+        system = prompt_text("generator").format(template_spec=template.prompt_spec())
         if state.get("issues"):
             # 定点修正：携带评审问题与当前用例全集（紧凑格式），只回传改动部分
-            user = FIX_INSTRUCTION.format(
+            user = prompt_text("fix_instruction").format(
                 issues=_dump(state["issues"]), cases=_compact(state["cases"])
             )
             action = "定点修正"
         else:
             user = (
-                f"需求内容：\n{state['requirement']}\n\n"
-                f"测试点拆解结果：\n{_dump(state['test_points'])}\n\n"
+                f"需求内容：\n{wrap_data('需求原文', state['requirement'])}\n\n"
+                f"测试点拆解结果：\n{wrap_data('测试点', _dump(state['test_points']))}\n\n"
                 "请为上述全部测试点生成详细测试用例。"
             )
             if knowledge_refs:
-                user += KNOWLEDGE_REFS_BLOCK.format(knowledge=knowledge_refs)
+                user += prompt_text("knowledge_refs_block").format(knowledge=wrap_data("需求/规则知识", knowledge_refs))
             action = "全量生成"
         if memory_notes:
-            user += MEMORY_BLOCK.format(memories=memory_notes)
+            user += prompt_text("memory_block").format(memories=wrap_data("偏好记忆", memory_notes))
+        if rule_notes:
+            user += prompt_text("rules_block").format(rules=wrap_data("团队规则", rule_notes))
         data, result = await _chat_json(
             llm,
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -225,7 +278,9 @@ def build_graph(
                 len(data.get("cases", [])), len(data.get("deleted", [])), len(cases),
             )
         else:
-            cases = data.get("cases", [])
+            cases = [c for c in (data.get("cases") or []) if isinstance(c, dict)]
+            if not cases:
+                raise LLMOutputError("用例生成未输出任何用例（模型返回结构异常或被截断）")
             logger.info("用例生成（全量）：{} 条", len(cases))
         return {"cases": cases, "trace": trace}
 
@@ -244,17 +299,17 @@ def build_graph(
             prior = f"\n\n上一轮评审问题（本轮重点核对是否已修复）：\n{_dump(state['issues'])}"
         if knowledge_cases:
             # 历史用例注入评审 Agent 辅助覆盖度把关（PRD：用例库进评审与拆解，不进生成）
-            prior += KNOWLEDGE_CASES_BLOCK.format(knowledge=knowledge_cases)
+            prior += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))
         data, result = await _chat_json(
             llm,
             [
-                {"role": "system", "content": REVIEWER_SYSTEM},
+                {"role": "system", "content": prompt_text("reviewer")},
                 {
                     "role": "user",
                     "content": (
                         f"{scope_line}本次为第 {current_round} 轮评审。\n\n"
-                        f"需求内容：\n{state['requirement']}\n\n"
-                        f"待评审用例：\n{_dump(state['cases'])}{prior}"
+                        f"需求内容：\n{wrap_data('需求原文', state['requirement'])}\n\n"
+                        f"待评审用例：\n{wrap_data('待评审用例', _dump(state['cases']))}{prior}"
                     ),
                 },
             ],

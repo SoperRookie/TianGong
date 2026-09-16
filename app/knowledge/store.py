@@ -3,7 +3,6 @@
 文档台账（KnowledgeDoc）落 JSON 文件，向量与切片正文存 Qdrant payload。
 """
 
-import json
 import uuid
 from pathlib import Path
 
@@ -57,23 +56,38 @@ class KnowledgeStore:
     # ---- 文档台账 ----
 
     def _load_docs(self) -> dict[str, KnowledgeDoc]:
-        if self._docs_path is None or not self._docs_path.exists():
+        if self._docs_path is None:  # :memory:（测试）：不入库，进程内即可
             return {}
-        raw = json.loads(self._docs_path.read_text(encoding="utf-8"))
-        return {d["doc_id"]: KnowledgeDoc.model_validate(d) for d in raw}
+        from app.db import DocStore, load_with_migration
 
-    def _save_docs(self) -> None:
+        self._doc_table = DocStore("knowledge_docs")
+        raw = load_with_migration(
+            self._doc_table, self._docs_path,
+            lambda data: {d["doc_id"]: d for d in data},
+        )
+        docs = {}
+        for k, d in raw.items():
+            if "level" not in d:  # 迁移期：历史 default 空间视同公共层，其余视同项目层
+                d["level"] = "public" if d.get("space") in ("default", "public") else "project"
+            docs[k] = KnowledgeDoc.model_validate(d)
+        return docs
+
+    def _save_docs(self, *doc_ids: str, removed: str | None = None) -> None:
         if self._docs_path is None:
             return
-        data = [d.model_dump() for d in self._docs.values()]
-        self._docs_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        if removed:
+            self._doc_table.remove(removed)
+        for did in (doc_ids or tuple(self._docs)):
+            if did in self._docs:
+                self._doc_table.put(did, self._docs[did].model_dump())
 
-    def list_docs(self, space: str | None = None, category: str | None = None) -> list[KnowledgeDoc]:
+    def list_docs(self, space: str | None = None, category: str | None = None,
+                  level: str | None = None) -> list[KnowledgeDoc]:
         docs = list(self._docs.values())
         if space:
             docs = [d for d in docs if d.space == space]
+        if level:
+            docs = [d for d in docs if d.level == level]
         if category:
             docs = [d for d in docs if d.category == category]
         return sorted(docs, key=lambda d: d.created_at, reverse=True)
@@ -97,6 +111,8 @@ class KnowledgeStore:
                     "source": doc.source,
                     "category": doc.category,
                     "space": doc.space,
+                    "level": doc.level,
+                    "module": doc.module,
                     "chunk_index": i,
                     "text": chunk,
                 },
@@ -105,7 +121,24 @@ class KnowledgeStore:
         ]
         self._client.upsert(collection_name=_COLLECTION, points=points)
         self._docs[doc.doc_id] = doc
-        self._save_docs()
+        self._save_docs(doc.doc_id)
+
+    @staticmethod
+    def _scope_filter(category: str | None, space: str | None):
+        """检索范围（16 章三层）：space 指定项目时 = 该项目（含模块层）+ 公共层（public / 历史 default）；
+        space 为 None 时不限（仅管理员全局检索用）。项目知识绝不跨项目命中。"""
+        from app.knowledge.schemas import DEFAULT_SPACE, PUBLIC_SPACE
+
+        must = []
+        if category:
+            must.append(FieldCondition(key="category", match=MatchValue(value=category)))
+        should = None
+        if space:
+            should = [FieldCondition(key="space", match=MatchValue(value=s))
+                      for s in dict.fromkeys([space, PUBLIC_SPACE, DEFAULT_SPACE])]
+        if not must and not should:
+            return None
+        return Filter(must=must or None, should=should)
 
     def search(
         self,
@@ -114,16 +147,11 @@ class KnowledgeStore:
         category: str | None = None,
         space: str | None = None,
     ) -> list[SearchHit]:
-        conditions = []
-        if category:
-            conditions.append(FieldCondition(key="category", match=MatchValue(value=category)))
-        if space:
-            conditions.append(FieldCondition(key="space", match=MatchValue(value=space)))
         result = self._client.query_points(
             collection_name=_COLLECTION,
             query=vector,
             limit=top_k,
-            query_filter=Filter(must=conditions) if conditions else None,
+            query_filter=self._scope_filter(category, space),
         )
         return [
             SearchHit(
@@ -133,6 +161,8 @@ class KnowledgeStore:
                 source=p.payload["source"],
                 category=p.payload["category"],
                 space=p.payload["space"],
+                level=p.payload.get("level", "project"),
+                module=p.payload.get("module", ""),
                 chunk_index=p.payload["chunk_index"],
             )
             for p in result.points
@@ -143,17 +173,12 @@ class KnowledgeStore:
     ) -> list[SearchHit]:
         """遍历范围内全部切片（关键词侧检索用）。当前规模全量扫描可行；
         语料到万级后关键词侧迁移 Elasticsearch（PRD 选型），此接口即废弃。"""
-        conditions = []
-        if category:
-            conditions.append(FieldCondition(key="category", match=MatchValue(value=category)))
-        if space:
-            conditions.append(FieldCondition(key="space", match=MatchValue(value=space)))
         hits: list[SearchHit] = []
         offset = None
         while True:
             points, offset = self._client.scroll(
                 collection_name=_COLLECTION,
-                scroll_filter=Filter(must=conditions) if conditions else None,
+                scroll_filter=self._scope_filter(category, space),
                 limit=256,
                 offset=offset,
                 with_payload=True,
@@ -167,12 +192,30 @@ class KnowledgeStore:
                     source=p.payload["source"],
                     category=p.payload["category"],
                     space=p.payload["space"],
+                    level=p.payload.get("level", "project"),
+                    module=p.payload.get("module", ""),
                     chunk_index=p.payload["chunk_index"],
                 )
                 for p in points
             )
             if offset is None:
                 return hits
+
+    def rename_space(self, old: str, new: str) -> int:
+        """项目改名联动：台账 space 与向量切片 payload 一并更新。"""
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        docs = [d for d in self._docs.values() if d.space == old]
+        if not docs:
+            return 0
+        for d in docs:
+            d.space = new
+        self._save_docs(*[d.doc_id for d in docs])
+        self._client.set_payload(
+            collection_name=_COLLECTION, payload={"space": new},
+            points=Filter(must=[FieldCondition(key="space", match=MatchValue(value=old))]),
+        )
+        return len(docs)
 
     def delete_doc(self, doc_id: str) -> bool:
         if doc_id not in self._docs:
@@ -184,5 +227,5 @@ class KnowledgeStore:
             ),
         )
         del self._docs[doc_id]
-        self._save_docs()
+        self._save_docs(removed=doc_id)
         return True

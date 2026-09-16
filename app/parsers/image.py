@@ -32,6 +32,8 @@ def _downscale(raw: bytes, mime: str) -> tuple[bytes, str]:
             buf = io.BytesIO()
             img.convert("RGB").save(buf, format="PNG", optimize=True)
             return buf.getvalue(), "image/png"
+    except Image.DecompressionBombError:
+        raise ValueError("图片像素数异常巨大（疑似解压炸弹），已拒绝处理")
     except Exception:
         # 无法用 Pillow 解码（少见格式等）：原样上送，交由模型侧处理
         return raw, mime
@@ -57,10 +59,19 @@ VISION_PROMPT = """你是一名资深测试分析师，请仔细观察这张需�
 
 
 async def understand_image_bytes(
-    data: bytes, mime: str, llm: LLMClient, prompt: str = VISION_PROMPT
+    data: bytes, mime: str, llm: LLMClient, prompt: str | None = None
 ) -> str:
     """Vision 模型理解图片字节，返回 Markdown 文本（自动路由 Vision 模型，F-1-5）。"""
+    if prompt is None:
+        from app.prompts import prompt_text
+
+        prompt = prompt_text("vision_image")
+    from app.config import get_settings
+
     payload, mime = _downscale(data, mime)
+    limit = get_settings().max_vision_image_mb * 1024 * 1024
+    if len(payload) > limit:
+        raise ValueError(f"图片 {len(payload) // (1024 * 1024)}MB 超过 Vision 处理上限 {get_settings().max_vision_image_mb}MB")
     data_url = f"data:{mime};base64,{base64.b64encode(payload).decode()}"
     result = await llm.chat(
         [

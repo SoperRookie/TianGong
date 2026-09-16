@@ -50,14 +50,28 @@ pip install -e ".[dev]"
 echo 'DEEPSEEK_API_KEY=sk-xxxx' > .env
 # 模型清单见 config/models.yaml，新增厂商/私有化模型只需追加条目
 
-# 3. 启动服务
-uvicorn app.main:app --reload
+# 3. 启动服务（自动拉起本地 MySQL，再启动 uvicorn；参数透传 uvicorn）
+bash scripts/dev.sh
 
 # 4. 打开 Web 界面
 open http://localhost:8000/
 ```
 
-运行测试：`pytest`（121 项，LLM 调用以桩件隔离，无需网络）。
+运行测试：`pytest`（222 项，LLM 调用以桩件隔离，无需网络）。
+
+### 品牌资源
+
+吉祥物「夜枭」（戴扫描护目镜的机械猫头鹰）：`app/web/brand/` 下有 `owl.svg`（应用图标 / favicon）、`owl-idle / owl-generating / owl-pass / owl-fail.svg`（四种表情）、`owl-mono.svg`（单色，随 currentColor）、`lockup.svg`（横版组合），运行时经 `/brand/*` 访问。
+
+### 部署须知
+
+- **单进程运行**：用户/项目/任务等为进程内内存态 + 数据库回写，`uvicorn` 不要加 `--workers`；启动时会在 `outputs/.instance.lock` 加文件锁，第二个实例会直接拒绝启动。
+- **初始管理员**：未配置 `TIANGONG_ADMIN_PASSWORD` 时首启生成随机口令打印在日志（仅一次），首次登录强制改密。
+- **反向代理**：配置 `TIANGONG_TRUSTED_PROXIES=代理IP` 后才采信 `X-Forwarded-For`，否则审计 IP 取直连地址。
+- **OpenAPI 文档**默认关闭（`TIANGONG_EXPOSE_DOCS=true` 开启）；登录接口有失败锁定（5 次 / 15 分钟）。
+- **模型密钥**只能通过形如 `XXX_API_KEY` 的环境变量引用，配置样例见 `.env.example`。
+- 上传限制：单文件 `TIANGONG_MAX_UPLOAD_SIZE_MB`（默认 50）、执行附件 200MB、PDF 300 页、zip 类文档解压后 300MB。
+- 日志留存：AI 调用日志与操作日志默认保留 180 天（`TIANGONG_LOG_RETENTION_DAYS`）。
 
 ## 演示路径（约 10 分钟）
 
@@ -84,6 +98,21 @@ open http://localhost:8000/
 | POST | `/api/v1/knowledge/docs` / `cases` | 知识文档入库 / 历史用例导入 |
 | GET/POST | `/api/v1/memories` | 记忆查看与维护 |
 | POST | `/api/v1/templates` | 上传并识别自定义模板 |
+| GET/POST/PUT/DELETE | `/api/v1/projects[/{name}]` | 项目实体（编码/负责人/状态/归档）、收藏 `/favorite` |
+| GET/PUT/DELETE | `/api/v1/projects/{name}/members[/{user}]` | 项目成员与项目角色 |
+| GET/POST/PUT/DELETE | `/api/v1/projects/{name}/versions[/{id}]` | 项目版本 |
+| GET/POST/PUT/DELETE | `/api/v1/projects/{name}/modules[/{id}]` | 模块树（≤5 级，逻辑删除/恢复/排序/移动） |
+| GET/PUT | `/api/v1/auth/me` | 当前用户（含所属项目角色、收藏/最近访问）/ 自助资料 |
+| GET/POST/PUT/DELETE | `/api/v1/requirements[/{id}]` | 需求中心：需求实体（原文/附件/人工补充/状态），详情含追溯与覆盖识别 |
+| POST | `/api/v1/requirements/{id}/analyze` | AI 需求分析（11 项结构化输出，待确认事项进入确认流） |
+| POST | `/api/v1/requirements/{id}/questions[/{qid}]` | 待确认事项：人工补充 / 确认结论 / 重新打开 |
+| POST | `/api/v1/requirements/{id}/design` | 从需求发起测试设计（任务回挂需求/模块/版本；未确认事项未清则 409） |
+| GET | `/api/v1/ai/tasks` / `/ai/calls[/{id}]` / `/ai/stats` | AI 任务中心、调用日志（用途/模型/Prompt 版本/输入输出/发起人）、用量统计 |
+| GET/POST | `/api/v1/ai/prompts[/{key}/versions[/{n}/activate\|archive]]` | Prompt 版本化管理（管理员） |
+| POST | `/api/v1/tasks/{id}/retry` | 失败任务重试 |
+| GET | `/api/v1/audit` | 操作日志 / 系统安全日志（管理员看全部，成员看所属项目与自己） |
+| GET | `/api/v1/workbench` / `/search?q=` / `/projects/{name}/coverage` | 我的工作台、全局搜索、覆盖追溯视图 |
+| POST | `/api/v1/knowledge/docs` | 知识入库：level=public/project/module + project + module |
 
 完整接口文档见服务启动后的 `/docs`（OpenAPI）。
 
@@ -103,19 +132,43 @@ app/
 └── web/         # Web 界面（单页）
 config/models.yaml   # 模型清单（密钥走 .env）
 docs/                # 需求文档、排期计划、架构图
-scripts/             # Prompt / Vision / Embedding 评测脚本
+scripts/             # dev.sh 一键启动、mysql_dev.sh 本地库、评测脚本
 tests/               # 121 项测试（LLM 桩件隔离）
 ```
 
 ## 里程碑进度
 
+V1.0 排期见 `docs/AI测试用例管理平台_V1.0_排期.md`（按需求 25 章对齐，验收 2026-11-06）。
+
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| M1 | 多 Agent 最小集 + 基础链路（解析 → 生成 → 评审 → 导出） | ✅ 已完成 |
-| M2 | XMind 导出、自定义模板、图片多模态、大文档分片、测试点确认 | ✅ 已完成 |
-| M3 | 三大知识库 RAG、混合检索、知识管家 Agent、历史用例导入 | ✅ 已完成 |
-| M4 | 多轮修订、Web 界面、长期记忆、评审闭环双通道 | ✅ 已完成（提前于排期） |
-| M5 | 用户权限与隔离、知识反哺闭环、OpenAPI 开放、容器化部署与监控 | 排期 10 月 |
-| M6 | 自我学习体系：语料管道、自动评估、Prompt 自动优化（黄金集回归 + 审批 + 可回滚） | 排期 11 月 |
+| 生成质量闭环（原 M1–M4） | 多 Agent 编排、拆解确认、评审闭环、知识库 RAG、Web 界面、长期记忆 | ✅ 已完成 |
+| M3 评审深化与版本安全 | 结构化驳回、字段/步骤级定位、AI 修改确认流、版本历史、乐观锁、回收站 | ✅ 已完成 |
+| M4 测试计划与执行 | 计划实体、用例快照、任务分配、执行挂计划、执行附件 | ✅ 已完成 |
+| M1 平台底座与权限 | 用户资料/禁用、系统级与项目级角色分离、项目成员、接口级项目隔离、项目字段与收藏/最近访问、版本与模块树、页面结构对齐 | ✅ 已完成 |
+| M2 需求中心与追溯链 | 需求实体化（原文永久保留、附件逐文件解析失败显式提示、人工补充独立保存）、AI 需求分析 11 项输出、待确认事项确认后才能测试设计、需求→测试点→用例→计划→执行追溯与覆盖识别、存量任务自动迁移为需求 | ✅ 已完成 |
+| M5 AI 中心、统计与审计 | 全部 Prompt 版本化（草稿/激活/回滚）、AI 调用日志与任务 Prompt 版本留痕、AI 任务中心（失败重试、部分成功明示）、知识库公共/项目/模块三层与跨项目隔离、AI 质量五指标、操作日志与系统安全日志、我的工作台、全局搜索、覆盖追溯视图 | ✅ 已完成 |
+| M4b 用例导入与批量维护 | 人工用例集容器任务；Excel/CSV/XMind 导入五步校验（上传→解析→预览→逐行校验→确认，错误行禁止静默导入，可只导入无错误行）；人工新增/复制用例（草稿→提交评审）；批量提交/改优先级/改模块/加标签/加入计划/删除入回收站，逐行乐观锁与部分冲突反馈 | ✅ |
+| 验收周 | 存量迁移正式执行（备份脚本 `scripts/migrate_prod.sh`、迁移报告与遗留任务归属项目/批量归属，需求实体与迁移计划自动跟随）；第 23 章 25 条核心规则逐条自动化验收（`tests/test_acceptance_rules.py`）；试点全流程走查清单与缺陷缓冲表（`docs/验收清单_V1.0.md`） | ✅ 工具与清单就绪，走查待试点执行 |
+
+### 长耗时解析一律后台
+
+- 创建任务、需求附件上传 / 重新解析：文件落盘后立即返回并入库（任务进度 `parsing`、附件状态「解析中」），PDF 提取与图片 Vision 理解在后台进行，页面轮询可见；解析失败逐条留痕，服务重启时未完成的解析标为失败并提示重试 / 重新解析。
+- 附件解析中的需求不能发起 AI 分析与测试设计（409）。
+- 启动参数建议带 `--timeout-graceful-shutdown 10`（`scripts/dev.sh` 默认已加）：热重载 / 停止时最多等 10 秒，不再被长请求卡住数分钟导致「Failed to fetch」。
+
+### 项目知识库 · 依赖关系
+
+- 知识库页「依赖关系」模式：同一项目内的 **需求功能依赖**（depends / related）与 **用例依赖链路**（precondition / data / related），按当前项目展示，数据按项目隔离（边两端必须是本项目的需求 / 用例，跨项目节点拒绝；非成员 403）。
+- 人工添加立即生效；「AI 识别依赖」结果为草稿，人工确认后才进入链路（用例识别须先圈定模块，单次 ≤200 节点）；需求分析「外部依赖」命中本项目需求时给一键建边提示。
+- 前置关系禁止成环；图接口返回拓扑分层、最长链路与成环告警；接口 `GET/POST/DELETE /api/v1/projects/{name}/dependencies[...]`，Prompt 键 `dependency_infer`。
+
+### 权限模型（M1）
+
+- 系统级角色 `admin` / `member` 与项目级角色分离：项目管理员 / 测试负责人 / 测试人员 / 只读人员（`app/permissions.py` 权限矩阵）。
+- 所有业务接口按「所属项目 + 动作」校验；未加入项目的用户对该项目数据一律不可见（403），杜绝跨项目 ID 访问。
+- 系统管理员视同任一项目的项目管理员；项目创建/删除仅系统管理员。
+- 历史遗留「未指定项目」的任务仅系统管理员可见（M2 需求实体化时迁移归属）。
+- 已归档项目只读，恢复后才能修改。
 
 试点计划：10 月中旬起 6 周，游戏 + 非游戏各一条业务线试运行，目标用例采纳率 ≥50%，扩大期 ≥70%。

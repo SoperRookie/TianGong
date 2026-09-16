@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from datetime import datetime, timezone
@@ -22,9 +21,6 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 SCOPES = ("user", "project")
-
-# 使用习惯固化阈值：模板/模型按最高频次（≥3 次）固化；修订指令重复 ≥2 次即固化
-_USAGE_THRESHOLDS = {"template": 3, "model": 3, "revision": 2}
 
 _SCOPE_LABELS = {"user": "用户偏好", "project": "项目记忆"}
 _USAGE_LABELS = {"template": "模板", "model": "模型"}
@@ -48,28 +44,34 @@ class MemoryEntry(BaseModel):
 
 
 class MemoryStore:
-    def __init__(self, storage_path: Path):
+    def __init__(self, storage_path: Path, pref_threshold: int = 3, revision_threshold: int = 2):
+        """pref_threshold：模板/模型使用满 N 次固化为默认偏好；
+        revision_threshold：修订指令跨任务重复 N 次固化并注入 Prompt。
+        阈值经 TIANGONG_MEMORY_PREF_THRESHOLD / TIANGONG_MEMORY_REVISION_THRESHOLD 配置。"""
         self._path = storage_path
+        self._thresholds = {
+            "template": max(1, pref_threshold),
+            "model": max(1, pref_threshold),
+            "revision": max(1, revision_threshold),
+        }
         self._entries: dict[str, MemoryEntry] = {}
         self._usage: dict[str, dict[str, int]] = {}
         self._load()
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return
+        from app.db import DocStore, load_with_migration
+
+        self._doc = DocStore("memories")
+        raw = load_with_migration(self._doc, self._path, lambda data: {"doc": data}).get("doc") or {}
         for item in raw.get("memories", []):
             entry = MemoryEntry.model_validate(item)
             self._entries[entry.memory_id] = entry
         self._usage = raw.get("usage", {})
 
     def _persist(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"memories": [e.model_dump() for e in self._entries.values()], "usage": self._usage}
-        self._path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        self._doc.put("doc", {
+            "memories": [e.model_dump() for e in self._entries.values()], "usage": self._usage,
+        })
 
     # ---- 可见可控（F-8-6）----
 
@@ -102,6 +104,15 @@ class MemoryStore:
         self._entries[entry.memory_id] = entry
         self._persist()
         return entry
+
+    def rename_project(self, old: str, new: str) -> None:
+        changed = False
+        for e in self._entries.values():
+            if e.project == old:
+                e.project = new
+                changed = True
+        if changed:
+            self._persist()
 
     def list(self, scope: str | None = None, project: str | None = None) -> list[MemoryEntry]:
         entries = [
@@ -148,13 +159,13 @@ class MemoryStore:
     def record_usage(self, kind: str, value: str) -> None:
         """记录一次模板/模型/修订指令的使用，达到阈值自动固化为偏好记忆。"""
         value = (value or "").strip()
-        if kind not in _USAGE_THRESHOLDS or not value:
+        if kind not in self._thresholds or not value:
             return
         key = _normalize(value) if kind == "revision" else value
         counter = self._usage.setdefault(kind, {})
         counter[key] = counter.get(key, 0) + 1
         count = counter[key]
-        if count < _USAGE_THRESHOLDS[kind]:
+        if count < self._thresholds[kind]:
             self._persist()
             return
         if kind == "revision":
@@ -181,7 +192,7 @@ class MemoryStore:
             counter = self._usage.get(kind, {})
             if counter:
                 top, count = max(counter.items(), key=lambda kv: kv[1])
-                if count >= _USAGE_THRESHOLDS[kind]:
+                if count >= self._thresholds[kind]:
                     out[field] = top
         return out
 

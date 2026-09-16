@@ -29,43 +29,63 @@ class KnowledgeService:
         self.chunk_max_chars = chunk_max_chars
 
     async def ingest_file(
-        self, path: str | Path, category: str, space: str = DEFAULT_SPACE
+        self, path: str | Path, category: str, space: str = DEFAULT_SPACE, **meta
     ) -> KnowledgeDoc:
         doc = parse_file(path)
-        return await self._ingest(doc.full_text, source=doc.source, category=category, space=space)
+        return await self._ingest(doc.full_text, source=doc.source, category=category, space=space, **meta)
 
     async def ingest_text(
-        self, text: str, source: str, category: str, space: str = DEFAULT_SPACE
+        self, text: str, source: str, category: str, space: str = DEFAULT_SPACE, **meta
     ) -> KnowledgeDoc:
         parsed = parse_text(text)
-        return await self._ingest(parsed.full_text, source=source, category=category, space=space)
+        return await self._ingest(parsed.full_text, source=source, category=category, space=space, **meta)
 
-    async def ingest_cases(self, path: str | Path, space: str = DEFAULT_SPACE) -> KnowledgeDoc:
+    async def ingest_cases(self, path: str | Path, space: str = DEFAULT_SPACE, **meta) -> KnowledgeDoc:
         """历史用例入库（F-7-2）：Excel/CSV/XMind → 测试用例库，每条用例一个切片。"""
         from app.knowledge.importers import parse_cases_file, render_case_chunk
 
         path = Path(path)
         chunks = [render_case_chunk(c) for c in parse_cases_file(path)]
         vectors = await self.embedder.embed(chunks)
-        record = self._new_doc(source=path.name, category="test_cases", space=space, chunk_count=len(chunks))
+        record = self._new_doc(source=path.name, category="test_cases", space=space, chunk_count=len(chunks), **meta)
         self.store.upsert_chunks(record, chunks, vectors)
+        self.invalidate_cache()
         return record
 
-    async def _ingest(self, text: str, source: str, category: str, space: str) -> KnowledgeDoc:
+    async def _ingest(self, text: str, source: str, category: str, space: str, **meta) -> KnowledgeDoc:
         if category not in CATEGORIES:
             raise InvalidCategoryError(category)
         chunks = split_knowledge(text, self.chunk_max_chars)
         if not chunks:
             raise ValueError(f"文档 {source} 无有效内容，未入库")
         vectors = await self.embedder.embed(chunks)
-        record = self._new_doc(source=source, category=category, space=space, chunk_count=len(chunks))
+        self._check_dims(vectors)
+        # 同空间同分类同来源重复入库：先删旧文档，避免重复切片挤占检索配额
+        for old in self.store.list_docs(space, category):
+            if old.source == source:
+                self.store.delete_doc(old.doc_id)
+        record = self._new_doc(source=source, category=category, space=space, chunk_count=len(chunks), **meta)
         self.store.upsert_chunks(record, chunks, vectors)
+        self.invalidate_cache()
         return record
 
-    def _new_doc(self, source: str, category: str, space: str, chunk_count: int) -> KnowledgeDoc:
+    def _check_dims(self, vectors: list[list[float]]) -> None:
+        expected = self.embedder.registry.get().dimensions
+        if vectors and len(vectors[0]) != expected:
+            raise ValueError(f"Embedding 返回维度 {len(vectors[0])} 与配置 {expected} 不一致，请检查模型配置")
+
+    def _new_doc(self, source: str, category: str, space: str, chunk_count: int,
+                 level: str | None = None, module: str = "", created_by: str | None = None) -> KnowledgeDoc:
+        from app.knowledge.schemas import DEFAULT_SPACE as _DEF, PUBLIC_SPACE
+
+        if level is None:
+            level = "public" if space in (_DEF, PUBLIC_SPACE) else ("module" if module else "project")
         return KnowledgeDoc(
             doc_id=uuid.uuid4().hex[:12],
             space=space,
+            level=level,
+            module=module or "",
+            created_by=created_by,
             category=category,
             source=source,
             chunk_count=chunk_count,
@@ -80,17 +100,34 @@ class KnowledgeService:
         category: str | None = None,
         space: str | None = None,
         mode: str = "hybrid",
+        vector: list[float] | None = None,
     ) -> list[SearchHit]:
-        """检索知识切片。mode: hybrid（向量+关键词 RRF 融合，F-7-3b，默认）/ vector。"""
+        """检索知识切片。mode: hybrid（向量+关键词 RRF 融合，F-7-3b，默认）/ vector。
+        vector 可传入已算好的查询向量（知识管家多分类检索共用一次 embedding）。"""
         if category is not None and category not in CATEGORIES:
             raise InvalidCategoryError(category)
-        [vector] = await self.embedder.embed([query])
+        if vector is None:
+            [vector] = await self.embedder.embed([query])
         vector_hits = self.store.search(
             vector, top_k=top_k if mode == "vector" else top_k * 3, category=category, space=space
         )
         if mode == "vector":
             return vector_hits
         return self._fuse(query, vector_hits, top_k, category, space)
+
+    _corpus_cache: dict | None = None
+
+    def _corpus(self, category: str | None, space: str | None) -> list[SearchHit]:
+        """关键词侧语料按 (分类, 空间) 缓存，入库/删除/改名时整体失效（不再每次全量 scroll）。"""
+        if self._corpus_cache is None:
+            self._corpus_cache = {}
+        key = (category, space)
+        if key not in self._corpus_cache:
+            self._corpus_cache[key] = self.store.iter_chunks(category=category, space=space)
+        return self._corpus_cache[key]
+
+    def invalidate_cache(self) -> None:
+        self._corpus_cache = None
 
     def _fuse(
         self,
@@ -102,7 +139,7 @@ class KnowledgeService:
     ) -> list[SearchHit]:
         from app.knowledge.hybrid import bm25_scores, rrf_merge
 
-        corpus = self.store.iter_chunks(category=category, space=space)
+        corpus = self._corpus(category, space)
         if not corpus:
             return vector_hits[:top_k]
         by_key = {(h.doc_id, h.chunk_index): i for i, h in enumerate(corpus)}

@@ -7,7 +7,7 @@
 from collections import defaultdict
 
 # 参与字段级对比的规范字段
-_DIFF_FIELDS = ("module", "priority", "precondition", "remark")
+_DIFF_FIELDS = ("module", "priority", "precondition", "keywords", "remark")
 
 
 def _steps_text(case: dict) -> str:

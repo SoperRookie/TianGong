@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.graph import analyze_requirement, build_graph
 from app.agents.state import MAX_REVIEW_ROUNDS
+from app.agents.prompts import wrap_data
 from app.config import get_settings
 from app.llm.client import LLMClient
 from app.parsers.chunking import split_text
@@ -68,6 +69,34 @@ async def run_analysis(
     )
 
 
+async def run_requirement_analysis(
+    text: str, llm: LLMClient, model: str | None = None
+) -> dict:
+    """需求中心 AI 需求分析（完整需求 5.5）：11 项结构化输出。超长需求分片后逐项合并去重。"""
+    from app.agents.graph import _chat_json
+    from app.agents.prompts import REQUIREMENT_ANALYSIS_KEYS
+    from app.prompts import prompt_text
+
+    chunks = split_text(text, get_settings().chunk_max_chars)
+    outputs = await asyncio.gather(*[
+        _chat_json(llm, [{"role": "system", "content": prompt_text("requirement_analysis")},
+                         {"role": "user", "content": f"需求原文：\n{wrap_data('需求原文', chunk)}"}], model)
+        for chunk in chunks
+    ])
+    merged: dict = {k: [] for k in REQUIREMENT_ANALYSIS_KEYS}
+    model_name = ""
+    for data, result in outputs:
+        model_name = result.model_name
+        for key in REQUIREMENT_ANALYSIS_KEYS:
+            for item in data.get(key) or []:
+                item = str(item).strip()
+                if item and item not in merged[key]:
+                    merged[key].append(item)
+    merged["model_name"] = model_name
+    merged["chunks"] = len(chunks)
+    return merged
+
+
 async def run_generation(
     requirement: str,
     llm: LLMClient,
@@ -79,6 +108,7 @@ async def run_generation(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
     on_analyzed=None,
 ) -> GenerationResult:
     """执行「拆解 → 生成 → 评审（≤3 轮回环）」全流程。
@@ -92,7 +122,7 @@ async def run_generation(
     on_analyzed：拆解完成回调（任务进度上报用，F-6-2）。
     """
     kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases,
-          "memory_notes": memory_notes}
+          "memory_notes": memory_notes, "rule_notes": rule_notes}
     if test_points:
         return await _run_from_points(
             requirement, llm, model, reviewer_model, template, test_points, **kw
@@ -125,6 +155,7 @@ async def _analyze_then_generate(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
     on_analyzed=None,
 ) -> GenerationResult:
     """先拆解，再按模块并行生成（PRD 4.1a 生成 Agent 多实例）。
@@ -137,7 +168,8 @@ async def _analyze_then_generate(
         on_analyzed()
     result = await _run_from_points(
         requirement, llm, model, reviewer_model, template, analysis["test_points"],
-        knowledge_refs=knowledge_refs, knowledge_cases=knowledge_cases, memory_notes=memory_notes,
+        knowledge_refs=knowledge_refs, knowledge_cases=knowledge_cases,
+        memory_notes=memory_notes, rule_notes=rule_notes,
     )
     for spot in analysis["blind_spots"]:
         if spot not in result.blind_spots:
@@ -156,10 +188,11 @@ async def _run_from_points(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
 ) -> GenerationResult:
     """从已确认测试点继续：单模块直接生成；多模块按模块并行多实例（PRD 4.1a 并行加速）。"""
     kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases,
-          "memory_notes": memory_notes}
+          "memory_notes": memory_notes, "rule_notes": rule_notes}
     if not test_points:  # 拆解为空的兜底：回退图内拆解
         return await _run_single(requirement, llm, model, reviewer_model, template, **kw)
     if len(test_points) == 1:
@@ -189,9 +222,11 @@ async def _run_single(
     knowledge_refs: str | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
 ) -> GenerationResult:
     graph = build_graph(llm, template, knowledge_refs=knowledge_refs,
-                        knowledge_cases=knowledge_cases, memory_notes=memory_notes)
+                        knowledge_cases=knowledge_cases, memory_notes=memory_notes,
+                        rule_notes=rule_notes)
     initial: dict = {
         "requirement": requirement,
         "model": model,
@@ -227,6 +262,7 @@ async def run_revision(
     history: list[str] | None = None,
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
+    rule_notes: str | None = None,
 ) -> GenerationResult:
     """多轮修订（F-3-5）：用户修订要求作为定点修正问题进入「生成→评审」回环。
 
@@ -234,11 +270,12 @@ async def run_revision(
     history：本任务此前已应用的修订指令（短期会话记忆 F-8-1），注入保持多轮一致性。
     memory_notes：用户偏好与项目记忆（F-8-7）。
     """
-    problem = f"用户修订要求：{instruction}"
+    problem = f"用户修订要求：{wrap_data('修订要求', instruction)}"
     if history:
         applied = "；".join(history)
         problem += f"\n（此前已应用的修订，保持其效果不被本次修订破坏：{applied}）"
-    graph = build_graph(llm, template, knowledge_cases=knowledge_cases, memory_notes=memory_notes)
+    graph = build_graph(llm, template, knowledge_cases=knowledge_cases,
+                        memory_notes=memory_notes, rule_notes=rule_notes)
     initial: dict = {
         "requirement": requirement,
         "model": model,
@@ -285,8 +322,14 @@ def _merge(outcomes: list) -> GenerationResult:
     seen_notes: dict[str, set[str]] = {"blind_spots": set(), "missing": set(), "suggestions": set()}
     module_points: dict[str, list[str]] = {}
 
+    from app.agents.json_utils import LLMOutputError
+    from app.llm.client import AllModelsFailedError
+    from app.llm.schemas import MissingAPIKeyError
+
     for i, outcome in enumerate(outcomes, 1):
         if isinstance(outcome, BaseException):
+            if isinstance(outcome, (asyncio.CancelledError, TypeError, KeyError, AttributeError, IndexError, NameError)):
+                raise outcome  # 取消 / 编程错误：不能伪装成"分片失败"以 completed 出稿
             # 分片失败不阻塞整体交付，显式标注缺失范围（PRD 异常流程）
             merged.passed = False
             merged.unresolved.append({"case_id": f"<分片{i}>", "problem": f"分片处理失败: {outcome}"})
@@ -316,10 +359,10 @@ def _merge(outcomes: list) -> GenerationResult:
 
 
 def _renumber(cases: list[TestCase]) -> None:
-    """模块内重编号：合并后保证各模块 case_id 从 001 连续（沿用原编号前缀风格）。"""
-    counters: dict[str, int] = {}
-    for case in cases:
-        counters[case.module] = counters.get(case.module, 0) + 1
-        m = _CASE_ID_PREFIX_RE.match(case.case_id)
-        prefix = m.group(1) if m else f"TC-{case.module}-"
-        case.case_id = f"{prefix}{counters[case.module]:03d}"
+    """模块内重编号：与 graph.renumber_case_ids 同一规则（前缀由模块派生、全局唯一），作用于 TestCase 对象。"""
+    from app.agents.graph import renumber_case_ids
+
+    dicts = [{"case_id": c.case_id, "module": c.module} for c in cases]
+    renumber_case_ids(dicts)
+    for case, d in zip(cases, dicts):
+        case.case_id, case.module = d["case_id"], d["module"]

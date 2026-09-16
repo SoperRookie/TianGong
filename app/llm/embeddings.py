@@ -110,15 +110,26 @@ class EmbeddingClient:
             )
         return self._clients[cfg.name]
 
+    _sem = None
+
+    def _semaphore(self):
+        from app.config import get_settings
+
+        loop = asyncio.get_running_loop()
+        if self._sem is None or self._sem[0] is not loop:
+            self._sem = (loop, asyncio.Semaphore(max(1, get_settings().embedding_max_concurrency)))
+        return self._sem[1]
+
     async def embed(self, texts: list[str], model: str | None = None) -> list[list[float]]:
-        """将文本列表向量化，返回与输入等长的向量列表。"""
+        """将文本列表向量化，返回与输入等长的向量列表（全局并发上限）。"""
         if not texts:
             return []
         cfg = self.registry.get(model)
         vectors: list[list[float]] = []
         for i in range(0, len(texts), _BATCH_SIZE):
             batch = texts[i : i + _BATCH_SIZE]
-            vectors.extend(await self._embed_batch(cfg, batch))
+            async with self._semaphore():
+                vectors.extend(await self._embed_batch(cfg, batch))
         return vectors
 
     async def _embed_batch(self, cfg: EmbeddingConfig, batch: list[str]) -> list[list[float]]:

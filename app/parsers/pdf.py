@@ -24,7 +24,13 @@ class PdfParser:
 
     def parse(self, path: Path) -> ParsedDocument:
         pages: list[tuple[list[tuple[str, float]], list[tuple[bytes, str]]]] = []
+        from app.config import get_settings
+        from app.parsers.base import UnsafeFileError
+
         with fitz.open(str(path)) as doc:
+            max_pages = get_settings().max_pdf_pages
+            if doc.page_count > max_pages:
+                raise UnsafeFileError(f"{path.name} 共 {doc.page_count} 页，超过解析上限 {max_pages} 页，请拆分后上传")
             seen_xrefs: set[int] = set()  # 页眉 logo 等重复图片只取一次
             for page in doc:
                 pages.append(

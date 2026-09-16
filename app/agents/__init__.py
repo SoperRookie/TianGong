@@ -5,7 +5,9 @@ from app.agents.service import (
     GenerationResult,
     run_analysis,
     run_generation,
+    run_requirement_analysis,
     run_revision,
 )
 
-__all__ = ["AnalysisResult", "GenerationResult", "run_analysis", "run_generation", "run_revision"]
+__all__ = ["AnalysisResult", "GenerationResult", "run_analysis", "run_generation",
+           "run_requirement_analysis", "run_revision"]
