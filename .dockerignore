@@ -1,0 +1,25 @@
+.git
+.venv
+__pycache__
+**/__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.idea
+.vscode
+.DS_Store
+
+# 密钥与本地运行产物不进镜像，运行时以卷挂载
+.env
+*.local.yaml
+outputs
+data
+logs
+backups
+uploads
+*.log
+img.png
+
+# 文档与测试不进镜像
+docs
+tests
