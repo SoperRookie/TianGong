@@ -17,9 +17,25 @@ from openpyxl import load_workbook
 from app.templates.custom import _map_canonical
 
 _PRIORITY_RE = re.compile(r"^[Pp]([0-9])$")
+# 禅道 / TestLink 等的数字优先级：1 最高 → P0；文字档位 高/中/低
+_NUMERIC_PRIORITY = {"1": "P0", "2": "P1", "3": "P2", "4": "P3"}
 
-# 步骤/预期列中的行前编号："1. xxx" / "1、xxx" / "1) xxx"
-_STEP_NO_RE = re.compile(r"^\s*\d+\s*[.、)．]\s*")
+# 步骤/预期列中的行前编号："1. xxx" / "1、xxx" / "1) xxx" / 禅道分组子步骤 "1.1 xxx"
+_STEP_NO_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)+\s+|\d+\s*[.、)．]\s*)")
+_HTML_BR_RE = re.compile(r"<br\s*/?>", re.I)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clean_cell(value) -> str:
+    """单元格文本规范化：禅道导出的步骤/预期含 <br /> 换行与 HTML 标签；数字单元格去掉 .0。"""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    text = str(value)
+    if "<" in text:
+        text = _HTML_TAG_RE.sub("", _HTML_BR_RE.sub("\n", text))
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 class CaseImportError(ValueError):
@@ -27,8 +43,11 @@ class CaseImportError(ValueError):
 
 
 def normalize_priority(value: str) -> str:
-    """优先级归一：大写；P4 及以上并入 P3（2026-07-10 四级决策）；其余原样保留。"""
-    value = str(value or "").strip().upper()
+    """优先级归一：大写；P4 及以上并入 P3（2026-07-10 四级决策）；
+    数字 1–4（禅道等）对应 P0–P3；其余（含自定义模板的文字档位）原样保留。"""
+    value = _clean_cell(value).upper()
+    if value in _NUMERIC_PRIORITY:
+        return _NUMERIC_PRIORITY[value]
     m = _PRIORITY_RE.match(value)
     if m and int(m.group(1)) > 3:
         return "P3"
@@ -45,7 +64,9 @@ def parse_cases_file(path: str | Path) -> list[dict]:
         return _parse_csv(path)
     if suffix == ".xmind":
         return _parse_xmind(path)
-    raise CaseImportError(f"不支持的用例文件格式 {suffix}，当前支持: .xlsx / .csv / .xmind")
+    if suffix in (".xls", ".html", ".htm"):
+        return _parse_html_table(path)
+    raise CaseImportError(f"不支持的用例文件格式 {suffix}，当前支持: .xlsx / .csv / .xmind / 禅道导出的 .xls")
 
 
 def render_case_chunk(case: dict) -> str:
@@ -80,15 +101,76 @@ def _parse_xlsx(path: Path) -> list[dict]:
 
     check_zip_safety(path)
     ws = load_workbook(path, read_only=True, data_only=True).active
-    rows = [[("" if c is None else str(c)) for c in row] for row in ws.iter_rows(values_only=True)]
+    rows = [[_clean_cell(c) for c in row] for row in ws.iter_rows(values_only=True)]
     return _rows_to_cases(rows, path.name)
+
+
+def _parse_html_table(path: Path) -> list[dict]:
+    """禅道旧版「导出 Excel」得到的 .xls 实为 HTML 表格：解析第一个 <table>，单元格内 <br /> 作换行。"""
+    from html.parser import HTMLParser
+
+    from app.parsers.base import read_text_any
+
+    raw = path.read_bytes()
+    if raw[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":  # 真正的二进制 xls（OLE2）
+        raise CaseImportError(f"{path.name} 是旧版二进制 Excel（.xls），请在禅道导出时选择 xlsx 或 csv 格式")
+    text = read_text_any(path)
+
+    class _Table(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rows: list[list[str]] = []
+            self._row: list[str] | None = None
+            self._cell: list[str] | None = None
+            self._done = False
+
+        def handle_starttag(self, tag, attrs):
+            if self._done:
+                return
+            if tag == "tr":
+                self._flush_row()
+                self._row = []
+            elif tag in ("td", "th"):
+                if self._row is None:  # 表头单元格不在 <tr> 内的宽松写法
+                    self._row = []
+                self._cell = []
+            elif tag == "br" and self._cell is not None:
+                self._cell.append("\n")
+
+        def handle_endtag(self, tag):
+            if self._done:
+                return
+            if tag in ("td", "th") and self._cell is not None and self._row is not None:
+                self._row.append("".join(self._cell).strip())
+                self._cell = None
+            elif tag in ("tr", "thead", "tbody"):
+                self._flush_row()
+            elif tag == "table":
+                self._flush_row()
+                if self.rows:
+                    self._done = True  # 只取第一张表
+
+        def _flush_row(self):
+            if self._row is not None:
+                self.rows.append(self._row)
+                self._row = None
+
+        def handle_data(self, data):
+            if self._cell is not None:
+                self._cell.append(data)
+
+    parser = _Table()
+    parser.feed(text)
+    if not parser.rows:
+        raise CaseImportError(f"{path.name} 未找到表格内容（禅道导出请选择 xlsx 或 csv 格式）")
+    return _rows_to_cases(parser.rows, path.name)
 
 
 def _parse_csv(path: Path) -> list[dict]:
     from app.parsers.base import read_text_any
 
     text = read_text_any(path)
-    rows = [list(row) for row in csv.reader(io.StringIO(text))]
+    rows = [[_clean_cell(c) for c in row] for row in csv.reader(io.StringIO(text))]
     return _rows_to_cases(rows, path.name)
 
 
@@ -112,6 +194,8 @@ def _rows_to_cases(rows: list[list[str]], filename: str) -> list[dict]:
         if not record.get("title"):
             continue
         record["priority"] = normalize_priority(record.get("priority", ""))
+        if record.get("module"):  # 禅道模块导出为「/父模块/子模块」路径：去掉首尾斜杠
+            record["module"] = record["module"].strip().strip("/").strip()
         record["steps"] = _pair_steps(record.pop("steps", ""), record.pop("expected", ""))
         cases.append(record)
     if not cases:
