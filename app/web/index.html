@@ -3229,6 +3229,15 @@ const EXEC_LABEL = {pass:'通过', fail:'失败', blocked:'阻塞', skipped:'跳
 const EXEC_CLS = {pass:'approved', fail:'rejected', blocked:'candidate', skipped:'pending'};
 /* ---------- 测试计划视图（M4：计划实体 + 快照 + 分配 + 计划执行与附件） ---------- */
 let curPlan = null, planRunId = null, plansMine = false, plansProject = '', planExecFilter = '';
+let plansKw = '', plansStatus = '', plansOwner = '', plansPage = 1, plansSize = 20;
+function plansSet(field, value) {  // 任何筛选/页大小变化回到第一页
+  if (field === 'plansKw') plansKw = value;
+  else if (field === 'plansStatus') plansStatus = value;
+  else if (field === 'plansOwner') plansOwner = value;
+  else if (field === 'plansSize') plansSize = value;
+  else if (field === 'plansProject') plansProject = value;
+  plansPage = 1; renderPlans();
+}
 let _planDetail = null;
 const PLAN_ST = {not_started:['未开始','pending'], in_progress:['进行中','candidate'], done:['已完成','approved'], archived:['已归档','pending']};
 
@@ -3248,9 +3257,14 @@ async function renderPlans() {
   const q = new URLSearchParams();
   if (plansProject) q.set('project', plansProject);
   if (plansMine) q.set('mine', 'true');
-  try { data = await api('/api/v1/plans' + (q.toString() ? '?' + q : '')); }
+  if (plansKw.trim()) q.set('keyword', plansKw.trim());
+  if (plansStatus) q.set('status', plansStatus);
+  if (plansOwner) q.set('owner', plansOwner);
+  q.set('page', plansPage); q.set('page_size', plansSize);
+  try { data = await api('/api/v1/plans?' + q); }
   catch (e) { return toast(e.message, 'err'); }
   if (stale('plans', _s)) return;
+  plansPage = data.page;  // 后端已按总页数收敛
   let projects = [];
   try { projects = (await getProjects()).filter(p => !p.builtin); } catch (e) {}
   const rows = data.plans.map(p => {
@@ -3300,15 +3314,43 @@ async function renderPlans() {
       <div class="grow">
         <label class="check">只看分配给我的
           <span class="switch"><input type="checkbox" ${plansMine?'checked':''} onchange="plansMine=this.checked;switchView('plans')"><i></i></span></label>
-        <select style="width:160px" onchange="plansProject=this.value;renderPlans()">
+        ${(curUser&&curUser.projects||[]).some(p=>can(p.project,'plan.manage'))||isSysAdmin()?`<button class="btn" onclick="openPlanDlg()">＋ 新建计划</button>`:''}
+      </div></div>
+    <div class="card-b">
+      <div class="filters" style="margin-bottom:10px">
+        <select style="width:150px" onchange="plansSet('plansProject', this.value)">
           <option value="">全部项目</option>
           ${projects.map(p => `<option value="${esc(p.project)}" ${plansProject===p.project?'selected':''}>${esc(p.project)}</option>`).join('')}
         </select>
-        ${(curUser&&curUser.projects||[]).some(p=>can(p.project,'plan.manage'))||isSysAdmin()?`<button class="btn" onclick="openPlanDlg()">＋ 新建计划</button>`:''}
-      </div></div>
-    <div class="card-b">${data.plans.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
+        <select style="width:110px" onchange="plansSet('plansStatus', this.value)">
+          <option value="">全部状态</option>
+          ${Object.entries(PLAN_ST).map(([k, v]) => `<option value="${k}" ${plansStatus===k?'selected':''}>${v[0]}</option>`).join('')}
+        </select>
+        <select style="width:130px" onchange="plansSet('plansOwner', this.value)">
+          <option value="">全部负责人</option>
+          ${(data.owners||[]).map(o => `<option value="${esc(o)}" ${plansOwner===o?'selected':''}>${esc(o)}</option>`).join('')}
+        </select>
+        <div class="search" style="width:240px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="text" placeholder="搜索计划名 / 项目 / 负责人…" value="${esc(plansKw)}"
+            oninput="plansKw=this.value" onchange="plansSet('plansKw', this.value)" onkeydown="if(event.key==='Enter')plansSet('plansKw', this.value)">
+        </div>
+        ${plansKw||plansStatus||plansOwner||plansProject ? `<button class="btn ghost sm" onclick="plansKw='';plansStatus='';plansOwner='';plansProject='';plansSet('plansPage', 1)">清除筛选</button>` : ''}
+      </div>
+      ${data.plans.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
       <tr><th>计划 / 项目</th><th style="width:90px">负责人</th><th style="width:180px">周期</th><th style="width:80px">状态</th><th style="width:150px">用例</th><th style="width:210px">最近执行</th><th style="width:130px">我的任务</th></tr>
-      ${rows}</table></div>` : `<div class="empty">${(curUser&&curUser.projects||[]).some(p=>can(p.project,'plan.manage'))||isSysAdmin()?'暂无测试计划。点击「＋ 新建计划」创建，并从项目的已通过用例中加入快照':'暂无测试计划（创建计划需要测试负责人及以上项目角色）'}</div>`}</div>
+      ${rows}</table></div>
+      <div class="filters" style="justify-content:flex-end;align-items:center;margin-top:10px">
+        <span class="hint">共 ${data.total} 个 · 第 ${data.page}/${data.pages} 页</span>
+        <label class="check">每页
+          <select style="width:70px" onchange="plansSet('plansSize', parseInt(this.value))">
+            ${[10,20,50,100].map(s => `<option value="${s}" ${plansSize===s?'selected':''}>${s}</option>`).join('')}
+          </select></label>
+        <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="plansPage=1;renderPlans()">«</button>
+        <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="plansPage--;renderPlans()">上一页</button>
+        <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="plansPage++;renderPlans()">下一页</button>
+        <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="plansPage=${data.pages};renderPlans()">»</button>
+      </div>` : `<div class="empty">${plansKw||plansStatus||plansOwner ? '没有符合筛选条件的测试计划' : (curUser&&curUser.projects||[]).some(p=>can(p.project,'plan.manage'))||isSysAdmin()?'暂无测试计划。点击「＋ 新建计划」创建，并从项目的已通过用例中加入快照':'暂无测试计划（创建计划需要测试负责人及以上项目角色）'}</div>`}</div>
   </div>`;
 }
 

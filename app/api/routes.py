@@ -3170,15 +3170,24 @@ async def my_plan_items(request: Request, include_done: bool = False) -> dict:
 @router.get("/api/v1/plans")
 async def list_plans(
     request: Request, project: str | None = None, mine: bool = False,
-    task_id: str | None = None,
+    task_id: str | None = None, keyword: str | None = None, status: str | None = None,
+    owner: str | None = None, page: int = 0, page_size: int = 20,
 ) -> dict:
-    """计划列表（可按项目过滤）；mine=true 只看分配给我的；task_id 只看引用该任务快照的计划。"""
+    """计划列表（可按项目过滤）；mine=true 只看分配给我的；task_id 只看引用该任务快照的计划。
+
+    查询条件：keyword（名称 / 项目 / 负责人模糊）、status（计划状态）、owner（负责人精确）。
+    分页：page ≥ 1 时返回该页并附 total / pages，page=0（默认）返回全部（任务概览、项目概览等内部调用）。
+    """
     from app.plans import PLAN_STATUSES, plan_summary
 
     me = _operator(request)
     if project:
         _require_project(request, project, "plan.view")
+    if status and status not in PLAN_STATUSES:
+        raise HTTPException(status_code=400, detail=f"未知计划状态: {status}")
+    kw = (keyword or "").strip().lower()
     out = []
+    owners: set[str] = set()
     for plan in request.app.state.plans.list(project=project):
         if not _record_visible(request, plan.get("project")):
             continue
@@ -3187,6 +3196,14 @@ async def list_plans(
             continue
         my_items = [i for i in plan["items"] if i.get("assignee") == me]
         if mine and (not my_items or plan["status"] == "archived"):
+            continue
+        if plan.get("owner"):
+            owners.add(plan["owner"])
+        if status and plan["status"] != status:
+            continue
+        if owner and plan.get("owner", "") != owner:
+            continue
+        if kw and kw not in f"{plan['name']} {plan.get('project', '')} {plan.get('owner', '')}".lower():
             continue
         latest = plan["runs"][-1] if plan["runs"] else None
         out.append({
@@ -3203,7 +3220,18 @@ async def list_plans(
             ) if my_items else 0,
             "my_items": len(my_items),
         })
-    return {"plans": out}
+    total = len(out)
+    if page <= 0:
+        return {"plans": out, "total": total, "owners": sorted(owners)}
+    page_size = min(max(1, page_size), 200)
+    pages = max(1, -(-total // page_size))
+    page = min(max(1, page), pages)
+    start = (page - 1) * page_size
+    return {
+        "plans": out[start:start + page_size], "total": total, "page": page,
+        "page_size": page_size, "pages": pages, "owners": sorted(owners),
+        "statuses": PLAN_STATUSES,
+    }
 
 
 class PlanBody(BaseModel):
