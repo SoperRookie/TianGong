@@ -565,13 +565,19 @@ async def test_model(request: Request, body: ModelTestBody) -> dict:
     """连通性测试（管理员）：向指定模型发送一次最小请求，返回耗时与结果。"""
     _require_admin(request)
     try:
-        request.app.state.registry.get(body.name)
+        cfg = request.app.state.registry.get(body.name)
     except UnknownModelError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    import os
+    if cfg.api_key_env and not os.environ.get(cfg.api_key_env):
+        # 密钥缺失是最常见的接入失败原因，直接说清楚；.env 只在启动时读取，改后须重启
+        return {"ok": False, "model": body.name,
+                "error": f"密钥环境变量 {cfg.api_key_env} 未设置：请写入部署环境或 .env 后重启服务再测"}
     try:
+        # 只测这一个模型，不走降级链路：否则密钥错/模型名错时备用模型回了 pong 也会显示成功
         result = await request.app.state.llm.chat(
             [{"role": "user", "content": "ping，请只回复 pong"}],
-            model=body.name, max_tokens=8,
+            model=body.name, max_tokens=64, fallback=False,
         )
         return {"ok": True, "model": result.model_name, "provider": result.provider,
                 "elapsed_ms": result.elapsed_ms, "reply": result.content[:50]}
