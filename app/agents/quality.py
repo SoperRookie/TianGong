@@ -333,7 +333,7 @@ def build_case_proposals(
         if not isinstance(raw, dict):
             continue
         try:
-            TestCase.model_validate({**raw, "uid": ""})
+            TestCase.model_validate({**raw, "uid": ""}, context={"require_expected": True})
         except ValidationError as e:
             invalid.append({"case_id": str(raw.get("case_id", "")), "problem": str(e)})
             continue
@@ -473,7 +473,7 @@ def merge_case_fix(
         if not isinstance(raw, dict):
             continue
         try:
-            TestCase.model_validate({**raw, "uid": ""})
+            TestCase.model_validate({**raw, "uid": ""}, context={"require_expected": True})
         except ValidationError as e:
             invalid.append({"case_id": str(raw.get("case_id", "")), "problem": str(e)})
             continue

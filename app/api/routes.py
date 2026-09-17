@@ -2078,7 +2078,8 @@ async def copy_case(request: Request, task_id: str, uid: str) -> dict:
 
 
 def _validate_import_rows(record: TaskRecord, parsed: list[dict]) -> list[dict]:
-    """逐行校验：标题/步骤必填、优先级合法、文件内与任务内标题重复、模块缺省——错误行不得静默导入。"""
+    """逐行校验：标题/步骤必填、优先级合法、文件内与任务内标题重复、模块缺省——错误行不得静默导入。
+    步骤缺预期只给警告（历史用例多有简化，导入后可在用例维护中补充），不阻止导入。"""
     from app.templates.default import TestCase
 
     existing_titles = {str(c.get("title", "")).strip() for c in record.result.get("cases", [])}
@@ -2095,7 +2096,7 @@ def _validate_import_rows(record: TaskRecord, parsed: list[dict]) -> list[dict]:
         else:
             missing = [i for i, s in enumerate(steps, 1) if not str(s.get("expected", "")).strip()]
             if missing:
-                errors.append(f"第 {', '.join(map(str, missing))} 步缺少预期结果")
+                warnings.append(f"第 {', '.join(map(str, missing))} 步无预期结果，按空导入（可在用例维护中补充）")
         pr = str(raw.get("priority", "")).strip().upper() or "P2"
         if pr not in ("P0", "P1", "P2", "P3"):
             errors.append(f"优先级 {raw.get('priority')} 不合法（P0–P3）")

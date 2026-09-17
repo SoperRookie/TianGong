@@ -177,3 +177,17 @@ def test_二进制xls给出明确提示(tmp_path):
     path.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
     with pytest.raises(CaseImportError, match="xlsx 或 csv"):
         parse_cases_file(path)
+
+
+def test_ai用例仍要求每步有预期_存量导入放宽():
+    from pydantic import ValidationError
+    from app.agents.graph import rule_check
+    raw = {**make_case(), "steps": [{"action": "点击登录", "expected": ""}]}
+    # 存量数据：预期可空（历史简化用例导入、后续维护不被拦）
+    assert TestCase.model_validate(raw).steps[0].expected == ""
+    with pytest.raises(ValidationError):  # 动作仍不能为空
+        TestCase.model_validate({**raw, "steps": [{"action": " ", "expected": "x"}]})
+    # AI 路径：评审规则校验与生成解析要求每步必有预期
+    with pytest.raises(ValidationError):
+        TestCase.model_validate(raw, context={"require_expected": True})
+    assert any("预期结果不能为空" in i["problem"] for i in rule_check([raw]))

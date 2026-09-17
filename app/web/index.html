@@ -2794,7 +2794,7 @@ function openImportDlg() {
   $('imMeta').textContent = '第 1 步 · 上传文件（Excel / CSV / XMind / 禅道导出）';
   $('imBody').innerHTML = `<div class="hint" style="margin-bottom:10px">按模板列头准备文件：用例编号、模块、用例标题、优先级、前置条件、操作步骤（每行一步）、预期结果（与步骤逐行对应）、关键词、备注。<a onclick="downloadFile('/api/v1/cases/import-template','用例导入模板.xlsx')">下载导入模板</a><br>禅道「导出用例」的 xlsx / csv / xls 可直接导入：优先级 1–4 对应 P0–P3，模块路径「/父/子」自动去掉斜杠，步骤与预期按行配对。</div>
     <input type="file" id="imFile" accept=".xlsx,.csv,.xmind,.xls,.html">
-    <div class="hint" style="margin-top:8px">解析后逐行校验：标题与步骤必填、优先级须为 P0–P3、标题不得与任务内或文件内重复；有错误的行不会被静默导入。</div>`;
+    <div class="hint" style="margin-top:8px">解析后逐行校验：标题与步骤必填（预期结果可为空，历史简化用例按空导入后可补）、优先级须为 P0–P3、标题不得与任务内或文件内重复；有错误的行不会被静默导入。</div>`;
   $('imFoot').innerHTML = `<button class="btn ghost" onclick="$('importDlg').close()">取消</button><button class="btn" id="imNext" onclick="importPreview()">解析并预览</button>`;
   $('importDlg').showModal();
 }

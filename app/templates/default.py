@@ -7,7 +7,7 @@ P0=冒烟/核心链路，P1=主功能正常流与重要异常流，P2=次要功�
 
 from typing import ClassVar, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 Priority = Literal["P0", "P1", "P2", "P3"]
 
@@ -18,9 +18,12 @@ class TestStep(BaseModel):
 
     @field_validator("action", "expected")
     @classmethod
-    def _not_blank(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("测试步骤与预期结果不能为空")
+    def _not_blank(cls, v: str, info: ValidationInfo) -> str:
+        # 动作必填。预期结果：AI 生成 / AI 修改 / 评审规则校验以 context={"require_expected": True} 要求每步必有；
+        # 存量数据（历史用例表格导入多有简化）默认允许为空，导入后可在用例维护中补充
+        strict = bool(info.context and info.context.get("require_expected"))
+        if not v.strip() and (info.field_name == "action" or strict):
+            raise ValueError("测试步骤与预期结果不能为空" if strict else "测试步骤不能为空")
         return v.strip()
 
 
