@@ -31,12 +31,21 @@ fi
 URL="${TIANGONG_DB_URL:-$(grep -E '^TIANGONG_DB_URL=' "$DIR/.env" 2>/dev/null | cut -d= -f2- || true)}"
 URL="${URL:-mysql+pymysql://root@127.0.0.1:3306/tiangong?charset=utf8mb4}"   # 与 app/config.py 默认一致
 
-# 解析 mysql+pymysql://user:pass@host:port/db?charset=...
-rest="${URL#*://}"
-auth="${rest%%@*}"; hostpart="${rest#*@}"
-user="${auth%%:*}"; pass=""; [ "$auth" != "$user" ] && pass="${auth#*:}"
-hostport="${hostpart%%/*}"; db="${hostpart#*/}"; db="${db%%\?*}"
-host="${hostport%%:*}"; port="3306"; [ "$hostport" != "$host" ] && port="${hostport#*:}"
+# 解析 mysql+pymysql://user:pass@host:port/db?charset=...（与 app/db.py normalize_db_url 同规则：
+# 以最后一个 @ 分隔用户信息与主机，密码可含 @ # / 等未编码字符，也可已是 URL 编码）
+eval "$(URL="$URL" python3 - <<'PY'
+import os, shlex
+from urllib.parse import unquote
+rest = os.environ["URL"].split("://", 1)[1]
+userinfo, hostpart = rest.rsplit("@", 1) if "@" in rest else ("root", rest)
+user, _, pw = userinfo.partition(":")
+hostport, _, tail = hostpart.partition("/")
+host, _, port = hostport.partition(":")
+db = tail.split("?", 1)[0]
+for k, v in [("user", unquote(user)), ("pass", unquote(pw)), ("host", host), ("port", port or "3306"), ("db", db)]:
+    print(f"{k}={shlex.quote(v)}")
+PY
+)"
 
 mkdir -p "$DIR/backups"
 out="$DIR/backups/${db}-$(date +%Y%m%d-%H%M%S).sql.gz"
