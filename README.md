@@ -48,7 +48,8 @@ pip install -e ".[dev]"
 
 # 2. 配置密钥（不入库）
 echo 'DEEPSEEK_API_KEY=sk-xxxx' > .env
-# 模型清单见 config/models.yaml，新增厂商/私有化模型只需追加条目
+# 首次启动自动生成 config/models.yaml（模型清单为空，不入库），登录后在 系统设置 → 模型配置 添加模型；
+# 样例与 Embedding 段见 config/models.example.yaml
 
 # 3. 启动服务（自动拉起本地 MySQL，再启动 uvicorn；参数透传 uvicorn）
 bash scripts/dev.sh

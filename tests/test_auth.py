@@ -285,7 +285,7 @@ async def test_模型配置读取与更新热重载(client, tmp_path, monkeypatc
     settings = get_settings()
     # 用临时副本承接写回，避免污染仓库 config/models.yaml
     tmp_yaml = tmp_path / "models.yaml"
-    tmp_yaml.write_text(settings.models_config_path.read_text(encoding="utf-8"), encoding="utf-8")
+    tmp_yaml.write_text(settings.models_example_path.read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.setattr(settings, "models_config_path", tmp_yaml)
 
     cfg = (await client.get("/api/v1/models/config")).json()

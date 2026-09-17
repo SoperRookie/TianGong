@@ -19,7 +19,8 @@ class Settings(BaseSettings):
     debug: bool = False
 
     # LLM 适配层
-    models_config_path: Path = BASE_DIR / "config" / "models.yaml"
+    models_config_path: Path = BASE_DIR / "config" / "models.yaml"          # 运行时配置（不入库，页面「模型配置」维护）
+    models_example_path: Path = BASE_DIR / "config" / "models.example.yaml"  # 样例：首启缺 models.yaml 时据此生成空模型清单
 
     # 任务队列
     redis_url: str = "redis://localhost:6379/0"

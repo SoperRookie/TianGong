@@ -20,9 +20,35 @@ from app.templates import TemplateStore
 setup_logging(get_settings().log_level, get_settings().log_dir)
 
 
+def _ensure_models_config(settings) -> None:
+    """首次部署没有 config/models.yaml 时生成一份空模型清单：LLM 模型在页面「模型配置」添加，
+    Embedding 段（知识库向量化，不在页面管理）从样例复制。运行时配置不入库，页面保存不会改脏仓库。"""
+    import yaml
+
+    path = settings.models_config_path
+    if path.exists():
+        return
+    example = {}
+    if settings.models_example_path.exists():
+        example = yaml.safe_load(settings.models_example_path.read_text(encoding="utf-8")) or {}
+    data = {"default_model": None, "max_retries": int(example.get("max_retries", 1)), "models": []}
+    for key in ("default_embedding", "embeddings"):
+        if key in example:
+            data[key] = example[key]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "# LLM 模型配置：由平台「系统设置 → 模型配置」页面管理，首次启动自动生成（模型清单为空，请到页面添加）。\n"
+        "# 密钥不写入本文件：api_key_env 为密钥所在环境变量名，请在部署环境/.env 中配置。\n"
+        "# embeddings 段（知识库向量化）不在页面管理，需要时手工编辑后重启；样例见 models.example.yaml。\n"
+    )
+    path.write_text(header + yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    logger.warning("未找到 {}，已生成空模型清单；请登录后在 系统设置 → 模型配置 添加模型", path)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    _ensure_models_config(settings)
     registry = ModelRegistry.from_yaml(settings.models_config_path)
     app.state.registry = registry
     app.state.llm = LLMClient(registry)

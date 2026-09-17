@@ -11,6 +11,7 @@ __pycache__
 
 # 密钥与本地运行产物不进镜像，运行时以卷挂载
 .env
+config/models.yaml
 *.local.yaml
 outputs
 data

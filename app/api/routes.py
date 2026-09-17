@@ -494,7 +494,7 @@ async def get_models_config(request: Request) -> dict:
 
 
 class ModelsConfigBody(BaseModel):
-    default_model: str
+    default_model: str | None = None  # 空时取清单第一个；清单为空则无默认
     max_retries: int = 1
     models: list[dict]
 
@@ -531,7 +531,7 @@ async def update_models_config(request: Request, body: ModelsConfigBody) -> dict
     path = get_settings().models_config_path
     existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     data = {
-        "default_model": body.default_model,
+        "default_model": registry.default_model,
         "max_retries": registry.max_retries,
         "models": [m.model_dump() for m in models],
     }
