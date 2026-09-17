@@ -108,9 +108,31 @@ def flush_persist() -> None:
         _persist_pool = None
 
 
+def normalize_db_url(url: str) -> str:
+    """把连接串里未编码的密码特殊字符（@ # / ? : % 等）转成 URL 编码，避免被当成主机名。
+
+    规则：`scheme://user:password@host...` 以最后一个 @ 分隔用户信息与主机（主机、库名、参数里不会出现 @），
+    密码先 unquote 再 quote，所以已经手工编码过的连接串原样等价，不会二次编码。无用户信息（sqlite 等）原样返回。
+    """
+    from urllib.parse import quote, unquote
+
+    if "://" not in url:
+        return url
+    scheme, rest = url.split("://", 1)
+    if "@" not in rest:
+        return url
+    userinfo, hostpart = rest.rsplit("@", 1)
+    if ":" in userinfo:
+        user, password = userinfo.split(":", 1)
+        userinfo = f"{quote(unquote(user), safe='')}:{quote(unquote(password), safe='')}"
+    else:
+        userinfo = quote(unquote(userinfo), safe="")
+    return f"{scheme}://{userinfo}@{hostpart}"
+
+
 @lru_cache
 def get_engine():
-    url = get_settings().db_url
+    url = normalize_db_url(get_settings().db_url)
     kwargs: dict = {"pool_pre_ping": True}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}
