@@ -218,6 +218,8 @@ class AuthStore:
             if user["role"] == "admin" and self._active_admins(exclude=username) == 0:
                 raise AuthError("不能降级最后一个可用管理员")
             user["role"] = role
+            # 角色变更即会话失效：前端在登录时取角色，不强制重登会一直停留在旧角色的入口与视图
+            self._sessions = {t: s for t, s in self._sessions.items() if s["username"] != username}
         if new_password:
             if len(new_password) < 6:
                 raise AuthError("密码长度至少 6 位")

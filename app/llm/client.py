@@ -63,17 +63,21 @@ class LLMClient:
         messages: list[dict[str, Any]],
         model: str | None = None,
         require_vision: bool = False,
+        fallback: bool = True,
         **overrides: Any,
     ) -> ChatResult:
         """发起一次对话补全（含自动重试与降级）。
 
         model: 任务级指定的模型标识，空则用默认模型（F-1-4）。
         require_vision: 消息含图片时置 True，自动路由至 Vision 模型（F-1-5）。
+        fallback: False 时只调指定模型不走降级链路（连通性测试用：测的就是这一个模型）。
         overrides: 覆盖 temperature / max_tokens 等单次参数。
         """
         from app.llm.calllog import record_call
 
         chain = self.registry.call_chain(model, require_vision=require_vision)
+        if not fallback:
+            chain = chain[:1]
         attempts = 0
         last_error: Exception | None = None
         started = time.monotonic()

@@ -72,15 +72,17 @@ MYSQL_PASSWORD=<强密码>
 
 不用填 `TIANGONG_DB_URL` 和 `TIANGONG_TRUSTED_PROXIES`，compose 文件已按容器网络写死。`MYSQL_PASSWORD` 会被拼进连接串，密码含 `@ # / % ?` 等符号也可以，应用会自动编码；但 compose 自身对 `$` 有特殊解释，密码里避免用 `$`。
 
-### 3.3 检查模型地址
+### 3.3 模型配置
 
-`config/models.yaml` 中 `qwen-vl-local` 与 `bge-m3-local` 的 `base_url` 默认指向 `192.168.0.152:11434`。容器走桥接网络，能访问宿主机所在局域网，地址是别的机器时保持即可；Ollama 就跑在这台宿主机上时改为：
+LLM 模型不预置：首次启动在挂载的 `config/` 目录里自动生成 `models.yaml`（模型清单为空），登录后在「系统设置 → 模型配置」添加，第一个模型自动成为默认。新模型的密钥写进 `.env` 后 `docker compose up -d app` 重建容器才会读到。
+
+Embedding 段从 `config/models.example.yaml` 复制，默认指向内网 Ollama 的 bge-m3（`192.168.0.152:11434`）。容器走桥接网络，能访问宿主机所在局域网；Ollama 就跑在这台宿主机上时把 `models.yaml` 里 `embeddings` 的 `base_url` 改为：
 
 ```yaml
 base_url: http://host.docker.internal:11434/v1
 ```
 
-compose 已通过 `extra_hosts` 把 `host.docker.internal` 指到宿主机。
+compose 已通过 `extra_hosts` 把 `host.docker.internal` 指到宿主机。页面添加内网 Ollama 模型时 Base URL 同理。
 
 ### 3.4 创建数据目录并启动
 

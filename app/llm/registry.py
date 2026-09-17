@@ -16,14 +16,18 @@ class NoVisionModelError(RuntimeError):
 
 
 class ModelRegistry:
-    def __init__(self, default_model: str, models: list[ModelConfig], max_retries: int = 1):
+    def __init__(self, default_model: str | None, models: list[ModelConfig], max_retries: int = 1):
         names = [m.name for m in models]
         if len(names) != len(set(names)):
             dup = sorted({n for n in names if names.count(n) > 1})
             raise ValueError(f"模型配置 name 重复: {dup}")
         self._models = {m.name: m for m in models}
-        if default_model not in self._models:
+        if models and not default_model:
+            default_model = models[0].name  # 有模型但未指定默认：取第一个
+        if models and default_model not in self._models:
             raise ValueError(f"default_model={default_model} 不在模型清单中")
+        if not models:
+            default_model = None  # 空清单（首次部署，模型在页面配置）
         for m in models:
             unknown = [f for f in m.fallbacks if f not in self._models]
             if unknown:
@@ -37,11 +41,9 @@ class ModelRegistry:
         if not path.exists():
             raise FileNotFoundError(f"模型配置文件不存在: {path}")
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        models = [ModelConfig.model_validate(item) for item in data.get("models", [])]
-        if not models:
-            raise ValueError(f"模型配置文件 {path} 中未定义任何模型")
+        models = [ModelConfig.model_validate(item) for item in data.get("models") or []]
         return cls(
-            default_model=data.get("default_model", models[0].name),
+            default_model=data.get("default_model") or (models[0].name if models else None),
             models=models,
             max_retries=int(data.get("max_retries", 1)),
         )
@@ -49,6 +51,8 @@ class ModelRegistry:
     def get(self, name: str | None = None) -> ModelConfig:
         """任务级模型切换：name 为空时返回默认模型（F-1-4）。"""
         target = name or self.default_model
+        if not self._models:
+            raise UnknownModelError("尚未配置任何模型：请系统管理员在 系统设置 → 模型配置 中添加并设为默认")
         if target not in self._models:
             raise UnknownModelError(f"未注册的模型: {target}，可用: {sorted(self._models)}")
         return self._models[target]

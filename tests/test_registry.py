@@ -6,7 +6,7 @@ from app.llm.schemas import MissingAPIKeyError, ModelConfig
 
 
 def test_从项目配置文件加载():
-    registry = ModelRegistry.from_yaml(get_settings().models_config_path)
+    registry = ModelRegistry.from_yaml(get_settings().models_example_path)
     assert registry.default_model == "deepseek-chat"
     cfg = registry.get()
     assert cfg.provider == "deepseek"

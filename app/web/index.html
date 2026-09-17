@@ -1881,7 +1881,7 @@ async function init() {
     sel.add(new Option(sel === $('modelSel') ? '生成：默认' : '评审：同生成', ''));
     m.models.forEach(x => sel.add(new Option(x.name, x.name)));
   }
-  $('barInfo').textContent = '默认模型 ' + m.default_model;
+  $('barInfo').textContent = m.default_model ? '默认模型 ' + m.default_model : '尚未配置模型（系统设置 → 模型配置）';
   const t = await api('/api/v1/templates');
   $('templateSel').innerHTML = '';
   t.templates.forEach(x => $('templateSel').add(
@@ -5514,6 +5514,7 @@ async function refreshModelsCfg() {
   $('modelsCfgList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
     <tr><th>名称</th><th>厂商</th><th>模型名</th><th>Base URL</th><th>密钥环境变量</th>
     <th>Vision</th><th>max_tokens</th><th>降级链路</th><th style="width:150px">操作</th></tr>
+    ${_modelCfg.models.length ? '' : `<tr><td colspan="9"><div class="empty">尚未配置任何模型。点击「添加模型」接入 DeepSeek / 智谱 / 阿里云百炼 / OpenAI 或内网 Ollama、vLLM，密钥写在 .env 里。第一个添加的模型自动成为默认模型。</div></td></tr>`}
     ${_modelCfg.models.map(m => `<tr>
       <td><b>${esc(m.name)}</b>${m.name===_modelCfg.default_model?' <span class="st approved">默认</span>':''}</td>
       <td>${esc(m.provider)}</td>
@@ -5535,7 +5536,7 @@ async function refreshModelsCfg() {
 async function saveModelsCfg(models) {
   if (!_modelCfg) return;
   const body = {
-    default_model: $('cfgDefault').value,
+    default_model: $('cfgDefault').value || null,
     max_retries: parseInt($('cfgRetries').value || '1', 10),
     models: (models || _modelCfg.models).map(m => { const {api_key_set, ...rest} = m; return rest; }),
   };
@@ -5728,11 +5729,12 @@ async function totpUnbind() {
 }
 
 let _editingUser = null;
+let _editingUserRole = '';
 function openUserEdit(username) {
   const u = _usersCache.find(x => x.username === username) || {};
   _editingUser = username;
   $('euName').textContent = username;
-  $('euRole').value = u.role || 'member';
+  $('euRole').value = u.role || 'member'; _editingUserRole = u.role || 'member';
   $('euStatus').value = u.status || 'active';
   $('euStatus').disabled = curUser && username === curUser.username;
   $('euRealName').value = u.name || ''; $('euEmail').value = u.email || ''; $('euPhone').value = u.phone || '';
@@ -5754,7 +5756,8 @@ async function saveUserEdit() {
     await api('/api/v1/auth/users/' + encodeURIComponent(_editingUser),
       {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     $('editUserDlg').close();
-    toast(pwd ? '已保存；密码已重置，该用户需重新登录' : '已保存', 'ok');
+    const roleChanged = body.role !== (_editingUserRole || body.role);
+    toast(pwd ? '已保存；密码已重置，该用户需重新登录' : roleChanged ? '已保存；角色已变更，该用户需重新登录后生效' : '已保存', 'ok');
     refreshUsers();
   } catch (e) { toast(e.message, 'err'); }
 }
