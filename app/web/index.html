@@ -5728,11 +5728,12 @@ async function totpUnbind() {
 }
 
 let _editingUser = null;
+let _editingUserRole = '';
 function openUserEdit(username) {
   const u = _usersCache.find(x => x.username === username) || {};
   _editingUser = username;
   $('euName').textContent = username;
-  $('euRole').value = u.role || 'member';
+  $('euRole').value = u.role || 'member'; _editingUserRole = u.role || 'member';
   $('euStatus').value = u.status || 'active';
   $('euStatus').disabled = curUser && username === curUser.username;
   $('euRealName').value = u.name || ''; $('euEmail').value = u.email || ''; $('euPhone').value = u.phone || '';
@@ -5754,7 +5755,8 @@ async function saveUserEdit() {
     await api('/api/v1/auth/users/' + encodeURIComponent(_editingUser),
       {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     $('editUserDlg').close();
-    toast(pwd ? '已保存；密码已重置，该用户需重新登录' : '已保存', 'ok');
+    const roleChanged = body.role !== (_editingUserRole || body.role);
+    toast(pwd ? '已保存；密码已重置，该用户需重新登录' : roleChanged ? '已保存；角色已变更，该用户需重新登录后生效' : '已保存', 'ok');
     refreshUsers();
   } catch (e) { toast(e.message, 'err'); }
 }

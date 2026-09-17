@@ -105,20 +105,29 @@ async def test_管理员重置密码与修改角色(client, auth_on):
             json={"username": "zhang", "password": "zhang123"})).status_code == 401
     token2 = await _login(client, "zhang", "reset666")
 
-    # 修改角色：member → admin 后可访问系统设置
+    # 修改角色：member → admin。旧会话立即失效（前端登录时取角色，不重登会停留在旧角色视图），
+    # 重新登录后 /auth/me 为 admin，可访问系统设置、可建项目
     resp = await client.put("/api/v1/auth/users/zhang", headers=headers, json={"role": "admin"})
     assert resp.status_code == 200 and resp.json()["role"] == "admin"
     assert (await client.get("/api/v1/auth/users",
-            headers={"Authorization": f"Bearer {token2}"})).status_code == 200
+            headers={"Authorization": f"Bearer {token2}"})).status_code == 401
+    token3 = await _login(client, "zhang", "reset666")
+    h3 = {"Authorization": f"Bearer {token3}"}
+    assert (await client.get("/api/v1/auth/me", headers=h3)).json()["role"] == "admin"
+    assert (await client.get("/api/v1/auth/users", headers=h3)).status_code == 200
+    assert (await client.post("/api/v1/projects", headers=h3,
+            json={"name": "zhang建的项目", "description": "", "owner": "zhang"})).status_code == 200
 
     # 保护：不能降级最后一个管理员
     await client.put("/api/v1/auth/users/zhang", headers=headers, json={"role": "member"})
     resp = await client.put("/api/v1/auth/users/admin", headers=headers, json={"role": "member"})
     assert resp.status_code == 400 and "最后一个可用管理员" in resp.json()["detail"]
-    # 空请求拒绝；member 无权调用
+    # 空请求拒绝；降级后旧会话失效，重登后 member 无权调用
     assert (await client.put("/api/v1/auth/users/zhang", headers=headers, json={})).status_code == 400
+    assert (await client.get("/api/v1/auth/me", headers=h3)).status_code == 401
+    token4 = await _login(client, "zhang", "reset666")
     assert (await client.put("/api/v1/auth/users/zhang", json={"role": "admin"},
-            headers={"Authorization": f"Bearer {token2}"})).status_code == 403
+            headers={"Authorization": f"Bearer {token4}"})).status_code == 403
     await client.delete("/api/v1/auth/users/zhang", headers=headers)
 
 
