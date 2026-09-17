@@ -116,3 +116,64 @@ async def test_ingest_cases_searchable(tmp_path):
     assert doc.chunk_count == 2
     hits = await service.search("赔率结算", category="test_cases")
     assert hits and "验证赔率结算正确" in hits[0].text
+
+
+# ---- 禅道导出兼容 ----
+
+_ZENTAO_HEADERS = ["用例编号", "所属产品", "所属模块", "相关需求", "用例标题", "前置条件", "步骤", "预期", "关键词", "用例类型", "优先级", "适用阶段", "用例状态"]
+
+
+def _zentao_rows():
+    return [
+        ["1", "天工", "/账号/登录", "", "正确账号密码登录成功", "已注册账号",
+         "1. 打开登录页\n2. 输入正确账号密码\n2.1 点击登录", "1. 显示登录表单\n2. 进入首页\n2.1 显示用户名", "登录,冒烟", "功能测试", "1", "功能测试阶段", "正常"],
+        ["2", "天工", "/账号/登录", "", "密码错误提示", "",
+         "1. 输入错误密码", "1. 提示用户名或密码错误", "", "功能测试", "3", "功能测试阶段", "正常"],
+        ["3", "天工", "", "", "第四档并入P3", "", "1. 操作", "1. 结果", "", "", "4", "", ""],
+    ]
+
+
+def test_zentao_csv_数字优先级与模块路径(tmp_path):
+    import csv
+    path = tmp_path / "禅道导出.csv"
+    with path.open("w", encoding="gb18030", newline="") as fh:  # 禅道/Windows 常见 GBK 编码
+        w = csv.writer(fh)
+        w.writerow(_ZENTAO_HEADERS)
+        w.writerows(_zentao_rows())
+    cases = parse_cases_file(path)
+    assert [c["priority"] for c in cases] == ["P0", "P2", "P3"]
+    assert cases[0]["module"] == "账号/登录" and cases[2].get("module", "") == ""
+    assert [s["action"] for s in cases[0]["steps"]] == ["打开登录页", "输入正确账号密码", "点击登录"]
+    assert cases[0]["steps"][2]["expected"] == "显示用户名"
+    assert cases[0]["keywords"] == "登录,冒烟"
+
+
+def test_zentao_xlsx_数字单元格与br换行(tmp_path):
+    from openpyxl import Workbook
+    path = tmp_path / "禅道导出.xlsx"
+    wb = Workbook(); ws = wb.active
+    ws.append(_ZENTAO_HEADERS)
+    row = list(_zentao_rows()[1]); row[10] = 2  # 数字单元格
+    row[6] = "1. 输入错误密码<br />2. 点击登录"; row[7] = "1. 无<br />2. 提示用户名或密码错误"
+    ws.append(row); wb.save(path)
+    cases = parse_cases_file(path)
+    assert cases[0]["priority"] == "P1"
+    assert [s["action"] for s in cases[0]["steps"]] == ["输入错误密码", "点击登录"]
+    assert cases[0]["steps"][1]["expected"] == "提示用户名或密码错误"
+
+
+def test_zentao_xls_其实是html表格(tmp_path):
+    path = tmp_path / "禅道导出.xls"
+    head = "<tr>" + "".join(f"<th>{h}</th>" for h in _ZENTAO_HEADERS) + "</tr>"
+    body = "".join("<tr>" + "".join(f"<td>{c.replace(chr(10), '<br />')}</td>" for c in r) + "</tr>" for r in _zentao_rows())
+    path.write_text(f"<html><body><table>{head}{body}</table></body></html>", encoding="utf-8")
+    cases = parse_cases_file(path)
+    assert len(cases) == 3 and cases[0]["title"] == "正确账号密码登录成功"
+    assert cases[0]["steps"][1]["action"] == "输入正确账号密码"
+
+
+def test_二进制xls给出明确提示(tmp_path):
+    path = tmp_path / "old.xls"
+    path.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
+    with pytest.raises(CaseImportError, match="xlsx 或 csv"):
+        parse_cases_file(path)
