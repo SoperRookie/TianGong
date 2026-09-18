@@ -367,3 +367,31 @@ async def test_migrate_task_executions(client):
     # 迁移后任务级执行入口关闭
     resp = await client.post(f"/api/v1/tasks/{task_id}/executions", json={})
     assert resp.status_code == 409 and "迁移" in resp.json()["detail"]
+
+
+async def test_计划列表查询条件与分页(client):
+    for i in range(1, 6):
+        await _plan(client, name=f"冒烟计划{i}", project="P端", owner="admin" if i % 2 else "zhang")
+    p6 = await _plan(client, name="回归计划", project="P端", owner="zhang")
+    await client.put(f"/api/v1/plans/{p6['plan_id']}", json={"status": "in_progress"})
+
+    # 不传 page：返回全部（内部调用兼容），附 total 与负责人候选
+    d = (await client.get("/api/v1/plans", params={"project": "P端"})).json()
+    assert d["total"] == 6 and len(d["plans"]) == 6 and d["owners"] == ["admin", "zhang"]
+
+    # 分页：每页 4 条 → 2 页；越界页收敛到最后一页
+    d = (await client.get("/api/v1/plans", params={"project": "P端", "page": 1, "page_size": 4})).json()
+    assert (d["total"], d["pages"], d["page"], len(d["plans"])) == (6, 2, 1, 4)
+    d = (await client.get("/api/v1/plans", params={"project": "P端", "page": 9, "page_size": 4})).json()
+    assert d["page"] == 2 and len(d["plans"]) == 2
+
+    # 关键词（名称模糊）、状态、负责人
+    d = (await client.get("/api/v1/plans", params={"keyword": "回归", "page": 1})).json()
+    assert [p["name"] for p in d["plans"]] == ["回归计划"]
+    d = (await client.get("/api/v1/plans", params={"status": "in_progress", "page": 1})).json()
+    assert d["total"] == 1 and d["plans"][0]["name"] == "回归计划"
+    d = (await client.get("/api/v1/plans", params={"owner": "zhang", "page": 1, "page_size": 10})).json()
+    assert d["total"] == 3 and all(p["owner"] == "zhang" for p in d["plans"])
+    d = (await client.get("/api/v1/plans", params={"owner": "zhang", "keyword": "冒烟", "page": 1})).json()
+    assert d["total"] == 2
+    assert (await client.get("/api/v1/plans", params={"status": "闲聊"})).status_code == 400

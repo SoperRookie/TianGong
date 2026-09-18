@@ -145,7 +145,7 @@ def rule_check(cases: list[dict], template: CustomTemplate | None = None) -> lis
     for i, raw in enumerate(cases):
         case_id = str(raw.get("case_id", f"<第{i + 1}条>"))
         try:
-            TestCase.model_validate(raw)
+            TestCase.model_validate(raw, context={"require_expected": True})
         except ValidationError as e:
             problems = "; ".join(err["msg"] for err in e.errors())
             issues.append({"case_id": case_id, "problem": f"模板校验不通过: {problems}"})

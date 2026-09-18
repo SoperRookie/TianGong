@@ -69,21 +69,23 @@ async def test_Excel导入五步校验(client, tmp_path):
         resp = await client.post(f"/api/v1/tasks/{tid}/cases/import/preview", files={"file": ("导入.xlsx", fh.read(), "application/octet-stream")})
     assert resp.status_code == 200, resp.text
     pv = resp.json()
-    assert pv["total"] == 5 and pv["errors"] == 3
+    assert pv["total"] == 5 and pv["errors"] == 2
     rows = {r["row"]: r for r in pv["rows"]}
     assert rows[1]["errors"] == []
     assert "与任务内已有用例标题重复" in rows[2]["errors"]
     assert any("与第 1 行标题重复" in e for e in rows[3]["errors"])
-    assert any("缺少预期结果" in e for e in rows[4]["errors"])
+    assert rows[4]["errors"] == [] and any("无预期结果" in w for w in rows[4]["warnings"])  # 历史简化用例：缺预期只警告
     assert rows[5]["errors"] == [] and rows[5]["case"]["module"] == "未分组" and "缺少模块" in " ".join(rows[5]["warnings"])
     # 有错误行：不显式选择只导有效行则拒绝
     resp = await client.post(f"/api/v1/tasks/{tid}/cases/import/confirm", json={"token": pv["token"]})
-    assert resp.status_code == 400 and "3 行" in resp.json()["detail"]
+    assert resp.status_code == 400 and "2 行" in resp.json()["detail"]
     resp = await client.post(f"/api/v1/tasks/{tid}/cases/import/confirm", json={"token": pv["token"], "only_valid": True})
-    assert resp.status_code == 200 and resp.json()["imported"] == 2 and resp.json()["skipped"] == 3
+    assert resp.status_code == 200 and resp.json()["imported"] == 3 and resp.json()["skipped"] == 2
     task = (await client.get(f"/api/v1/tasks/{tid}")).json()
     imported = [c for c in task["result"]["cases"] if c["source"] == "import"]
-    assert len(imported) == 2 and all(task["case_reviews"][c["uid"]]["status"] == "draft" for c in imported)
+    assert len(imported) == 3 and all(task["case_reviews"][c["uid"]]["status"] == "draft" for c in imported)
+    blank = next(c for c in imported if c["title"] == "缺模块缺预期")
+    assert blank["steps"][0]["action"] == "步骤" and blank["steps"][0]["expected"] == ""
     # 令牌一次性
     assert (await client.post(f"/api/v1/tasks/{tid}/cases/import/confirm", json={"token": pv["token"], "only_valid": True})).status_code == 404
     # 模板下载
