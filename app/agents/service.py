@@ -238,7 +238,7 @@ async def _run_single(
         initial["test_points"] = test_points  # 已确认拆解：图从生成节点开始
     final = await graph.ainvoke(initial, {"recursion_limit": 10 + MAX_REVIEW_ROUNDS * 10})
     return GenerationResult(
-        cases=[TestCase.model_validate(c) for c in final["cases"]] if final.get("passed") else _lenient_cases(final),
+        cases=[TestCase.model_validate(c, context={"require_expected": True}) for c in final["cases"]] if final.get("passed") else _lenient_cases(final),
         passed=final.get("passed", False),
         review_rounds=final.get("review_rounds", 0),
         unresolved=final.get("unresolved", []),
@@ -289,7 +289,7 @@ async def run_revision(
     }
     final = await graph.ainvoke(initial, {"recursion_limit": 10 + MAX_REVIEW_ROUNDS * 10})
     return GenerationResult(
-        cases=[TestCase.model_validate(c) for c in final["cases"]] if final.get("passed") else _lenient_cases(final),
+        cases=[TestCase.model_validate(c, context={"require_expected": True}) for c in final["cases"]] if final.get("passed") else _lenient_cases(final),
         passed=final.get("passed", False),
         review_rounds=final.get("review_rounds", 0),
         unresolved=final.get("unresolved", []),
@@ -306,7 +306,7 @@ def _lenient_cases(final: dict) -> list[TestCase]:
     cases: list[TestCase] = []
     for raw in final.get("cases", []):
         try:
-            cases.append(TestCase.model_validate(raw))
+            cases.append(TestCase.model_validate(raw, context={"require_expected": True}))
         except Exception:
             continue
     return cases
