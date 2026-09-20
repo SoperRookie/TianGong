@@ -921,6 +921,23 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 </dialog>
 
 <!-- 单行输入 -->
+<!-- 新建执行轮次：轮次名称 + 本轮执行人（默认当前登录人） -->
+<dialog id="runDlg">
+  <div class="dlg-h"><h3>新建执行轮次</h3><span class="meta" id="rdMeta"></span></div>
+  <div class="dlg-b">
+    <label class="f">轮次名称</label>
+    <input type="text" id="rdName">
+    <label class="f">本轮执行人<span class="hint">（默认当前登录账号；计划内未分配的用例将分配给他）</span></label>
+    <select id="rdUser" onchange="runDlgHint()"></select>
+    <label class="check" style="margin-top:10px"><input type="checkbox" id="rdReassign" onchange="runDlgHint()"> 已分配给其他人的用例也改派给该执行人（留痕原执行人）</label>
+    <div class="hint" id="rdHint" style="margin-top:8px"></div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="resolveRunDlg(null)">取消</button>
+    <button class="btn" onclick="submitRunDlg()">开始执行</button>
+  </div>
+</dialog>
+
 <dialog id="inputDlg">
   <div class="dlg-h"><h3 id="inTitle"></h3></div>
   <div class="dlg-b">
@@ -3496,7 +3513,7 @@ async function renderPlanDetail() {
     <span class="meta">执行轮次挂计划 · 失败/阻塞须填原因 · 附件支持图片/视频/日志/压缩包</span>
     <div class="grow">
       ${p.runs.length ? `<select style="width:220px" onchange="planRunId=this.value;renderPlanDetail()">
-        ${p.runs.map(r => `<option value="${r.run_id}" ${run && r.run_id===run.run_id?'selected':''}>${esc(r.name)} · ${r.finished_at?'已结束':'进行中'}</option>`).join('')}
+        ${p.runs.map(r => `<option value="${r.run_id}" ${run && r.run_id===run.run_id?'selected':''}>${esc(r.name)}${r.executor?` · 执行人 ${esc(r.executor)}`:''} · ${r.finished_at?'已结束':'进行中'}</option>`).join('')}
       </select>` : ''}
       ${run ? `<button class="btn ghost sm" title="不关联具体用例的整轮附件；关联用例请用表格行内的回形针按钮" onclick="planPickAtt(null)">＋ 整轮附件</button>` : ''}
       ${active ? `<button class="btn ghost sm" onclick="planFinishRun()">结束本轮</button>` : ''}
@@ -3648,12 +3665,47 @@ async function planRemoveItem(itemId) {
 }
 
 /* ---- 计划执行与附件 ---- */
+let _rdResolve = null, _rdItems = [], _rdCanAssign = false;
+async function openRunDlg(pid, plan) {
+  // plan：计划详情（items / runs / project）；候选执行人取项目成员，默认当前登录人
+  let data;
+  try { data = await api(`/api/v1/plans/${pid}/assignees`); } catch (e) { toast(e.message, 'err'); return null; }
+  _rdItems = plan.items || [];
+  _rdCanAssign = can(plan.project, 'plan.assign');
+  const me = curUser ? curUser.username : '';
+  const opts = data.assignees.slice();
+  if (me && !opts.some(a => a.username === me)) opts.unshift({username: me, name: curUser.name || '', role_label: '当前登录'});
+  $('rdName').value = `第 ${(plan.runs || []).length + 1} 轮执行`;
+  $('rdUser').innerHTML = `<option value="">不指定（用例执行时认领）</option>` + opts.map(a =>
+    `<option value="${esc(a.username)}" ${a.username===me?'selected':''}>${esc(a.name ? `${a.name}（${a.username}）` : a.username)}${a.username===me?' · 我':''} · ${esc(a.role_label||'')}</option>`).join('');
+  $('rdReassign').checked = false;
+  $('rdReassign').parentElement.style.display = _rdCanAssign ? '' : 'none';
+  $('rdMeta').textContent = `${_rdItems.length} 条用例`;
+  runDlgHint();
+  return new Promise(res => { _rdResolve = res; $('runDlg').showModal(); $('rdName').focus(); });
+}
+function runDlgHint() {
+  const who = $('rdUser').value, me = curUser ? curUser.username : '';
+  const unassigned = _rdItems.filter(i => !i.assignee).length, others = _rdItems.filter(i => i.assignee && i.assignee !== who).length;
+  if (!who) { $('rdHint').textContent = `不指定执行人：${unassigned} 条未分配用例在执行时由执行者认领`; return; }
+  const parts = [`未分配的 ${unassigned} 条将分配给 ${who}`];
+  if (others) parts.push($('rdReassign').checked ? `已分配给他人的 ${others} 条一并改派` : `已分配给他人的 ${others} 条保持不变`);
+  if (who !== me && !_rdCanAssign) parts.push('指定他人执行需要「分配」权限');
+  $('rdHint').textContent = parts.join('；');
+}
+function resolveRunDlg(v) { $('runDlg').close(); const r = _rdResolve; _rdResolve = null; r && r(v); }
+function submitRunDlg() {
+  const name = $('rdName').value.trim();
+  if (!name) return toast('轮次名称不能为空', 'warn');
+  resolveRunDlg({name, executor: $('rdUser').value || null, reassign_all: $('rdReassign').checked});
+}
 async function planNewRun() {
-  const name = await askInput('新建执行轮次', '轮次名称', `第 ${_planDetail.runs.length + 1} 轮执行`);
-  if (!name) return;
+  const body = await openRunDlg(curPlan, _planDetail);
+  if (!body) return;
   try {
-    const run = await jpost(`/api/v1/plans/${curPlan}/runs`, {name});
+    const run = await jpost(`/api/v1/plans/${curPlan}/runs`, body);
     planRunId = run.run_id;
+    if (run.assigned) toast(`轮次已开始，${run.assigned} 条用例分配给 ${body.executor}`, 'ok');
     renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
 }
@@ -4368,10 +4420,15 @@ async function saveDep() {
   catch (e) { toast(e.message, 'err'); }
 }
 async function myStartRun(pid) {
-  const name = await askInput('开始新一轮执行', '轮次名称', '第 ' + (new Date().getMonth()+1) + '/' + new Date().getDate() + ' 轮');
-  if (!name) return;
-  try { await jpost(`/api/v1/plans/${pid}/runs`, {name}); toast('轮次已开始，可直接打结果', 'ok'); renderPlans(); }
-  catch (e) { toast(e.message, 'err'); }
+  let plan;
+  try { plan = await api(`/api/v1/plans/${pid}`); } catch (e) { return toast(e.message, 'err'); }
+  const body = await openRunDlg(pid, plan);
+  if (!body) return;
+  try {
+    const run = await jpost(`/api/v1/plans/${pid}/runs`, body);
+    toast(run.assigned ? `轮次已开始，${run.assigned} 条用例分配给 ${body.executor}，可直接打结果` : '轮次已开始，可直接打结果', 'ok');
+    renderPlans();
+  } catch (e) { toast(e.message, 'err'); }
 }
 async function kbSearch() {
   kbQuery = $('kbQ').value.trim(); if (!kbQuery) return;
