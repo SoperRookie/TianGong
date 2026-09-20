@@ -395,3 +395,41 @@ async def test_计划列表查询条件与分页(client):
     d = (await client.get("/api/v1/plans", params={"owner": "zhang", "keyword": "冒烟", "page": 1})).json()
     assert d["total"] == 2
     assert (await client.get("/api/v1/plans", params={"status": "闲聊"})).status_code == 400
+
+
+async def test_新建轮次指定执行人(client):
+    from app.main import app as _app
+    _app.state.auth.add_user("zhang", "zhang123", role="member")
+    tid = await _task_with_approved(client, make_case(), make_case(case_id="TC-登录-002", title="第二条"), make_case(case_id="TC-登录-003", title="第三条"))
+    plan = await _plan(client)
+    pid = plan["plan_id"]
+    await client.post(f"/api/v1/plans/{pid}/cases", json={"task_id": tid})
+    detail = (await client.get(f"/api/v1/plans/{pid}")).json()
+    items = [i["item_id"] for i in detail["items"]]
+    assert len(items) == 3
+    # 先把第一条分给 zhang（项目成员）
+    await client.put("/api/v1/projects/P端/members", json={"username": "zhang", "role": "tester"})
+    assert (await client.post(f"/api/v1/plans/{pid}/assign", json={"assignee": "zhang", "item_ids": items[:1]})).status_code == 200
+
+    # 不是项目成员的执行人 → 400；不传 executor 保持原行为（不分配）
+    assert (await client.post(f"/api/v1/plans/{pid}/runs", json={"name": "r0", "executor": "nobody"})).status_code == 400
+    run0 = (await client.post(f"/api/v1/plans/{pid}/runs", json={"name": "r0"})).json()
+    assert run0["executor"] is None and run0["assigned"] == 0
+    await client.post(f"/api/v1/plans/{pid}/runs/{run0['run_id']}/finish")
+
+    # 指定 admin 为本轮执行人：未分配的 2 条分给 admin，已分给 zhang 的保持
+    run = (await client.post(f"/api/v1/plans/{pid}/runs", json={"name": "r1", "executor": "admin"})).json()
+    assert run["executor"] == "admin" and run["assigned"] == 2
+    detail = (await client.get(f"/api/v1/plans/{pid}")).json()
+    by_item = {i["item_id"]: i for i in detail["items"]}
+    assert by_item[items[0]]["assignee"] == "zhang"
+    assert all(by_item[x]["assignee"] == "admin" for x in items[1:])
+    assert by_item[items[1]]["assign_log"][-1]["assignee"] == "admin"
+    await client.post(f"/api/v1/plans/{pid}/runs/{run['run_id']}/finish")
+
+    # reassign_all：已分给他人的也改派，留痕原执行人
+    run2 = (await client.post(f"/api/v1/plans/{pid}/runs", json={"name": "r2", "executor": "admin", "reassign_all": True})).json()
+    assert run2["assigned"] == 1
+    detail = (await client.get(f"/api/v1/plans/{pid}")).json()
+    first = next(i for i in detail["items"] if i["item_id"] == items[0])
+    assert first["assignee"] == "admin" and first["assign_log"][-1]["prev"] == "zhang"
