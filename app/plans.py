@@ -194,7 +194,8 @@ def get_run(plan: dict, run_id: str) -> dict | None:
     return next((r for r in plan["runs"] if r["run_id"] == run_id), None)
 
 
-def new_run(plan: dict, name: str, by: str) -> dict:
+def new_run(plan: dict, name: str, by: str, executor: str | None = None) -> dict:
+    """新建执行轮次。executor 为本轮指定执行人（可空=不指定，用例执行时认领）；用例级分配由调用方处理。"""
     if any(not r.get("finished_at") for r in plan["runs"]):
         raise PlanError("存在未结束的执行轮次，请先结束后再新建")
     if not plan["items"]:
@@ -203,6 +204,7 @@ def new_run(plan: dict, name: str, by: str) -> dict:
         "run_id": _hex8(),
         "name": (name or "").strip() or f"第 {len(plan['runs']) + 1 } 轮执行",
         "by": by,
+        "executor": executor or None,
         "started_at": _now(),
         "finished_at": None,
         "results": {},      # item_id -> {case_id, title, status, note, by, at, history}

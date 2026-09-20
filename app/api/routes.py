@@ -3503,22 +3503,40 @@ _ATTACHMENT_SUFFIXES = {
 
 class PlanRunBody(BaseModel):
     name: str = ""
+    executor: str | None = None   # 本轮执行人：传则把计划内未分配的用例分配给他（默认页面填当前登录人）；不传保持原行为
+    reassign_all: bool = False    # 连同已分配给他人的用例一并改派给该执行人（留痕原执行人）
 
 
 @router.post("/api/v1/plans/{plan_id}/runs")
 async def create_plan_run(request: Request, plan_id: str, body: PlanRunBody | None = None) -> dict:
     from app.plans import PlanError, new_run, run_summary
 
+    from app.plans import assign_items
+
     plan = _plan(request, plan_id, "exec.run")
     if plan["status"] == "archived":
         raise HTTPException(status_code=409, detail="计划已归档，不可再执行")
+    me = _operator(request)
+    executor = (body.executor or "").strip() if body else ""
+    if executor and executor != me and executor not in {a["username"] for a in _plan_assignees(request, plan)}:
+        raise HTTPException(status_code=400, detail=f"执行人不存在或不是项目成员: {executor}")
+    if executor and executor != me:
+        _require_project(request, plan.get("project"), "plan.assign")  # 指定他人执行等同分配，需分配权限
     try:
-        run = new_run(plan, (body.name if body else ""), by=_operator(request))
+        run = new_run(plan, (body.name if body else ""), by=me, executor=executor or None)
+        assigned = 0
+        if executor:
+            ids = [i["item_id"] for i in plan["items"]
+                   if (body and body.reassign_all) or not i.get("assignee")]
+            if ids:
+                changed, _ = assign_items(plan, ids, executor, by=me)
+                assigned = len(changed)
     except PlanError as e:
         raise HTTPException(status_code=409, detail=str(e))
     request.app.state.plans.save(plan)
-    logger.info("计划 {} 新建执行轮次 {}（{}）", plan_id, run["run_id"], run["name"])
-    return {**run, "summary": run_summary(plan, run)}
+    request.state.audit_detail = f"轮次 {run['name']}" + (f"，执行人 {executor}（分配 {assigned} 条）" if executor else "")
+    logger.info("计划 {} 新建执行轮次 {}（{}），执行人 {}，分配 {} 条", plan_id, run["run_id"], run["name"], executor or "-", assigned)
+    return {**run, "summary": run_summary(plan, run), "assigned": assigned}
 
 
 def _plan_run(plan: dict, run_id: str) -> dict:
