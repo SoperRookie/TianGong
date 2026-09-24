@@ -12,8 +12,8 @@
                                                         ├─ ./logs
                                                         └─ ./config/models.yaml（目录挂载，页面可改）
                                                         │
-                                                        └──▶ 内网 Ollama（qwen-vl 图片理解、bge-m3 Embedding）
-                                                        └──▶ 公网 DeepSeek API
+                                                        └──▶ 公网 OpenAI API（text-embedding-3-large Embedding）
+                                                        └──▶ 公网 OpenAI API（GPT；其他厂商可配）
 ```
 
 设计要点：
@@ -37,7 +37,7 @@
 ## 2. 服务器准备
 
 - Linux，Docker Engine 24 以上，Docker Compose v2（`docker compose version` 能输出即可）。
-- 出网访问 `https://api.deepseek.com`；内网访问 Ollama。
+- 出网访问 `https://api.openai.com`（LLM 与 Embedding 同用）。
 - 端口 80（及 443）未被占用。
 
 ## 3. 部署步骤
@@ -61,7 +61,7 @@ chmod 600 .env
 至少填写：
 
 ```bash
-DEEPSEEK_API_KEY=sk-xxxx
+OPENAI_API_KEY=sk-xxxx
 TIANGONG_ADMIN_PASSWORD=<初始管理员口令>
 
 MYSQL_ROOT_PASSWORD=<强密码>
@@ -76,7 +76,7 @@ MYSQL_PASSWORD=<强密码>
 
 LLM 模型不预置：首次启动在挂载的 `config/` 目录里自动生成 `models.yaml`（模型清单为空），登录后在「系统设置 → 模型配置」添加，第一个模型自动成为默认。新模型的密钥写进 `.env` 后 `docker compose up -d app` 重建容器才会读到。
 
-Embedding 段从 `config/models.example.yaml` 复制，默认指向内网 Ollama 的 bge-m3（`192.168.0.152:11434`）。容器走桥接网络，能访问宿主机所在局域网；Ollama 就跑在这台宿主机上时把 `models.yaml` 里 `embeddings` 的 `base_url` 改为：
+Embedding 段从 `config/models.example.yaml` 复制，默认为 OpenAI text-embedding-3-large，与 LLM 共用 `OPENAI_API_KEY`，无需内网服务。改接宿主机上的 Ollama 时把 `models.yaml` 里 `embeddings` 的 `base_url` 改为：
 
 ```yaml
 base_url: http://host.docker.internal:11434/v1
@@ -179,7 +179,7 @@ docker compose logs -f app
 
 **app 启动报权限错误（Permission denied）。** 宿主机目录属主不是 uid 1000，执行 `sudo chown -R 1000:1000 outputs data logs`。
 
-**知识库、图片理解不可用。** 容器访问不到 Ollama：`docker compose exec app python -c "import urllib.request;print(urllib.request.urlopen('http://192.168.0.152:11434/v1/models',timeout=5).status)"` 验证，按第 3.3 节改地址。
+**知识库上传或检索报错。** 多为 `OPENAI_API_KEY` 未配或容器出网受限：`docker compose exec app python -c "import urllib.request;print(urllib.request.urlopen('https://api.openai.com/v1/models',timeout=5).status)"` 验证出网（401 也算通）；若 `embeddings` 段改接了内网 Ollama，则按第 3.3 节核对地址。
 
 **操作日志 IP 都是 172.28.0.10。** nginx 容器没有拿到固定 IP（例如手工改了网段），确认 `docker inspect tiangong-nginx` 的 IP 与 `TIANGONG_TRUSTED_PROXIES` 一致。
 

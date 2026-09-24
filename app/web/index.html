@@ -785,7 +785,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     </div>
     <div class="login-err" id="loginErr"></div>
     <button class="btn block" id="loginBtn" onclick="doLogin()">登 录</button>
-    <div class="login-foot"><span class="live"><i></i>内网部署 · 数据不出域</span><span>DeepSeek · bge-m3</span></div>
+    <div class="login-foot"><span class="live"><i></i>内网部署 · 数据不出域</span><span>OpenAI GPT</span></div>
   </div>
   </div>
 </div>
@@ -1260,21 +1260,21 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="dlg-h"><h3 id="mdTitle">添加模型</h3></div>
   <div class="dlg-b">
     <div style="display:flex;gap:10px">
-      <div style="flex:1"><label class="f">名称<span class="hint">（系统内唯一标识）</span></label><input type="text" id="mdName" placeholder="如 deepseek-chat"></div>
-      <div style="flex:1"><label class="f">厂商</label><input type="text" id="mdProvider" placeholder="deepseek / openai / dashscope / ollama / vllm"></div>
+      <div style="flex:1"><label class="f">名称<span class="hint">（系统内唯一标识）</span></label><input type="text" id="mdName" placeholder="如 gpt-5.4"></div>
+      <div style="flex:1"><label class="f">厂商</label><input type="text" id="mdProvider" placeholder="openai / deepseek / dashscope / ollama / vllm"></div>
     </div>
     <label class="f">Base URL<span class="hint">（OpenAI 兼容协议地址）</span></label>
-    <input type="text" id="mdBaseUrl" placeholder="https://api.deepseek.com/v1">
+    <input type="text" id="mdBaseUrl" placeholder="https://api.openai.com/v1">
     <div style="display:flex;gap:10px">
-      <div style="flex:1"><label class="f">厂商侧模型名</label><input type="text" id="mdModel" placeholder="deepseek-chat"></div>
-      <div style="flex:1"><label class="f">密钥环境变量名<span class="hint">（内网免鉴权可留空）</span></label><input type="text" id="mdKeyEnv" placeholder="DEEPSEEK_API_KEY"></div>
+      <div style="flex:1"><label class="f">厂商侧模型名</label><input type="text" id="mdModel" placeholder="gpt-5.4"></div>
+      <div style="flex:1"><label class="f">密钥环境变量名<span class="hint">（内网免鉴权可留空）</span></label><input type="text" id="mdKeyEnv" placeholder="OPENAI_API_KEY"></div>
     </div>
     <div style="display:flex;gap:10px">
       <div style="flex:1"><label class="f">temperature</label><input type="number" id="mdTemp" step="0.1" min="0" max="2"></div>
       <div style="flex:1"><label class="f">max_tokens</label><input type="number" id="mdMaxTok" min="256"></div>
     </div>
     <label class="f">降级链路<span class="hint">（备用模型名，逗号分隔，按顺序尝试）</span></label>
-    <input type="text" id="mdFallbacks" placeholder="deepseek-reasoner">
+    <input type="text" id="mdFallbacks" placeholder="gpt-5.4-mini">
     <label class="check" style="margin-top:10px"><input type="checkbox" id="mdVision"> 支持 Vision（图片需求自动路由）</label>
   </div>
   <div class="dlg-f">
@@ -5613,7 +5613,7 @@ async function refreshModelsCfg() {
   $('modelsCfgList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
     <tr><th>名称</th><th>厂商</th><th>模型名</th><th>Base URL</th><th>密钥环境变量</th>
     <th>Vision</th><th>max_tokens</th><th>降级链路</th><th style="width:150px">操作</th></tr>
-    ${_modelCfg.models.length ? '' : `<tr><td colspan="9"><div class="empty">尚未配置任何模型。点击「添加模型」接入 DeepSeek / 智谱 / 阿里云百炼 / OpenAI 或内网 Ollama、vLLM，密钥写在 .env 里。第一个添加的模型自动成为默认模型。</div></td></tr>`}
+    ${_modelCfg.models.length ? '' : `<tr><td colspan="9"><div class="empty">尚未配置任何模型。点击「添加模型」接入 OpenAI / DeepSeek / 智谱 / 阿里云百炼 或内网 Ollama、vLLM，密钥写在 .env 里。第一个添加的模型自动成为默认模型。</div></td></tr>`}
     ${_modelCfg.models.map(m => `<tr>
       <td><b>${esc(m.name)}</b>${m.name===_modelCfg.default_model?' <span class="st approved">默认</span>':''}</td>
       <td>${esc(m.provider)}</td>

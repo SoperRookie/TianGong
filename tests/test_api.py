@@ -22,9 +22,9 @@ async def test_健康检查与模型列表(client):
     resp = await client.get("/api/v1/models")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["default_model"] == "deepseek-chat"
+    assert data["default_model"] == "gpt-5.4"
     names = [m["name"] for m in data["models"]]
-    assert "deepseek-chat" in names
+    assert "gpt-5.4" in names
     for m in data["models"]:
         assert "api_key_env" not in m
 
