@@ -9,7 +9,7 @@ class ModelConfig(BaseModel):
     """单个模型的接入配置（config/models.yaml 中的一个条目）。"""
 
     name: str = Field(description="系统内唯一标识，任务级切换时使用")
-    provider: str = Field(description="厂商标识：deepseek / openai / dashscope / ollama / vllm 等")
+    provider: str = Field(description="厂商标识：openai / deepseek / dashscope / ollama / vllm 等；OpenAI 官方 API 须为 openai（客户端据此适配 GPT-5 系参数）")
     base_url: str
     api_key_env: str | None = Field(default=None, description="密钥所在环境变量名；内网无鉴权服务可为空")
     model: str = Field(description="厂商侧模型名")

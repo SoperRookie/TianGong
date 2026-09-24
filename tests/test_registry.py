@@ -7,10 +7,11 @@ from app.llm.schemas import MissingAPIKeyError, ModelConfig
 
 def test_从项目配置文件加载():
     registry = ModelRegistry.from_yaml(get_settings().models_example_path)
-    assert registry.default_model == "deepseek-chat"
+    assert registry.default_model == "gpt-5.4"
     cfg = registry.get()
-    assert cfg.provider == "deepseek"
-    assert cfg.supports_vision is False
+    assert cfg.provider == "openai"
+    assert cfg.supports_vision is True
+    assert registry.get("gpt-5.5").temperature == 1  # 纯推理模型只接受默认温度
 
 
 def test_任务级模型切换(registry_with_vision):
