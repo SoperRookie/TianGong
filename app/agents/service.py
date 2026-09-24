@@ -161,7 +161,7 @@ async def _analyze_then_generate(
     """先拆解，再按模块并行生成（PRD 4.1a 生成 Agent 多实例）。
 
     单次生成调用只输出一个模块的用例，避免大需求下输出超过模型 max_tokens 被截断
-    （deepseek-chat 输出上限 8K，全模块一次性输出必然超限）。
+    （多数模型单次输出上限 8K～16K，全模块一次性输出必然超限）。
     """
     analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
     if on_analyzed:

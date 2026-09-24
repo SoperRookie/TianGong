@@ -3,88 +3,127 @@
 # - 所有模型统一走 OpenAI 兼容协议（chat/completions）。
 # - api_key_env 为密钥所在的环境变量名，密钥本身不写入本文件。
 # - supports_vision 标记多模态能力，图片类需求自动路由至 Vision 模型（F-1-5）。
-# - 新增厂商/模型只需追加条目，无需改代码；私有化 Ollama/vLLM 同样以条目形式接入。
+# - 新增厂商/模型只需追加条目，无需改代码；DeepSeek / 智谱 / 百炼等商用 API 与私有化
+#   Ollama / vLLM 同样以条目形式接入，文末保留示例，接入路径不因当前选型而收窄。
+# - 当前选型：公司采购 OpenAI GPT，生成 / 评审 / 图片理解全部走 GPT（provider 须为
+#   openai，客户端据此改传 max_completion_tokens）。
 
-default_model: deepseek-chat
+default_model: gpt-5.4
 
 # 单模型调用失败的自动重试次数（F-1-6）；重试耗尽后按各模型的 fallbacks 依序降级
 max_retries: 1
 
 models:
-  - name: deepseek-chat
-    provider: deepseek
-    base_url: https://api.deepseek.com/v1
-    api_key_env: DEEPSEEK_API_KEY
-    model: deepseek-chat
-    supports_vision: false
-    temperature: 0.3
-    max_tokens: 8192
-    timeout: 120
-    fallbacks: [deepseek-reasoner]
-
-  - name: deepseek-reasoner
-    provider: deepseek
-    base_url: https://api.deepseek.com/v1
-    api_key_env: DEEPSEEK_API_KEY
-    model: deepseek-reasoner
-    supports_vision: false
+  # 默认模型：生成、需求分析、AI 修改；支持图片输入，图片需求无需另配 Vision 模型
+  - name: gpt-5.4
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-5.4
+    supports_vision: true
     temperature: 0.3
     max_tokens: 16384
     timeout: 300
+    fallbacks: [gpt-5.4-mini]
 
-  # 私有化 Vision 模型（F-2-3 图片需求解析）：Windows + RTX 4090 16G，Ollama 部署
-  - name: qwen-vl-local
-    provider: ollama
-    base_url: http://192.168.0.152:11434/v1
-    api_key_env: null
-    # 直连裸模型（2026-08-09 换用 8b）：原 30b 需派生别名固化 num_ctx，现服务端
-    # 默认窗口已实测 ≥9K token 输入无截断且召回正常，无需别名；若后续出现长输入
-    # 截断，按旧法经 /api/create 建 num_ctx 别名再切回
-    model: qwen3-vl:8b
+  # 评审模型：生成任务中指定为 reviewer_model，交叉评审更严格
+  - name: gpt-5.5
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-5.5
     supports_vision: true
-    temperature: 0.2
-    # 思考型模型：思考与正文共享输出额度，需给足
-    max_tokens: 10240
+    # 纯推理模型：只接受默认温度 1，传其他值直接 400
+    temperature: 1
+    max_tokens: 16384
     timeout: 300
+    fallbacks: [gpt-5.4]
 
-  # ---- 以下为示例条目，接入时取消注释并配置对应环境变量 ----
+  # 轻量档：便宜快速，作默认模型的降级备用，也适合改写等小任务
+  - name: gpt-5.4-mini
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-5.4-mini
+    supports_vision: true
+    temperature: 0.3
+    max_tokens: 16384
+    timeout: 180
 
-  # - name: qwen-vl-max            # 商用多模态示例（复杂图升级备选）
+  # ---- 以下为其他厂商示例条目（保留接入路径），接入时取消注释并配置对应环境变量 ----
+
+  # - name: deepseek-chat          # DeepSeek 商用 API
+  #   provider: deepseek
+  #   base_url: https://api.deepseek.com/v1
+  #   api_key_env: DEEPSEEK_API_KEY
+  #   model: deepseek-chat
+  #   supports_vision: false
+  #   max_tokens: 8192
+  #   fallbacks: [deepseek-reasoner]
+
+  # - name: deepseek-reasoner
+  #   provider: deepseek
+  #   base_url: https://api.deepseek.com/v1
+  #   api_key_env: DEEPSEEK_API_KEY
+  #   model: deepseek-reasoner
+  #   supports_vision: false
+  #   max_tokens: 16384
+  #   timeout: 300
+
+  # - name: qwen-vl-max            # 阿里云百炼多模态
   #   provider: dashscope
   #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
   #   api_key_env: DASHSCOPE_API_KEY
   #   model: qwen-vl-max
   #   supports_vision: true
 
-  # - name: gpt-5.4                # OpenAI：provider 须为 openai，客户端据此改传 max_completion_tokens
-  #   provider: openai
-  #   base_url: https://api.openai.com/v1
-  #   api_key_env: OPENAI_API_KEY
-  #   model: gpt-5.4
+  # - name: qwen-vl-local          # 私有化 Vision（Ollama，曾用 qwen3-vl:8b 实测可用）
+  #   provider: ollama
+  #   base_url: http://内网推理服务:11434/v1
+  #   api_key_env: null            # 内网服务可无鉴权
+  #   model: qwen3-vl:8b
   #   supports_vision: true
-  #   max_tokens: 16384
+  #   temperature: 0.2
+  #   max_tokens: 10240            # 思考型模型：思考与正文共享输出额度，需给足
+  #   timeout: 300
 
   # - name: qwen3-local            # 后期私有化部署示例（Ollama / vLLM）
   #   provider: ollama
   #   base_url: http://内网推理服务:11434/v1
-  #   api_key_env: null            # 内网服务可无鉴权
+  #   api_key_env: null
   #   model: qwen3:32b
   #   supports_vision: false
 
 # ---- Embedding 模型（F-7-10）：知识库切片向量化，与 LLM 同构的多厂商设计 ----
-# 选型以 POC-R8 结论为准；当前默认内网 Ollama 部署的 bge-m3（1024 维）。
-default_embedding: bge-m3-local
+# 当前选型随 LLM 一并采购 OpenAI：text-embedding-3-large（3072 维）。
+# dimensions 必须与模型实际输出一致，建库时用于校验；更换 Embedding 模型后
+# 向量维度变化，需删除 data/knowledge 重新入库。
+default_embedding: text-embedding-3-large
 
 embeddings:
-  - name: bge-m3-local
-    provider: ollama
-    base_url: http://192.168.0.152:11434/v1
-    api_key_env: null
-    model: bge-m3:latest
-    dimensions: 1024
+  - name: text-embedding-3-large
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: text-embedding-3-large
+    dimensions: 3072
     timeout: 60
 
-  # ---- 商用 Embedding 示例条目，POC-R8 对比时取消注释 ----
+  # ---- 其他厂商 / 私有化示例条目（保留接入路径），接入时取消注释 ----
+
+  # - name: text-embedding-3-small # OpenAI 轻量档
+  #   provider: openai
+  #   base_url: https://api.openai.com/v1
+  #   api_key_env: OPENAI_API_KEY
+  #   model: text-embedding-3-small
+  #   dimensions: 1536
+
+  # - name: bge-m3-local           # 私有化 Ollama（POC-R8 曾实测可用）
+  #   provider: ollama
+  #   base_url: http://内网推理服务:11434/v1
+  #   api_key_env: null
+  #   model: bge-m3:latest
+  #   dimensions: 1024
 
   # - name: text-embedding-v3      # 阿里云百炼
   #   provider: dashscope

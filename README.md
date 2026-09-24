@@ -16,7 +16,7 @@
 | 长期记忆 | 用户偏好与项目记忆跨会话保留，独立配额注入生成上下文；常用模板/模型与重复修订要求自动沉淀为偏好；记忆可查看、编辑、删除 |
 | 多轮对话修订 | 对生成结果提修订要求，增量定点修正（只改受影响用例，其余原样保留），修订历史留痕 |
 | 评审闭环双通道 | 在线：逐条采纳/修改/删除 + 反馈留痕，按终稿重导出；离线：人工定稿文件回传，自动计算字段级差异与采纳率 |
-| 多模型接入 | 配置化多厂商接入（当前：DeepSeek 商用 API + 内网 Ollama 私有化 Vision/Embedding），OpenAI 兼容协议，自动重试与降级，新增模型只改配置 |
+| 多模型接入 | 配置化多厂商接入（当前：公司采购 OpenAI GPT 承担生成 / 评审 / 图片理解，Embedding 同用 OpenAI text-embedding-3-large），OpenAI 兼容协议，自动重试与降级，DeepSeek / 智谱 / 百炼 / 私有化 Ollama、vLLM 只改配置即可接入 |
 | 使用形态 | Web 界面 + REST API；任务异步执行、进度轮询、历史任务管理 |
 
 ## 系统架构
@@ -47,7 +47,7 @@ python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # 2. 配置密钥（不入库）
-echo 'DEEPSEEK_API_KEY=sk-xxxx' > .env
+echo 'OPENAI_API_KEY=sk-xxxx' > .env
 # 首次启动自动生成 config/models.yaml（模型清单为空，不入库），登录后在 系统设置 → 模型配置 添加模型；
 # 样例与 Embedding 段见 config/models.example.yaml
 
@@ -57,6 +57,8 @@ bash scripts/dev.sh
 # 4. 打开 Web 界面
 open http://localhost:8000/
 ```
+
+服务器源码部署不用 dev.sh，改用一键脚本：`bash scripts/server.sh start|stop|restart|status|logs|update`（配置只改 `.env`，详见 `docs/服务器部署文档.md` 第 4 节）。
 
 运行测试：`pytest`（222 项，LLM 调用以桩件隔离，无需网络）。
 
