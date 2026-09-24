@@ -58,6 +58,8 @@ bash scripts/dev.sh
 open http://localhost:8000/
 ```
 
+服务器源码部署不用 dev.sh，改用一键脚本：`bash scripts/server.sh start|stop|restart|status|logs|update`（配置只改 `.env`，详见 `docs/服务器部署文档.md` 第 4 节）。
+
 运行测试：`pytest`（222 项，LLM 调用以桩件隔离，无需网络）。
 
 ### 品牌资源
