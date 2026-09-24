@@ -56,12 +56,13 @@ models:
   #   model: qwen-vl-max
   #   supports_vision: true
 
-  # - name: gpt-4o
+  # - name: gpt-5.4                # OpenAI：provider 须为 openai，客户端据此改传 max_completion_tokens
   #   provider: openai
   #   base_url: https://api.openai.com/v1
   #   api_key_env: OPENAI_API_KEY
-  #   model: gpt-4o
+  #   model: gpt-5.4
   #   supports_vision: true
+  #   max_tokens: 16384
 
   # - name: qwen3-local            # 后期私有化部署示例（Ollama / vLLM）
   #   provider: ollama
