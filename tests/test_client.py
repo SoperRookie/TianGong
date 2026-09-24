@@ -56,3 +56,29 @@ async def test_图片需求自动路由至vision模型(registry_with_vision):
 
     assert result.model_name == "qwen-vl"
     assert captured["model"] == "qwen-vl-max"
+
+
+async def test_openai厂商改传max_completion_tokens(monkeypatch):
+    from app.llm.registry import ModelRegistry
+    from app.llm.schemas import ModelConfig
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    registry = ModelRegistry(
+        default_model="gpt",
+        models=[
+            ModelConfig(name="gpt", provider="openai", base_url="https://api.openai.com/v1",
+                        api_key_env="OPENAI_API_KEY", model="gpt-5.4", max_tokens=4096),
+        ],
+    )
+    client = LLMClient(registry)
+    captured: dict = {}
+    client._clients["gpt"] = _stub_openai(captured)
+
+    await client.chat([{"role": "user", "content": "hi"}])
+    assert "max_tokens" not in captured
+    assert captured["max_completion_tokens"] == 4096
+
+    captured.clear()
+    await client.chat([{"role": "user", "content": "hi"}], max_tokens=64)
+    assert "max_tokens" not in captured
+    assert captured["max_completion_tokens"] == 64

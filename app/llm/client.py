@@ -125,6 +125,10 @@ class LLMClient:
             "max_tokens": cfg.max_tokens,
         }
         params.update(overrides)
+        if cfg.provider == "openai" and "max_tokens" in params:
+            # OpenAI 官方新模型（GPT-5 系）已废弃 max_tokens，统一改传 max_completion_tokens；
+            # 其余 OpenAI 兼容厂商（DeepSeek/Ollama 等）仍只认 max_tokens，不能一概替换
+            params["max_completion_tokens"] = params.pop("max_tokens")
 
         start = time.monotonic()
         resp = await client.chat.completions.create(**params)
