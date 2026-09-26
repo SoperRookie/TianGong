@@ -7,11 +7,12 @@ from app.llm.schemas import MissingAPIKeyError, ModelConfig
 
 def test_从项目配置文件加载():
     registry = ModelRegistry.from_yaml(get_settings().models_example_path)
-    assert registry.default_model == "gpt-5.4"
+    assert registry.default_model == "gpt-6-astra"
     cfg = registry.get()
     assert cfg.provider == "openai"
     assert cfg.supports_vision is True
-    assert registry.get("gpt-5.5").temperature == 1  # 纯推理模型只接受默认温度
+    assert cfg.temperature == 1  # 推理型模型只接受默认温度
+    assert registry.get("gpt-5.4").temperature == 0.3
 
 
 def test_任务级模型切换(registry_with_vision):
