@@ -8,13 +8,51 @@
 # - 当前选型：公司采购 OpenAI GPT，生成 / 评审 / 图片理解全部走 GPT（provider 须为
 #   openai，客户端据此改传 max_completion_tokens）。
 
-default_model: gpt-5.4
+default_model: gpt-6-astra
 
 # 单模型调用失败的自动重试次数（F-1-6）；重试耗尽后按各模型的 fallbacks 依序降级
 max_retries: 1
 
+# GPT-6 / 5.6 / 5.5 均为推理型模型，只接受默认温度 1，传其他值直接 400；5.4 系可用 0.3
 models:
-  # 默认模型：生成、需求分析、AI 修改；支持图片输入，图片需求无需另配 Vision 模型
+  # 默认模型：GPT-6 旗舰，生成、评审、图片理解全走它（公司决策：默认用效果最好的组合，
+  # 各组合的效果排序与预算见 docs/GPT模型组合与预算.md）
+  - name: gpt-6-astra
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-6-astra
+    supports_vision: true
+    temperature: 1
+    max_tokens: 16384
+    timeout: 300
+    fallbacks: [gpt-6-sol, gpt-6-luna]
+
+  # 中档：均衡组合的生成模型，也是旗舰的第一降级
+  - name: gpt-6-sol
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-6-sol
+    supports_vision: true
+    temperature: 1
+    max_tokens: 16384
+    timeout: 300
+    fallbacks: [gpt-6-luna, gpt-5.4]
+
+  # 低价档：降级备用与大批量小任务
+  - name: gpt-6-luna
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-6-luna
+    supports_vision: true
+    temperature: 1
+    max_tokens: 16384
+    timeout: 180
+    fallbacks: [gpt-5.4-nano]
+
+  # 5.4 系：唯一可用低温度（0.3）的一代，需要更稳定输出时可指定
   - name: gpt-5.4
     provider: openai
     base_url: https://api.openai.com/v1
@@ -24,31 +62,20 @@ models:
     temperature: 0.3
     max_tokens: 16384
     timeout: 300
-    fallbacks: [gpt-5.4-mini]
+    fallbacks: [gpt-5.4-nano]
 
-  # 评审模型：生成任务中指定为 reviewer_model，交叉评审更严格
-  - name: gpt-5.5
+  - name: gpt-5.4-nano
     provider: openai
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
-    model: gpt-5.5
-    supports_vision: true
-    # 纯推理模型：只接受默认温度 1，传其他值直接 400
-    temperature: 1
-    max_tokens: 16384
-    timeout: 300
-    fallbacks: [gpt-5.4]
-
-  # 轻量档：便宜快速，作默认模型的降级备用，也适合改写等小任务
-  - name: gpt-5.4-mini
-    provider: openai
-    base_url: https://api.openai.com/v1
-    api_key_env: OPENAI_API_KEY
-    model: gpt-5.4-mini
+    model: gpt-5.4-nano
     supports_vision: true
     temperature: 0.3
     max_tokens: 16384
-    timeout: 180
+    timeout: 120
+
+  # 其余同厂商型号（gpt-5.5、gpt-5.6-sol/terra/luna、gpt-5.4-mini）按同样格式追加即可；
+  # *-pro 型号不支持 chat/completions 接口，平台无法使用
 
   # ---- 以下为其他厂商示例条目（保留接入路径），接入时取消注释并配置对应环境变量 ----
 
