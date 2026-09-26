@@ -3,7 +3,7 @@
 用法：
     .venv/bin/python scripts/prompt_poc.py                              # 内置样例需求
     .venv/bin/python scripts/prompt_poc.py --file path/to/需求.md        # 指定需求文件
-    .venv/bin/python scripts/prompt_poc.py --reviewer gpt-5.5            # 指定评审模型
+    .venv/bin/python scripts/prompt_poc.py --reviewer gpt-6-astra        # 指定评审模型
 """
 
 import argparse

@@ -86,7 +86,7 @@
 ### 模型接入
 
 - 配置化多厂商接入（`config/models.yaml`），OpenAI 兼容协议，自动重试与降级。
-- 当前配置：公司采购 OpenAI GPT（gpt-5.4 生成与图片理解、gpt-5.5 评审、gpt-5.4-mini 降级备用），Embedding 同用 OpenAI text-embedding-3-large，无内网模型依赖。DeepSeek / 智谱 / 百炼 / 私有化 Ollama、vLLM 只改配置即可接入，样例见 `config/models.example.yaml`。
+- 当前配置：公司采购 OpenAI GPT（默认 gpt-6-astra 生成与评审、gpt-6-sol / gpt-6-luna 降级备用，5.4 / 5.5 / 5.6 系保留作备选），Embedding 同用 OpenAI text-embedding-3-large，无内网模型依赖。DeepSeek / 智谱 / 百炼 / 私有化 Ollama、vLLM 只改配置即可接入，样例见 `config/models.example.yaml`。
 
 ## 部署与升级
 
