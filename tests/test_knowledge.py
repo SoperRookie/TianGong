@@ -189,3 +189,20 @@ async def test_ingest_bugs_入历史缺陷库并进入拆解阶段注入(service
     assert doc.category == "bug_history" and doc.chunk_count == 1
     hits = await service.search("下注金额", category="bug_history", space="P")
     assert hits and "【历史缺陷】下注金额为负数时余额反而增加" in hits[0].text
+
+
+async def test_检索范围_同业务线多项目与公共层_其他项目不命中(service):
+    await service.ingest_text("斗地主出牌规则：炸弹压顺子", source="ddz.md", category="test_cases", space="斗地主")
+    await service.ingest_text("麻将胡牌规则：清一色加番", source="mj.md", category="test_cases", space="麻将")
+    await service.ingest_text("老虎机中奖线规则", source="slot.md", category="test_cases", space="老虎机")
+    await service.ingest_text("公共规则：结算四舍五入", source="pub.md", category="test_cases", space="public")
+    spaces = {h.space for h in await service.search("规则", top_k=10, category="test_cases", space=["斗地主", "麻将"])}
+    assert spaces == {"斗地主", "麻将", "public"}
+    spaces = {h.space for h in await service.search("规则", top_k=10, category="test_cases", space="斗地主")}
+    assert spaces == {"斗地主", "public"}
+    # 知识管家渲染时标注同业务线来源项目
+    from app.knowledge.steward import KnowledgeSteward
+    bundle = await KnowledgeSteward(service, budget_chars=4000).for_analysis("规则", space=["斗地主", "麻将"])
+    text = bundle.render()
+    assert "同业务线项目「麻将」· mj.md" in text and "同业务线项目「斗地主」" not in text
+    assert any(s["space"] == "麻将" for s in bundle.snapshot)

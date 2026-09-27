@@ -110,7 +110,7 @@ class KnowledgeService:
         query: str,
         top_k: int = 5,
         category: str | None = None,
-        space: str | None = None,
+        space: str | list[str] | None = None,
         mode: str = "hybrid",
         vector: list[float] | None = None,
     ) -> list[SearchHit]:
@@ -129,11 +129,11 @@ class KnowledgeService:
 
     _corpus_cache: dict | None = None
 
-    def _corpus(self, category: str | None, space: str | None) -> list[SearchHit]:
+    def _corpus(self, category: str | None, space: str | list[str] | None) -> list[SearchHit]:
         """关键词侧语料按 (分类, 空间) 缓存，入库/删除/改名时整体失效（不再每次全量 scroll）。"""
         if self._corpus_cache is None:
             self._corpus_cache = {}
-        key = (category, space)
+        key = (category, tuple(space) if isinstance(space, list) else space)
         if key not in self._corpus_cache:
             self._corpus_cache[key] = self.store.iter_chunks(category=category, space=space)
         return self._corpus_cache[key]
@@ -147,7 +147,7 @@ class KnowledgeService:
         vector_hits: list[SearchHit],
         top_k: int,
         category: str | None,
-        space: str | None,
+        space: str | list[str] | None,
     ) -> list[SearchHit]:
         from app.knowledge.hybrid import bm25_scores, rrf_merge
 

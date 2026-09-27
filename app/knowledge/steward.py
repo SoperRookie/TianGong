@@ -34,6 +34,7 @@ class KnowledgeBundle(BaseModel):
 
     hits: dict[str, list[SearchHit]] = Field(default_factory=dict)
     snapshot: list[dict] = Field(default_factory=list, description="知识快照（F-7-13）")
+    current_space: str | None = Field(default=None, description="当前项目；来自同业务线其他项目的切片在渲染时标注来源项目")
 
     @property
     def empty(self) -> bool:
@@ -47,9 +48,16 @@ class KnowledgeBundle(BaseModel):
                 continue
             parts.append(f"### {CATEGORIES[category]}")
             parts.extend(
-                f"[{h.source} 第{h.chunk_index + 1}片] {h.text}" for h in hits
+                f"[{'同业务线项目「' + h.space + '」· ' if self._cross(h) else ''}{h.source} 第{h.chunk_index + 1}片] {h.text}"
+                for h in hits
             )
         return "\n\n".join(parts)
+
+
+    def _cross(self, h: SearchHit) -> bool:
+        from app.knowledge.schemas import DEFAULT_SPACE, PUBLIC_SPACE
+
+        return bool(self.current_space) and h.space not in (self.current_space, PUBLIC_SPACE, DEFAULT_SPACE)
 
 
 class KnowledgeSteward:
@@ -57,16 +65,16 @@ class KnowledgeSteward:
         self.service = service
         self.budget_chars = budget_chars
 
-    async def for_analysis(self, query: str, space: str | None = None) -> KnowledgeBundle:
+    async def for_analysis(self, query: str, space: str | list[str] | None = None) -> KnowledgeBundle:
         """拆解阶段：注入测试用例库（历史用例覆盖度查漏）与历史缺陷库（曾出错的场景重点覆盖）。"""
         return await self._gather(query, ANALYSIS_CATEGORIES, space, stage="analysis")
 
-    async def for_generation(self, query: str, space: str | None = None) -> KnowledgeBundle:
+    async def for_generation(self, query: str, space: str | list[str] | None = None) -> KnowledgeBundle:
         """生成前：注入需求文档库与规则库，共占总预算的 5/10，两类间可让渡。"""
         return await self._gather(query, GENERATION_CATEGORIES, space, stage="generation")
 
     async def _gather(
-        self, query: str, categories: tuple[str, ...], space: str | None, stage: str
+        self, query: str, categories: tuple[str, ...], space: str | list[str] | None, stage: str
     ) -> KnowledgeBundle:
         total_shares = sum(QUOTA_SHARES.values())
         candidates: dict[str, list[SearchHit]] = {}
@@ -77,7 +85,7 @@ class KnowledgeSteward:
         budgets = {
             c: self.budget_chars * QUOTA_SHARES[c] // total_shares for c in categories
         }
-        bundle = KnowledgeBundle()
+        bundle = KnowledgeBundle(current_space=space[0] if isinstance(space, list) and space else (space or None))
         # 首轮按各自配额装填；余量按配额比例让渡给仍有候选的分类，直至无候选或无余量
         leftover = 0
         for category in categories:
@@ -104,6 +112,7 @@ class KnowledgeSteward:
                         "category": category,
                         "doc_id": hit.doc_id,
                         "source": hit.source,
+                        "space": hit.space,
                         "chunk_index": hit.chunk_index,
                         "score": hit.score,
                         "chars": len(hit.text),
@@ -112,7 +121,7 @@ class KnowledgeSteward:
         return bundle
 
     async def _layered_search(
-        self, query: str, category: str, space: str | None, vector: list[float] | None = None
+        self, query: str, category: str, space: str | list[str] | None, vector: list[float] | None = None
     ) -> list[SearchHit]:
         """分层检索（完整需求 16 章 / 核心规则 24）：检索范围 = 当前项目（含模块层）+ 公共层。
 

@@ -1010,6 +1010,9 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div style="flex:2"><label class="f">项目名</label><input type="text" id="pjName" placeholder="如：斗地主赛季玩法"></div>
       <div style="flex:1"><label class="f">编码<span class="hint">（接口识别，可选）</span></label><input type="text" id="pjCode" placeholder="如 DDZ"></div>
     </div>
+    <label class="f">业务线<span class="hint">（可选；同业务线的项目互相共享历史用例复用与知识检索，如「棋牌」「电子」）</span></label>
+    <input type="text" id="pjLine" list="lineNames" placeholder="如 棋牌">
+    <datalist id="lineNames"></datalist>
     <div style="display:flex;gap:10px">
       <div style="flex:1"><label class="f">负责人<span class="hint">（登录用户名，自动成为项目管理员）</span></label><input type="text" id="pjOwner" list="userNames" placeholder="用户名"></div>
       <div style="flex:1"><label class="f">状态</label>
@@ -2629,7 +2632,7 @@ function renderCoverage(t) {
 function renderReuseHints(t) {
   if (!t.reuse_hints || !t.reuse_hints.length) return '';
   return `<div class="section-t">历史用例复用提示</div>${t.reuse_hints.map(h=>`
-    <div class="box accent">历史正式用例与当前需求高度相关（相似度 ${h.score} · 来源 ${esc(h.source)}）
+    <div class="box accent">历史正式用例与当前需求高度相关（相似度 ${h.score} · 来源 ${esc(h.source)}${h.from_project?` · <span class="tag">同业务线项目「${esc(h.from_project)}」</span>`:''}）
       <div class="hint" style="white-space:pre-wrap;margin-top:4px">${esc(h.text)}</div></div>`).join('')}`;
 }
 function renderDupReport(t) {
@@ -5024,7 +5027,7 @@ async function getProjects(force) {
   // 15 秒内复用缓存；并发调用共用同一请求
   if (!force && _projectsCache.length && Date.now() - _projectsAt < 15000) return _projectsCache;
   if (!_projectsPending) {
-    _projectsPending = api('/api/v1/projects').then(d => { _projectsCache = d.projects; _projectsAt = Date.now(); return _projectsCache; })
+    _projectsPending = api('/api/v1/projects').then(d => { _projectsCache = d.projects; _businessLines = d.business_lines || []; _projectsAt = Date.now(); return _projectsCache; })
       .finally(() => { _projectsPending = null; });
   }
   return _projectsPending;
@@ -5060,7 +5063,7 @@ async function drawerNewProject() {
   } catch (e) { toast(e.message, 'err'); }
 }
 let curProject = null, projTab = 'overview';
-let _projectsCache = [], _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
+let _projectsCache = [], _businessLines = [], projListLine = '', _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
 const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved'], draft:['草稿','candidate']};
 let _editingProject = null;
 async function fillUserNames() {
@@ -5076,6 +5079,8 @@ function openProjDlg(name) {
   $('pjTitle').textContent = name ? '编辑项目 ' + name : '新建项目';
   $('pjName').value = name || '';
   $('pjCode').value = p ? (p.code || '') : '';
+  $('pjLine').value = p ? (p.business_line || '') : '';
+  $('lineNames').innerHTML = (_businessLines || []).map(l => `<option value="${esc(l)}">`).join('');
   $('pjOwner').value = p ? (p.owner || '') : (curUser ? curUser.username : '');
   $('pjStatus').value = p ? (p.status || 'active') : 'active';
   $('pjStatus').parentElement.style.display = name ? '' : 'none';
@@ -5086,17 +5091,17 @@ function openProjDlg(name) {
 }
 async function saveProjDlg() {
   const name = $('pjName').value.trim(), description = $('pjDesc').value.trim();
-  const code = $('pjCode').value.trim(), owner = $('pjOwner').value.trim();
+  const code = $('pjCode').value.trim(), owner = $('pjOwner').value.trim(), business_line = $('pjLine').value.trim();
   if (!name) return toast('项目名不能为空', 'warn');
   try {
     if (_editingProject) {
       await api('/api/v1/projects/' + encodeURIComponent(_editingProject),
         {method:'PUT', headers:{'Content-Type':'application/json'},
-         body: JSON.stringify({name, description, code, owner, status: $('pjStatus').value})});
+         body: JSON.stringify({name, description, code, owner, business_line, status: $('pjStatus').value})});
       if (curProject === _editingProject) curProject = name;
       if (curProjectName === _editingProject) { curProjectName = name; localStorage.setItem('tg_project', name); renderCurProj(); }
     } else {
-      await jpost('/api/v1/projects', {name, description, code, owner});
+      await jpost('/api/v1/projects', {name, description, code, owner, business_line});
     }
     $('projDlg').close(); toast('已保存', 'ok');
     await fillProjectSelect(); await reloadMe();
@@ -5151,7 +5156,7 @@ async function renderProjects() {
   try { _projectsCache = await getProjects(true); } catch (e) { return toast(e.message, 'err'); }
   if (stale('projects', _s)) return;
   const kw = projListKw.trim().toLowerCase();
-  const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus)
+  const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus) && (!projListLine || p.business_line === projListLine)
     && (!kw || p.project.toLowerCase().includes(kw) || (p.code||'').toLowerCase().includes(kw) || (p.owner||'').toLowerCase().includes(kw)));
   const STATUS_CLS = {active:'approved', paused:'candidate', archived:'pending'};
   const rows = shown.map(p => {
@@ -5160,6 +5165,7 @@ async function renderProjects() {
     return `<tr class="rowlink" onclick="openProject(${jsq(p.project)})">
       <td onclick="event.stopPropagation()" style="width:26px;padding-right:0">${p.builtin?'':`<button class="star-btn ${p.favorite?'on':''}" title="${p.favorite?'取消收藏':'收藏'}" onclick="toggleFavorite(${jsq(p.project)})">${p.favorite?'★':'☆'}</button>`}</td>
       <td><b>${esc(p.project)}</b>${p.code?` <code class="hint">${esc(p.code)}</code>`:''}${p.description?`<div class="hint">${esc(p.description)}</div>`:''}</td>
+      <td>${p.business_line?`<span class="tag" title="同业务线项目共享历史用例复用">${esc(p.business_line)}</span>`:'<span class="hint">—</span>'}</td>
       <td>${p.owner?`<span class="tag">${esc(p.owner)}</span>`:'<span class="hint">—</span>'}</td>
       <td><span class="st ${STATUS_CLS[p.status]||'pending'}">${esc(p.status_label||'')}</span></td>
       <td>${p.my_role?`<span class="role-tag">${esc(PROJECT_ROLES[p.my_role]||p.my_role)}</span>`:'<span class="hint">—</span>'}<div class="hint">${p.member_count||0} 名成员</div></td>
@@ -5183,6 +5189,8 @@ async function renderProjects() {
     <div class="card-h"><h3>项目管理</h3><span class="meta">共 ${_projectsCache.filter(p=>!p.builtin).length} 个 · 收藏置顶 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
       <div class="grow">
         <input type="text" placeholder="搜索名称 / 编码 / 负责人（回车）" value="${esc(projListKw)}" style="width:190px" onchange="projListKw=this.value;renderProjects()">
+        <select style="width:120px" onchange="projListLine=this.value;renderProjects()" title="按业务线筛选"><option value="">全部业务线</option>
+          ${(_businessLines||[]).map(l=>`<option value="${esc(l)}" ${projListLine===l?'selected':''}>${esc(l)}</option>`).join('')}</select>
         <select style="width:120px" onchange="projListStatus=this.value;renderProjects()">
           <option value="">全部状态</option>
           ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>`<option value="${v}" ${projListStatus===v?'selected':''}>${l}</option>`).join('')}
@@ -5191,10 +5199,10 @@ async function renderProjects() {
         <button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
     <div class="card-b">
       <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
-        <thead><tr><th style="width:26px"></th><th>项目</th><th style="width:90px">负责人</th><th style="width:70px">状态</th><th style="width:110px">我的角色</th>
+        <thead><tr><th style="width:26px"></th><th>项目</th><th style="width:90px">业务线</th><th style="width:90px">负责人</th><th style="width:70px">状态</th><th style="width:110px">我的角色</th>
         <th style="width:56px">任务</th><th style="width:80px">用例</th>
         <th>用例生命周期</th><th style="width:110px">执行</th><th style="width:90px">最近活动</th><th style="width:90px">操作</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="11"><div class="empty">${_projectsCache.length?'没有符合筛选的项目':(isSysAdmin()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="12"><div class="empty">${_projectsCache.length?'没有符合筛选的项目':(isSysAdmin()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
       </table></div>
     </div></div>`;
 }

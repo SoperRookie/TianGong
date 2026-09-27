@@ -821,6 +821,17 @@ async def set_default_template(request: Request, template_id: str) -> dict:
     return {"default_id": template_id}
 
 
+def _knowledge_spaces(app, space: str | None) -> str | list[str] | None:
+    """检索范围：本项目 + 同业务线的其他项目（历史用例复用）+ 公共层（公共层由存储层自动并入）。"""
+    if not space:
+        return space
+    try:
+        siblings = app.state.projects.siblings(space)
+    except Exception:
+        siblings = []
+    return [space, *siblings] if siblings else space
+
+
 async def _gather_knowledge(
     app, requirement: str, stages: tuple[str, ...], space: str | None
 ) -> tuple[dict, list[dict]]:
@@ -839,6 +850,7 @@ async def _gather_knowledge(
             return out, snapshot
         steward = KnowledgeSteward(service, budget_chars=get_settings().knowledge_budget_chars)
         query = requirement[:1500]
+        space = _knowledge_spaces(app, space)
         if "analysis" in stages:
             bundle = await steward.for_analysis(query, space=space)
             if not bundle.empty:
@@ -889,17 +901,20 @@ async def _reuse_hints(app, requirement: str, space: str | None) -> list[dict]:
     """历史用例复用提示（需求二十九）：向量检索测试用例库，高相似即提示复用。"""
     try:
         service = _knowledge_service(app)
-        if not service.store.list_docs(space, "test_cases"):
+        spaces = _knowledge_spaces(app, space)
+        scope = spaces if isinstance(spaces, list) else [spaces]
+        if not any(service.store.list_docs(s, "test_cases") for s in scope):
             return []
         hits = await service.search(
-            requirement[:1500], top_k=3, category="test_cases", space=space, mode="vector"
+            requirement[:1500], top_k=5, category="test_cases", space=spaces, mode="vector"
         )
         threshold = get_settings().reuse_hint_score
         return [
-            {"source": h.source, "text": h.text, "score": round(h.score, 3),
+            {"source": h.source, "text": h.text, "score": round(h.score, 3), "space": h.space,
+             "from_project": h.space if (space and h.space != space and h.space not in ("public", "default")) else None,
              "hint": "发现历史正式用例与当前需求高度相关，可复用/作为参考/忽略"}
             for h in hits if h.score >= threshold
-        ]
+        ][:3]
     except Exception as e:
         logger.warning("复用提示检索故障，跳过：{}", e)
         return []
@@ -4428,6 +4443,7 @@ def _project_view(request: Request, p: dict, stats: dict | None = None) -> dict:
     return {
         **_EMPTY_STATS, **(stats or {}),
         "project": p["name"], "code": p.get("code", ""), "description": p.get("description", ""),
+        "business_line": p.get("business_line", ""),
         "owner": p.get("owner", ""), "status": p.get("status", "active"),
         "status_label": PROJECT_STATUSES.get(p.get("status", "active"), p.get("status")),
         "members": p.get("members", {}), "member_count": len(p.get("members", {})),
@@ -4440,7 +4456,7 @@ def _project_view(request: Request, p: dict, stats: dict | None = None) -> dict:
 
 @router.get("/api/v1/projects")
 async def list_projects(
-    request: Request, keyword: str = "", status: str = "", include_archived: bool = True,
+    request: Request, keyword: str = "", status: str = "", include_archived: bool = True, business_line: str = "",
 ) -> dict:
     """项目列表：实体字段 + 汇总统计 + 我的角色/收藏/最近访问；非管理员只见所属项目。
 
@@ -4463,7 +4479,10 @@ async def list_projects(
             continue
         if not include_archived and p["status"] == "archived":
             continue
-        if kw and kw not in p["name"].lower() and kw not in p.get("code", "").lower():
+        if business_line and p.get("business_line", "") != business_line:
+            continue
+        if kw and kw not in p["name"].lower() and kw not in p.get("code", "").lower() \
+                and kw not in p.get("business_line", "").lower():
             continue
         merged.append(_project_view(request, p, stats.get(p["name"])))
     if UNASSIGNED in stats and not kw and not status:
@@ -4476,7 +4495,7 @@ async def list_projects(
     # 收藏置顶，其余按最近活动倒序
     merged.sort(key=lambda x: x["last_activity"], reverse=True)
     merged.sort(key=lambda x: not x.get("favorite"))
-    return {"projects": merged}
+    return {"projects": merged, "business_lines": pstore.business_lines()}
 
 
 class ProjectBody(BaseModel):
@@ -4484,6 +4503,7 @@ class ProjectBody(BaseModel):
     description: str = ""
     code: str = ""
     owner: str = ""
+    business_line: str = ""
 
 
 @router.post("/api/v1/projects")
@@ -4498,7 +4518,7 @@ async def create_project(request: Request, body: ProjectBody) -> dict:
     try:
         project = request.app.state.projects.create(
             body.name, body.description, created_by=_operator(request),
-            code=body.code, owner=body.owner,
+            code=body.code, owner=body.owner, business_line=body.business_line,
         )
     except ProjectError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -4511,6 +4531,7 @@ class ProjectUpdateBody(BaseModel):
     code: str | None = None
     owner: str | None = None
     status: str | None = None       # active / paused / archived
+    business_line: str | None = None
 
 
 @router.put("/api/v1/projects/{name}")
@@ -4567,7 +4588,7 @@ async def update_project(request: Request, name: str, body: ProjectUpdateBody) -
     try:
         project = pstore.update(
             name, body.name, body.description, code=body.code, owner=body.owner,
-            status=body.status, operator=_operator(request),
+            status=body.status, operator=_operator(request), business_line=body.business_line,
         )
     except ProjectError as e:
         raise HTTPException(status_code=400, detail=str(e))
