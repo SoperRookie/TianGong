@@ -108,6 +108,9 @@ def _is_admin(request: Request) -> bool:
 def _project_role(request: Request, project: str | None) -> str | None:
     if _is_admin(request):
         return "project_admin"
+    if get_settings().open_projects:
+        # 开放模式：所有登录用户视同项目管理员（删除项目另行限制为系统管理员）
+        return "project_admin"
     return request.app.state.projects.role_of(project, _operator(request))
 
 
@@ -136,6 +139,12 @@ def _require_project(request: Request, project: str | None, action: str) -> dict
     return entity
 
 
+def _require_delete(request: Request) -> None:
+    """开放模式下项目内数据（需求 / 测试点 / 用例 / 计划 / 版本 / 模块 / 知识 / 依赖）的删除仅系统管理员（2026-09-27 决策）。"""
+    if get_settings().open_projects and not _is_admin(request):
+        raise HTTPException(status_code=403, detail="删除操作仅系统管理员可执行")
+
+
 def _role_label(role: str) -> str:
     from app.permissions import PROJECT_ROLES
 
@@ -147,7 +156,8 @@ def _visible_projects(request: Request) -> set[str] | None:
     cached = getattr(request.state, "_visible", ...)
     if cached is not ...:
         return cached
-    visible = None if _is_admin(request) else {p["project"] for p in request.app.state.projects.projects_of(_operator(request))}
+    visible = None if (_is_admin(request) or get_settings().open_projects) \
+        else {p["project"] for p in request.app.state.projects.projects_of(_operator(request))}
     request.state._visible = visible
     return visible
 
@@ -314,7 +324,8 @@ def _with_memberships(request: Request, user: dict) -> dict:
     projects = request.app.state.projects.projects_of(user["username"]) if user["role"] != "admin" \
         else [{"project": p["name"], "role": "project_admin", "status": p["status"]}
               for p in request.app.state.projects.list()]
-    return {**user, "projects": projects, "prefs": request.app.state.user_prefs.get(user["username"])}
+    return {**user, "projects": projects, "prefs": request.app.state.user_prefs.get(user["username"]),
+            "open_projects": get_settings().open_projects}
 
 
 @router.get("/api/v1/auth/me")
@@ -409,7 +420,7 @@ async def auth_list_users(
 async def auth_lookup_users(request: Request) -> dict:
     """成员添加时的用户名联想：系统管理员或任一项目的项目管理员可用，只返回正常状态用户的用户名与姓名。"""
     user = _current_user(request)
-    if user["role"] != "admin" and not any(
+    if user["role"] != "admin" and not get_settings().open_projects and not any(
         p.get("role") == "project_admin" for p in request.app.state.projects.projects_of(user["username"])
     ):
         raise HTTPException(status_code=403, detail="仅项目管理员可查询用户列表")
@@ -1182,6 +1193,7 @@ async def delete_knowledge_doc(request: Request, doc_id: str) -> dict:
         _require_admin(request)
     else:
         _require_project(request, doc.space, "knowledge.manage")
+        _require_delete(request)
     service.store.delete_doc(doc_id)
     service.invalidate_cache()
     return {"deleted": doc_id}
@@ -1815,6 +1827,8 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
     import copy
     from functools import partial
 
+    if any(i.action == "delete" for i in body.items):
+        _require_delete(request)
     cases: list[dict] = list(record.result["cases"])
     by_id = {str(c.get("case_id")): c for c in cases}
     operator = _operator(request)
@@ -2286,6 +2300,8 @@ async def batch_cases(request: Request, task_id: str, body: CaseBatchBody) -> di
     record = _case_task(request, task_id)
     if body.action not in ("set_priority", "set_module", "set_keywords", "add_keywords", "submit", "delete"):
         raise HTTPException(status_code=400, detail=f"未知批量操作: {body.action}")
+    if body.action == "delete":
+        _require_delete(request)
     if body.action == "set_priority" and body.value.upper() not in ("P0", "P1", "P2", "P3"):
         raise HTTPException(status_code=400, detail="优先级须为 P0–P3")
     if body.action in ("set_module", "set_keywords", "add_keywords") and not body.value.strip():
@@ -2396,6 +2412,8 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
     import copy
 
     working = copy.deepcopy(modules)  # 批量原子性：任一条失败整批不生效（原对象不被部分修改）
+    if any(i.action == "delete" for i in body.items):
+        _require_delete(request)
     try:
         outcome = apply_point_review(working, [i.model_dump() for i in body.items])
     except ConcurrencyError as e:  # 乐观锁冲突（需求 11）：不落任何改动
@@ -2693,6 +2711,8 @@ async def confirm_fix(request: Request, task_id: str, body: FixConfirmBody) -> d
     accepted = [p for p in pf["proposals"]
                 if body.accept_all or decided.get(p["proposal_id"]) == "accept"]
     rejected_count = len(pf["proposals"]) - len(accepted)
+    if any(p.get("action") == "delete" for p in accepted):
+        _require_delete(request)
     operator = _operator(request)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     record.pending_fix = None
@@ -3413,6 +3433,7 @@ async def delete_plan(request: Request, plan_id: str) -> dict:
     from app.plans import PlanError
 
     plan = _plan(request, plan_id, "plan.manage")
+    _require_delete(request)
     user = _current_user(request)
     if user["role"] != "admin" and user["username"] not in (plan["created_by"], plan["owner"]):
         raise HTTPException(status_code=403, detail="仅计划创建人/负责人或管理员可删除计划")
@@ -3527,6 +3548,7 @@ async def add_plan_cases(request: Request, plan_id: str, body: PlanCasesBody) ->
 @router.delete("/api/v1/plans/{plan_id}/cases/{item_id}")
 async def remove_plan_case(request: Request, plan_id: str, item_id: str) -> dict:
     plan = _plan(request, plan_id, "plan.manage")
+    _require_delete(request)
     item = next((i for i in plan["items"] if i["item_id"] == item_id), None)
     if item is None:
         raise HTTPException(status_code=404, detail=f"用例不在计划中: {item_id}")
@@ -4213,6 +4235,7 @@ async def delete_requirement(request: Request, req_id: str, force: bool = False)
     依赖关系图中指向该需求的边一并清理。
     """
     item = _req(request, req_id, "requirement.edit")
+    _require_delete(request)
     linked = [t for t in item.get("tasks") or [] if request.app.state.tasks.get(t) is not None]
     if linked and not force:
         raise HTTPException(status_code=409, detail=f"该需求已发起 {len(linked)} 个测试设计任务；确认删除后任务与用例保留，仅失去来源追溯")
@@ -4468,7 +4491,7 @@ async def list_projects(
     records = request.app.state.tasks.list(limit=100000, projects=visible)
     stats = {p["project"]: p for p in project_rollup(records)}
     pstore = request.app.state.projects
-    if visible is None:  # 管理员视角才自动注册历史项目名
+    if _is_admin(request):  # 管理员视角才自动注册历史项目名
         pstore.ensure([n for n in stats if n != UNASSIGNED])
     kw = keyword.strip().lower()
     merged = []
@@ -4487,7 +4510,7 @@ async def list_projects(
         merged.append(_project_view(request, p, stats.get(p["name"])))
     if UNASSIGNED in stats and not kw and not status:
         # 未指定项目的任务聚合行（不可编辑/删除），仅管理员可见
-        if visible is None:
+        if _is_admin(request):
             merged.append({**_EMPTY_STATS, **stats[UNASSIGNED], "description": "", "code": "",
                            "owner": "", "status": "active", "status_label": "进行中", "members": {},
                            "member_count": 0, "my_role": "project_admin", "favorite": False,
@@ -4508,10 +4531,11 @@ class ProjectBody(BaseModel):
 
 @router.post("/api/v1/projects")
 async def create_project(request: Request, body: ProjectBody) -> dict:
-    """创建项目（系统管理员）：创建人与负责人自动成为项目管理员。"""
+    """创建项目：开放模式下任何登录用户可建，否则仅系统管理员；创建人与负责人自动成为项目管理员。"""
     from app.projects import ProjectError
 
-    _require_admin(request)
+    if not get_settings().open_projects:
+        _require_admin(request)
     auth = request.app.state.auth
     if body.owner.strip() and not auth.exists(body.owner.strip()) and get_settings().auth_enabled:
         raise HTTPException(status_code=400, detail=f"负责人不存在: {body.owner}")
@@ -4751,6 +4775,7 @@ async def update_version(request: Request, name: str, version_id: str, body: Ver
 @router.delete("/api/v1/projects/{name}/versions/{version_id}")
 async def delete_version(request: Request, name: str, version_id: str) -> dict:
     _version_of(request, name, version_id, "version.manage")
+    _require_delete(request)
     used = [r["title"] for r in request.app.state.requirements.list(name, include_deleted=True) if r.get("version_id") == version_id]
     if used:
         raise HTTPException(status_code=400, detail=f"版本仍被 {len(used)} 条需求引用（如「{used[0]}」），请先解除关联")
@@ -4862,6 +4887,8 @@ async def delete_module(request: Request, name: str, module_id: str, permanent: 
     """删除模块：默认逻辑删除（含子树，可恢复）；permanent=true 物理删除，被用例引用时拒绝。"""
     from app.projects import ProjectError
 
+    _require_project(request, name, "version.manage")
+    _require_delete(request)
     mstore = request.app.state.modules
     try:
         if permanent:
@@ -5115,6 +5142,7 @@ async def dependency_delete(request: Request, name: str, edge_id: str, kind: str
     from app.dependencies import DependencyError
 
     _require_project(request, name, "knowledge.manage")
+    _require_delete(request)
     try:
         edge = request.app.state.dependencies.remove(name, _dep_kind(kind), edge_id)
     except DependencyError as e:
