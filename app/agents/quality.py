@@ -122,6 +122,81 @@ async def run_dup_judge(
     return [p for p in merged if p["verdict"] != "不重复"]
 
 
+# ---- 人工 vs AI 测试点对比 ----
+
+
+async def run_point_compare(llm: LLMClient, requirement: str, modules: list[dict], model: str | None) -> dict:
+    """人工测试点与 AI 测试点逐条语义匹配；LLM 故障时降级为文字相似配对（标注待复核）。"""
+    from app.tasks.points import AI_SOURCES, cross_source_candidates, iter_points
+
+    flat = [dict(p, module=e["module"]) for e, p in iter_points(modules)]
+    manual = [p for p in flat if p.get("source") == "manual"]
+    ai = [p for p in flat if p.get("source", "ai") in AI_SOURCES]
+    by_id = {p["tp_id"]: p for p in flat}
+    view = lambda ps: [{"tp_id": p["tp_id"], "module": p["module"], "point": p["point"]} for p in ps]  # noqa: E731
+    degraded = False
+    model_name = None
+    if manual and ai:
+        try:
+            data, result = await _chat_json(
+                llm,
+                [
+                    {"role": "system", "content": prompt_text("point_compare")},
+                    {"role": "user", "content": f"需求内容：\n{wrap_data('需求原文', requirement[:4000])}\n\n"
+                                                f"人工编写的测试点：\n{wrap_data('人工测试点', _dump(view(manual)))}\n\n"
+                                                f"AI 生成的测试点：\n{wrap_data('AI 测试点', _dump(view(ai)))}"},
+                ],
+                model,
+            )
+            model_name = getattr(result, "model_name", None)
+        except Exception as e:
+            logger.warning("人工/AI 测试点对比 LLM 故障，降级为文字相似配对：{}", e)
+            degraded = True
+            data = {"matches": [{"manual": p["manual"], "ai": p["ai"], "verdict": "待复核",
+                                 "reason": f"文字相似度 {p['similarity']}，LLM 复核失败请人工判断"}
+                                for p in cross_source_candidates(modules)]}
+    else:
+        data = {"matches": []}
+
+    matched: list[dict] = []
+    used_manual: set[str] = set()
+    used_ai: set[str] = set()
+    manual_ids = {p["tp_id"] for p in manual}
+    ai_ids = {p["tp_id"] for p in ai}
+    for m in data.get("matches", []) or []:
+        if not isinstance(m, dict):
+            continue
+        mid, aid = str(m.get("manual", "")), str(m.get("ai", ""))
+        if mid not in manual_ids or aid not in ai_ids or mid in used_manual or aid in used_ai:
+            continue
+        used_manual.add(mid)
+        used_ai.add(aid)
+        verdict = str(m.get("verdict", "一致"))
+        matched.append({"manual": mid, "manual_point": by_id[mid]["point"], "ai": aid, "ai_point": by_id[aid]["point"],
+                        "module": by_id[mid]["module"], "verdict": verdict if verdict in ("一致", "部分覆盖", "待复核") else "部分覆盖",
+                        "reason": str(m.get("reason", ""))})
+    reasons_m = {str(x.get("tp_id")): x for x in data.get("manual_only", []) or [] if isinstance(x, dict)}
+    reasons_a = {str(x.get("tp_id")): x for x in data.get("ai_only", []) or [] if isinstance(x, dict)}
+    manual_only = [{"tp_id": p["tp_id"], "point": p["point"], "module": p["module"],
+                    "reason": str(reasons_m.get(p["tp_id"], {}).get("reason", ""))}
+                   for p in manual if p["tp_id"] not in used_manual]
+    ai_only = [{"tp_id": p["tp_id"], "point": p["point"], "module": p["module"], "source": p.get("source", "ai"),
+                "reason": str(reasons_a.get(p["tp_id"], {}).get("reason", "")),
+                "valuable": reasons_a.get(p["tp_id"], {}).get("valuable")}
+               for p in ai if p["tp_id"] not in used_ai]
+    exact = sum(1 for m in matched if m["verdict"] == "一致")
+    stats = {
+        "manual_total": len(manual), "ai_total": len(ai), "matched": len(matched), "exact": exact,
+        "partial": len(matched) - exact, "manual_only": len(manual_only), "ai_only": len(ai_only),
+        # AI 对人工测试点的覆盖率：人工写的点里有多少被 AI 找到了
+        "ai_recall": round(len(matched) / len(manual), 3) if manual else None,
+        # AI 结果里与人工一致的占比：人工视角下 AI 的「命中率」
+        "ai_precision": round(len(matched) / len(ai), 3) if ai else None,
+    }
+    return {"matched": matched, "manual_only": manual_only, "ai_only": ai_only, "stats": stats,
+            "degraded": degraded, "model_name": model_name}
+
+
 # ---- 测试点驳回定点修改（需求三十~三十三）----
 
 

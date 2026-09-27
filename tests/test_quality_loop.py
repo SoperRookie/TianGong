@@ -613,3 +613,73 @@ def test_字段级定位_操作步骤含预期_越界改动给出原因():
     reviews = {"u1": {"status": "rejected", "fields": ["title"], "steps": []}}
     out = build_case_proposals([origin], data, {origin["case_id"]}, reviews)
     assert out["proposals"] == [] and "不在驳回时指定的范围内" in out["invalid"][0]["problem"]
+
+
+# ---- 人工编写测试点 vs AI 生成测试点对比 ----
+
+
+def test_parse_manual_points_多种写法():
+    from app.tasks.points import parse_manual_points
+
+    text = "1. 登录|密码为空提示\n- 找回密码：验证码过期\nTP03、密码错误5次锁定\n\n   "
+    assert parse_manual_points(text, "账号") == [
+        {"module": "登录", "point": "密码为空提示"},
+        {"module": "找回密码", "point": "验证码过期"},
+        {"module": "账号", "point": "密码错误5次锁定"},
+    ]
+
+
+def test_add_points_人工录入不做相似跳过_并给出人工与AI候选配对():
+    from app.tasks.points import add_points, assign_entities, cross_source_candidates
+
+    modules = assign_entities(_modules())
+    ai_point = modules[0]["points"][0]["point"]
+    skipped: list = []
+    # 默认相似跳过：与 AI 相同的人工点会被丢掉
+    assert add_points(modules, [{"module": "登录", "point": ai_point}], source="manual", skipped=skipped) == []
+    assert skipped
+    added = add_points(modules, [{"module": "登录", "point": ai_point}, {"module": "登录", "point": "锁定期间不允许找回密码"}],
+                       source="manual", skip_similar=False)
+    assert len(added) == 2 and all(p["source"] == "manual" for p in added)
+    pairs = cross_source_candidates(modules)
+    assert pairs and pairs[0]["manual"] == added[0]["tp_id"] and pairs[0]["similarity"] == 1.0
+
+
+async def test_points_compare_人工与AI逐条匹配与覆盖率(client):
+    data = await _create_confirm_task(client)
+    task_id = data["task_id"]
+    ai_ids = [p["tp_id"] for m in data["test_points"] for p in m["points"]]
+    # 没有人工测试点时不能对比
+    assert (await client.post(f"/api/v1/tasks/{task_id}/points/compare")).status_code == 409
+    resp = await client.post(f"/api/v1/tasks/{task_id}/points/manual-batch",
+                             json={"text": "登录|正确账号密码登录成功\n登录|锁定期间不允许找回密码\n", "module": ""})
+    assert resp.status_code == 200, resp.text
+    manual = resp.json()["added"]
+    assert len(manual) == 2 and all(p["source"] == "manual" for p in manual)
+    assert (await client.post(f"/api/v1/tasks/{task_id}/points/manual-batch", json={"text": "  \n"})).status_code == 400
+    app.state.llm = StubLLM([json.dumps({
+        "matches": [{"manual": manual[0]["tp_id"], "ai": ai_ids[0], "verdict": "一致", "reason": "均验证正常登录"},
+                    {"manual": "TP999", "ai": ai_ids[0], "verdict": "一致"}],   # 非法 id / 重复占用被丢弃
+        "manual_only": [{"tp_id": manual[1]["tp_id"], "reason": "AI 未覆盖锁定后找回密码"}],
+        "ai_only": [{"tp_id": ai_ids[1], "reason": "属合理补充", "valuable": True}],
+    }, ensure_ascii=False)])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/points/compare")
+    assert resp.status_code == 200, resp.text
+    r = resp.json()["point_compare"]
+    assert [m["manual"] for m in r["matched"]] == [manual[0]["tp_id"]] and r["matched"][0]["verdict"] == "一致"
+    assert [m["tp_id"] for m in r["manual_only"]] == [manual[1]["tp_id"]] and "找回密码" in r["manual_only"][0]["reason"]
+    assert {m["tp_id"] for m in r["ai_only"]} == set(ai_ids[1:]) and next(m for m in r["ai_only"] if m["tp_id"] == ai_ids[1])["valuable"] is True
+    st = r["stats"]
+    assert st["manual_total"] == 2 and st["ai_total"] == len(ai_ids) and st["matched"] == 1 and st["ai_recall"] == 0.5
+    assert not r["degraded"]
+    # 报告随任务持久化；再录入人工点后旧报告作废
+    assert (await client.get(f"/api/v1/tasks/{task_id}")).json()["point_compare"]["stats"]["matched"] == 1
+    await client.post(f"/api/v1/tasks/{task_id}/points/manual-batch", json={"text": "登录|记住密码"})
+    assert (await client.get(f"/api/v1/tasks/{task_id}")).json()["point_compare"] is None
+    # LLM 故障降级：文字相似配对 + degraded 标记
+    class _Boom:
+        async def chat(self, *a, **k):
+            raise RuntimeError("down")
+    app.state.llm = _Boom()
+    r = (await client.post(f"/api/v1/tasks/{task_id}/points/compare")).json()["point_compare"]
+    assert r["degraded"] and r["matched"] and r["matched"][0]["verdict"] == "待复核"

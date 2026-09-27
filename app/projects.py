@@ -75,6 +75,7 @@ class ProjectStore:
     def _normalize(p: dict) -> dict:
         """老数据补默认字段（项目实体化之前只有名称/描述/创建人）。"""
         p.setdefault("code", "")
+        p.setdefault("business_line", "")  # 业务线：一条业务线包含多个项目，同业务线项目共享历史用例复用
         p.setdefault("description", "")
         p.setdefault("owner", p.get("created_by") or "")
         p.setdefault("status", "active")
@@ -111,6 +112,20 @@ class ProjectStore:
             return None
         return p["members"].get(username)
 
+    def business_lines(self) -> list[str]:
+        """已出现过的业务线名称（去重排序），供筛选与录入联想。"""
+        return sorted({p.get("business_line", "") for p in self._projects.values() if p.get("business_line")})
+
+    def siblings(self, name: str, include_archived: bool = False) -> list[str]:
+        """同业务线的其他项目名（用例复用范围）；项目无业务线时为空。"""
+        p = self._projects.get(name)
+        line = (p or {}).get("business_line") or ""
+        if not line:
+            return []
+        return sorted(q["name"] for q in self._projects.values()
+                      if q["name"] != name and q.get("business_line") == line
+                      and (include_archived or q.get("status") != "archived"))
+
     def projects_of(self, username: str) -> list[dict]:
         """用户所属项目及其项目角色（3.1「查看所属项目」/ 3.4）。"""
         return [
@@ -135,7 +150,7 @@ class ProjectStore:
 
     def create(
         self, name: str, description: str = "", created_by: str | None = None,
-        code: str = "", owner: str = "",
+        code: str = "", owner: str = "", business_line: str = "",
     ) -> dict:
         name = check_name(name, "项目名")
         if name in self._projects:
@@ -145,6 +160,7 @@ class ProjectStore:
             raise ProjectError(f"项目编码已存在: {code}")
         project = self._normalize({
             "name": name, "code": code, "description": (description or "").strip(),
+            "business_line": (business_line or "").strip()[:100],
             "owner": (owner or "").strip() or (created_by or ""),
             "created_by": created_by, "created_at": _now(),
         })
@@ -157,7 +173,7 @@ class ProjectStore:
     def update(
         self, name: str, new_name: str | None = None, description: str | None = None,
         code: str | None = None, owner: str | None = None, status: str | None = None,
-        operator: str | None = None,
+        operator: str | None = None, business_line: str | None = None,
     ) -> dict:
         project = self._projects.get(name)
         if project is None:
@@ -186,6 +202,8 @@ class ProjectStore:
             if status not in PROJECT_STATUSES:
                 raise ProjectError(f"未知项目状态: {status}（可用 {'/'.join(PROJECT_STATUSES)}）")
             project["status"] = status
+        if business_line is not None:
+            project["business_line"] = business_line.strip()[:100]
         project["updated_at"] = _now()
         project["updated_by"] = operator
         self._persist(project["name"], removed=removed)

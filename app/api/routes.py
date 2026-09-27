@@ -25,6 +25,9 @@ from app.llm.schemas import MissingAPIKeyError
 from app.parsers.base import UnsafeFileError
 from app.parsers import (
     IMAGE_SUFFIXES,
+    LinkFetchError,
+    extract_urls,
+    fetch_link,
     ScannedPDFError,
     UnsupportedFormatError,
     enrich_images,
@@ -370,14 +373,36 @@ class UserBody(BaseModel):
 
 
 @router.get("/api/v1/auth/users")
-async def auth_list_users(request: Request) -> dict:
-    """用户列表（管理员）：含资料/状态/最后登录，并附所属项目与项目角色（3.1「查看所属项目」）。"""
+async def auth_list_users(
+    request: Request, keyword: str = "", role: str = "", status: str = "", project: str = "",
+    page: int = 0, page_size: int = 20,
+) -> dict:
+    """用户列表（管理员）：含资料/状态/最后登录，并附所属项目与项目角色（3.1「查看所属项目」）。
+
+    keyword 匹配用户名 / 姓名 / 邮箱 / 手机；role / status / project 精确筛选；page 为 0 时返回全部（兼容内部调用）。
+    """
     _require_admin(request)
     pstore = request.app.state.projects
     users = request.app.state.auth.list_users()
     for u in users:
         u["projects"] = pstore.projects_of(u["username"])
-    return {"users": users}
+    kw = keyword.strip().lower()
+    if kw:
+        users = [u for u in users if any(kw in str(u.get(k) or "").lower() for k in ("username", "name", "email", "phone"))]
+    if role:
+        users = [u for u in users if u.get("role") == role]
+    if status:
+        users = [u for u in users if u.get("status") == status]
+    if project:
+        users = [u for u in users if any(p["project"] == project for p in u["projects"])]
+    total = len(users)
+    if page <= 0:
+        return {"users": users, "total": total}
+    page_size = min(max(1, page_size), 200)
+    pages = max(1, -(-total // page_size))
+    page = min(max(1, page), pages)
+    start = (page - 1) * page_size
+    return {"users": users[start:start + page_size], "total": total, "page": page, "page_size": page_size, "pages": pages}
 
 
 @router.get("/api/v1/auth/users/lookup")
@@ -486,6 +511,7 @@ async def get_models_config(request: Request) -> dict:
     return {
         "default_model": registry.default_model,
         "max_retries": registry.max_retries,
+        "monthly_budget_usd": registry.monthly_budget_usd,
         "models": [
             {**m.model_dump(), "api_key_set": bool(not m.api_key_env or os.environ.get(m.api_key_env))}
             for m in registry.all()
@@ -496,6 +522,7 @@ async def get_models_config(request: Request) -> dict:
 class ModelsConfigBody(BaseModel):
     default_model: str | None = None  # 空时取清单第一个；清单为空则无默认
     max_retries: int = 1
+    monthly_budget_usd: float = 0     # 月预算（美元），0 表示不设；AI 中心按单价折算已消费并显示余额
     models: list[dict]
 
 
@@ -515,7 +542,8 @@ async def update_models_config(request: Request, body: ModelsConfigBody) -> dict
     try:
         models = [ModelConfig.model_validate(m) for m in body.models]
         registry = ModelRegistry(
-            default_model=body.default_model, models=models, max_retries=max(0, body.max_retries)
+            default_model=body.default_model, models=models, max_retries=max(0, body.max_retries),
+            monthly_budget_usd=body.monthly_budget_usd,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"模型配置不合法: {e}")
@@ -533,6 +561,7 @@ async def update_models_config(request: Request, body: ModelsConfigBody) -> dict
     data = {
         "default_model": registry.default_model,
         "max_retries": registry.max_retries,
+        "monthly_budget_usd": registry.monthly_budget_usd,
         "models": [m.model_dump() for m in models],
     }
     for key in ("default_embedding", "embeddings"):
@@ -792,6 +821,17 @@ async def set_default_template(request: Request, template_id: str) -> dict:
     return {"default_id": template_id}
 
 
+def _knowledge_spaces(app, space: str | None) -> str | list[str] | None:
+    """检索范围：本项目 + 同业务线的其他项目（历史用例复用）+ 公共层（公共层由存储层自动并入）。"""
+    if not space:
+        return space
+    try:
+        siblings = app.state.projects.siblings(space)
+    except Exception:
+        siblings = []
+    return [space, *siblings] if siblings else space
+
+
 async def _gather_knowledge(
     app, requirement: str, stages: tuple[str, ...], space: str | None
 ) -> tuple[dict, list[dict]]:
@@ -810,6 +850,7 @@ async def _gather_knowledge(
             return out, snapshot
         steward = KnowledgeSteward(service, budget_chars=get_settings().knowledge_budget_chars)
         query = requirement[:1500]
+        space = _knowledge_spaces(app, space)
         if "analysis" in stages:
             bundle = await steward.for_analysis(query, space=space)
             if not bundle.empty:
@@ -860,17 +901,20 @@ async def _reuse_hints(app, requirement: str, space: str | None) -> list[dict]:
     """历史用例复用提示（需求二十九）：向量检索测试用例库，高相似即提示复用。"""
     try:
         service = _knowledge_service(app)
-        if not service.store.list_docs(space, "test_cases"):
+        spaces = _knowledge_spaces(app, space)
+        scope = spaces if isinstance(spaces, list) else [spaces]
+        if not any(service.store.list_docs(s, "test_cases") for s in scope):
             return []
         hits = await service.search(
-            requirement[:1500], top_k=3, category="test_cases", space=space, mode="vector"
+            requirement[:1500], top_k=5, category="test_cases", space=spaces, mode="vector"
         )
         threshold = get_settings().reuse_hint_score
         return [
-            {"source": h.source, "text": h.text, "score": round(h.score, 3),
+            {"source": h.source, "text": h.text, "score": round(h.score, 3), "space": h.space,
+             "from_project": h.space if (space and h.space != space and h.space not in ("public", "default")) else None,
              "hint": "发现历史正式用例与当前需求高度相关，可复用/作为参考/忽略"}
             for h in hits if h.score >= threshold
-        ]
+        ][:3]
     except Exception as e:
         logger.warning("复用提示检索故障，跳过：{}", e)
         return []
@@ -1078,6 +1122,36 @@ async def ingest_history_cases(
         for upload in files:
             saved = await _read_upload(upload, save_dir, settings.max_upload_size_mb * 1024 * 1024)
             docs.append(await service.ingest_cases(saved, space=space, **meta))
+    except CaseImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, _openai.APIConnectionError, _openai.APIStatusError) as e:
+        raise HTTPException(status_code=502, detail=f"Embedding 服务调用失败: {e}")
+    return {"ingested": [d.model_dump() for d in docs]}
+
+
+@router.post("/api/v1/knowledge/bugs")
+async def ingest_history_bugs(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    level: str = Form(default="project"),
+    project: str = Form(default=""),
+    module: str = Form(default=""),
+) -> dict:
+    """历史缺陷入库：禅道 / Jira / TAPD 导出的缺陷表（xlsx / csv / 禅道 xls）导入历史缺陷库，拆解与查漏阶段注入。"""
+    import openai as _openai
+
+    from app.knowledge.importers import CaseImportError
+
+    settings = get_settings()
+    space, level, module = _knowledge_scope(request, level, project, module)
+    meta = {"level": level, "module": module, "created_by": _operator(request)}
+    service = _knowledge_service(request.app)
+    save_dir = request.app.state.tasks.output_dir / "_knowledge_uploads"
+    docs = []
+    try:
+        for upload in files:
+            saved = await _read_upload(upload, save_dir, settings.max_upload_size_mb * 1024 * 1024)
+            docs.append(await service.ingest_bugs(saved, space=space, **meta))
     except CaseImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except (MissingAPIKeyError, _openai.APIConnectionError, _openai.APIStatusError) as e:
@@ -2475,6 +2549,51 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
     return {"task_id": task_id, "coverage": gap["coverage"], "added": added, "test_points": modules}
 
 
+class ManualPointsBody(BaseModel):
+    text: str                      # 每行一条，支持「模块|测试点」
+    module: str = ""               # 未写模块时的默认模块（空则「未分组」）
+
+
+@router.post("/api/v1/tasks/{task_id}/points/manual-batch")
+async def add_manual_points_batch(request: Request, task_id: str, body: ManualPointsBody) -> dict:
+    """人工测试点批量录入（人工 vs AI 对比用）：不做相似跳过——与 AI 相同的点正是要统计的一致项。"""
+    from app.tasks.points import add_points, parse_manual_points
+
+    store = request.app.state.tasks
+    record, modules = _points_record(request, task_id, "point.edit")
+    additions = parse_manual_points(body.text, body.module.strip())
+    if not additions:
+        raise HTTPException(status_code=400, detail="没有识别到测试点：每行一条，可写成「模块|测试点」")
+    added = add_points(modules, additions, source="manual", seq_floor=tp_seq_of(record.analysis), skip_similar=False)
+    bump_tp_seq(record.analysis)
+    record.point_compare = None  # 人工集合变了，旧对比报告作废
+    store.save(record)
+    return {"task_id": task_id, "added": added, "test_points": modules}
+
+
+@router.post("/api/v1/tasks/{task_id}/points/compare")
+async def compare_points(request: Request, task_id: str) -> dict:
+    """人工编写测试点 vs AI 生成测试点对比：语义逐条匹配，给出一致 / 部分覆盖 / AI 遗漏 / AI 额外发现与覆盖率。"""
+    from app.agents.quality import run_point_compare
+
+    store = request.app.state.tasks
+    record, modules = _points_record(request, task_id, "point.ai")
+    _ai_ctx(request, record)
+    from app.tasks.points import iter_points
+    if not any(p.get("source") == "manual" for _, p in iter_points(modules)):
+        raise HTTPException(status_code=409, detail="还没有人工编写的测试点，请先录入（手工新增或批量录入）再对比")
+    ctx = record.context or {}
+    try:
+        report = await run_point_compare(request.app.state.llm, ctx.get("requirement", ""), modules, ctx.get("model"))
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    report["at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    report["by"] = _operator(request)
+    record.point_compare = report
+    store.save(record)
+    return {"task_id": task_id, "point_compare": report}
+
+
 @router.post("/api/v1/tasks/{task_id}/points/dup-check")
 async def dup_check_points(request: Request, task_id: str) -> dict:
     """重复检查（需求十一~十三）：文字初筛 + 语义复核；AI 不删除，人工决定处置。"""
@@ -3754,6 +3873,73 @@ async def _save_attachments(files: list[UploadFile], save_dir: Path) -> list[dic
     return out
 
 
+MAX_REQUIREMENT_LINKS = 10
+
+
+def _link_records(urls: list[str]) -> list[dict]:
+    """链接附件占位记录：先入库为「解析中」，下载与解析都在后台完成后回写。"""
+    out = []
+    for url in urls:
+        out.append({"att_id": uuid.uuid4().hex[:8], "filename": url.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or url,
+                    "source_url": url, "stored": "", "size": 0, "parsed": False, "parsing": True, "error": None,
+                    "text": "", "chars": 0, "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    return out
+
+
+def _collect_links(*texts: str) -> list[str]:
+    urls: list[str] = []
+    for t in texts:
+        for u in extract_urls(t or ""):
+            if u not in urls:
+                urls.append(u)
+    if len(urls) > MAX_REQUIREMENT_LINKS:
+        raise HTTPException(status_code=400, detail=f"一次最多抓取 {MAX_REQUIREMENT_LINKS} 个链接")
+    return urls
+
+
+def _schedule_link_fetch(request: Request, req_id: str, atts: list[dict]) -> None:
+    """后台下载链接内容再解析：网页抽正文、图片走 Vision、PDF/Word 走对应解析器；失败原因逐条落到附件。"""
+    import asyncio
+
+    app = request.app
+    todo = [(a["att_id"], a["source_url"]) for a in atts if a.get("parsing") and a.get("source_url")]
+    if not todo:
+        return
+    save_dir = _req_dir(req_id)
+    max_bytes = get_settings().max_upload_size_mb * 1024 * 1024
+
+    async def _run() -> None:
+        from app.requirements import RequirementError
+
+        for att_id, url in todo:
+            try:
+                saved = await fetch_link(url, save_dir, max_bytes)
+            except LinkFetchError as e:
+                logger.warning("需求 {} 链接抓取失败 {}：{}", req_id, url, e)
+                parsed = {"parsed": False, "error": str(e), "text": "", "chars": 0,
+                          "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            except Exception as e:  # 抓取内部异常同样必须显式落到附件上
+                logger.exception("需求 {} 链接抓取异常 {}", req_id, url)
+                parsed = {"parsed": False, "error": f"抓取异常：{e}", "text": "", "chars": 0,
+                          "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            else:
+                parsed = await _parse_saved_attachment(saved, app.state.llm)
+                logger.info("需求 {} 链接 {} 解析{}：{}", req_id, url, "完成" if parsed["parsed"] else "失败",
+                            f"{parsed['chars']} 字" if parsed["parsed"] else parsed.get("error"))
+            parsed.update(att_id=att_id, parsing=False, source_url=url)
+            try:
+                app.state.requirements.replace_attachment(req_id, att_id, parsed)
+            except RequirementError:
+                return  # 需求已被删除
+
+    jobs = getattr(app.state, "bg_jobs", None)
+    if jobs is None:
+        jobs = app.state.bg_jobs = set()
+    task = asyncio.create_task(_run())
+    jobs.add(task)
+    task.add_done_callback(jobs.discard)
+
+
 def _schedule_attachment_parse(request: Request, req_id: str, atts: list[dict]) -> None:
     """后台解析附件（PDF 提取 / 图片 Vision 理解可能数分钟）：上传立即返回，逐个解析完成即回写，页面轮询可见。"""
     import asyncio
@@ -3924,11 +4110,16 @@ async def create_requirement(
     description: str = Form(default=""),
     version_id: str = Form(default=""),
     module_id: str = Form(default=""),
+    urls: str = Form(default=""),
     files: list[UploadFile] = File(default=[]),
 ) -> dict:
-    """新建需求：手工文本 / 粘贴原文 / 上传文件（逐文件解析并记录失败原因）。"""
+    """新建需求：手工文本 / 粘贴原文 / 上传文件 / 链接（网页、图片、PDF、Word 直链；原文里的链接也会抓取）。
+
+    文件与链接都逐条解析并记录失败原因，解析在后台进行。
+    """
     from app.requirements import RequirementError
 
+    links = _collect_links(urls, text)
     _require_project(request, project, "requirement.edit")
     if request.app.state.projects.get(project) is None:
         if _is_admin(request):
@@ -3942,17 +4133,34 @@ async def create_requirement(
     if version_id and (request.app.state.versions.get(version_id) or {}).get("project") != project:
         raise HTTPException(status_code=400, detail="版本不属于该项目")
     try:
+        # 原文只是一串链接时视为链接来源，不算手工文本
+        rest = text
+        for u in links:
+            rest = rest.replace(u, "")
+        has_text = bool(rest.strip())
+        if has_text and (files or links):
+            source_type = "mixed"
+        elif files:
+            source_type = "file"
+        elif links:
+            source_type = "link"
+        else:
+            source_type = "manual"
         item = rstore.create(project, title, text, created_by=_operator(request), description=description,
-                             source_type="mixed" if (text.strip() and files) else ("file" if files else "manual"),
-                             version_id=version_id or None, module_id=module_id or None,
-                             has_files=bool(files))
+                             source_type=source_type, version_id=version_id or None, module_id=module_id or None,
+                             has_files=bool(files) or bool(links))
     except RequirementError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if files:
         atts = await _save_attachments(files, _req_dir(item["req_id"]))
         rstore.add_attachments(item["req_id"], atts, operator=_operator(request))
         _schedule_attachment_parse(request, item["req_id"], atts)
-    logger.info("需求已创建：{}「{}」（{}，附件 {}，后台解析）", item["req_id"], item["title"], project, len(files))
+    if links:
+        latts = _link_records(links)
+        rstore.add_attachments(item["req_id"], latts, operator=_operator(request))
+        _schedule_link_fetch(request, item["req_id"], latts)
+    logger.info("需求已创建：{}「{}」（{}，附件 {}，链接 {}，后台解析）", item["req_id"], item["title"], project,
+                len(files), len(links))
     return _req_view(request, rstore.get(item["req_id"]))
 
 
@@ -3998,11 +4206,28 @@ async def update_requirement(request: Request, req_id: str, body: RequirementUpd
 
 
 @router.delete("/api/v1/requirements/{req_id}")
-async def delete_requirement(request: Request, req_id: str) -> dict:
-    """逻辑删除（核心规则 20）。"""
-    _req(request, req_id, "requirement.edit")
-    request.app.state.requirements.delete(req_id, operator=_operator(request))
-    return {"deleted": req_id}
+async def delete_requirement(request: Request, req_id: str, force: bool = False) -> dict:
+    """逻辑删除（核心规则 20）：进回收站可恢复。
+
+    已发起测试设计（关联任务）的需求默认拦截，force=true 才删：任务与用例保留，任务上标记来源需求已删除；
+    依赖关系图中指向该需求的边一并清理。
+    """
+    item = _req(request, req_id, "requirement.edit")
+    linked = [t for t in item.get("tasks") or [] if request.app.state.tasks.get(t) is not None]
+    if linked and not force:
+        raise HTTPException(status_code=409, detail=f"该需求已发起 {len(linked)} 个测试设计任务；确认删除后任务与用例保留，仅失去来源追溯")
+    rstore = request.app.state.requirements
+    rstore.delete(req_id, operator=_operator(request))
+    tstore = request.app.state.tasks
+    for tid in linked:
+        rec = tstore.get(tid)
+        if rec is not None and rec.context is not None:
+            rec.context["requirement_deleted"] = True
+            tstore.save(rec)
+    alive = {r["req_id"] for r in rstore.list(item["project"])}
+    request.app.state.dependencies.prune(item["project"], "requirement", alive)
+    logger.info("需求已删除：{}「{}」（关联任务 {} 个）", req_id, item["title"], len(linked))
+    return {"deleted": req_id, "linked_tasks": len(linked)}
 
 
 class MergeBody(BaseModel):
@@ -4042,14 +4267,21 @@ async def restore_requirement(request: Request, req_id: str) -> dict:
 
 @router.post("/api/v1/requirements/{req_id}/attachments")
 async def add_requirement_attachments(
-    request: Request, req_id: str, files: list[UploadFile] = File(default=[])
+    request: Request, req_id: str, files: list[UploadFile] = File(default=[]), urls: str = Form(default="")
 ) -> dict:
+    """追加附件：文件或链接（每行一个）。"""
     item = _req(request, req_id, "requirement.edit")
-    if not files:
-        raise HTTPException(status_code=400, detail="请选择文件")
-    atts = await _save_attachments(files, _req_dir(req_id))
-    item = request.app.state.requirements.add_attachments(req_id, atts, operator=_operator(request))
-    _schedule_attachment_parse(request, req_id, atts)
+    links = _collect_links(urls)
+    if not files and not links:
+        raise HTTPException(status_code=400, detail="请选择文件或填写链接")
+    if files:
+        atts = await _save_attachments(files, _req_dir(req_id))
+        item = request.app.state.requirements.add_attachments(req_id, atts, operator=_operator(request))
+        _schedule_attachment_parse(request, req_id, atts)
+    if links:
+        latts = _link_records(links)
+        item = request.app.state.requirements.add_attachments(req_id, latts, operator=_operator(request))
+        _schedule_link_fetch(request, req_id, latts)
     return _req_view(request, item)
 
 
@@ -4062,10 +4294,15 @@ async def reparse_requirement_attachment(request: Request, req_id: str, att_id: 
     att = next((a for a in item["attachments"] if a["att_id"] == att_id), None)
     if att is None:
         raise HTTPException(status_code=404, detail=f"附件不存在: {att_id}")
-    if not att.get("stored") or not Path(att["stored"]).exists():
-        raise HTTPException(status_code=409, detail="原文件已不存在，请重新上传")
     if att.get("parsing"):
         raise HTTPException(status_code=409, detail="该附件正在解析中")
+    if att.get("source_url") and (not att.get("stored") or not Path(att["stored"]).exists()):
+        # 链接附件下载失败过：重新抓取
+        item = request.app.state.requirements.replace_attachment(req_id, att_id, {"parsing": True, "error": None})
+        _schedule_link_fetch(request, req_id, [att])
+        return _req_view(request, item)
+    if not att.get("stored") or not Path(att["stored"]).exists():
+        raise HTTPException(status_code=409, detail="原文件已不存在，请重新上传")
     try:
         item = request.app.state.requirements.replace_attachment(
             req_id, att_id, {"parsing": True, "parsed": False, "error": None})
@@ -4206,6 +4443,7 @@ def _project_view(request: Request, p: dict, stats: dict | None = None) -> dict:
     return {
         **_EMPTY_STATS, **(stats or {}),
         "project": p["name"], "code": p.get("code", ""), "description": p.get("description", ""),
+        "business_line": p.get("business_line", ""),
         "owner": p.get("owner", ""), "status": p.get("status", "active"),
         "status_label": PROJECT_STATUSES.get(p.get("status", "active"), p.get("status")),
         "members": p.get("members", {}), "member_count": len(p.get("members", {})),
@@ -4218,7 +4456,7 @@ def _project_view(request: Request, p: dict, stats: dict | None = None) -> dict:
 
 @router.get("/api/v1/projects")
 async def list_projects(
-    request: Request, keyword: str = "", status: str = "", include_archived: bool = True,
+    request: Request, keyword: str = "", status: str = "", include_archived: bool = True, business_line: str = "",
 ) -> dict:
     """项目列表：实体字段 + 汇总统计 + 我的角色/收藏/最近访问；非管理员只见所属项目。
 
@@ -4241,7 +4479,10 @@ async def list_projects(
             continue
         if not include_archived and p["status"] == "archived":
             continue
-        if kw and kw not in p["name"].lower() and kw not in p.get("code", "").lower():
+        if business_line and p.get("business_line", "") != business_line:
+            continue
+        if kw and kw not in p["name"].lower() and kw not in p.get("code", "").lower() \
+                and kw not in p.get("business_line", "").lower():
             continue
         merged.append(_project_view(request, p, stats.get(p["name"])))
     if UNASSIGNED in stats and not kw and not status:
@@ -4254,7 +4495,7 @@ async def list_projects(
     # 收藏置顶，其余按最近活动倒序
     merged.sort(key=lambda x: x["last_activity"], reverse=True)
     merged.sort(key=lambda x: not x.get("favorite"))
-    return {"projects": merged}
+    return {"projects": merged, "business_lines": pstore.business_lines()}
 
 
 class ProjectBody(BaseModel):
@@ -4262,6 +4503,7 @@ class ProjectBody(BaseModel):
     description: str = ""
     code: str = ""
     owner: str = ""
+    business_line: str = ""
 
 
 @router.post("/api/v1/projects")
@@ -4276,7 +4518,7 @@ async def create_project(request: Request, body: ProjectBody) -> dict:
     try:
         project = request.app.state.projects.create(
             body.name, body.description, created_by=_operator(request),
-            code=body.code, owner=body.owner,
+            code=body.code, owner=body.owner, business_line=body.business_line,
         )
     except ProjectError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -4289,6 +4531,7 @@ class ProjectUpdateBody(BaseModel):
     code: str | None = None
     owner: str | None = None
     status: str | None = None       # active / paused / archived
+    business_line: str | None = None
 
 
 @router.put("/api/v1/projects/{name}")
@@ -4345,7 +4588,7 @@ async def update_project(request: Request, name: str, body: ProjectUpdateBody) -
     try:
         project = pstore.update(
             name, body.name, body.description, code=body.code, owner=body.owner,
-            status=body.status, operator=_operator(request),
+            status=body.status, operator=_operator(request), business_line=body.business_line,
         )
     except ProjectError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -5470,7 +5713,37 @@ async def ai_stats(request: Request, days: int = 30, project: str = "") -> dict:
     if days > 0:
         from datetime import timedelta
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
-    return stats(since=since, visible=_visible_projects(request), project=project or None)
+    data = stats(since=since, visible=_visible_projects(request), project=project or None)
+    # 费用折算：按模型配置的单价（美元 / 百万 token）；未配单价的模型费用记 0 并标注
+    registry = request.app.state.registry
+    def _price(name: str):
+        try:
+            return registry.get(name)
+        except Exception:
+            return None
+    total_cost = 0.0
+    for row in data["by_model"]:
+        cfg = _price(row["model"])
+        priced = cfg is not None and (cfg.input_price or cfg.output_price)
+        row["cost_usd"] = cfg.cost_usd(row["prompt_tokens"], row["completion_tokens"]) if priced else 0.0
+        row["priced"] = bool(priced)
+        total_cost += row["cost_usd"]
+    data["cost_usd"] = round(total_cost, 2)
+    data["unpriced_models"] = [r["model"] for r in data["by_model"] if not r["priced"] and r["tokens"]]
+    if _is_admin(request):
+        from app.llm.calllog import month_usage
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
+        spent = 0.0
+        for u in month_usage(month_start):
+            cfg = _price(u["model"])
+            if cfg is not None:
+                spent += cfg.cost_usd(u["prompt_tokens"], u["completion_tokens"])
+        budget = registry.monthly_budget_usd
+        data["budget"] = {"month": now.strftime("%Y-%m"), "monthly_budget_usd": budget, "spent_usd": round(spent, 2),
+                          "remaining_usd": round(budget - spent, 2) if budget else None,
+                          "used_ratio": round(spent / budget, 3) if budget else None}
+    return data
 
 
 @router.get("/api/v1/ai/prompts")

@@ -16,7 +16,8 @@ class NoVisionModelError(RuntimeError):
 
 
 class ModelRegistry:
-    def __init__(self, default_model: str | None, models: list[ModelConfig], max_retries: int = 1):
+    def __init__(self, default_model: str | None, models: list[ModelConfig], max_retries: int = 1,
+                 monthly_budget_usd: float = 0.0):
         names = [m.name for m in models]
         if len(names) != len(set(names)):
             dup = sorted({n for n in names if names.count(n) > 1})
@@ -34,6 +35,7 @@ class ModelRegistry:
                 raise ValueError(f"模型 {m.name} 的 fallbacks 引用了未注册模型: {unknown}")
         self.default_model = default_model
         self.max_retries = max_retries
+        self.monthly_budget_usd = max(0.0, float(monthly_budget_usd or 0))  # 0 表示未设预算
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ModelRegistry":
@@ -46,6 +48,7 @@ class ModelRegistry:
             default_model=data.get("default_model") or (models[0].name if models else None),
             models=models,
             max_retries=int(data.get("max_retries", 1)),
+            monthly_budget_usd=float(data.get("monthly_budget_usd") or 0),
         )
 
     def get(self, name: str | None = None) -> ModelConfig:

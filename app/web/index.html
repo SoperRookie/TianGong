@@ -637,11 +637,13 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div style="flex:1"><label class="f">项目</label><select id="kbProject" onchange="fillKbModules(this.value)"></select></div>
       <div style="flex:1" id="kbModuleWrap"><label class="f">模块</label><select id="kbModule"><option value="">—</option></select></div>
     </div>
-    <label class="f">文件<span class="hint">（Word / PDF / Markdown / TXT；分类为测试用例库时用「导入历史用例」）</span></label>
+    <label class="f">文件<span class="hint">（普通文档：Word / PDF / Markdown / TXT；历史用例：Excel / CSV / XMind；历史缺陷：禅道 / Jira 导出的 Excel / CSV）</span></label>
     <input type="file" id="kbFiles" multiple>
     <label class="f">或粘贴文本</label><textarea id="kbText" rows="5" placeholder="规则 / 需求 / 术语…"></textarea>
     <label class="f">文本来源名<span class="hint">（可选）</span></label><input type="text" id="kbSource" placeholder="如 赔率规则.md">
-    <label class="check" style="margin-top:8px"><input type="checkbox" id="kbAsCases"> 文件是历史用例（Excel / CSV / XMind），导入测试用例库</label>
+    <label class="f" style="margin-top:8px">文件类型</label>
+    <select id="kbFileKind"><option value="doc">普通知识文档（按上方分类入库）</option><option value="cases">历史用例表（Excel / CSV / XMind）→ 测试用例库</option><option value="bugs">历史缺陷表（禅道 / Jira / TAPD 导出）→ 历史缺陷库</option></select>
+    <div class="hint" style="margin-top:4px">历史缺陷在需求拆解与查漏阶段注入，提示相关功能曾在哪些场景出过问题；表头自动识别标题 / 模块 / 严重程度 / 复现步骤 / 预期 / 实际 / 解决方案</div>
   </div>
   <div class="dlg-f"><button class="btn ghost" onclick="$('kbDlg').close()">取消</button><button class="btn" id="kbSaveBtn" onclick="saveKb()">入库</button></div>
 </dialog>
@@ -720,6 +722,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div class="grow">
         <label class="check">默认模型 <select id="cfgDefault" style="width:170px" onchange="saveModelsCfg()"></select></label>
         <label class="check">失败重试 <input type="number" id="cfgRetries" min="0" max="5" style="width:64px" onchange="saveModelsCfg()"></label>
+        <label class="check" title="按各模型单价折算当月已消费，AI 中心显示余额；0 表示不设">月预算 $<input type="number" id="cfgBudget" min="0" step="10" style="width:84px" onchange="saveModelsCfg()"></label>
         <button class="btn" onclick="openModelDlg()">＋ 添加模型</button>
       </div></div>
     <div class="card-b" id="modelsCfgList"></div>
@@ -807,6 +810,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <select id="templateSel"></select>
     <label class="f">所属项目<span class="hint">（同项目共享项目记忆与规则）</span></label>
     <select id="projectInput" onchange="if(this.value==='__new__')drawerNewProject()"></select>
+    <div class="hint" id="projectHint" style="display:none;color:var(--danger)"></div>
     <div class="toolbar">
       <label class="check"><input type="checkbox" id="confirmPoints" checked> 先审核测试点</label>
       <label class="check"><input type="checkbox" id="asyncMode" checked> 后台执行</label>
@@ -938,6 +942,33 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<dialog id="compareDlg" style="width:640px">
+  <div class="dlg-h"><h3>人工测试点录入与对比</h3></div>
+  <div class="dlg-b">
+    <label class="f">人工编写的测试点<span class="hint">（每行一条，可写「模块|测试点」；与 AI 相同的点也照常录入，对比时计为一致）</span></label>
+    <textarea id="cpText" rows="8" placeholder="登录|密码为空时提示&#10;登录|密码错误 5 次锁定 30 分钟&#10;找回密码：验证码过期后重新获取"></textarea>
+    <label class="f">默认模块<span class="hint">（未写模块的行归入此模块；留空为「未分组」）</span></label>
+    <input type="text" id="cpModule" placeholder="如：登录">
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('compareDlg').close()">取消</button>
+    <button class="btn ghost" onclick="submitCompare(false)">仅录入</button>
+    <button class="btn" id="cpGoBtn" onclick="submitCompare(true)">录入并对比</button>
+  </div>
+</dialog>
+
+<dialog id="reqLinkDlg" style="width:560px">
+  <div class="dlg-h"><h3>添加需求链接</h3></div>
+  <div class="dlg-b">
+    <label class="f">链接<span class="hint">（每行一个：网页、图片、PDF / Word 直链，最多 10 个；抓取与解析在后台进行）</span></label>
+    <textarea id="rlUrls" rows="4" placeholder="https://…/需求页面&#10;https://…/原型图.png"></textarea>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('reqLinkDlg').close()">取消</button>
+    <button class="btn" onclick="submitReqLinks()">添加</button>
+  </div>
+</dialog>
+
 <dialog id="inputDlg">
   <div class="dlg-h"><h3 id="inTitle"></h3></div>
   <div class="dlg-b">
@@ -979,6 +1010,9 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div style="flex:2"><label class="f">项目名</label><input type="text" id="pjName" placeholder="如：斗地主赛季玩法"></div>
       <div style="flex:1"><label class="f">编码<span class="hint">（接口识别，可选）</span></label><input type="text" id="pjCode" placeholder="如 DDZ"></div>
     </div>
+    <label class="f">业务线<span class="hint">（可选；同业务线的项目互相共享历史用例复用与知识检索，如「棋牌」「电子」）</span></label>
+    <input type="text" id="pjLine" list="lineNames" placeholder="如 棋牌">
+    <datalist id="lineNames"></datalist>
     <div style="display:flex;gap:10px">
       <div style="flex:1"><label class="f">负责人<span class="hint">（登录用户名，自动成为项目管理员）</span></label><input type="text" id="pjOwner" list="userNames" placeholder="用户名"></div>
       <div style="flex:1"><label class="f">状态</label>
@@ -1077,6 +1111,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <textarea id="rqText" rows="6" placeholder="粘贴需求原文…"></textarea>
     <label class="f">需求文件<span class="hint">（Word / PDF / Excel / 图片 / Markdown / TXT，可多选；解析失败会逐文件提示）</span></label>
     <input type="file" id="rqFiles" multiple>
+    <label class="f">需求链接<span class="hint">（每行一个：网页、图片、PDF / Word 直链；原文里出现的链接也会自动抓取，最多 10 个）</span></label>
+    <textarea id="rqUrls" rows="2" placeholder="https://…/需求页面&#10;https://…/原型图.png"></textarea>
     <label class="f">人工补充<span class="hint">（可选，独立于原文保存）</span></label>
     <textarea id="rqDesc" rows="2" placeholder="补充说明 / 口头约定 / 背景"></textarea>
   </div>
@@ -1272,6 +1308,10 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <div style="display:flex;gap:10px">
       <div style="flex:1"><label class="f">temperature</label><input type="number" id="mdTemp" step="0.1" min="0" max="2"></div>
       <div style="flex:1"><label class="f">max_tokens</label><input type="number" id="mdMaxTok" min="256"></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">输入单价<span class="hint">（美元 / 百万 token）</span></label><input type="number" id="mdInPrice" step="0.01" min="0" placeholder="如 2"></div>
+      <div style="flex:1"><label class="f">输出单价<span class="hint">（美元 / 百万 token）</span></label><input type="number" id="mdOutPrice" step="0.01" min="0" placeholder="如 10"></div>
     </div>
     <label class="f">降级链路<span class="hint">（备用模型名，逗号分隔，按顺序尝试）</span></label>
     <input type="text" id="mdFallbacks" placeholder="gpt-6-luna">
@@ -1879,8 +1919,11 @@ function switchView(v) {
 }
 
 /* ---------- 抽屉 ---------- */
-function openDrawer() {
+async function openDrawer() {
   const sel = $('projectInput');
+  // 每次打开都刷新成员身份与项目清单：管理员刚把用户加进项目 / 调整角色后，无需重新登录即可选到项目
+  const preset = sel ? sel.value : '';
+  try { await reloadMe(); await fillProjectSelect(preset); } catch (e) {}
   if (sel && !sel.value) {  // 默认当前项目；没有当前项目但只加入了一个项目时也直接选中，避免产生「未指定项目」的遗留任务
     const opts = [...sel.options].map(o => o.value).filter(v => v && v !== '__new__');
     if (curProjectName && opts.includes(curProjectName)) sel.value = curProjectName;
@@ -2391,7 +2434,7 @@ function renderOverview(t) {
           <div><dt>来源</dt><dd>${srcText_(t.sources)||'-'}</dd></div>
           <div><dt>创建人</dt><dd>${esc(t.created_by||'—')}</dd></div>
           <div><dt>项目</dt><dd>${esc(ctx.project||'—')}${!ctx.project&&curUser&&curUser.role==='admin'?` <button class="btn ghost sm" onclick="assignTaskProject(${jsq(t.task_id)})" title="存量迁移：归属后自动建需求实体并回填关联">归属项目</button>`:''}</dd></div>
-          <div><dt>来源需求</dt><dd>${ctx.requirement_id?`<a onclick="openRequirement(${jsq(ctx.requirement_id)})">${esc(ctx.requirement_title||ctx.requirement_id)}</a>`:'—'}</dd></div>
+          <div><dt>来源需求</dt><dd>${ctx.requirement_id?(ctx.requirement_deleted?`<span class="hint">${esc(ctx.requirement_title||ctx.requirement_id)}（需求已删除）</span>`:`<a onclick="openRequirement(${jsq(ctx.requirement_id)})">${esc(ctx.requirement_title||ctx.requirement_id)}</a>`):'—'}</dd></div>
           <div><dt>生成模型</dt><dd>${esc(ctx.model||'默认')}</dd></div>
           <div><dt>Prompt 版本</dt><dd>${Object.keys(t.prompt_versions||{}).length?Object.entries(t.prompt_versions).map(([k,v])=>`<code title="${esc(k)}">${esc(PROMPT_NAMES[k]||k)} v${v}</code>`).join(' '):'—'}${ctx.retry_count?`<div class="hint">已重试 ${ctx.retry_count} 次</div>`:''}</dd></div>
           <div><dt>模板</dt><dd>${esc(ctx.template_id||'—')}</dd></div>
@@ -2458,7 +2501,10 @@ function allPoints(t) {
   const modules = (t.analysis||{}).test_points || [];
   return modules.flatMap(m => (m.points||[]).map(p => ({...normPoint(p), module:m.module})));
 }
-const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'手工', ai_fix:'修改新增'};
+const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增'};
+const srcChip = src => src === 'manual'
+  ? '<span class="tag" style="background:var(--warn-bg,#fff4e0);color:var(--warn,#b36b00)">人工</span>'
+  : `<span class="tag">AI</span><div class="hint">${esc(srcText[src]||src||'AI 拆解')}</div>`;
 const pStatusText = {pending:'待审核', approved:'已通过', rejected:'已驳回'};
 
 function renderPointWorkbench(t) {
@@ -2483,7 +2529,7 @@ function renderPointWorkbench(t) {
           ${editingHint('point', p.tp_id)}
           ${rejectInfoLine(p)}</td>
         <td style="width:84px">${p.dimension?`<span class="tag">${esc(p.dimension)}</span>`:'<span class="hint">—</span>'}</td>
-        <td style="width:76px" class="hint">${srcText[p.source]||esc(p.source||'')}</td>
+        <td style="width:76px">${p.legacy?'':srcChip(p.source||'ai')}</td>
         <td style="width:92px"><span class="st ${p.status}">${pStatusText[p.status]||p.status}</span>
           ${p.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${p.reject_count} 次</div>`:''}</td>
         <td style="width:132px">${p.legacy?'':`<div class="rowops">
@@ -2509,10 +2555,12 @@ function renderPointWorkbench(t) {
         <button class="btn ghost sm" onclick="dupCheck()">重复检查</button>
         <button class="btn ghost sm" onclick="supplementPoints()">AI 补充</button>
         <button class="btn ghost sm" onclick="manualAddPoint()">手工新增</button>`:''}
+        ${canEditPt&&!pts.every(p=>p.legacy)?`<button class="btn ghost sm" onclick="openCompareDlg()" title="录入人工编写的测试点，与 AI 生成的逐条对比">人工对比</button>`:''}
       </div></div>
     ${renderCoverage(t)}
     ${renderReuseHints(t)}
     ${renderDupReport(t)}
+    ${renderPointCompare(t)}
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
     ${pts.length && pts.every(p=>p.legacy) ? '<div class="hint" style="margin:6px 0">项目化之前的旧版任务：测试点为只读留档，不支持审核操作</div>' : ''}
     ${pointView==='mind' ? renderPointMind(t, modules, confirmable) : `<div class="tbl-wrap"><table>
@@ -2584,7 +2632,7 @@ function renderCoverage(t) {
 function renderReuseHints(t) {
   if (!t.reuse_hints || !t.reuse_hints.length) return '';
   return `<div class="section-t">历史用例复用提示</div>${t.reuse_hints.map(h=>`
-    <div class="box accent">历史正式用例与当前需求高度相关（相似度 ${h.score} · 来源 ${esc(h.source)}）
+    <div class="box accent">历史正式用例与当前需求高度相关（相似度 ${h.score} · 来源 ${esc(h.source)}${h.from_project?` · <span class="tag">同业务线项目「${esc(h.from_project)}」</span>`:''}）
       <div class="hint" style="white-space:pre-wrap;margin-top:4px">${esc(h.text)}</div></div>`).join('')}`;
 }
 function renderDupReport(t) {
@@ -2601,6 +2649,56 @@ function renderDupReport(t) {
         <button class="btn ghost sm" onclick="pointDelete(${jsq(p.b)})">删除 ${esc(p.b)}</button>
         <button class="btn ghost sm" onclick="hiddenDupPairs.add(${jsq(p.a+'|'+p.b)});renderDetail()">忽略</button>
       </div></div>`).join('')}`;
+}
+let compareHidden = false;
+function renderPointCompare(t) {
+  const r = t.point_compare;
+  if (!r || compareHidden) return '';
+  const st = r.stats || {};
+  const pct = v => v == null ? '—' : (v*100).toFixed(0) + '%';
+  const vTag = v => `<span class="tag" style="${v==='一致'?'background:var(--ok-bg,#e6f7ec);color:var(--ok)':v==='部分覆盖'?'background:var(--warn-bg,#fff4e0);color:var(--warn,#b36b00)':''}">${esc(v)}</span>`;
+  const row = (id, point) => `<b class="cid">${esc(id)}</b>「${esc(point)}」`;
+  return `<div class="section-t" style="display:flex;align-items:center">人工 vs AI 测试点对比
+      <span class="hint" style="margin-left:8px">${esc(fmtTime(r.at))} · ${esc(r.by||'')}${r.model_name?' · '+esc(r.model_name):''}${r.degraded?' · <b style="color:var(--warn)">LLM 复核失败，为文字相似配对，请人工判断</b>':''}</span>
+      <button class="btn ghost sm" style="margin-left:auto" onclick="compareHidden=true;renderDetail()">收起</button></div>
+    <div class="stats" style="display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 10px">
+      <div class="box" style="flex:1;min-width:120px"><div class="hint">人工测试点</div><b style="font-size:18px">${st.manual_total}</b></div>
+      <div class="box" style="flex:1;min-width:120px"><div class="hint">AI 测试点</div><b style="font-size:18px">${st.ai_total}</b></div>
+      <div class="box" style="flex:1;min-width:120px"><div class="hint">AI 覆盖人工的比例</div><b style="font-size:18px;color:var(--ok)">${pct(st.ai_recall)}</b><div class="hint">一致 ${st.exact} · 部分 ${st.partial}</div></div>
+      <div class="box" style="flex:1;min-width:120px"><div class="hint">AI 遗漏（人工独有）</div><b style="font-size:18px;color:var(--danger)">${st.manual_only}</b></div>
+      <div class="box" style="flex:1;min-width:120px"><div class="hint">AI 额外发现</div><b style="font-size:18px">${st.ai_only}</b><div class="hint">AI 命中人工 ${pct(st.ai_precision)}</div></div>
+    </div>
+    ${r.matched.length?`<div class="hint" style="margin:4px 0">匹配对（人工 → AI）</div>${r.matched.map(m=>`<div class="box">${row(m.manual,m.manual_point)} → ${row(m.ai,m.ai_point)} ${vTag(m.verdict)}${m.reason?`<div class="hint">${esc(m.reason)}</div>`:''}</div>`).join('')}`:''}
+    ${r.manual_only.length?`<div class="hint" style="margin:8px 0 4px;color:var(--danger)">AI 遗漏：只有人工写到的测试点</div>${r.manual_only.map(m=>`<div class="box">${row(m.tp_id,m.point)} <span class="hint">${esc(m.module)}</span>${m.reason?`<div class="hint">${esc(m.reason)}</div>`:''}</div>`).join('')}`:''}
+    ${r.ai_only.length?`<div class="hint" style="margin:8px 0 4px">AI 额外发现：只有 AI 给出的测试点（请判断是补充还是超出需求）</div>${r.ai_only.map(m=>`<div class="box">${row(m.tp_id,m.point)} <span class="hint">${esc(m.module)}</span>${m.valuable===false?' <span class="tag">疑似超出需求</span>':m.valuable===true?' <span class="tag" style="background:var(--ok-bg,#e6f7ec);color:var(--ok)">有价值补充</span>':''}${m.reason?`<div class="hint">${esc(m.reason)}</div>`:''}</div>`).join('')}`:''}`;
+}
+function openCompareDlg() {
+  const hasManual = allPoints(currentTask).some(p => p.source === 'manual');
+  $('cpText').value = ''; $('cpModule').value = '';
+  $('cpGoBtn').textContent = hasManual ? '录入并对比' : '录入并对比';
+  $('compareDlg').showModal(); $('cpText').focus();
+}
+async function submitCompare(runCompare) {
+  const text = $('cpText').value.trim();
+  const hasManual = allPoints(currentTask).some(p => p.source === 'manual');
+  if (!text && !(runCompare && hasManual)) return toast('请先粘贴人工编写的测试点', 'warn');
+  const btn = $('cpGoBtn'); btn.disabled = true;
+  try {
+    if (text) {
+      const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/points/manual-batch`, {text, module: $('cpModule').value});
+      toast(`已录入 ${r.added.length} 条人工测试点`, 'ok');
+    }
+    if (runCompare) {
+      toast('对比中…');
+      const d = await api(`/api/v1/tasks/${currentTask.task_id}/points/compare`, {method:'POST'});
+      const st = d.point_compare.stats;
+      toast(`对比完成：AI 覆盖人工 ${st.ai_recall==null?'—':(st.ai_recall*100).toFixed(0)+'%'}，AI 遗漏 ${st.manual_only} 条，额外发现 ${st.ai_only} 条`, st.manual_only ? 'warn' : 'ok');
+    }
+    compareHidden = false;
+    $('compareDlg').close();
+    await openTask(currentTask.task_id, true);
+  } catch (e) { toast(e.message, 'err'); }
+  btn.disabled = false;
 }
 function renderPointDiff(d) {
   return `<div class="section-t">AI 定点修改结果<span class="hint">（修改前 → 修改后）</span></div>${d.diff.map(x=>`
@@ -3056,6 +3154,14 @@ async function mSave() {
     await openTask(t.task_id, true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
 }
+function _rerenderSteps() {
+  if (currentView === 'plans') { if (curPlan) renderPlanDetail(); else renderPlans(); }
+  else if (currentView === 'cases') renderAllCases();
+  else if (currentView === 'projects') renderProjectWorkspace();
+  else renderDetail();
+}
+function stepsExpandAll(keysJson) { for (const k of JSON.parse(keysJson)) expandedSteps.add(k); _rerenderSteps(); }
+function stepsCollapseAll(keysJson) { for (const k of JSON.parse(keysJson)) expandedSteps.delete(k); _rerenderSteps(); }
 function toggleSteps(key) {
   if (expandedSteps.has(key)) expandedSteps.delete(key); else expandedSteps.add(key);
   if (currentView === 'plans') renderPlanDetail();
@@ -3293,7 +3399,7 @@ async function renderPlans() {
       <td class="hint">${p.start_date || p.end_date ? esc(p.start_date + ' ~ ' + p.end_date) : '—'}</td>
       <td><span class="st ${st[1]}">${st[0]}</span></td>
       <td>${p.summary.cases}<span class="hint"> 条 / 已分配 ${p.summary.assigned}</span></td>
-      <td>${lr ? `${lr.executed}/${lr.total}${lr.pass_rate != null ? ` · 通过率 <b>${(lr.pass_rate*100).toFixed(1)}%</b>` : ''}<div class="hint">${esc(lr.name)}${lr.finished_at ? ' · 已结束' : ' · 进行中'}</div>` : '<span class="hint">未执行</span>'}</td>
+      <td>${lr ? `${lr.executed}/${lr.total}${lr.pass_rate != null ? ` · 通过率 <b>${(lr.pass_rate*100).toFixed(1)}%</b>` : ''}<div class="hint">${esc(lr.name)}${lr.finished_at ? ' · 已结束' : ' · 进行中'}${p.summary.runs > 1 ? ` · 共 ${p.summary.runs} 轮` : ''}</div>` : '<span class="hint">未执行</span>'}</td>
       <td>${p.my_items ? `${p.my_items} 条${p.my_pending ? ` <span class="st rejected">待执行 ${p.my_pending}</span>` : ''}` : '<span class="hint">—</span>'}</td>
     </tr>`;
   }).join('');
@@ -3306,7 +3412,12 @@ async function renderPlans() {
       myCard = `<div class="card" style="margin-bottom:14px"><div class="card-h">
         <h3>我的待执行用例<span class="cnt" style="margin-left:6px">${mine.pending}</span></h3>
         <span class="meta">分配给我、本轮尚未执行的用例，可在此直接打结果${myShowDone ? ` · 本轮已执行 ${mine.executed}` : ''}</span>
-        <div class="grow"><label class="check">显示本轮已执行 <input type="checkbox" ${myShowDone?'checked':''} onchange="myShowDone=this.checked;renderPlans()"></label></div></div>
+        <div class="grow">
+          <div class="seg" title="展开 / 收起全部用例的操作步骤与预期结果">
+            <button onclick="stepsExpandAll(${jsq(JSON.stringify(mine.items.map(it => 'my-' + it.item_id)))})">全部展开</button>
+            <button onclick="stepsCollapseAll(${jsq(JSON.stringify(mine.items.map(it => 'my-' + it.item_id)))})">全部收起</button>
+          </div>
+          <label class="check">显示本轮已执行 <input type="checkbox" ${myShowDone?'checked':''} onchange="myShowDone=this.checked;renderPlans()"></label></div></div>
         <div class="card-b">${mine.items.length ? Object.entries(byPlan).map(([pid, g]) => `
           <div class="section-t" style="display:flex;align-items:center;gap:8px"><a onclick="openPlan('${pid}','__me')">${esc(g.name)}</a><span class="hint">${esc(g.project)} · ${g.run ? esc(g.run) : '尚未开始执行轮次'}${g.active ? '' : (can(g.project,'plan.manage') ? ` · <button class="btn ghost sm" onclick="myStartRun('${pid}')">开始新一轮执行</button>` : ' · <span style="color:var(--warn)">轮次未开始或已结束，需负责人新建轮次后才能执行</span>')}</span></div>
           <div class="tbl-wrap" style="margin:4px 0 12px"><table>
@@ -3468,6 +3579,10 @@ async function renderPlanDetail() {
     <h3>用例快照<span class="cnt" style="margin-left:6px">${shownItems.length}${planExecFilter ? ` / ${p.items.length}` : ''}</span></h3>
     <span class="meta">已分配 ${p.summary.assigned}/${p.summary.cases}${myItems.length ? ` · <b>我的：待执行 ${myItems.length - myDone} / 已执行 ${myDone}</b>` : ''} · 快照引用版本记录</span>
     <div class="grow">
+      <div class="seg" title="展开 / 收起全部用例的操作步骤与预期结果">
+        <button onclick="stepsExpandAll(${jsq(JSON.stringify(shownItems.map(it => it.item_id)))})">全部展开</button>
+        <button onclick="stepsCollapseAll(${jsq(JSON.stringify(shownItems.map(it => it.item_id)))})">全部收起</button>
+      </div>
       <select style="width:150px" onchange="planExecFilter=this.value;renderPlanDetail()" title="按执行人筛选">
         <option value="">全部执行人</option>
         <option value="__me" ${planExecFilter==='__me'?'selected':''}>分配给我的</option>
@@ -3530,6 +3645,20 @@ async function renderPlanDetail() {
       ${atts.length ? `<div class="section-t">本轮附件</div><div class="tbl-wrap" style="margin-top:4px"><table>
         <tr><th>文件</th><th style="width:70px">类型</th><th style="width:90px">大小</th><th style="width:110px">关联用例</th><th style="width:200px">上传人 / 时间</th></tr>
         ${attRows}</table></div>` : ''}
+      ${p.runs.length > 1 || (p.runs.length === 1 && p.runs[0].finished_at) ? `<div class="section-t">执行历史<span class="hint">（共 ${p.runs.length} 轮 · 点击切换到该轮查看逐条结果）</span></div>
+        <div class="tbl-wrap" style="margin-top:4px"><table>
+          <tr><th style="width:40px">轮次</th><th>名称</th><th style="width:90px">执行人</th><th style="width:130px">开始</th><th style="width:130px">结束</th><th style="width:90px">进度</th><th style="width:60px">通过</th><th style="width:60px">失败</th><th style="width:60px">阻塞</th><th style="width:60px">跳过</th><th style="width:80px">通过率</th></tr>
+          ${p.runs.map((r, i) => { const s = r.summary; const cur = run && r.run_id === run.run_id; return `<tr class="rowlink ${cur ? 'mine' : ''}" onclick="planRunId='${r.run_id}';renderPlanDetail()">
+            <td>${i + 1}${cur ? ' <span class="tag">当前</span>' : ''}</td>
+            <td><b>${esc(r.name)}</b><div class="hint">${esc(r.by || '')} 发起</div></td>
+            <td class="hint">${esc(r.executor || '—')}</td>
+            <td class="hint">${esc(fmtTime(r.started_at))}</td>
+            <td class="hint">${r.finished_at ? esc(fmtTime(r.finished_at)) : '<span class="st candidate">进行中</span>'}</td>
+            <td>${s.executed}/${s.total}</td>
+            <td style="color:var(--ok)"><b>${s.pass}</b></td><td style="color:var(--danger)"><b>${s.fail}</b></td><td style="color:var(--warn)">${s.blocked}</td><td class="hint">${s.skipped}</td>
+            <td>${s.pass_rate != null ? `<b>${(s.pass_rate*100).toFixed(1)}%</b>` : '—'}</td>
+          </tr>`; }).join('')}
+        </table></div>` : ''}
     </div></div>
     <input type="file" id="planAttFile" style="display:none" onchange="planUploadAtt(this)">`;
 
@@ -3818,6 +3947,28 @@ function acSet(field, value) {
   renderAllCases();
 }
 
+let acChecked = new Map();  // uid -> task_id（用例中心勾选，跨任务）
+function acToggle(uid, taskId, on) { if (on) acChecked.set(uid, taskId); else acChecked.delete(uid); renderAllCases(); }
+let _acRows = [];
+function acToggleAll(on) {
+  if (!on) acChecked.clear();
+  else for (const c of _acRows) if (can(c.project, 'case.edit')) acChecked.set(c.uid, c.task_id);
+  renderAllCases();
+}
+async function acDelete(entries, caseId) {
+  const n = entries.length;
+  if (!await uiConfirm(caseId ? `删除用例 ${caseId}？` : `删除选中的 ${n} 条用例？`, '用例进入所属任务的回收站，可在任务页恢复；已入测试计划的快照不受影响。', true)) return;
+  const byTask = new Map();
+  for (const [uid, tid] of entries) { if (!byTask.has(tid)) byTask.set(tid, []); byTask.get(tid).push(uid); }
+  let ok = 0, fail = 0;
+  for (const [tid, uids] of byTask) {
+    try { await jpost(`/api/v1/tasks/${tid}/cases/batch`, {uids, action: 'delete'}); ok += uids.length; }
+    catch (e) { fail += uids.length; toast(`任务 ${tid} 删除失败：${e.message}`, 'err'); }
+  }
+  acChecked.clear();
+  if (ok) toast(`已删除 ${ok} 条用例${fail?`，${fail} 条失败`:''}`, fail ? 'warn' : 'ok');
+  renderAllCases();
+}
 async function renderAllCases() {
   const q = new URLSearchParams({page: acPage, page_size: acSize});
   if (acProject) q.set('project', acProject);
@@ -3832,9 +3983,14 @@ async function renderAllCases() {
   let projects = [];
   try { projects = await getProjects(); } catch (e) {}
 
+  _acRows = data.cases;
+  const anyEdit = data.cases.some(c => can(c.project, 'case.edit'));
+  for (const k of [...acChecked.keys()]) if (!data.cases.some(c => c.uid === k)) acChecked.delete(k);
   const rows = data.cases.map(c => {
     const [label, cls] = REVIEW_STAGE[c.review] || REVIEW_STAGE.pending;
+    const editable = can(c.project, 'case.edit');
     return `<tr class="rowlink" onclick="openTaskFromProject('${c.task_id}','cases')">
+      ${anyEdit?`<td onclick="event.stopPropagation()">${editable?`<input type="checkbox" class="acck" ${acChecked.has(c.uid)?'checked':''} onchange="acToggle(${jsq(c.uid)},${jsq(c.task_id)},this.checked)">`:''}</td>`:''}
       <td><span class="cid">${esc(c.case_id)}</span><div class="hint">v${c.version||1}</div></td>
       <td>${esc(c.project)}</td>
       <td>${esc(c.module)}</td>
@@ -3847,6 +4003,7 @@ async function renderAllCases() {
       <td>${c.exec_count ? `<b>${c.exec_count}</b><span class="hint"> 次</span>` : '<span class="hint">0 次</span>'}</td>
       <td class="hint">${esc(c.created_by || '—')}</td>
       <td class="hint">${esc((c.created_at||'').slice(0,10))}</td>
+      ${anyEdit?`<td onclick="event.stopPropagation()">${editable?`<button class="ibtn bad" title="删除（进回收站）" onclick="acDelete([[${jsq(c.uid)},${jsq(c.task_id)}]], ${jsq(c.case_id)})">${IC.trash}</button>`:''}</td>`:''}
     </tr>`;
   }).join('');
 
@@ -3868,6 +4025,7 @@ async function renderAllCases() {
     <div class="card-h"><h3>测试用例</h3>
       <span class="meta">全库用例 · 跨项目/任务聚合 · 点击行进入所属任务的用例审核</span>
       <div class="grow">
+        ${acChecked.size?`<button class="btn danger sm" onclick="acDelete([...acChecked.entries()])">删除选中 ${acChecked.size} 条</button>`:''}
         <select style="width:150px" onchange="acModule='';acSet('acProject', this.value)">
           <option value="">全部项目</option>
           ${projects.map(p => `<option value="${esc(p.project)}" ${acProject===p.project?'selected':''}>${esc(p.project)}</option>`).join('')}
@@ -3898,9 +4056,9 @@ async function renderAllCases() {
     <div class="card-b">
       ${data.total && acView==='mind' ? mindFromRows(data.cases, acProject || '全部项目', !acProject) + pager : ''}
       ${data.total && acView!=='mind' ? `<div class="tbl-wrap"><table>
-        <thead><tr><th style="width:104px">编号 / 版本</th><th style="width:100px">项目</th><th style="width:80px">模块</th>
+        <thead><tr>${anyEdit?`<th style="width:30px"><input type="checkbox" title="全选本页" onchange="acToggleAll(this.checked)"></th>`:''}<th style="width:104px">编号 / 版本</th><th style="width:100px">项目</th><th style="width:80px">模块</th>
         <th>标题</th><th>操作步骤</th><th>预期结果</th><th style="width:110px">标签</th><th style="width:44px">优先级</th><th style="width:80px">生命周期</th>
-        <th style="width:90px">最新执行</th><th style="width:70px">执行次数</th><th style="width:80px">创建人</th><th style="width:90px">创建时间</th></tr></thead>
+        <th style="width:90px">最新执行</th><th style="width:70px">执行次数</th><th style="width:80px">创建人</th><th style="width:90px">创建时间</th>${anyEdit?'<th style="width:40px"></th>':''}</tr></thead>
         <tbody>${rows}</tbody></table></div>${pager}` : ''}
       ${data.total ? '' : '<div class="empty">没有符合条件的用例</div>'}
     </div></div>`;
@@ -4074,7 +4232,7 @@ function renderOfflineDiff(o) {
 /* ==================== AI 中心（M5）：任务中心 / 调用日志 / Prompt 管理 ==================== */
 const PROMPT_NAMES = {analyst:'需求拆解', requirement_analysis:'需求分析', generator:'用例生成', reviewer:'用例评审', fix_instruction:'定点修正指令',
   gap_check:'覆盖查漏', dup_judge:'语义查重', point_fix:'测试点修改', case_fix:'用例修改', requirement_diff:'需求变更', learning:'修改习惯学习',
-  point_supplement:'测试点补充', vision_image:'图片理解', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
+  point_supplement:'测试点补充', point_compare:'人工与 AI 测试点对比', vision_image:'图片理解', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
 let aiTab = 'tasks', aiStatus = '', aiMine = false, aiCallPage = 1, aiCallPurpose = '', aiCallStatus = '', aiCallModel = '', aiDays = 30;
 async function retryTask() {
   if (!currentTask) return;
@@ -4170,13 +4328,21 @@ async function aiStatsHtml() {
   const q = new URLSearchParams({days: aiDays}); if (curProjectName) q.set('project', curProjectName);
   const d = await api('/api/v1/ai/stats?' + q);
   const totalCalls = d.by_model.reduce((a,b)=>a+b.calls,0), totalTok = d.by_model.reduce((a,b)=>a+b.tokens,0);
-  return `<div class="toolbar" style="margin-bottom:10px"><select style="width:120px" onchange="aiDays=+this.value;renderAiCenter()">${[[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${aiDays===v?'selected':''}>${l}</option>`).join('')}</select></div>
+  const usd = v => '$' + (v||0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  const b = d.budget;
+  const budgetCard = b ? `<div class="stat" title="按模型配置的单价折算；当月 1 日起全平台口径"><div class="lab">本月预算余额（${esc(b.month)}）</div>
+      <div class="num" style="${b.remaining_usd!=null&&b.remaining_usd<0?'color:var(--danger)':''}">${b.monthly_budget_usd?usd(b.remaining_usd):'未设预算'}</div>
+      <div class="sub">已消费 ${usd(b.spent_usd)}${b.monthly_budget_usd?` / 预算 ${usd(b.monthly_budget_usd)}（${(b.used_ratio*100).toFixed(0)}%）`:' · 在「模型配置」设置月预算'}</div></div>` : '';
+  return `<div class="toolbar" style="margin-bottom:10px"><select style="width:120px" onchange="aiDays=+this.value;renderAiCenter()">${[[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${aiDays===v?'selected':''}>${l}</option>`).join('')}</select>
+      ${d.unpriced_models.length?`<span class="hint" style="color:var(--warn)">以下模型未配置单价，费用未计入：${d.unpriced_models.map(esc).join('、')}</span>`:''}</div>
     <div class="statrow"><div class="stat"><div class="lab">调用次数</div><div class="num">${totalCalls}</div></div>
       <div class="stat"><div class="lab">Token 消耗</div><div class="num">${totalTok.toLocaleString()}</div><div class="sub">输入 + 输出</div></div>
+      <div class="stat" title="按模型配置的单价（美元 / 百万 token）折算"><div class="lab">费用（估算）</div><div class="num">${usd(d.cost_usd)}</div><div class="sub">所选时间范围</div></div>
+      ${budgetCard}
       <div class="stat"><div class="lab">失败调用</div><div class="num">${d.by_purpose.reduce((a,b)=>a+b.errors,0)}</div></div></div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px 26px;margin-top:12px">
-      <div><div class="section-t">按模型</div><div class="tbl-wrap" style="margin-top:4px"><table><tr><th>模型</th><th>调用</th><th>Token</th><th>平均耗时</th></tr>
-        ${d.by_model.map(m=>`<tr><td>${esc(m.model)}</td><td>${m.calls}</td><td>${m.tokens.toLocaleString()}</td><td>${m.calls?Math.round(m.elapsed_ms/m.calls):0} ms</td></tr>`).join('')||'<tr><td colspan="4" class="hint">无</td></tr>'}</table></div></div>
+      <div><div class="section-t">按模型</div><div class="tbl-wrap" style="margin-top:4px"><table><tr><th>模型</th><th>调用</th><th>输入 Token</th><th>输出 Token</th><th>费用</th><th>平均耗时</th></tr>
+        ${d.by_model.map(m=>`<tr><td>${esc(m.model)}</td><td>${m.calls}</td><td>${m.prompt_tokens.toLocaleString()}</td><td>${m.completion_tokens.toLocaleString()}</td><td>${m.priced?usd(m.cost_usd):'<span class="hint" title="未配置单价">—</span>'}</td><td>${m.calls?Math.round(m.elapsed_ms/m.calls):0} ms</td></tr>`).join('')||'<tr><td colspan="6" class="hint">无</td></tr>'}</table></div></div>
       <div><div class="section-t">按用途</div><div class="tbl-wrap" style="margin-top:4px"><table><tr><th>用途</th><th>调用</th><th>失败</th></tr>
         ${d.by_purpose.map(p=>`<tr><td>${esc(p.purpose)}</td><td>${p.calls}</td><td>${p.errors?`<b style="color:var(--danger)">${p.errors}</b>`:0}</td></tr>`).join('')||'<tr><td colspan="3" class="hint">无</td></tr>'}</table></div></div></div>`;
 }
@@ -4456,17 +4622,17 @@ async function openKbDlg() {
   $('kbProject').innerHTML = projects.map(p=>`<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
   if (curProjectName && projects.some(p=>p.project===curProjectName)) $('kbProject').value = curProjectName;
   await fillKbModules($('kbProject').value);
-  $('kbFiles').value = ''; $('kbText').value = ''; $('kbSource').value = ''; $('kbAsCases').checked = false;
+  $('kbFiles').value = ''; $('kbText').value = ''; $('kbSource').value = ''; $('kbFileKind').value = 'doc';
   kbLevelChanged(); $('kbDlg').showModal();
 }
 async function saveKb() {
-  const fd = new FormData(); const asCases = $('kbAsCases').checked;
+  const fd = new FormData(); const kind = $('kbFileKind').value;
   fd.append('level', $('kbLevel').value); fd.append('project', $('kbProject').value || ''); fd.append('module', $('kbModule').value || '');
-  if (!asCases) { fd.append('category', $('kbCategory').value); fd.append('text', $('kbText').value); fd.append('source', $('kbSource').value || 'text'); }
+  if (kind === 'doc') { fd.append('category', $('kbCategory').value); fd.append('text', $('kbText').value); fd.append('source', $('kbSource').value || 'text'); }
   for (const f of $('kbFiles').files) fd.append('files', f);
-  if (!$('kbFiles').files.length && !$('kbText').value.trim()) return toast('请上传文件或粘贴文本', 'warn');
+  if (!$('kbFiles').files.length && !(kind === 'doc' && $('kbText').value.trim())) return toast(kind === 'doc' ? '请上传文件或粘贴文本' : '请选择要导入的表格文件', 'warn');
   const btn = $('kbSaveBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 切片向量化中';
-  try { const r = await api(asCases ? '/api/v1/knowledge/cases' : '/api/v1/knowledge/docs', {method:'POST', body: fd}); $('kbDlg').close(); toast(`已入库 ${r.ingested.length} 个文档`, 'ok'); renderKnowledge(); }
+  try { const r = await api({doc:'/api/v1/knowledge/docs', cases:'/api/v1/knowledge/cases', bugs:'/api/v1/knowledge/bugs'}[kind], {method:'POST', body: fd}); $('kbDlg').close(); toast(`已入库 ${r.ingested.length} 个文档`, 'ok'); renderKnowledge(); }
   catch (e) { toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '入库';
 }
@@ -4579,7 +4745,7 @@ async function archivePrompt(no) {
 }
 
 /* ==================== 需求中心（M2） ==================== */
-let curReq = null, _reqDetail = null, _reqsCache = [], reqStatus = '', reqKw = '', reqTab = 'raw';
+let curReq = null, _reqDetail = null, _reqsCache = [], reqStatus = '', reqKw = '', reqTab = 'raw', reqDeleted = false;
 const REQ_ST_CLS = {draft:'pending', analyzed:'candidate', pending_confirm:'rejected', confirmed:'approved', designing:'candidate', done:'approved', archived:'pending'};
 const REQ_ST_LABEL = {draft:'草稿', analyzed:'已分析', pending_confirm:'待确认', confirmed:'已确认', designing:'设计中', done:'已完成', archived:'已归档'};
 function crumbForReqs() {
@@ -4595,13 +4761,14 @@ async function renderRequirements() {
   if (curProjectName) q.set('project', curProjectName);
   if (reqStatus) q.set('status', reqStatus);
   if (reqKw.trim()) q.set('keyword', reqKw.trim());
+  if (reqDeleted) q.set('include_deleted', 'true');
   let data;
   try { data = await api('/api/v1/requirements?' + q); } catch (e) { return toast(e.message, 'err'); }
   if (stale('reqs', _s)) return;
   _reqsCache = data.requirements;
   const canEdit = curProjectName ? can(curProjectName, 'requirement.edit') : (isSysAdmin() || (curUser.projects||[]).some(p => can(p.project, 'requirement.edit')));
-  const rows = data.requirements.map(r => `<tr class="rowlink" onclick="openRequirement('${r.req_id}')">
-    <td><b>${esc(r.title)}</b>${r.description?`<div class="hint">${esc(r.description.slice(0,80))}</div>`:''}</td>
+  const rows = data.requirements.map(r => `<tr class="${r.deleted_at?'':'rowlink'}" ${r.deleted_at?'':`onclick="openRequirement('${r.req_id}')"`}>
+    <td><b>${esc(r.title)}</b>${r.deleted_at?` <span class="tag" style="background:var(--danger-bg);color:var(--danger)">已删除</span>${r.merged_into?'<span class="hint"> 已合并</span>':''}${canEdit&&!r.merged_into?`<button class="btn ghost sm" style="margin-left:6px" onclick="restoreReq('${r.req_id}')">恢复</button>`:''}`:''}${r.description?`<div class="hint">${esc(r.description.slice(0,80))}</div>`:''}</td>
     <td class="hint">${esc(r.project)}${r.version_name?`<div>${esc(r.version_name)}</div>`:''}</td>
     <td class="hint">${esc(r.module_path||'—')}</td>
     <td><span class="st ${REQ_ST_CLS[r.status]||'pending'}">${esc(r.status_label)}</span>
@@ -4617,6 +4784,7 @@ async function renderRequirements() {
         <input type="text" placeholder="搜索标题 / 原文" value="${esc(reqKw)}" style="width:180px" onchange="reqKw=this.value;renderRequirements()">
         <select style="width:120px" onchange="reqStatus=this.value;renderRequirements()"><option value="">全部状态</option>
           ${Object.entries(data.statuses).map(([k,v])=>`<option value="${k}" ${reqStatus===k?'selected':''}>${v}</option>`).join('')}</select>
+        <label class="check" title="回收站：已删除的需求可恢复"><input type="checkbox" ${reqDeleted?'checked':''} onchange="reqDeleted=this.checked;renderRequirements()"> 显示已删除</label>
         ${canEdit?`<button class="btn" onclick="openReqDlg()">＋ 新建需求</button>`:''}</div></div>
     <div class="card-b"><div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
       <thead><tr><th>需求</th><th style="width:120px">项目 / 版本</th><th style="width:120px">模块</th><th style="width:110px">状态</th><th style="width:130px">来源</th><th style="width:90px">测试设计</th><th style="width:110px">创建</th></tr></thead>
@@ -4638,7 +4806,7 @@ async function openReqDlg() {
   if (!projects.length) return toast('没有可录入需求的项目（需要测试人员及以上项目角色）', 'warn');
   $('rqProject').innerHTML = projects.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
   if (curProjectName && projects.some(p => p.project === curProjectName)) $('rqProject').value = curProjectName;
-  $('rqTitle').value = ''; $('rqText').value = ''; $('rqDesc').value = ''; $('rqFiles').value = '';
+  $('rqTitle').value = ''; $('rqText').value = ''; $('rqDesc').value = ''; $('rqFiles').value = ''; $('rqUrls').value = '';
   await fillReqRefs($('rqProject').value);
   $('reqDlg').showModal();
 }
@@ -4647,14 +4815,15 @@ async function saveReqDlg() {
   fd.append('project', $('rqProject').value); fd.append('title', $('rqTitle').value.trim());
   fd.append('text', $('rqText').value); fd.append('description', $('rqDesc').value);
   fd.append('version_id', $('rqVersion').value); fd.append('module_id', $('rqModule').value);
+  fd.append('urls', $('rqUrls').value);
   for (const f of $('rqFiles').files) fd.append('files', f);
   if (!$('rqTitle').value.trim()) return toast('请填写需求标题', 'warn');
-  if (!$('rqText').value.trim() && !$('rqFiles').files.length) return toast('请粘贴需求原文或上传文件', 'warn');
+  if (!$('rqText').value.trim() && !$('rqFiles').files.length && !$('rqUrls').value.trim()) return toast('请粘贴需求原文、上传文件或填写链接', 'warn');
   const btn = $('rqSaveBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 解析中';
   try {
     const r = await api('/api/v1/requirements', {method:'POST', body: fd});
     $('reqDlg').close();
-    toast(r.parse_failed ? `需求已创建，${r.parse_failed} 个文件不合法，请在详情中查看原因` : (r.parsing ? `需求已创建，${r.parsing} 个附件正在后台解析` : '需求已创建'), r.parse_failed ? 'warn' : 'ok');
+    toast(r.parse_failed ? `需求已创建，${r.parse_failed} 个文件不合法，请在详情中查看原因` : (r.parsing ? `需求已创建，${r.parsing} 个附件 / 链接正在后台抓取解析` : '需求已创建'), r.parse_failed ? 'warn' : 'ok');
     openRequirement(r.req_id);
   } catch (e) { toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '创建';
@@ -4691,15 +4860,15 @@ async function renderRequirementDetail() {
     </table></div>` : '<div class="hint" style="margin-top:8px">尚未发起测试设计</div>'}`;
 
   const attRows = r.attachments.map(a => `<tr>
-    <td>${a.stored?`<a onclick="downloadFile(${jsq('/api/v1/requirements/'+r.req_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a>`:esc(a.filename)}</td>
-    <td class="hint">${(a.size/1024).toFixed(1)} KB</td>
-    <td>${a.parsing?`<span class="st candidate">解析中</span> <span class="spin"></span><div class="hint">PDF 提取 / 图片理解在后台进行，可离开页面</div>`:a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>`:`<span class="st rejected">解析失败</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
-    <td>${canEdit&&a.stored&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">重新解析</button>`:''}</td>
+    <td>${a.stored?`<a onclick="downloadFile(${jsq('/api/v1/requirements/'+r.req_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a>`:esc(a.filename)}${a.source_url?`<div class="hint" style="word-break:break-all"><span class="tag">链接</span> <a href="${esc(a.source_url)}" target="_blank" rel="noopener">${esc(a.source_url.length>70?a.source_url.slice(0,70)+'…':a.source_url)}</a></div>`:''}</td>
+    <td class="hint">${a.size?(a.size/1024).toFixed(1)+' KB':'—'}</td>
+    <td>${a.parsing?`<span class="st candidate">${a.source_url&&!a.stored?'抓取中':'解析中'}</span> <span class="spin"></span><div class="hint">${a.source_url?'链接下载与解析在后台进行':'PDF 提取 / 图片理解在后台进行'}，可离开页面</div>`:a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>`:`<span class="st rejected">${a.source_url&&!a.stored?'抓取失败':'解析失败'}</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
+    <td>${canEdit&&(a.stored||a.source_url)&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">${a.source_url&&!a.stored?'重新抓取':'重新解析'}</button>`:''}</td>
     <td class="hint" style="white-space:pre-wrap;max-width:420px">${a.parsed?esc((a.preview||'').slice(0,300))+((a.preview||'').length>300?'…':''):''}</td></tr>`).join('');
   const rawTab = `<div class="section-t">需求原文<span class="hint">（永久保留，AI 结果不覆盖）</span></div>
     <pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:420px;overflow:auto;font:inherit">${esc(r.raw_text||'（原文来自附件）')}</pre>
     <div class="section-t" style="margin-top:14px;display:flex;align-items:center">附件与解析结果
-      ${canEdit?`<label class="btn ghost sm" style="margin-left:auto;cursor:pointer">＋ 上传附件<input type="file" multiple style="display:none" onchange="uploadReqAtt(this)"></label>`:''}</div>
+      ${canEdit?`<label class="btn ghost sm" style="margin-left:auto;cursor:pointer">＋ 上传附件<input type="file" multiple style="display:none" onchange="uploadReqAtt(this)"></label><button class="btn ghost sm" style="margin-left:6px" onclick="addReqLinks()">＋ 添加链接</button>`:''}</div>
     ${r.attachments.length?`<div class="tbl-wrap" style="margin-top:6px"><table><tr><th>文件</th><th style="width:80px">大小</th><th style="width:160px">解析</th><th style="width:90px"></th><th>解析预览</th></tr>${attRows}</table></div>`:'<div class="hint" style="margin-top:6px">无附件</div>'}
     <div class="section-t" style="margin-top:14px">人工补充<span class="hint">（独立于原文保存，参与测试设计）</span></div>
     <textarea id="rqDescEdit" rows="3" style="width:100%;box-sizing:border-box" ${canEdit?'':'disabled'}>${esc(r.description||'')}</textarea>
@@ -4740,6 +4909,7 @@ async function renderRequirementDetail() {
         ${canEdit?`<button class="btn ghost sm" onclick="editReqMeta()">编辑</button>`:''}
         ${canEdit&&r.status==='designing'?`<button class="btn ghost sm" onclick="setReqStatus('done')">标记完成</button>`:''}
         ${canEdit&&r.status!=='archived'?`<button class="btn ghost sm" onclick="openMergeDlg()" title="同一份文档重复导入时，把本需求并入另一条">合并到…</button><button class="btn ghost sm" onclick="setReqStatus('archived')">归档</button>`:`${canEdit?`<button class="btn ghost sm" onclick="setReqStatus('designing')">恢复</button>`:''}`}
+        ${canEdit?`<button class="btn ghost sm danger" onclick="deleteReq()">删除</button>`:''}
         ${canDesign?`<button class="btn sm" ${designDisabled?'disabled':''} title="${openN?`还有 ${openN} 项待确认事项`:''}" onclick="openDesignDlg()">开始测试设计</button>`:''}
       </div></div>
     <div class="dtabs">
@@ -4785,6 +4955,30 @@ async function uploadReqAtt(input) {
   const fd = new FormData(); for (const f of input.files) fd.append('files', f);
   toast('解析中…');
   try { const r = await api(`/api/v1/requirements/${curReq}/attachments`, {method:'POST', body: fd}); toast(r.parse_failed?`已上传，${r.parse_failed} 个文件不合法`:'已上传，正在后台解析', r.parse_failed?'warn':'ok'); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+function addReqLinks() { $('rlUrls').value = ''; $('reqLinkDlg').showModal(); $('rlUrls').focus(); }
+async function submitReqLinks() {
+  const v = $('rlUrls').value.trim();
+  if (!v) return toast('请填写链接', 'warn');
+  const fd = new FormData(); fd.append('urls', v);
+  try { const r = await api(`/api/v1/requirements/${curReq}/attachments`, {method:'POST', body: fd}); $('reqLinkDlg').close(); toast(`已添加链接，${r.parsing} 个附件正在后台抓取解析`, 'ok'); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function deleteReq() {
+  const r = _reqDetail || {};
+  const n = r.task_count || 0;
+  const msg = n ? `该需求已发起 ${n} 个测试设计任务。删除后任务与用例保留，仅失去来源追溯；需求进入回收站，可在列表勾选「显示已删除」后恢复。`
+                : '需求进入回收站，可在列表勾选「显示已删除」后恢复。';
+  if (!await uiConfirm(`删除需求「${r.title||''}」？`, msg, true)) return;
+  try {
+    await api(`/api/v1/requirements/${curReq}${n?'?force=true':''}`, {method:'DELETE'});
+    toast('需求已删除，可在回收站恢复', 'ok');
+    curReq = null; renderRequirements();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function restoreReq(reqId) {
+  try { await api(`/api/v1/requirements/${reqId}/restore`, {method:'POST'}); toast('需求已恢复', 'ok'); renderRequirements(); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function reparseAtt(attId) {
@@ -4833,7 +5027,7 @@ async function getProjects(force) {
   // 15 秒内复用缓存；并发调用共用同一请求
   if (!force && _projectsCache.length && Date.now() - _projectsAt < 15000) return _projectsCache;
   if (!_projectsPending) {
-    _projectsPending = api('/api/v1/projects').then(d => { _projectsCache = d.projects; _projectsAt = Date.now(); return _projectsCache; })
+    _projectsPending = api('/api/v1/projects').then(d => { _projectsCache = d.projects; _businessLines = d.business_lines || []; _projectsAt = Date.now(); return _projectsCache; })
       .finally(() => { _projectsPending = null; });
   }
   return _projectsPending;
@@ -4846,6 +5040,15 @@ async function fillProjectSelect(keep) {
   sel.innerHTML = (isSysAdmin() ? '<option value="">（不指定项目）</option>' : '<option value="">请选择项目</option>')
     + allowed.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('')
     + (isSysAdmin() ? '<option value="__new__">＋ 新建项目…</option>' : '');
+  const hint = $('projectHint');
+  if (hint) {
+    if (!allowed.length && !isSysAdmin()) {
+      const viewerOnly = _projectsCache.some(p => !p.builtin && p.status !== 'archived' && can(p.project, 'project.view'));
+      hint.textContent = viewerOnly ? '你在所属项目中的角色是观察者，不能创建任务；请项目负责人把你的角色调整为测试人员及以上'
+                                    : '你还没有加入任何项目；请项目负责人或系统管理员在「项目管理 → 成员」中把你加入项目';
+      hint.style.display = '';
+    } else hint.style.display = 'none';
+  }
   if (!cur && curProjectName && allowed.some(p => p.project === curProjectName)) { sel.value = curProjectName; return; }
   if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
 }
@@ -4860,7 +5063,7 @@ async function drawerNewProject() {
   } catch (e) { toast(e.message, 'err'); }
 }
 let curProject = null, projTab = 'overview';
-let _projectsCache = [], _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
+let _projectsCache = [], _businessLines = [], projListLine = '', _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
 const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved'], draft:['草稿','candidate']};
 let _editingProject = null;
 async function fillUserNames() {
@@ -4876,6 +5079,8 @@ function openProjDlg(name) {
   $('pjTitle').textContent = name ? '编辑项目 ' + name : '新建项目';
   $('pjName').value = name || '';
   $('pjCode').value = p ? (p.code || '') : '';
+  $('pjLine').value = p ? (p.business_line || '') : '';
+  $('lineNames').innerHTML = (_businessLines || []).map(l => `<option value="${esc(l)}">`).join('');
   $('pjOwner').value = p ? (p.owner || '') : (curUser ? curUser.username : '');
   $('pjStatus').value = p ? (p.status || 'active') : 'active';
   $('pjStatus').parentElement.style.display = name ? '' : 'none';
@@ -4886,17 +5091,17 @@ function openProjDlg(name) {
 }
 async function saveProjDlg() {
   const name = $('pjName').value.trim(), description = $('pjDesc').value.trim();
-  const code = $('pjCode').value.trim(), owner = $('pjOwner').value.trim();
+  const code = $('pjCode').value.trim(), owner = $('pjOwner').value.trim(), business_line = $('pjLine').value.trim();
   if (!name) return toast('项目名不能为空', 'warn');
   try {
     if (_editingProject) {
       await api('/api/v1/projects/' + encodeURIComponent(_editingProject),
         {method:'PUT', headers:{'Content-Type':'application/json'},
-         body: JSON.stringify({name, description, code, owner, status: $('pjStatus').value})});
+         body: JSON.stringify({name, description, code, owner, business_line, status: $('pjStatus').value})});
       if (curProject === _editingProject) curProject = name;
       if (curProjectName === _editingProject) { curProjectName = name; localStorage.setItem('tg_project', name); renderCurProj(); }
     } else {
-      await jpost('/api/v1/projects', {name, description, code, owner});
+      await jpost('/api/v1/projects', {name, description, code, owner, business_line});
     }
     $('projDlg').close(); toast('已保存', 'ok');
     await fillProjectSelect(); await reloadMe();
@@ -4951,7 +5156,7 @@ async function renderProjects() {
   try { _projectsCache = await getProjects(true); } catch (e) { return toast(e.message, 'err'); }
   if (stale('projects', _s)) return;
   const kw = projListKw.trim().toLowerCase();
-  const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus)
+  const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus) && (!projListLine || p.business_line === projListLine)
     && (!kw || p.project.toLowerCase().includes(kw) || (p.code||'').toLowerCase().includes(kw) || (p.owner||'').toLowerCase().includes(kw)));
   const STATUS_CLS = {active:'approved', paused:'candidate', archived:'pending'};
   const rows = shown.map(p => {
@@ -4960,6 +5165,7 @@ async function renderProjects() {
     return `<tr class="rowlink" onclick="openProject(${jsq(p.project)})">
       <td onclick="event.stopPropagation()" style="width:26px;padding-right:0">${p.builtin?'':`<button class="star-btn ${p.favorite?'on':''}" title="${p.favorite?'取消收藏':'收藏'}" onclick="toggleFavorite(${jsq(p.project)})">${p.favorite?'★':'☆'}</button>`}</td>
       <td><b>${esc(p.project)}</b>${p.code?` <code class="hint">${esc(p.code)}</code>`:''}${p.description?`<div class="hint">${esc(p.description)}</div>`:''}</td>
+      <td>${p.business_line?`<span class="tag" title="同业务线项目共享历史用例复用">${esc(p.business_line)}</span>`:'<span class="hint">—</span>'}</td>
       <td>${p.owner?`<span class="tag">${esc(p.owner)}</span>`:'<span class="hint">—</span>'}</td>
       <td><span class="st ${STATUS_CLS[p.status]||'pending'}">${esc(p.status_label||'')}</span></td>
       <td>${p.my_role?`<span class="role-tag">${esc(PROJECT_ROLES[p.my_role]||p.my_role)}</span>`:'<span class="hint">—</span>'}<div class="hint">${p.member_count||0} 名成员</div></td>
@@ -4983,6 +5189,8 @@ async function renderProjects() {
     <div class="card-h"><h3>项目管理</h3><span class="meta">共 ${_projectsCache.filter(p=>!p.builtin).length} 个 · 收藏置顶 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
       <div class="grow">
         <input type="text" placeholder="搜索名称 / 编码 / 负责人（回车）" value="${esc(projListKw)}" style="width:190px" onchange="projListKw=this.value;renderProjects()">
+        <select style="width:120px" onchange="projListLine=this.value;renderProjects()" title="按业务线筛选"><option value="">全部业务线</option>
+          ${(_businessLines||[]).map(l=>`<option value="${esc(l)}" ${projListLine===l?'selected':''}>${esc(l)}</option>`).join('')}</select>
         <select style="width:120px" onchange="projListStatus=this.value;renderProjects()">
           <option value="">全部状态</option>
           ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>`<option value="${v}" ${projListStatus===v?'selected':''}>${l}</option>`).join('')}
@@ -4991,10 +5199,10 @@ async function renderProjects() {
         <button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
     <div class="card-b">
       <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
-        <thead><tr><th style="width:26px"></th><th>项目</th><th style="width:90px">负责人</th><th style="width:70px">状态</th><th style="width:110px">我的角色</th>
+        <thead><tr><th style="width:26px"></th><th>项目</th><th style="width:90px">业务线</th><th style="width:90px">负责人</th><th style="width:70px">状态</th><th style="width:110px">我的角色</th>
         <th style="width:56px">任务</th><th style="width:80px">用例</th>
         <th>用例生命周期</th><th style="width:110px">执行</th><th style="width:90px">最近活动</th><th style="width:90px">操作</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="11"><div class="empty">${_projectsCache.length?'没有符合筛选的项目':(isSysAdmin()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="12"><div class="empty">${_projectsCache.length?'没有符合筛选的项目':(isSysAdmin()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
       </table></div>
     </div></div>`;
 }
@@ -5608,12 +5816,13 @@ let _modelCfg = null, _editingModel = null;
 async function refreshModelsCfg() {
   try { _modelCfg = await api('/api/v1/models/config'); } catch (e) { return toast(e.message, 'err'); }
   $('cfgRetries').value = _modelCfg.max_retries;
+  $('cfgBudget').value = _modelCfg.monthly_budget_usd || 0;
   $('cfgDefault').innerHTML = _modelCfg.models.map(m =>
     `<option ${m.name===_modelCfg.default_model?'selected':''}>${esc(m.name)}</option>`).join('');
   $('modelsCfgList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
     <tr><th>名称</th><th>厂商</th><th>模型名</th><th>Base URL</th><th>密钥环境变量</th>
-    <th>Vision</th><th>max_tokens</th><th>降级链路</th><th style="width:150px">操作</th></tr>
-    ${_modelCfg.models.length ? '' : `<tr><td colspan="9"><div class="empty">尚未配置任何模型。点击「添加模型」接入 OpenAI / DeepSeek / 智谱 / 阿里云百炼 或内网 Ollama、vLLM，密钥写在 .env 里。第一个添加的模型自动成为默认模型。</div></td></tr>`}
+    <th>Vision</th><th>max_tokens</th><th title="美元 / 百万 token，输入 / 输出">单价</th><th>降级链路</th><th style="width:150px">操作</th></tr>
+    ${_modelCfg.models.length ? '' : `<tr><td colspan="10"><div class="empty">尚未配置任何模型。点击「添加模型」接入 OpenAI / DeepSeek / 智谱 / 阿里云百炼 或内网 Ollama、vLLM，密钥写在 .env 里。第一个添加的模型自动成为默认模型。</div></td></tr>`}
     ${_modelCfg.models.map(m => `<tr>
       <td><b>${esc(m.name)}</b>${m.name===_modelCfg.default_model?' <span class="st approved">默认</span>':''}</td>
       <td>${esc(m.provider)}</td>
@@ -5622,6 +5831,7 @@ async function refreshModelsCfg() {
       <td>${m.api_key_env ? `<span class="cid">${esc(m.api_key_env)}</span> ${m.api_key_set?'<span class="st approved">已配置</span>':'<span class="st rejected">未配置</span>'}` : '<span class="hint">免鉴权</span>'}</td>
       <td>${m.supports_vision?'<span class="tag">✓</span>':'<span class="hint">—</span>'}</td>
       <td>${m.max_tokens}</td>
+      <td class="hint">${m.input_price||m.output_price?`$${m.input_price} / $${m.output_price}`:'<span style="color:var(--warn)">未配</span>'}</td>
       <td class="hint">${(m.fallbacks||[]).map(esc).join(' → ')||'—'}</td>
       <td><div class="rowops">
         <button class="ibtn" title="编辑" onclick="openModelDlg(${jsq(m.name)})">${IC.edit}</button>
@@ -5637,6 +5847,7 @@ async function saveModelsCfg(models) {
   const body = {
     default_model: $('cfgDefault').value || null,
     max_retries: parseInt($('cfgRetries').value || '1', 10),
+    monthly_budget_usd: parseFloat($('cfgBudget').value || '0') || 0,
     models: (models || _modelCfg.models).map(m => { const {api_key_set, ...rest} = m; return rest; }),
   };
   try {
@@ -5657,13 +5868,14 @@ function openModelDlg(name) {
   _editingModel = name || null;
   const m = name ? _modelCfg.models.find(x=>x.name===name) : {
     name:'', provider:'', base_url:'', api_key_env:'', model:'',
-    temperature:0.3, max_tokens:8192, timeout:120, fallbacks:[], supports_vision:false,
+    temperature:0.3, max_tokens:8192, timeout:120, fallbacks:[], supports_vision:false, input_price:0, output_price:0,
   };
   $('mdTitle').textContent = name ? '编辑模型 ' + name : '添加模型';
   $('mdName').value = m.name; $('mdProvider').value = m.provider;
   $('mdBaseUrl').value = m.base_url; $('mdModel').value = m.model;
   $('mdKeyEnv').value = m.api_key_env || '';
   $('mdTemp').value = m.temperature; $('mdMaxTok').value = m.max_tokens;
+  $('mdInPrice').value = m.input_price || ''; $('mdOutPrice').value = m.output_price || '';
   window._editingTimeout = m.timeout;  // 超时不在界面配置：编辑沿用原值，新增用默认
   $('mdFallbacks').value = (m.fallbacks||[]).join(', ');
   $('mdVision').checked = !!m.supports_vision;
@@ -5679,6 +5891,8 @@ async function saveModelDlg() {
     timeout: window._editingTimeout || 120,
     fallbacks: $('mdFallbacks').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean),
     supports_vision: $('mdVision').checked,
+    input_price: parseFloat($('mdInPrice').value || '0') || 0,
+    output_price: parseFloat($('mdOutPrice').value || '0') || 0,
   };
   if (!entry.name || !entry.provider || !entry.base_url || !entry.model)
     return toast('名称 / 厂商 / Base URL / 模型名为必填项', 'warn');
@@ -5725,10 +5939,29 @@ async function refreshUsers() {
   try {
     window._authSettings = await api('/api/v1/auth/settings').catch(()=>window._authSettings);
     if ($('totpPolicySwitch')) $('totpPolicySwitch').checked = (window._authSettings||{}).totp_enabled !== false;
-    const data = await api('/api/v1/auth/users');
+    const q = new URLSearchParams({page: usersPage, page_size: usersSize});
+    if (usersKw.trim()) q.set('keyword', usersKw.trim());
+    if (usersRole) q.set('role', usersRole);
+    if (usersStatus) q.set('status', usersStatus);
+    const data = await api('/api/v1/auth/users?' + q);
     _usersCache = data.users;
+    usersPage = data.page;
     const fmt = t => esc(fmtTime(t));
-    $('usersList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
+    const first = data.total ? (data.page - 1) * data.page_size + 1 : 0, last = Math.min(data.page * data.page_size, data.total);
+    const pager = `<div class="filters" style="justify-content:flex-end;align-items:center">
+      <span class="hint">共 ${data.total} 人 · 第 ${data.page}/${data.pages} 页（${first}-${last}）</span>
+      <label class="check">每页 <select style="width:70px" onchange="usersSet('size', parseInt(this.value))">${[10,20,50,100].map(s => `<option value="${s}" ${usersSize===s?'selected':''}>${s}</option>`).join('')}</select></label>
+      <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="usersSet('page', 1)">«</button>
+      <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="usersSet('page', ${data.page-1})">上一页</button>
+      <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="usersSet('page', ${data.page+1})">下一页</button>
+      <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="usersSet('page', ${data.pages})">»</button></div>`;
+    $('usersList').innerHTML = `<div class="filters" style="margin-bottom:8px">
+      <input type="text" placeholder="搜索用户名 / 姓名 / 邮箱 / 手机" value="${esc(usersKw)}" style="width:220px" onchange="usersSet('kw', this.value)">
+      <select style="width:110px" onchange="usersSet('role', this.value)"><option value="">全部角色</option><option value="admin" ${usersRole==='admin'?'selected':''}>admin</option><option value="member" ${usersRole==='member'?'selected':''}>member</option></select>
+      <select style="width:110px" onchange="usersSet('status', this.value)"><option value="">全部状态</option><option value="active" ${usersStatus==='active'?'selected':''}>正常</option><option value="disabled" ${usersStatus==='disabled'?'selected':''}>已禁用</option></select>
+      ${usersKw||usersRole||usersStatus?`<button class="btn ghost sm" onclick="usersKw='';usersRole='';usersStatus='';usersSet('page',1)">清除筛选</button>`:''}</div>
+    ${data.total ? '' : '<div class="empty">没有符合条件的用户</div>'}
+    <div class="tbl-wrap" style="margin-top:0"><table>
       <tr><th>用户名</th><th>姓名</th><th>邮箱 / 手机</th><th>系统角色</th><th>状态</th><th>所属项目</th><th>两步验证</th><th>最后登录</th><th>创建时间</th><th style="width:110px">操作</th></tr>
       ${data.users.map(u => `<tr style="${u.status==='disabled'?'opacity:.6':''}">
         <td>${u.avatar?`<img src="${esc(u.avatar)}" style="width:22px;height:22px;border-radius:50%;vertical-align:middle;margin-right:6px;object-fit:cover">`:''}<b>${esc(u.username)}</b>${curUser&&u.username===curUser.username?' <span class="tag">当前</span>':''}</td>
@@ -5745,10 +5978,15 @@ async function refreshUsers() {
           ${curUser&&u.username===curUser.username?'':`<button class="ibtn ${u.status==='disabled'?'ok':''}" title="${u.status==='disabled'?'启用':'禁用'}" onclick="toggleUserStatus(${jsq(u.username)},'${u.status==='disabled'?'active':'disabled'}')">${u.status==='disabled'?IC.check:IC.x}</button>`}
           ${curUser&&u.username===curUser.username?'':`<button class="ibtn bad" title="删除" onclick="deleteUser(${jsq(u.username)})">${IC.trash}</button>`}
         </div></td></tr>`).join('')}
-    </table></div>`;
+    </table></div>${pager}`;
   } catch (e) { toast(e.message, 'err'); }
 }
-let _usersCache = [];
+let _usersCache = [], usersPage = 1, usersSize = 20, usersKw = '', usersRole = '', usersStatus = '';
+function usersSet(field, value) {
+  if (field === 'page') usersPage = value;
+  else { if (field === 'size') usersSize = value; else if (field === 'kw') usersKw = value; else if (field === 'role') usersRole = value; else if (field === 'status') usersStatus = value; usersPage = 1; }
+  refreshUsers();
+}
 function openUserDlg() {
   for (const id of ['nuName','nuPwd','nuRealName','nuEmail','nuPhone']) $(id).value = '';
   $('nuRole').value='member'; $('userDlg').showModal();

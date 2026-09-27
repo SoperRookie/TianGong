@@ -276,11 +276,15 @@ def confirmable_points(modules: list[dict]) -> list[dict]:
     return result
 
 
+AI_SOURCES = ("ai", "gap", "supplement", "ai_fix")
+
+
 def add_points(modules: list[dict], additions: list[dict], source: str, seq_floor: int = 0,
-               skipped: list | None = None) -> list[dict]:
+               skipped: list | None = None, skip_similar: bool = True) -> list[dict]:
     """只允许新增（需求十/五十六）：新测试点以待审核状态追加，存量不动。
 
     additions: [{module, point, dimension?}]；模块不存在则新建分组。
+    skip_similar=False 用于人工测试点对比录入：与 AI 相同的点正是对比要统计的「一致」项，不能跳过。
     """
     seq = _max_tp_seq(modules, seq_floor)
     added: list[dict] = []
@@ -289,7 +293,7 @@ def add_points(modules: list[dict], additions: list[dict], source: str, seq_floo
         text = str(item.get("point", "")).strip()
         if not text:
             continue
-        if _has_similar_point(modules, text):  # 生成前查重（需求十四）：高度匹配则跳过
+        if skip_similar and _has_similar_point(modules, text):  # 生成前查重（需求十四）：高度匹配则跳过
             if skipped is not None:
                 skipped.append({"module": module, "point": text, "reason": "与已有测试点高度相似，已跳过"})
             continue
@@ -351,6 +355,45 @@ def duplicate_candidates(modules: list[dict], threshold: float = 0.45) -> list[d
                     "reason": "文字高度相似",
                 })
     pairs.sort(key=lambda x: -x["similarity"])
+    return pairs
+
+
+def parse_manual_points(text: str, default_module: str = "") -> list[dict]:
+    """人工测试点批量文本 → additions：每行一条，支持「模块|测试点」或「模块：测试点」，编号前缀自动去掉。"""
+    out: list[dict] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip().lstrip("-•*·").strip()
+        line = re.sub(r"^(?:TP)?\d+[.、:：)）]\s*", "", line, flags=re.I)
+        if not line:
+            continue
+        module, point = default_module, line
+        for sep in ("|", "｜"):
+            if sep in line:
+                module, point = (x.strip() for x in line.split(sep, 1))
+                break
+        else:
+            m = re.match(r"^([^:：]{1,20})[:：](.+)$", line)
+            if m and " " not in m.group(1):
+                module, point = m.group(1).strip(), m.group(2).strip()
+        if point:
+            out.append({"module": module or default_module, "point": point})
+    return out
+
+
+def cross_source_candidates(modules: list[dict], threshold: float = 0.3, top: int = 3) -> list[dict]:
+    """人工测试点 × AI 测试点的文字相似候选（每个人工点保留最相近的 top 条），供 LLM 语义复核或降级兜底。"""
+    flat = [dict(p, module=entry["module"]) for entry, p in iter_points(modules)]
+    manual = [p for p in flat if p.get("source") == "manual"]
+    ai = [p for p in flat if p.get("source", "ai") in AI_SOURCES]
+    ai_grams = [_bigrams(p["point"]) for p in ai]
+    pairs: list[dict] = []
+    for m in manual:
+        gm = _bigrams(m["point"])
+        scored = sorted(((_jaccard(gm, g), a) for g, a in zip(ai_grams, ai)), key=lambda x: -x[0])
+        for score, a in scored[:top]:
+            if score >= threshold:
+                pairs.append({"manual": m["tp_id"], "manual_point": m["point"], "ai": a["tp_id"],
+                              "ai_point": a["point"], "similarity": round(score, 3)})
     return pairs
 
 

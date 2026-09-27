@@ -75,8 +75,10 @@ async def stocked_service(service):
 async def test_analysis_stage_only_test_cases(stocked_service):
     steward = KnowledgeSteward(stocked_service, budget_chars=2000)
     bundle = await steward.for_analysis("赔率投注")
-    assert set(bundle.hits) == {"test_cases"}
-    assert bundle.hits["test_cases"]
+    # 拆解阶段只看测试用例库与历史缺陷库；缺陷库为空时不占注入
+    assert set(bundle.hits) == {"test_cases", "bug_history"}
+    assert {k for k, v in bundle.hits.items() if v} == {"test_cases"}
+    assert bundle.hits["test_cases"] and "历史缺陷库" not in bundle.render()
     assert all(s["stage"] == "analysis" for s in bundle.snapshot)
 
 
