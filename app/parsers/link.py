@@ -19,12 +19,19 @@ _TRAILING = ".,;:!?)）】」』>》"
 # Content-Type → 落盘后缀；后缀决定后续走哪个解析器
 _CT_SUFFIX = {
     "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/webp": ".webp",
+    "image/gif": ".gif", "image/bmp": ".bmp", "image/tiff": ".tif", "image/svg+xml": ".svg",
     "application/pdf": ".pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-excel": ".xls", "text/csv": ".csv",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.ms-powerpoint": ".ppt", "application/zip": ".zip", "application/json": ".json",
     "text/markdown": ".md", "text/plain": ".txt",
 }
 _HTML_TYPES = ("text/html", "application/xhtml+xml")
-_KNOWN_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".pdf", ".docx", ".md", ".markdown", ".txt")
+_KNOWN_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".svg", ".pdf", ".docx", ".doc",
+                   ".xlsx", ".xls", ".csv", ".pptx", ".ppt", ".md", ".markdown", ".txt", ".json", ".xml", ".zip")
 
 
 class LinkFetchError(ValueError):

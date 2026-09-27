@@ -9,7 +9,8 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
 
 
 class TextParser:
-    suffixes = (".txt", ".md", ".markdown")
+    suffixes = (".txt", ".md", ".markdown", ".json", ".xml", ".yaml", ".yml", ".log", ".sql", ".ini", ".conf",
+                ".toml", ".properties", ".har")
 
     def parse(self, path: Path) -> ParsedDocument:
         from app.parsers.base import read_text_any

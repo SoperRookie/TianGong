@@ -106,3 +106,94 @@ def test_pptx按页解析文字与图片占位(tmp_path):
     assert doc.sections[0].title == "第 1 页：登录流程" and "输入账号密码" in doc.full_text
     assert len(doc.embedded_images) == 1 and "[[图片:1]]" in doc.full_text
     assert any(s.title == "第 2 页：找回密码" for s in doc.sections)
+
+
+# ---- 全格式支持：压缩包 / 邮件 / 网页 / 扩展图片 / 老版 Office 转换 / 非文本类型 ----
+
+
+def _png_bytes(size=(120, 120)):
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, "white").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_压缩包递归解析_文档合并_图片转内嵌占位(tmp_path):
+    import io
+    import tarfile
+    import zipfile
+
+    z = tmp_path / "需求包.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("docs/需求.md", "# 登录\n账号密码登录")
+        zf.writestr("docs/清单.csv", "模块,功能\n登录,找回密码\n")
+        zf.writestr("原型.png", _png_bytes())
+        zf.writestr("__MACOSX/._需求.md", b"junk")
+        zf.writestr("demo.mp4", b"\x00\x00\x00 ftypmp42")
+    doc = parse_file(z)
+    text = doc.full_text
+    assert doc.doc_type == "zip"
+    assert "文件：docs/需求.md" in text and "账号密码登录" in text and "登录 | 找回密码" in text
+    assert len(doc.embedded_images) == 1 and "[[图片:1]]" in text
+    assert "demo.mp4" in text and "视频文件" in text and "junk" not in text
+    # tar.gz 同样可读
+    t = tmp_path / "需求.tar.gz"
+    with tarfile.open(t, "w:gz") as tf:
+        data = "测试范围：登录与找回密码".encode()
+        info = tarfile.TarInfo("范围.txt"); info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    assert "登录与找回密码" in parse_file(t).full_text
+
+
+def test_邮件解析_正文与附件(tmp_path):
+    from email.message import EmailMessage
+
+    m = EmailMessage()
+    m["Subject"] = "登录需求确认"; m["From"] = "pm@x.com"; m["To"] = "qa@x.com"
+    m.set_content("请按附件需求设计用例。")
+    m.add_attachment("# 需求\n密码错误 5 次锁定".encode(), maintype="text", subtype="markdown", filename="需求.md")
+    m.add_attachment(_png_bytes(), maintype="image", subtype="png", filename="原型.png")
+    f = tmp_path / "需求.eml"
+    f.write_bytes(bytes(m))
+    doc = parse_file(f)
+    text = doc.full_text
+    assert doc.sections[0].title == "邮件：登录需求确认" and "发件人：pm@x.com" in text
+    assert "请按附件需求设计用例" in text and "密码错误 5 次锁定" in text
+    assert len(doc.embedded_images) == 1
+
+
+def test_网页文件与扩展图片格式(tmp_path):
+    from app.parsers.image import load_image_bytes
+
+    h = tmp_path / "需求.html"
+    h.write_text("<html><head><title>登录</title></head><body><h1>规则</h1><p>锁定 30 分钟</p></body></html>", encoding="utf-8")
+    doc = parse_file(h)
+    assert doc.doc_type == "html" and "# 登录" in doc.full_text and "锁定 30 分钟" in doc.full_text
+    from PIL import Image
+
+    b = tmp_path / "截图.bmp"
+    Image.new("RGB", (30, 30), "red").save(b, format="BMP")
+    data, mime = load_image_bytes(b)
+    assert mime == "image/png" and data[:8] == b"\x89PNG\r\n\x1a\n"
+    g = tmp_path / "动图.gif"
+    Image.new("RGB", (30, 30), "blue").save(g, format="GIF")
+    assert load_image_bytes(g)[1] == "image/gif"
+
+
+def test_老版Office需LibreOffice_未安装给出明确提示(tmp_path, monkeypatch):
+    from app.parsers import convert
+    from app.parsers.convert import ConversionUnavailableError
+
+    monkeypatch.setattr(convert, "soffice_path", lambda: None)
+    for name in ("需求.doc", "清单.xls", "方案.ppt", "文字.wps", "表格.et", "演示.dps", "说明.rtf"):
+        f = tmp_path / name
+        f.write_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 64)
+        with pytest.raises(ConversionUnavailableError, match="LibreOffice"):
+            parse_file(f)
+    v = tmp_path / "视频.mp4"
+    v.write_bytes(b"\x00" * 16)
+    with pytest.raises(UnsupportedFormatError, match="视频文件"):
+        parse_file(v)

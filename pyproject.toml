@@ -23,6 +23,12 @@ dependencies = [
     "qdrant-client>=1.9",
     "loguru>=0.7",
     "qrcode>=7.4",
+    # 扩展上传格式：HEIC/HEIF 与 AVIF 图片、7z / rar 压缩包、Outlook .msg 邮件；老版 Office / WPS 另需服务器安装 LibreOffice
+    "pillow-heif>=0.16",
+    "pillow-avif-plugin>=1.4",
+    "py7zr>=0.21",
+    "rarfile>=4.2",
+    "extract-msg>=0.48",
 ]
 
 [dependency-groups]

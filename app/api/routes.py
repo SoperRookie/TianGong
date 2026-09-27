@@ -3643,11 +3643,12 @@ async def assign_plan_cases(request: Request, plan_id: str, body: PlanAssignBody
 
 # 附件类型白名单（13.4：图片/视频/日志/压缩包）
 _ATTACHMENT_SUFFIXES = {
-    "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"},
-    "video": {".mp4", ".mov", ".avi", ".mkv", ".webm"},
-    "log": {".log", ".txt", ".json", ".xml", ".har"},
-    "archive": {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"},
-    "doc": {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".ppt", ".pptx", ".md"},
+    "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".ico", ".heic", ".heif", ".avif", ".psd"},
+    "video": {".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv", ".flv", ".m4v"},
+    "log": {".log", ".txt", ".json", ".xml", ".har", ".yaml", ".yml"},
+    "archive": {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz"},
+    "doc": {".pdf", ".doc", ".docx", ".docm", ".rtf", ".odt", ".wps", ".xls", ".xlsx", ".xlsm", ".csv", ".ods", ".et",
+            ".ppt", ".pptx", ".pptm", ".odp", ".dps", ".md", ".html", ".htm", ".eml", ".msg"},
 }
 
 
