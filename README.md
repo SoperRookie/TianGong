@@ -73,7 +73,7 @@ open http://localhost:8000/
 - **反向代理**：配置 `TIANGONG_TRUSTED_PROXIES=代理IP` 后才采信 `X-Forwarded-For`，否则审计 IP 取直连地址。
 - **OpenAPI 文档**默认关闭（`TIANGONG_EXPOSE_DOCS=true` 开启）；登录接口有失败锁定（5 次 / 15 分钟）。
 - **模型密钥**只能通过形如 `XXX_API_KEY` 的环境变量引用，配置样例见 `.env.example`。
-- 上传限制：单文件 `TIANGONG_MAX_UPLOAD_SIZE_MB`（默认 50）、执行附件 200MB、PDF 300 页、zip 类文档解压后 300MB。
+- 上传限制：单文件 `TIANGONG_MAX_UPLOAD_SIZE_MB`（默认 100）、执行附件 200MB、PDF 300 页、zip 类文档解压后 300MB。
 - 日志留存：AI 调用日志与操作日志默认保留 180 天（`TIANGONG_LOG_RETENTION_DAYS`）。
 
 ## 演示路径（约 10 分钟）

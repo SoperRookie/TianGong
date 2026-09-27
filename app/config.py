@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     log_dir: Path = BASE_DIR / "logs"
 
     # 文件上传限制（F-2-8），单位 MB
-    max_upload_size_mb: int = 50
+    max_upload_size_mb: int = 100
 
     # 大文档分片阈值（F-2-6），单位字符：超过则按章节切分并行分段生成
     chunk_max_chars: int = 10000
