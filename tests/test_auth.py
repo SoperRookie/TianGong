@@ -315,3 +315,27 @@ async def test_模型配置读取与更新热重载(client, tmp_path, monkeypatc
     })
     assert bad.status_code == 400
     assert (await client.get("/api/v1/models")).json()["default_model"] == "kimi-k2"
+
+async def test_用户列表_查询条件与分页(client, auth_on):
+    headers = {"Authorization": f"Bearer {await _login(client)}"}
+    for i in range(3):
+        r = await client.post("/api/v1/auth/users", headers=headers,
+                              json={"username": f"pg{i}", "password": "Pass1234!", "role": "member", "name": f"分页{i}", "email": f"pg{i}@x.com"})
+        assert r.status_code == 200, r.text
+    # page 为 0：返回全部（兼容旧调用）
+    data = (await client.get("/api/v1/auth/users", headers=headers)).json()
+    assert data["total"] >= 4 and len(data["users"]) == data["total"] and "page" not in data
+    # 分页：每页 2，越界页收敛到最后一页
+    data = (await client.get("/api/v1/auth/users?page=1&page_size=2", headers=headers)).json()
+    assert len(data["users"]) == 2 and data["page"] == 1 and data["pages"] == -(-data["total"] // 2)
+    data = (await client.get("/api/v1/auth/users?page=99&page_size=2", headers=headers)).json()
+    assert data["page"] == data["pages"] and data["users"]
+    # 关键词匹配姓名 / 邮箱；角色与状态筛选
+    data = (await client.get("/api/v1/auth/users?keyword=分页1&page=1", headers=headers)).json()
+    assert [u["username"] for u in data["users"]] == ["pg1"]
+    data = (await client.get("/api/v1/auth/users?keyword=pg2@x.com", headers=headers)).json()
+    assert [u["username"] for u in data["users"]] == ["pg2"]
+    assert all(u["role"] == "admin" for u in (await client.get("/api/v1/auth/users?role=admin", headers=headers)).json()["users"])
+    await client.put("/api/v1/auth/users/pg0", headers=headers, json={"status": "disabled"})
+    data = (await client.get("/api/v1/auth/users?status=disabled", headers=headers)).json()
+    assert [u["username"] for u in data["users"]] == ["pg0"]

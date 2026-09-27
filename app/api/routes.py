@@ -373,14 +373,36 @@ class UserBody(BaseModel):
 
 
 @router.get("/api/v1/auth/users")
-async def auth_list_users(request: Request) -> dict:
-    """用户列表（管理员）：含资料/状态/最后登录，并附所属项目与项目角色（3.1「查看所属项目」）。"""
+async def auth_list_users(
+    request: Request, keyword: str = "", role: str = "", status: str = "", project: str = "",
+    page: int = 0, page_size: int = 20,
+) -> dict:
+    """用户列表（管理员）：含资料/状态/最后登录，并附所属项目与项目角色（3.1「查看所属项目」）。
+
+    keyword 匹配用户名 / 姓名 / 邮箱 / 手机；role / status / project 精确筛选；page 为 0 时返回全部（兼容内部调用）。
+    """
     _require_admin(request)
     pstore = request.app.state.projects
     users = request.app.state.auth.list_users()
     for u in users:
         u["projects"] = pstore.projects_of(u["username"])
-    return {"users": users}
+    kw = keyword.strip().lower()
+    if kw:
+        users = [u for u in users if any(kw in str(u.get(k) or "").lower() for k in ("username", "name", "email", "phone"))]
+    if role:
+        users = [u for u in users if u.get("role") == role]
+    if status:
+        users = [u for u in users if u.get("status") == status]
+    if project:
+        users = [u for u in users if any(p["project"] == project for p in u["projects"])]
+    total = len(users)
+    if page <= 0:
+        return {"users": users, "total": total}
+    page_size = min(max(1, page_size), 200)
+    pages = max(1, -(-total // page_size))
+    page = min(max(1, page), pages)
+    start = (page - 1) * page_size
+    return {"users": users[start:start + page_size], "total": total, "page": page, "page_size": page_size, "pages": pages}
 
 
 @router.get("/api/v1/auth/users/lookup")

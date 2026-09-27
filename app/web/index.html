@@ -3144,6 +3144,14 @@ async function mSave() {
     await openTask(t.task_id, true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
 }
+function _rerenderSteps() {
+  if (currentView === 'plans') { if (curPlan) renderPlanDetail(); else renderPlans(); }
+  else if (currentView === 'cases') renderAllCases();
+  else if (currentView === 'projects') renderProjectWorkspace();
+  else renderDetail();
+}
+function stepsExpandAll(keysJson) { for (const k of JSON.parse(keysJson)) expandedSteps.add(k); _rerenderSteps(); }
+function stepsCollapseAll(keysJson) { for (const k of JSON.parse(keysJson)) expandedSteps.delete(k); _rerenderSteps(); }
 function toggleSteps(key) {
   if (expandedSteps.has(key)) expandedSteps.delete(key); else expandedSteps.add(key);
   if (currentView === 'plans') renderPlanDetail();
@@ -3381,7 +3389,7 @@ async function renderPlans() {
       <td class="hint">${p.start_date || p.end_date ? esc(p.start_date + ' ~ ' + p.end_date) : '—'}</td>
       <td><span class="st ${st[1]}">${st[0]}</span></td>
       <td>${p.summary.cases}<span class="hint"> 条 / 已分配 ${p.summary.assigned}</span></td>
-      <td>${lr ? `${lr.executed}/${lr.total}${lr.pass_rate != null ? ` · 通过率 <b>${(lr.pass_rate*100).toFixed(1)}%</b>` : ''}<div class="hint">${esc(lr.name)}${lr.finished_at ? ' · 已结束' : ' · 进行中'}</div>` : '<span class="hint">未执行</span>'}</td>
+      <td>${lr ? `${lr.executed}/${lr.total}${lr.pass_rate != null ? ` · 通过率 <b>${(lr.pass_rate*100).toFixed(1)}%</b>` : ''}<div class="hint">${esc(lr.name)}${lr.finished_at ? ' · 已结束' : ' · 进行中'}${p.summary.runs > 1 ? ` · 共 ${p.summary.runs} 轮` : ''}</div>` : '<span class="hint">未执行</span>'}</td>
       <td>${p.my_items ? `${p.my_items} 条${p.my_pending ? ` <span class="st rejected">待执行 ${p.my_pending}</span>` : ''}` : '<span class="hint">—</span>'}</td>
     </tr>`;
   }).join('');
@@ -3394,7 +3402,12 @@ async function renderPlans() {
       myCard = `<div class="card" style="margin-bottom:14px"><div class="card-h">
         <h3>我的待执行用例<span class="cnt" style="margin-left:6px">${mine.pending}</span></h3>
         <span class="meta">分配给我、本轮尚未执行的用例，可在此直接打结果${myShowDone ? ` · 本轮已执行 ${mine.executed}` : ''}</span>
-        <div class="grow"><label class="check">显示本轮已执行 <input type="checkbox" ${myShowDone?'checked':''} onchange="myShowDone=this.checked;renderPlans()"></label></div></div>
+        <div class="grow">
+          <div class="seg" title="展开 / 收起全部用例的操作步骤与预期结果">
+            <button onclick="stepsExpandAll(${jsq(JSON.stringify(mine.items.map(it => 'my-' + it.item_id)))})">全部展开</button>
+            <button onclick="stepsCollapseAll(${jsq(JSON.stringify(mine.items.map(it => 'my-' + it.item_id)))})">全部收起</button>
+          </div>
+          <label class="check">显示本轮已执行 <input type="checkbox" ${myShowDone?'checked':''} onchange="myShowDone=this.checked;renderPlans()"></label></div></div>
         <div class="card-b">${mine.items.length ? Object.entries(byPlan).map(([pid, g]) => `
           <div class="section-t" style="display:flex;align-items:center;gap:8px"><a onclick="openPlan('${pid}','__me')">${esc(g.name)}</a><span class="hint">${esc(g.project)} · ${g.run ? esc(g.run) : '尚未开始执行轮次'}${g.active ? '' : (can(g.project,'plan.manage') ? ` · <button class="btn ghost sm" onclick="myStartRun('${pid}')">开始新一轮执行</button>` : ' · <span style="color:var(--warn)">轮次未开始或已结束，需负责人新建轮次后才能执行</span>')}</span></div>
           <div class="tbl-wrap" style="margin:4px 0 12px"><table>
@@ -3556,6 +3569,10 @@ async function renderPlanDetail() {
     <h3>用例快照<span class="cnt" style="margin-left:6px">${shownItems.length}${planExecFilter ? ` / ${p.items.length}` : ''}</span></h3>
     <span class="meta">已分配 ${p.summary.assigned}/${p.summary.cases}${myItems.length ? ` · <b>我的：待执行 ${myItems.length - myDone} / 已执行 ${myDone}</b>` : ''} · 快照引用版本记录</span>
     <div class="grow">
+      <div class="seg" title="展开 / 收起全部用例的操作步骤与预期结果">
+        <button onclick="stepsExpandAll(${jsq(JSON.stringify(shownItems.map(it => it.item_id)))})">全部展开</button>
+        <button onclick="stepsCollapseAll(${jsq(JSON.stringify(shownItems.map(it => it.item_id)))})">全部收起</button>
+      </div>
       <select style="width:150px" onchange="planExecFilter=this.value;renderPlanDetail()" title="按执行人筛选">
         <option value="">全部执行人</option>
         <option value="__me" ${planExecFilter==='__me'?'selected':''}>分配给我的</option>
@@ -3618,6 +3635,20 @@ async function renderPlanDetail() {
       ${atts.length ? `<div class="section-t">本轮附件</div><div class="tbl-wrap" style="margin-top:4px"><table>
         <tr><th>文件</th><th style="width:70px">类型</th><th style="width:90px">大小</th><th style="width:110px">关联用例</th><th style="width:200px">上传人 / 时间</th></tr>
         ${attRows}</table></div>` : ''}
+      ${p.runs.length > 1 || (p.runs.length === 1 && p.runs[0].finished_at) ? `<div class="section-t">执行历史<span class="hint">（共 ${p.runs.length} 轮 · 点击切换到该轮查看逐条结果）</span></div>
+        <div class="tbl-wrap" style="margin-top:4px"><table>
+          <tr><th style="width:40px">轮次</th><th>名称</th><th style="width:90px">执行人</th><th style="width:130px">开始</th><th style="width:130px">结束</th><th style="width:90px">进度</th><th style="width:60px">通过</th><th style="width:60px">失败</th><th style="width:60px">阻塞</th><th style="width:60px">跳过</th><th style="width:80px">通过率</th></tr>
+          ${p.runs.map((r, i) => { const s = r.summary; const cur = run && r.run_id === run.run_id; return `<tr class="rowlink ${cur ? 'mine' : ''}" onclick="planRunId='${r.run_id}';renderPlanDetail()">
+            <td>${i + 1}${cur ? ' <span class="tag">当前</span>' : ''}</td>
+            <td><b>${esc(r.name)}</b><div class="hint">${esc(r.by || '')} 发起</div></td>
+            <td class="hint">${esc(r.executor || '—')}</td>
+            <td class="hint">${esc(fmtTime(r.started_at))}</td>
+            <td class="hint">${r.finished_at ? esc(fmtTime(r.finished_at)) : '<span class="st candidate">进行中</span>'}</td>
+            <td>${s.executed}/${s.total}</td>
+            <td style="color:var(--ok)"><b>${s.pass}</b></td><td style="color:var(--danger)"><b>${s.fail}</b></td><td style="color:var(--warn)">${s.blocked}</td><td class="hint">${s.skipped}</td>
+            <td>${s.pass_rate != null ? `<b>${(s.pass_rate*100).toFixed(1)}%</b>` : '—'}</td>
+          </tr>`; }).join('')}
+        </table></div>` : ''}
     </div></div>
     <input type="file" id="planAttFile" style="display:none" onchange="planUploadAtt(this)">`;
 
@@ -5879,10 +5910,29 @@ async function refreshUsers() {
   try {
     window._authSettings = await api('/api/v1/auth/settings').catch(()=>window._authSettings);
     if ($('totpPolicySwitch')) $('totpPolicySwitch').checked = (window._authSettings||{}).totp_enabled !== false;
-    const data = await api('/api/v1/auth/users');
+    const q = new URLSearchParams({page: usersPage, page_size: usersSize});
+    if (usersKw.trim()) q.set('keyword', usersKw.trim());
+    if (usersRole) q.set('role', usersRole);
+    if (usersStatus) q.set('status', usersStatus);
+    const data = await api('/api/v1/auth/users?' + q);
     _usersCache = data.users;
+    usersPage = data.page;
     const fmt = t => esc(fmtTime(t));
-    $('usersList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
+    const first = data.total ? (data.page - 1) * data.page_size + 1 : 0, last = Math.min(data.page * data.page_size, data.total);
+    const pager = `<div class="filters" style="justify-content:flex-end;align-items:center">
+      <span class="hint">共 ${data.total} 人 · 第 ${data.page}/${data.pages} 页（${first}-${last}）</span>
+      <label class="check">每页 <select style="width:70px" onchange="usersSet('size', parseInt(this.value))">${[10,20,50,100].map(s => `<option value="${s}" ${usersSize===s?'selected':''}>${s}</option>`).join('')}</select></label>
+      <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="usersSet('page', 1)">«</button>
+      <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="usersSet('page', ${data.page-1})">上一页</button>
+      <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="usersSet('page', ${data.page+1})">下一页</button>
+      <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="usersSet('page', ${data.pages})">»</button></div>`;
+    $('usersList').innerHTML = `<div class="filters" style="margin-bottom:8px">
+      <input type="text" placeholder="搜索用户名 / 姓名 / 邮箱 / 手机" value="${esc(usersKw)}" style="width:220px" onchange="usersSet('kw', this.value)">
+      <select style="width:110px" onchange="usersSet('role', this.value)"><option value="">全部角色</option><option value="admin" ${usersRole==='admin'?'selected':''}>admin</option><option value="member" ${usersRole==='member'?'selected':''}>member</option></select>
+      <select style="width:110px" onchange="usersSet('status', this.value)"><option value="">全部状态</option><option value="active" ${usersStatus==='active'?'selected':''}>正常</option><option value="disabled" ${usersStatus==='disabled'?'selected':''}>已禁用</option></select>
+      ${usersKw||usersRole||usersStatus?`<button class="btn ghost sm" onclick="usersKw='';usersRole='';usersStatus='';usersSet('page',1)">清除筛选</button>`:''}</div>
+    ${data.total ? '' : '<div class="empty">没有符合条件的用户</div>'}
+    <div class="tbl-wrap" style="margin-top:0"><table>
       <tr><th>用户名</th><th>姓名</th><th>邮箱 / 手机</th><th>系统角色</th><th>状态</th><th>所属项目</th><th>两步验证</th><th>最后登录</th><th>创建时间</th><th style="width:110px">操作</th></tr>
       ${data.users.map(u => `<tr style="${u.status==='disabled'?'opacity:.6':''}">
         <td>${u.avatar?`<img src="${esc(u.avatar)}" style="width:22px;height:22px;border-radius:50%;vertical-align:middle;margin-right:6px;object-fit:cover">`:''}<b>${esc(u.username)}</b>${curUser&&u.username===curUser.username?' <span class="tag">当前</span>':''}</td>
@@ -5899,10 +5949,15 @@ async function refreshUsers() {
           ${curUser&&u.username===curUser.username?'':`<button class="ibtn ${u.status==='disabled'?'ok':''}" title="${u.status==='disabled'?'启用':'禁用'}" onclick="toggleUserStatus(${jsq(u.username)},'${u.status==='disabled'?'active':'disabled'}')">${u.status==='disabled'?IC.check:IC.x}</button>`}
           ${curUser&&u.username===curUser.username?'':`<button class="ibtn bad" title="删除" onclick="deleteUser(${jsq(u.username)})">${IC.trash}</button>`}
         </div></td></tr>`).join('')}
-    </table></div>`;
+    </table></div>${pager}`;
   } catch (e) { toast(e.message, 'err'); }
 }
-let _usersCache = [];
+let _usersCache = [], usersPage = 1, usersSize = 20, usersKw = '', usersRole = '', usersStatus = '';
+function usersSet(field, value) {
+  if (field === 'page') usersPage = value;
+  else { if (field === 'size') usersSize = value; else if (field === 'kw') usersKw = value; else if (field === 'role') usersRole = value; else if (field === 'status') usersStatus = value; usersPage = 1; }
+  refreshUsers();
+}
 function openUserDlg() {
   for (const id of ['nuName','nuPwd','nuRealName','nuEmail','nuPhone']) $(id).value = '';
   $('nuRole').value='member'; $('userDlg').showModal();
