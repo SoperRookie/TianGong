@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     # 登录认证：默认开启；初始管理员首启自动创建——未显式配置 TIANGONG_ADMIN_PASSWORD 时生成随机口令
     # 只打印一次并强制首次登录改密
     auth_enabled: bool = True
+    # 项目开放模式（2026-09 决策）：所有登录用户可见全部项目及其数据，可创建 / 修改项目与项目内数据（视同项目管理员）；
+    # 删除项目仍仅系统管理员。关闭后回到成员制：未加入项目的用户对该项目一律不可见。
+    open_projects: bool = True
     admin_username: str = "admin"
     admin_password: str = ""
     session_ttl_hours: int = 72

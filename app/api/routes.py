@@ -108,6 +108,9 @@ def _is_admin(request: Request) -> bool:
 def _project_role(request: Request, project: str | None) -> str | None:
     if _is_admin(request):
         return "project_admin"
+    if get_settings().open_projects:
+        # 开放模式：所有登录用户视同项目管理员（删除项目另行限制为系统管理员）
+        return "project_admin"
     return request.app.state.projects.role_of(project, _operator(request))
 
 
@@ -147,7 +150,8 @@ def _visible_projects(request: Request) -> set[str] | None:
     cached = getattr(request.state, "_visible", ...)
     if cached is not ...:
         return cached
-    visible = None if _is_admin(request) else {p["project"] for p in request.app.state.projects.projects_of(_operator(request))}
+    visible = None if (_is_admin(request) or get_settings().open_projects) \
+        else {p["project"] for p in request.app.state.projects.projects_of(_operator(request))}
     request.state._visible = visible
     return visible
 
@@ -314,7 +318,8 @@ def _with_memberships(request: Request, user: dict) -> dict:
     projects = request.app.state.projects.projects_of(user["username"]) if user["role"] != "admin" \
         else [{"project": p["name"], "role": "project_admin", "status": p["status"]}
               for p in request.app.state.projects.list()]
-    return {**user, "projects": projects, "prefs": request.app.state.user_prefs.get(user["username"])}
+    return {**user, "projects": projects, "prefs": request.app.state.user_prefs.get(user["username"]),
+            "open_projects": get_settings().open_projects}
 
 
 @router.get("/api/v1/auth/me")
@@ -409,7 +414,7 @@ async def auth_list_users(
 async def auth_lookup_users(request: Request) -> dict:
     """成员添加时的用户名联想：系统管理员或任一项目的项目管理员可用，只返回正常状态用户的用户名与姓名。"""
     user = _current_user(request)
-    if user["role"] != "admin" and not any(
+    if user["role"] != "admin" and not get_settings().open_projects and not any(
         p.get("role") == "project_admin" for p in request.app.state.projects.projects_of(user["username"])
     ):
         raise HTTPException(status_code=403, detail="仅项目管理员可查询用户列表")
@@ -4468,7 +4473,7 @@ async def list_projects(
     records = request.app.state.tasks.list(limit=100000, projects=visible)
     stats = {p["project"]: p for p in project_rollup(records)}
     pstore = request.app.state.projects
-    if visible is None:  # 管理员视角才自动注册历史项目名
+    if _is_admin(request):  # 管理员视角才自动注册历史项目名
         pstore.ensure([n for n in stats if n != UNASSIGNED])
     kw = keyword.strip().lower()
     merged = []
@@ -4487,7 +4492,7 @@ async def list_projects(
         merged.append(_project_view(request, p, stats.get(p["name"])))
     if UNASSIGNED in stats and not kw and not status:
         # 未指定项目的任务聚合行（不可编辑/删除），仅管理员可见
-        if visible is None:
+        if _is_admin(request):
             merged.append({**_EMPTY_STATS, **stats[UNASSIGNED], "description": "", "code": "",
                            "owner": "", "status": "active", "status_label": "进行中", "members": {},
                            "member_count": 0, "my_role": "project_admin", "favorite": False,
@@ -4508,10 +4513,11 @@ class ProjectBody(BaseModel):
 
 @router.post("/api/v1/projects")
 async def create_project(request: Request, body: ProjectBody) -> dict:
-    """创建项目（系统管理员）：创建人与负责人自动成为项目管理员。"""
+    """创建项目：开放模式下任何登录用户可建，否则仅系统管理员；创建人与负责人自动成为项目管理员。"""
     from app.projects import ProjectError
 
-    _require_admin(request)
+    if not get_settings().open_projects:
+        _require_admin(request)
     auth = request.app.state.auth
     if body.owner.strip() and not auth.exists(body.owner.strip()) and get_settings().auth_enabled:
         raise HTTPException(status_code=400, detail=f"负责人不存在: {body.owner}")

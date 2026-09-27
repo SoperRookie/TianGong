@@ -1771,9 +1771,11 @@ const ROLE_ACTIONS = {
   viewer: _VIEW_ACTIONS,
 };
 const isSysAdmin = () => !!curUser && curUser.role === 'admin';
+const openProjects = () => !!curUser && curUser.open_projects === true;  // 项目开放模式：所有人视同项目管理员
 function myRole(project) {
   if (isSysAdmin()) return 'project_admin';
   if (!project || project === '（未指定）') return null;  // 遗留未指定项目：仅系统管理员
+  if (openProjects()) return 'project_admin';
   const m = (curUser.projects || []).find(p => p.project === project);
   return m ? m.role : null;
 }
@@ -5039,7 +5041,7 @@ async function fillProjectSelect(keep) {
   const allowed = _projectsCache.filter(p => !p.builtin && p.status !== 'archived' && can(p.project, 'point.ai'));
   sel.innerHTML = (isSysAdmin() ? '<option value="">（不指定项目）</option>' : '<option value="">请选择项目</option>')
     + allowed.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('')
-    + (isSysAdmin() ? '<option value="__new__">＋ 新建项目…</option>' : '');
+    + (isSysAdmin() || openProjects() ? '<option value="__new__">＋ 新建项目…</option>' : '');
   const hint = $('projectHint');
   if (hint) {
     if (!allowed.length && !isSysAdmin()) {
@@ -5067,7 +5069,7 @@ let _projectsCache = [], _businessLines = [], projListLine = '', _projCases = []
 const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved'], draft:['草稿','candidate']};
 let _editingProject = null;
 async function fillUserNames() {
-  if (!isSysAdmin() && !(curUser && curUser.projects && curUser.projects.some(p => p.role === 'project_admin'))) return;
+  if (!isSysAdmin() && !openProjects() && !(curUser && curUser.projects && curUser.projects.some(p => p.role === 'project_admin'))) return;
   try {
     const users = (await api('/api/v1/auth/users/lookup')).users;
     $('userNames').innerHTML = users.map(u => `<option value="${esc(u.username)}">${esc(u.name||'')}</option>`).join('');
@@ -5195,14 +5197,14 @@ async function renderProjects() {
           <option value="">全部状态</option>
           ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>`<option value="${v}" ${projListStatus===v?'selected':''}>${l}</option>`).join('')}
         </select>
-        ${isSysAdmin()?`<button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>`:''}
+        ${isSysAdmin()||openProjects()?`<button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>`:''}
         <button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
     <div class="card-b">
       <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
         <thead><tr><th style="width:26px"></th><th>项目</th><th style="width:90px">业务线</th><th style="width:90px">负责人</th><th style="width:70px">状态</th><th style="width:110px">我的角色</th>
         <th style="width:56px">任务</th><th style="width:80px">用例</th>
         <th>用例生命周期</th><th style="width:110px">执行</th><th style="width:90px">最近活动</th><th style="width:90px">操作</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="12"><div class="empty">${_projectsCache.length?'没有符合筛选的项目':(isSysAdmin()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="12"><div class="empty">${_projectsCache.length?'没有符合筛选的项目':(isSysAdmin()||openProjects()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
       </table></div>
     </div></div>`;
 }
