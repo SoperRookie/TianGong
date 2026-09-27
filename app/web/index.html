@@ -3163,22 +3163,28 @@ function _rerenderSteps() {
   else if (currentView === 'projects') renderProjectWorkspace();
   else renderDetail();
 }
-function stepsExpandAll(keysJson) { for (const k of JSON.parse(keysJson)) expandedSteps.add(k); _rerenderSteps(); }
-function stepsCollapseAll(keysJson) { for (const k of JSON.parse(keysJson)) expandedSteps.delete(k); _rerenderSteps(); }
+// 展开 / 收起只改 DOM 上的 class，不重绘整页：重绘会把滚动位置拉回顶部（用例审核页点一下就跳到第一条）
+function _applySteps(keys) {
+  let missing = false;
+  for (const k of keys) {
+    const boxes = document.querySelectorAll(`.stepbox[data-key="${CSS.escape(k)}"]`);
+    if (!boxes.length) { missing = true; continue; }
+    boxes.forEach(b => b.classList.toggle('open', expandedSteps.has(k)));
+  }
+  if (missing) _rerenderSteps();
+}
+function stepsExpandAll(keysJson) { const ks = JSON.parse(keysJson); for (const k of ks) expandedSteps.add(k); _applySteps(ks); }
+function stepsCollapseAll(keysJson) { const ks = JSON.parse(keysJson); for (const k of ks) expandedSteps.delete(k); _applySteps(ks); }
 function toggleSteps(key) {
   if (expandedSteps.has(key)) expandedSteps.delete(key); else expandedSteps.add(key);
-  if (currentView === 'plans') renderPlanDetail();
-  else if (currentView === 'cases') renderAllCases();
-  else if (currentView === 'projects') renderProjectWorkspace();
-  else renderDetail();
+  _applySteps([key]);
 }
-/* 步骤/预期两列展示（全站用例表统一）：同一把展开开关，两列同步展开收起 */
 function stepCells(key, steps, width) {
   const acts = (steps||[]).map((x,i)=>`${i+1}. ${esc(x.action)}`).join('\n');
   const exps = (steps||[]).map((x,i)=>`${i+1}. ${esc(x.expected)}`).join('\n');
   const long = (steps||[]).length > 2;
   const open = expandedSteps.has(key);
-  const box = txt => `<div class="stepbox ${long?'long':''} ${open?'open':''}" onclick="event.stopPropagation();toggleSteps('${key}')">${txt}</div>`;
+  const box = txt => `<div class="stepbox ${long?'long':''} ${open?'open':''}" data-key="${esc(key)}" onclick="event.stopPropagation();toggleSteps(${jsq(key)})">${txt}</div>`;
   return `<td style="max-width:${width||240}px">${box(acts)}</td><td style="max-width:${width||240}px">${box(exps)}</td>`;
 }
 function renderCaseDiff(d) {
