@@ -807,6 +807,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <select id="templateSel"></select>
     <label class="f">所属项目<span class="hint">（同项目共享项目记忆与规则）</span></label>
     <select id="projectInput" onchange="if(this.value==='__new__')drawerNewProject()"></select>
+    <div class="hint" id="projectHint" style="display:none;color:var(--danger)"></div>
     <div class="toolbar">
       <label class="check"><input type="checkbox" id="confirmPoints" checked> 先审核测试点</label>
       <label class="check"><input type="checkbox" id="asyncMode" checked> 后台执行</label>
@@ -935,6 +936,18 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="dlg-f">
     <button class="btn ghost" onclick="resolveRunDlg(null)">取消</button>
     <button class="btn" onclick="submitRunDlg()">开始执行</button>
+  </div>
+</dialog>
+
+<dialog id="reqLinkDlg" style="width:560px">
+  <div class="dlg-h"><h3>添加需求链接</h3></div>
+  <div class="dlg-b">
+    <label class="f">链接<span class="hint">（每行一个：网页、图片、PDF / Word 直链，最多 10 个；抓取与解析在后台进行）</span></label>
+    <textarea id="rlUrls" rows="4" placeholder="https://…/需求页面&#10;https://…/原型图.png"></textarea>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('reqLinkDlg').close()">取消</button>
+    <button class="btn" onclick="submitReqLinks()">添加</button>
   </div>
 </dialog>
 
@@ -1077,6 +1090,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <textarea id="rqText" rows="6" placeholder="粘贴需求原文…"></textarea>
     <label class="f">需求文件<span class="hint">（Word / PDF / Excel / 图片 / Markdown / TXT，可多选；解析失败会逐文件提示）</span></label>
     <input type="file" id="rqFiles" multiple>
+    <label class="f">需求链接<span class="hint">（每行一个：网页、图片、PDF / Word 直链；原文里出现的链接也会自动抓取，最多 10 个）</span></label>
+    <textarea id="rqUrls" rows="2" placeholder="https://…/需求页面&#10;https://…/原型图.png"></textarea>
     <label class="f">人工补充<span class="hint">（可选，独立于原文保存）</span></label>
     <textarea id="rqDesc" rows="2" placeholder="补充说明 / 口头约定 / 背景"></textarea>
   </div>
@@ -1879,8 +1894,11 @@ function switchView(v) {
 }
 
 /* ---------- 抽屉 ---------- */
-function openDrawer() {
+async function openDrawer() {
   const sel = $('projectInput');
+  // 每次打开都刷新成员身份与项目清单：管理员刚把用户加进项目 / 调整角色后，无需重新登录即可选到项目
+  const preset = sel ? sel.value : '';
+  try { await reloadMe(); await fillProjectSelect(preset); } catch (e) {}
   if (sel && !sel.value) {  // 默认当前项目；没有当前项目但只加入了一个项目时也直接选中，避免产生「未指定项目」的遗留任务
     const opts = [...sel.options].map(o => o.value).filter(v => v && v !== '__new__');
     if (curProjectName && opts.includes(curProjectName)) sel.value = curProjectName;
@@ -4638,7 +4656,7 @@ async function openReqDlg() {
   if (!projects.length) return toast('没有可录入需求的项目（需要测试人员及以上项目角色）', 'warn');
   $('rqProject').innerHTML = projects.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
   if (curProjectName && projects.some(p => p.project === curProjectName)) $('rqProject').value = curProjectName;
-  $('rqTitle').value = ''; $('rqText').value = ''; $('rqDesc').value = ''; $('rqFiles').value = '';
+  $('rqTitle').value = ''; $('rqText').value = ''; $('rqDesc').value = ''; $('rqFiles').value = ''; $('rqUrls').value = '';
   await fillReqRefs($('rqProject').value);
   $('reqDlg').showModal();
 }
@@ -4647,14 +4665,15 @@ async function saveReqDlg() {
   fd.append('project', $('rqProject').value); fd.append('title', $('rqTitle').value.trim());
   fd.append('text', $('rqText').value); fd.append('description', $('rqDesc').value);
   fd.append('version_id', $('rqVersion').value); fd.append('module_id', $('rqModule').value);
+  fd.append('urls', $('rqUrls').value);
   for (const f of $('rqFiles').files) fd.append('files', f);
   if (!$('rqTitle').value.trim()) return toast('请填写需求标题', 'warn');
-  if (!$('rqText').value.trim() && !$('rqFiles').files.length) return toast('请粘贴需求原文或上传文件', 'warn');
+  if (!$('rqText').value.trim() && !$('rqFiles').files.length && !$('rqUrls').value.trim()) return toast('请粘贴需求原文、上传文件或填写链接', 'warn');
   const btn = $('rqSaveBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 解析中';
   try {
     const r = await api('/api/v1/requirements', {method:'POST', body: fd});
     $('reqDlg').close();
-    toast(r.parse_failed ? `需求已创建，${r.parse_failed} 个文件不合法，请在详情中查看原因` : (r.parsing ? `需求已创建，${r.parsing} 个附件正在后台解析` : '需求已创建'), r.parse_failed ? 'warn' : 'ok');
+    toast(r.parse_failed ? `需求已创建，${r.parse_failed} 个文件不合法，请在详情中查看原因` : (r.parsing ? `需求已创建，${r.parsing} 个附件 / 链接正在后台抓取解析` : '需求已创建'), r.parse_failed ? 'warn' : 'ok');
     openRequirement(r.req_id);
   } catch (e) { toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '创建';
@@ -4691,15 +4710,15 @@ async function renderRequirementDetail() {
     </table></div>` : '<div class="hint" style="margin-top:8px">尚未发起测试设计</div>'}`;
 
   const attRows = r.attachments.map(a => `<tr>
-    <td>${a.stored?`<a onclick="downloadFile(${jsq('/api/v1/requirements/'+r.req_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a>`:esc(a.filename)}</td>
-    <td class="hint">${(a.size/1024).toFixed(1)} KB</td>
-    <td>${a.parsing?`<span class="st candidate">解析中</span> <span class="spin"></span><div class="hint">PDF 提取 / 图片理解在后台进行，可离开页面</div>`:a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>`:`<span class="st rejected">解析失败</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
-    <td>${canEdit&&a.stored&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">重新解析</button>`:''}</td>
+    <td>${a.stored?`<a onclick="downloadFile(${jsq('/api/v1/requirements/'+r.req_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a>`:esc(a.filename)}${a.source_url?`<div class="hint" style="word-break:break-all"><span class="tag">链接</span> <a href="${esc(a.source_url)}" target="_blank" rel="noopener">${esc(a.source_url.length>70?a.source_url.slice(0,70)+'…':a.source_url)}</a></div>`:''}</td>
+    <td class="hint">${a.size?(a.size/1024).toFixed(1)+' KB':'—'}</td>
+    <td>${a.parsing?`<span class="st candidate">${a.source_url&&!a.stored?'抓取中':'解析中'}</span> <span class="spin"></span><div class="hint">${a.source_url?'链接下载与解析在后台进行':'PDF 提取 / 图片理解在后台进行'}，可离开页面</div>`:a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>`:`<span class="st rejected">${a.source_url&&!a.stored?'抓取失败':'解析失败'}</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
+    <td>${canEdit&&(a.stored||a.source_url)&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">${a.source_url&&!a.stored?'重新抓取':'重新解析'}</button>`:''}</td>
     <td class="hint" style="white-space:pre-wrap;max-width:420px">${a.parsed?esc((a.preview||'').slice(0,300))+((a.preview||'').length>300?'…':''):''}</td></tr>`).join('');
   const rawTab = `<div class="section-t">需求原文<span class="hint">（永久保留，AI 结果不覆盖）</span></div>
     <pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:420px;overflow:auto;font:inherit">${esc(r.raw_text||'（原文来自附件）')}</pre>
     <div class="section-t" style="margin-top:14px;display:flex;align-items:center">附件与解析结果
-      ${canEdit?`<label class="btn ghost sm" style="margin-left:auto;cursor:pointer">＋ 上传附件<input type="file" multiple style="display:none" onchange="uploadReqAtt(this)"></label>`:''}</div>
+      ${canEdit?`<label class="btn ghost sm" style="margin-left:auto;cursor:pointer">＋ 上传附件<input type="file" multiple style="display:none" onchange="uploadReqAtt(this)"></label><button class="btn ghost sm" style="margin-left:6px" onclick="addReqLinks()">＋ 添加链接</button>`:''}</div>
     ${r.attachments.length?`<div class="tbl-wrap" style="margin-top:6px"><table><tr><th>文件</th><th style="width:80px">大小</th><th style="width:160px">解析</th><th style="width:90px"></th><th>解析预览</th></tr>${attRows}</table></div>`:'<div class="hint" style="margin-top:6px">无附件</div>'}
     <div class="section-t" style="margin-top:14px">人工补充<span class="hint">（独立于原文保存，参与测试设计）</span></div>
     <textarea id="rqDescEdit" rows="3" style="width:100%;box-sizing:border-box" ${canEdit?'':'disabled'}>${esc(r.description||'')}</textarea>
@@ -4787,6 +4806,14 @@ async function uploadReqAtt(input) {
   try { const r = await api(`/api/v1/requirements/${curReq}/attachments`, {method:'POST', body: fd}); toast(r.parse_failed?`已上传，${r.parse_failed} 个文件不合法`:'已上传，正在后台解析', r.parse_failed?'warn':'ok'); renderRequirementDetail(); }
   catch (e) { toast(e.message, 'err'); }
 }
+function addReqLinks() { $('rlUrls').value = ''; $('reqLinkDlg').showModal(); $('rlUrls').focus(); }
+async function submitReqLinks() {
+  const v = $('rlUrls').value.trim();
+  if (!v) return toast('请填写链接', 'warn');
+  const fd = new FormData(); fd.append('urls', v);
+  try { const r = await api(`/api/v1/requirements/${curReq}/attachments`, {method:'POST', body: fd}); $('reqLinkDlg').close(); toast(`已添加链接，${r.parsing} 个附件正在后台抓取解析`, 'ok'); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
 async function reparseAtt(attId) {
   try { await jpost(`/api/v1/requirements/${curReq}/attachments/${attId}/reparse`, {}); toast('已开始重新解析'); renderRequirementDetail(); }
   catch (e) { toast(e.message, 'err'); }
@@ -4846,6 +4873,15 @@ async function fillProjectSelect(keep) {
   sel.innerHTML = (isSysAdmin() ? '<option value="">（不指定项目）</option>' : '<option value="">请选择项目</option>')
     + allowed.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('')
     + (isSysAdmin() ? '<option value="__new__">＋ 新建项目…</option>' : '');
+  const hint = $('projectHint');
+  if (hint) {
+    if (!allowed.length && !isSysAdmin()) {
+      const viewerOnly = _projectsCache.some(p => !p.builtin && p.status !== 'archived' && can(p.project, 'project.view'));
+      hint.textContent = viewerOnly ? '你在所属项目中的角色是观察者，不能创建任务；请项目负责人把你的角色调整为测试人员及以上'
+                                    : '你还没有加入任何项目；请项目负责人或系统管理员在「项目管理 → 成员」中把你加入项目';
+      hint.style.display = '';
+    } else hint.style.display = 'none';
+  }
   if (!cur && curProjectName && allowed.some(p => p.project === curProjectName)) { sel.value = curProjectName; return; }
   if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
 }

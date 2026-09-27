@@ -25,6 +25,9 @@ from app.llm.schemas import MissingAPIKeyError
 from app.parsers.base import UnsafeFileError
 from app.parsers import (
     IMAGE_SUFFIXES,
+    LinkFetchError,
+    extract_urls,
+    fetch_link,
     ScannedPDFError,
     UnsupportedFormatError,
     enrich_images,
@@ -3754,6 +3757,73 @@ async def _save_attachments(files: list[UploadFile], save_dir: Path) -> list[dic
     return out
 
 
+MAX_REQUIREMENT_LINKS = 10
+
+
+def _link_records(urls: list[str]) -> list[dict]:
+    """链接附件占位记录：先入库为「解析中」，下载与解析都在后台完成后回写。"""
+    out = []
+    for url in urls:
+        out.append({"att_id": uuid.uuid4().hex[:8], "filename": url.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or url,
+                    "source_url": url, "stored": "", "size": 0, "parsed": False, "parsing": True, "error": None,
+                    "text": "", "chars": 0, "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    return out
+
+
+def _collect_links(*texts: str) -> list[str]:
+    urls: list[str] = []
+    for t in texts:
+        for u in extract_urls(t or ""):
+            if u not in urls:
+                urls.append(u)
+    if len(urls) > MAX_REQUIREMENT_LINKS:
+        raise HTTPException(status_code=400, detail=f"一次最多抓取 {MAX_REQUIREMENT_LINKS} 个链接")
+    return urls
+
+
+def _schedule_link_fetch(request: Request, req_id: str, atts: list[dict]) -> None:
+    """后台下载链接内容再解析：网页抽正文、图片走 Vision、PDF/Word 走对应解析器；失败原因逐条落到附件。"""
+    import asyncio
+
+    app = request.app
+    todo = [(a["att_id"], a["source_url"]) for a in atts if a.get("parsing") and a.get("source_url")]
+    if not todo:
+        return
+    save_dir = _req_dir(req_id)
+    max_bytes = get_settings().max_upload_size_mb * 1024 * 1024
+
+    async def _run() -> None:
+        from app.requirements import RequirementError
+
+        for att_id, url in todo:
+            try:
+                saved = await fetch_link(url, save_dir, max_bytes)
+            except LinkFetchError as e:
+                logger.warning("需求 {} 链接抓取失败 {}：{}", req_id, url, e)
+                parsed = {"parsed": False, "error": str(e), "text": "", "chars": 0,
+                          "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            except Exception as e:  # 抓取内部异常同样必须显式落到附件上
+                logger.exception("需求 {} 链接抓取异常 {}", req_id, url)
+                parsed = {"parsed": False, "error": f"抓取异常：{e}", "text": "", "chars": 0,
+                          "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            else:
+                parsed = await _parse_saved_attachment(saved, app.state.llm)
+                logger.info("需求 {} 链接 {} 解析{}：{}", req_id, url, "完成" if parsed["parsed"] else "失败",
+                            f"{parsed['chars']} 字" if parsed["parsed"] else parsed.get("error"))
+            parsed.update(att_id=att_id, parsing=False, source_url=url)
+            try:
+                app.state.requirements.replace_attachment(req_id, att_id, parsed)
+            except RequirementError:
+                return  # 需求已被删除
+
+    jobs = getattr(app.state, "bg_jobs", None)
+    if jobs is None:
+        jobs = app.state.bg_jobs = set()
+    task = asyncio.create_task(_run())
+    jobs.add(task)
+    task.add_done_callback(jobs.discard)
+
+
 def _schedule_attachment_parse(request: Request, req_id: str, atts: list[dict]) -> None:
     """后台解析附件（PDF 提取 / 图片 Vision 理解可能数分钟）：上传立即返回，逐个解析完成即回写，页面轮询可见。"""
     import asyncio
@@ -3924,11 +3994,16 @@ async def create_requirement(
     description: str = Form(default=""),
     version_id: str = Form(default=""),
     module_id: str = Form(default=""),
+    urls: str = Form(default=""),
     files: list[UploadFile] = File(default=[]),
 ) -> dict:
-    """新建需求：手工文本 / 粘贴原文 / 上传文件（逐文件解析并记录失败原因）。"""
+    """新建需求：手工文本 / 粘贴原文 / 上传文件 / 链接（网页、图片、PDF、Word 直链；原文里的链接也会抓取）。
+
+    文件与链接都逐条解析并记录失败原因，解析在后台进行。
+    """
     from app.requirements import RequirementError
 
+    links = _collect_links(urls, text)
     _require_project(request, project, "requirement.edit")
     if request.app.state.projects.get(project) is None:
         if _is_admin(request):
@@ -3942,17 +4017,34 @@ async def create_requirement(
     if version_id and (request.app.state.versions.get(version_id) or {}).get("project") != project:
         raise HTTPException(status_code=400, detail="版本不属于该项目")
     try:
+        # 原文只是一串链接时视为链接来源，不算手工文本
+        rest = text
+        for u in links:
+            rest = rest.replace(u, "")
+        has_text = bool(rest.strip())
+        if has_text and (files or links):
+            source_type = "mixed"
+        elif files:
+            source_type = "file"
+        elif links:
+            source_type = "link"
+        else:
+            source_type = "manual"
         item = rstore.create(project, title, text, created_by=_operator(request), description=description,
-                             source_type="mixed" if (text.strip() and files) else ("file" if files else "manual"),
-                             version_id=version_id or None, module_id=module_id or None,
-                             has_files=bool(files))
+                             source_type=source_type, version_id=version_id or None, module_id=module_id or None,
+                             has_files=bool(files) or bool(links))
     except RequirementError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if files:
         atts = await _save_attachments(files, _req_dir(item["req_id"]))
         rstore.add_attachments(item["req_id"], atts, operator=_operator(request))
         _schedule_attachment_parse(request, item["req_id"], atts)
-    logger.info("需求已创建：{}「{}」（{}，附件 {}，后台解析）", item["req_id"], item["title"], project, len(files))
+    if links:
+        latts = _link_records(links)
+        rstore.add_attachments(item["req_id"], latts, operator=_operator(request))
+        _schedule_link_fetch(request, item["req_id"], latts)
+    logger.info("需求已创建：{}「{}」（{}，附件 {}，链接 {}，后台解析）", item["req_id"], item["title"], project,
+                len(files), len(links))
     return _req_view(request, rstore.get(item["req_id"]))
 
 
@@ -4042,14 +4134,21 @@ async def restore_requirement(request: Request, req_id: str) -> dict:
 
 @router.post("/api/v1/requirements/{req_id}/attachments")
 async def add_requirement_attachments(
-    request: Request, req_id: str, files: list[UploadFile] = File(default=[])
+    request: Request, req_id: str, files: list[UploadFile] = File(default=[]), urls: str = Form(default="")
 ) -> dict:
+    """追加附件：文件或链接（每行一个）。"""
     item = _req(request, req_id, "requirement.edit")
-    if not files:
-        raise HTTPException(status_code=400, detail="请选择文件")
-    atts = await _save_attachments(files, _req_dir(req_id))
-    item = request.app.state.requirements.add_attachments(req_id, atts, operator=_operator(request))
-    _schedule_attachment_parse(request, req_id, atts)
+    links = _collect_links(urls)
+    if not files and not links:
+        raise HTTPException(status_code=400, detail="请选择文件或填写链接")
+    if files:
+        atts = await _save_attachments(files, _req_dir(req_id))
+        item = request.app.state.requirements.add_attachments(req_id, atts, operator=_operator(request))
+        _schedule_attachment_parse(request, req_id, atts)
+    if links:
+        latts = _link_records(links)
+        item = request.app.state.requirements.add_attachments(req_id, latts, operator=_operator(request))
+        _schedule_link_fetch(request, req_id, latts)
     return _req_view(request, item)
 
 
@@ -4062,10 +4161,15 @@ async def reparse_requirement_attachment(request: Request, req_id: str, att_id: 
     att = next((a for a in item["attachments"] if a["att_id"] == att_id), None)
     if att is None:
         raise HTTPException(status_code=404, detail=f"附件不存在: {att_id}")
-    if not att.get("stored") or not Path(att["stored"]).exists():
-        raise HTTPException(status_code=409, detail="原文件已不存在，请重新上传")
     if att.get("parsing"):
         raise HTTPException(status_code=409, detail="该附件正在解析中")
+    if att.get("source_url") and (not att.get("stored") or not Path(att["stored"]).exists()):
+        # 链接附件下载失败过：重新抓取
+        item = request.app.state.requirements.replace_attachment(req_id, att_id, {"parsing": True, "error": None})
+        _schedule_link_fetch(request, req_id, [att])
+        return _req_view(request, item)
+    if not att.get("stored") or not Path(att["stored"]).exists():
+        raise HTTPException(status_code=409, detail="原文件已不存在，请重新上传")
     try:
         item = request.app.state.requirements.replace_attachment(
             req_id, att_id, {"parsing": True, "parsed": False, "error": None})

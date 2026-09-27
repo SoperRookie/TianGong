@@ -23,7 +23,8 @@ REQ_STATUSES = {
     "done": "已完成",             # 人工标记完成
     "archived": "已归档",
 }
-SOURCE_TYPES = {"manual": "手工录入", "file": "文件上传", "mixed": "文本+文件", "migrated": "历史任务迁移"}
+SOURCE_TYPES = {"manual": "手工录入", "file": "文件上传", "link": "链接抓取", "mixed": "文本+文件",
+                "migrated": "历史任务迁移"}
 
 
 class RequirementError(ValueError):
@@ -87,7 +88,7 @@ class RequirementStore:
         if not title:
             raise RequirementError("需求标题不能为空")
         if not (raw_text or "").strip() and not attachments and not has_files:
-            raise RequirementError("需求原文不能为空（粘贴文本或上传文件）")
+            raise RequirementError("需求原文不能为空（粘贴文本、上传文件或填写链接）")
         item = {
             "req_id": _hex8(), "project": project, "title": title,
             "version_id": version_id or None, "module_id": module_id or None,
@@ -125,7 +126,7 @@ class RequirementStore:
         item = self._get_alive(req_id)
         item["attachments"].extend(attachments)
         if item["source_type"] == "manual":
-            item["source_type"] = "mixed" if item["raw_text"].strip() else "file"
+            item["source_type"] = "mixed" if item["raw_text"].strip() else ("link" if all(a.get("source_url") for a in attachments) else "file")
         item["updated_by"], item["updated_at"] = operator, _now()
         self._persist(item)
         return item
@@ -298,7 +299,8 @@ def design_brief(item: dict) -> str:
     parts = [item["raw_text"].strip()]
     for att in item.get("attachments", []):
         if att.get("text"):
-            parts.append(f"【文件：{att['filename']}】\n{att['text']}")
+            label = f"链接：{att['source_url']}" if att.get("source_url") else f"文件：{att['filename']}"
+            parts.append(f"【{label}】\n{att['text']}")
     if item.get("description", "").strip():
         parts.append(f"【人工补充说明】\n{item['description'].strip()}")
     confirmed = [q for q in item.get("questions", []) if q["status"] == "confirmed" and q.get("answer")]
