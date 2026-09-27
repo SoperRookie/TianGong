@@ -108,3 +108,34 @@ async def test_失败任务重试与部分成功明示(client):
     t = next(x for x in (await client.get("/api/v1/ai/tasks")).json()["tasks"] if x["task_id"] == task_id)
     assert t["retry_count"] == 1 and any("评审未收敛" in n or "未解决" in n for n in t["partial"])
     assert (await client.post(f"/api/v1/tasks/{task_id}/retry")).status_code == 409
+
+
+async def test_用量统计_按单价折算费用与月预算余额(client):
+    from app.llm.calllog import record_call
+    from app.llm.client import ChatResult
+    from app.llm.registry import ModelRegistry
+    from app.llm.schemas import ModelConfig, UsageInfo
+
+    app.state.registry = ModelRegistry(
+        default_model="paid",
+        models=[ModelConfig(name="paid", provider="openai", base_url="https://api.openai.com/v1", model="gpt-6-sol",
+                            input_price=2, output_price=10),
+                ModelConfig(name="free", provider="ollama", base_url="http://x:11434/v1", model="qwen")],
+        monthly_budget_usd=100,
+    )
+    msgs = [{"role": "user", "content": "hi"}]
+    record_call(msgs, ChatResult(content="ok", model_name="paid", provider="openai", elapsed_ms=1,
+                                 usage=UsageInfo(prompt_tokens=1_000_000, completion_tokens=100_000, total_tokens=1_100_000)))
+    record_call(msgs, ChatResult(content="ok", model_name="free", provider="ollama", elapsed_ms=1,
+                                 usage=UsageInfo(prompt_tokens=5000, completion_tokens=5000, total_tokens=10000)))
+    from app.db import wait_persist
+    wait_persist()
+    d = (await client.get("/api/v1/ai/stats?days=0")).json()
+    paid = next(m for m in d["by_model"] if m["model"] == "paid")
+    assert paid["prompt_tokens"] == 1_000_000 and paid["completion_tokens"] == 100_000
+    assert paid["cost_usd"] == 3.0 and paid["priced"]          # 1M×$2 + 0.1M×$10
+    assert d["cost_usd"] == 3.0 and d["unpriced_models"] == ["free"]
+    assert d["budget"]["monthly_budget_usd"] == 100 and d["budget"]["spent_usd"] == 3.0 and d["budget"]["remaining_usd"] == 97.0
+    # 预算随模型配置读写
+    cfg = (await client.get("/api/v1/models/config")).json()
+    assert cfg["monthly_budget_usd"] == 100 and next(m for m in cfg["models"] if m["name"] == "paid")["input_price"] == 2

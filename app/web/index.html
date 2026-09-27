@@ -720,6 +720,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div class="grow">
         <label class="check">默认模型 <select id="cfgDefault" style="width:170px" onchange="saveModelsCfg()"></select></label>
         <label class="check">失败重试 <input type="number" id="cfgRetries" min="0" max="5" style="width:64px" onchange="saveModelsCfg()"></label>
+        <label class="check" title="按各模型单价折算当月已消费，AI 中心显示余额；0 表示不设">月预算 $<input type="number" id="cfgBudget" min="0" step="10" style="width:84px" onchange="saveModelsCfg()"></label>
         <button class="btn" onclick="openModelDlg()">＋ 添加模型</button>
       </div></div>
     <div class="card-b" id="modelsCfgList"></div>
@@ -1302,6 +1303,10 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <div style="display:flex;gap:10px">
       <div style="flex:1"><label class="f">temperature</label><input type="number" id="mdTemp" step="0.1" min="0" max="2"></div>
       <div style="flex:1"><label class="f">max_tokens</label><input type="number" id="mdMaxTok" min="256"></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1"><label class="f">输入单价<span class="hint">（美元 / 百万 token）</span></label><input type="number" id="mdInPrice" step="0.01" min="0" placeholder="如 2"></div>
+      <div style="flex:1"><label class="f">输出单价<span class="hint">（美元 / 百万 token）</span></label><input type="number" id="mdOutPrice" step="0.01" min="0" placeholder="如 10"></div>
     </div>
     <label class="f">降级链路<span class="hint">（备用模型名，逗号分隔，按顺序尝试）</span></label>
     <input type="text" id="mdFallbacks" placeholder="gpt-6-luna">
@@ -4318,13 +4323,21 @@ async function aiStatsHtml() {
   const q = new URLSearchParams({days: aiDays}); if (curProjectName) q.set('project', curProjectName);
   const d = await api('/api/v1/ai/stats?' + q);
   const totalCalls = d.by_model.reduce((a,b)=>a+b.calls,0), totalTok = d.by_model.reduce((a,b)=>a+b.tokens,0);
-  return `<div class="toolbar" style="margin-bottom:10px"><select style="width:120px" onchange="aiDays=+this.value;renderAiCenter()">${[[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${aiDays===v?'selected':''}>${l}</option>`).join('')}</select></div>
+  const usd = v => '$' + (v||0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  const b = d.budget;
+  const budgetCard = b ? `<div class="stat" title="按模型配置的单价折算；当月 1 日起全平台口径"><div class="lab">本月预算余额（${esc(b.month)}）</div>
+      <div class="num" style="${b.remaining_usd!=null&&b.remaining_usd<0?'color:var(--danger)':''}">${b.monthly_budget_usd?usd(b.remaining_usd):'未设预算'}</div>
+      <div class="sub">已消费 ${usd(b.spent_usd)}${b.monthly_budget_usd?` / 预算 ${usd(b.monthly_budget_usd)}（${(b.used_ratio*100).toFixed(0)}%）`:' · 在「模型配置」设置月预算'}</div></div>` : '';
+  return `<div class="toolbar" style="margin-bottom:10px"><select style="width:120px" onchange="aiDays=+this.value;renderAiCenter()">${[[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${aiDays===v?'selected':''}>${l}</option>`).join('')}</select>
+      ${d.unpriced_models.length?`<span class="hint" style="color:var(--warn)">以下模型未配置单价，费用未计入：${d.unpriced_models.map(esc).join('、')}</span>`:''}</div>
     <div class="statrow"><div class="stat"><div class="lab">调用次数</div><div class="num">${totalCalls}</div></div>
       <div class="stat"><div class="lab">Token 消耗</div><div class="num">${totalTok.toLocaleString()}</div><div class="sub">输入 + 输出</div></div>
+      <div class="stat" title="按模型配置的单价（美元 / 百万 token）折算"><div class="lab">费用（估算）</div><div class="num">${usd(d.cost_usd)}</div><div class="sub">所选时间范围</div></div>
+      ${budgetCard}
       <div class="stat"><div class="lab">失败调用</div><div class="num">${d.by_purpose.reduce((a,b)=>a+b.errors,0)}</div></div></div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px 26px;margin-top:12px">
-      <div><div class="section-t">按模型</div><div class="tbl-wrap" style="margin-top:4px"><table><tr><th>模型</th><th>调用</th><th>Token</th><th>平均耗时</th></tr>
-        ${d.by_model.map(m=>`<tr><td>${esc(m.model)}</td><td>${m.calls}</td><td>${m.tokens.toLocaleString()}</td><td>${m.calls?Math.round(m.elapsed_ms/m.calls):0} ms</td></tr>`).join('')||'<tr><td colspan="4" class="hint">无</td></tr>'}</table></div></div>
+      <div><div class="section-t">按模型</div><div class="tbl-wrap" style="margin-top:4px"><table><tr><th>模型</th><th>调用</th><th>输入 Token</th><th>输出 Token</th><th>费用</th><th>平均耗时</th></tr>
+        ${d.by_model.map(m=>`<tr><td>${esc(m.model)}</td><td>${m.calls}</td><td>${m.prompt_tokens.toLocaleString()}</td><td>${m.completion_tokens.toLocaleString()}</td><td>${m.priced?usd(m.cost_usd):'<span class="hint" title="未配置单价">—</span>'}</td><td>${m.calls?Math.round(m.elapsed_ms/m.calls):0} ms</td></tr>`).join('')||'<tr><td colspan="6" class="hint">无</td></tr>'}</table></div></div>
       <div><div class="section-t">按用途</div><div class="tbl-wrap" style="margin-top:4px"><table><tr><th>用途</th><th>调用</th><th>失败</th></tr>
         ${d.by_purpose.map(p=>`<tr><td>${esc(p.purpose)}</td><td>${p.calls}</td><td>${p.errors?`<b style="color:var(--danger)">${p.errors}</b>`:0}</td></tr>`).join('')||'<tr><td colspan="3" class="hint">无</td></tr>'}</table></div></div></div>`;
 }
@@ -5793,12 +5806,13 @@ let _modelCfg = null, _editingModel = null;
 async function refreshModelsCfg() {
   try { _modelCfg = await api('/api/v1/models/config'); } catch (e) { return toast(e.message, 'err'); }
   $('cfgRetries').value = _modelCfg.max_retries;
+  $('cfgBudget').value = _modelCfg.monthly_budget_usd || 0;
   $('cfgDefault').innerHTML = _modelCfg.models.map(m =>
     `<option ${m.name===_modelCfg.default_model?'selected':''}>${esc(m.name)}</option>`).join('');
   $('modelsCfgList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
     <tr><th>名称</th><th>厂商</th><th>模型名</th><th>Base URL</th><th>密钥环境变量</th>
-    <th>Vision</th><th>max_tokens</th><th>降级链路</th><th style="width:150px">操作</th></tr>
-    ${_modelCfg.models.length ? '' : `<tr><td colspan="9"><div class="empty">尚未配置任何模型。点击「添加模型」接入 OpenAI / DeepSeek / 智谱 / 阿里云百炼 或内网 Ollama、vLLM，密钥写在 .env 里。第一个添加的模型自动成为默认模型。</div></td></tr>`}
+    <th>Vision</th><th>max_tokens</th><th title="美元 / 百万 token，输入 / 输出">单价</th><th>降级链路</th><th style="width:150px">操作</th></tr>
+    ${_modelCfg.models.length ? '' : `<tr><td colspan="10"><div class="empty">尚未配置任何模型。点击「添加模型」接入 OpenAI / DeepSeek / 智谱 / 阿里云百炼 或内网 Ollama、vLLM，密钥写在 .env 里。第一个添加的模型自动成为默认模型。</div></td></tr>`}
     ${_modelCfg.models.map(m => `<tr>
       <td><b>${esc(m.name)}</b>${m.name===_modelCfg.default_model?' <span class="st approved">默认</span>':''}</td>
       <td>${esc(m.provider)}</td>
@@ -5807,6 +5821,7 @@ async function refreshModelsCfg() {
       <td>${m.api_key_env ? `<span class="cid">${esc(m.api_key_env)}</span> ${m.api_key_set?'<span class="st approved">已配置</span>':'<span class="st rejected">未配置</span>'}` : '<span class="hint">免鉴权</span>'}</td>
       <td>${m.supports_vision?'<span class="tag">✓</span>':'<span class="hint">—</span>'}</td>
       <td>${m.max_tokens}</td>
+      <td class="hint">${m.input_price||m.output_price?`$${m.input_price} / $${m.output_price}`:'<span style="color:var(--warn)">未配</span>'}</td>
       <td class="hint">${(m.fallbacks||[]).map(esc).join(' → ')||'—'}</td>
       <td><div class="rowops">
         <button class="ibtn" title="编辑" onclick="openModelDlg(${jsq(m.name)})">${IC.edit}</button>
@@ -5822,6 +5837,7 @@ async function saveModelsCfg(models) {
   const body = {
     default_model: $('cfgDefault').value || null,
     max_retries: parseInt($('cfgRetries').value || '1', 10),
+    monthly_budget_usd: parseFloat($('cfgBudget').value || '0') || 0,
     models: (models || _modelCfg.models).map(m => { const {api_key_set, ...rest} = m; return rest; }),
   };
   try {
@@ -5842,13 +5858,14 @@ function openModelDlg(name) {
   _editingModel = name || null;
   const m = name ? _modelCfg.models.find(x=>x.name===name) : {
     name:'', provider:'', base_url:'', api_key_env:'', model:'',
-    temperature:0.3, max_tokens:8192, timeout:120, fallbacks:[], supports_vision:false,
+    temperature:0.3, max_tokens:8192, timeout:120, fallbacks:[], supports_vision:false, input_price:0, output_price:0,
   };
   $('mdTitle').textContent = name ? '编辑模型 ' + name : '添加模型';
   $('mdName').value = m.name; $('mdProvider').value = m.provider;
   $('mdBaseUrl').value = m.base_url; $('mdModel').value = m.model;
   $('mdKeyEnv').value = m.api_key_env || '';
   $('mdTemp').value = m.temperature; $('mdMaxTok').value = m.max_tokens;
+  $('mdInPrice').value = m.input_price || ''; $('mdOutPrice').value = m.output_price || '';
   window._editingTimeout = m.timeout;  // 超时不在界面配置：编辑沿用原值，新增用默认
   $('mdFallbacks').value = (m.fallbacks||[]).join(', ');
   $('mdVision').checked = !!m.supports_vision;
@@ -5864,6 +5881,8 @@ async function saveModelDlg() {
     timeout: window._editingTimeout || 120,
     fallbacks: $('mdFallbacks').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean),
     supports_vision: $('mdVision').checked,
+    input_price: parseFloat($('mdInPrice').value || '0') || 0,
+    output_price: parseFloat($('mdOutPrice').value || '0') || 0,
   };
   if (!entry.name || !entry.provider || !entry.base_url || !entry.model)
     return toast('名称 / 厂商 / Base URL / 模型名为必填项', 'warn');

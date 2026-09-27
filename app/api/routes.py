@@ -511,6 +511,7 @@ async def get_models_config(request: Request) -> dict:
     return {
         "default_model": registry.default_model,
         "max_retries": registry.max_retries,
+        "monthly_budget_usd": registry.monthly_budget_usd,
         "models": [
             {**m.model_dump(), "api_key_set": bool(not m.api_key_env or os.environ.get(m.api_key_env))}
             for m in registry.all()
@@ -521,6 +522,7 @@ async def get_models_config(request: Request) -> dict:
 class ModelsConfigBody(BaseModel):
     default_model: str | None = None  # 空时取清单第一个；清单为空则无默认
     max_retries: int = 1
+    monthly_budget_usd: float = 0     # 月预算（美元），0 表示不设；AI 中心按单价折算已消费并显示余额
     models: list[dict]
 
 
@@ -540,7 +542,8 @@ async def update_models_config(request: Request, body: ModelsConfigBody) -> dict
     try:
         models = [ModelConfig.model_validate(m) for m in body.models]
         registry = ModelRegistry(
-            default_model=body.default_model, models=models, max_retries=max(0, body.max_retries)
+            default_model=body.default_model, models=models, max_retries=max(0, body.max_retries),
+            monthly_budget_usd=body.monthly_budget_usd,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"模型配置不合法: {e}")
@@ -558,6 +561,7 @@ async def update_models_config(request: Request, body: ModelsConfigBody) -> dict
     data = {
         "default_model": registry.default_model,
         "max_retries": registry.max_retries,
+        "monthly_budget_usd": registry.monthly_budget_usd,
         "models": [m.model_dump() for m in models],
     }
     for key in ("default_embedding", "embeddings"):
@@ -5658,7 +5662,37 @@ async def ai_stats(request: Request, days: int = 30, project: str = "") -> dict:
     if days > 0:
         from datetime import timedelta
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
-    return stats(since=since, visible=_visible_projects(request), project=project or None)
+    data = stats(since=since, visible=_visible_projects(request), project=project or None)
+    # 费用折算：按模型配置的单价（美元 / 百万 token）；未配单价的模型费用记 0 并标注
+    registry = request.app.state.registry
+    def _price(name: str):
+        try:
+            return registry.get(name)
+        except Exception:
+            return None
+    total_cost = 0.0
+    for row in data["by_model"]:
+        cfg = _price(row["model"])
+        priced = cfg is not None and (cfg.input_price or cfg.output_price)
+        row["cost_usd"] = cfg.cost_usd(row["prompt_tokens"], row["completion_tokens"]) if priced else 0.0
+        row["priced"] = bool(priced)
+        total_cost += row["cost_usd"]
+    data["cost_usd"] = round(total_cost, 2)
+    data["unpriced_models"] = [r["model"] for r in data["by_model"] if not r["priced"] and r["tokens"]]
+    if _is_admin(request):
+        from app.llm.calllog import month_usage
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
+        spent = 0.0
+        for u in month_usage(month_start):
+            cfg = _price(u["model"])
+            if cfg is not None:
+                spent += cfg.cost_usd(u["prompt_tokens"], u["completion_tokens"])
+        budget = registry.monthly_budget_usd
+        data["budget"] = {"month": now.strftime("%Y-%m"), "monthly_budget_usd": budget, "spent_usd": round(spent, 2),
+                          "remaining_usd": round(budget - spent, 2) if budget else None,
+                          "used_ratio": round(spent / budget, 3) if budget else None}
+    return data
 
 
 @router.get("/api/v1/ai/prompts")
