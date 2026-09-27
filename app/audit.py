@@ -105,6 +105,8 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [(m, re.compile(p), k, a) for m
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/add$", "point", "补充测试点"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/gap-check$", "ai", "覆盖查漏"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/dup-check$", "ai", "测试点查重"),
+    ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/manual-batch$", "point", "批量录入人工测试点"),
+    ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/compare$", "ai", "人工与 AI 测试点对比"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/cases/fix$", "ai", "AI 修改用例"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/fix/confirm$", "case", "确认 AI 修改提案"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/versions/restore$", "case", "恢复历史版本"),

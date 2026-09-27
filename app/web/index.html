@@ -939,6 +939,21 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<dialog id="compareDlg" style="width:640px">
+  <div class="dlg-h"><h3>人工测试点录入与对比</h3></div>
+  <div class="dlg-b">
+    <label class="f">人工编写的测试点<span class="hint">（每行一条，可写「模块|测试点」；与 AI 相同的点也照常录入，对比时计为一致）</span></label>
+    <textarea id="cpText" rows="8" placeholder="登录|密码为空时提示&#10;登录|密码错误 5 次锁定 30 分钟&#10;找回密码：验证码过期后重新获取"></textarea>
+    <label class="f">默认模块<span class="hint">（未写模块的行归入此模块；留空为「未分组」）</span></label>
+    <input type="text" id="cpModule" placeholder="如：登录">
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('compareDlg').close()">取消</button>
+    <button class="btn ghost" onclick="submitCompare(false)">仅录入</button>
+    <button class="btn" id="cpGoBtn" onclick="submitCompare(true)">录入并对比</button>
+  </div>
+</dialog>
+
 <dialog id="reqLinkDlg" style="width:560px">
   <div class="dlg-h"><h3>添加需求链接</h3></div>
   <div class="dlg-b">
@@ -2476,7 +2491,10 @@ function allPoints(t) {
   const modules = (t.analysis||{}).test_points || [];
   return modules.flatMap(m => (m.points||[]).map(p => ({...normPoint(p), module:m.module})));
 }
-const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'手工', ai_fix:'修改新增'};
+const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增'};
+const srcChip = src => src === 'manual'
+  ? '<span class="tag" style="background:var(--warn-bg,#fff4e0);color:var(--warn,#b36b00)">人工</span>'
+  : `<span class="tag">AI</span><div class="hint">${esc(srcText[src]||src||'AI 拆解')}</div>`;
 const pStatusText = {pending:'待审核', approved:'已通过', rejected:'已驳回'};
 
 function renderPointWorkbench(t) {
@@ -2501,7 +2519,7 @@ function renderPointWorkbench(t) {
           ${editingHint('point', p.tp_id)}
           ${rejectInfoLine(p)}</td>
         <td style="width:84px">${p.dimension?`<span class="tag">${esc(p.dimension)}</span>`:'<span class="hint">—</span>'}</td>
-        <td style="width:76px" class="hint">${srcText[p.source]||esc(p.source||'')}</td>
+        <td style="width:76px">${p.legacy?'':srcChip(p.source||'ai')}</td>
         <td style="width:92px"><span class="st ${p.status}">${pStatusText[p.status]||p.status}</span>
           ${p.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${p.reject_count} 次</div>`:''}</td>
         <td style="width:132px">${p.legacy?'':`<div class="rowops">
@@ -2527,10 +2545,12 @@ function renderPointWorkbench(t) {
         <button class="btn ghost sm" onclick="dupCheck()">重复检查</button>
         <button class="btn ghost sm" onclick="supplementPoints()">AI 补充</button>
         <button class="btn ghost sm" onclick="manualAddPoint()">手工新增</button>`:''}
+        ${canEditPt&&!pts.every(p=>p.legacy)?`<button class="btn ghost sm" onclick="openCompareDlg()" title="录入人工编写的测试点，与 AI 生成的逐条对比">人工对比</button>`:''}
       </div></div>
     ${renderCoverage(t)}
     ${renderReuseHints(t)}
     ${renderDupReport(t)}
+    ${renderPointCompare(t)}
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
     ${pts.length && pts.every(p=>p.legacy) ? '<div class="hint" style="margin:6px 0">项目化之前的旧版任务：测试点为只读留档，不支持审核操作</div>' : ''}
     ${pointView==='mind' ? renderPointMind(t, modules, confirmable) : `<div class="tbl-wrap"><table>
@@ -2619,6 +2639,56 @@ function renderDupReport(t) {
         <button class="btn ghost sm" onclick="pointDelete(${jsq(p.b)})">删除 ${esc(p.b)}</button>
         <button class="btn ghost sm" onclick="hiddenDupPairs.add(${jsq(p.a+'|'+p.b)});renderDetail()">忽略</button>
       </div></div>`).join('')}`;
+}
+let compareHidden = false;
+function renderPointCompare(t) {
+  const r = t.point_compare;
+  if (!r || compareHidden) return '';
+  const st = r.stats || {};
+  const pct = v => v == null ? '—' : (v*100).toFixed(0) + '%';
+  const vTag = v => `<span class="tag" style="${v==='一致'?'background:var(--ok-bg,#e6f7ec);color:var(--ok)':v==='部分覆盖'?'background:var(--warn-bg,#fff4e0);color:var(--warn,#b36b00)':''}">${esc(v)}</span>`;
+  const row = (id, point) => `<b class="cid">${esc(id)}</b>「${esc(point)}」`;
+  return `<div class="section-t" style="display:flex;align-items:center">人工 vs AI 测试点对比
+      <span class="hint" style="margin-left:8px">${esc(fmtTime(r.at))} · ${esc(r.by||'')}${r.model_name?' · '+esc(r.model_name):''}${r.degraded?' · <b style="color:var(--warn)">LLM 复核失败，为文字相似配对，请人工判断</b>':''}</span>
+      <button class="btn ghost sm" style="margin-left:auto" onclick="compareHidden=true;renderDetail()">收起</button></div>
+    <div class="stats" style="display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 10px">
+      <div class="box" style="flex:1;min-width:120px"><div class="hint">人工测试点</div><b style="font-size:18px">${st.manual_total}</b></div>
+      <div class="box" style="flex:1;min-width:120px"><div class="hint">AI 测试点</div><b style="font-size:18px">${st.ai_total}</b></div>
+      <div class="box" style="flex:1;min-width:120px"><div class="hint">AI 覆盖人工的比例</div><b style="font-size:18px;color:var(--ok)">${pct(st.ai_recall)}</b><div class="hint">一致 ${st.exact} · 部分 ${st.partial}</div></div>
+      <div class="box" style="flex:1;min-width:120px"><div class="hint">AI 遗漏（人工独有）</div><b style="font-size:18px;color:var(--danger)">${st.manual_only}</b></div>
+      <div class="box" style="flex:1;min-width:120px"><div class="hint">AI 额外发现</div><b style="font-size:18px">${st.ai_only}</b><div class="hint">AI 命中人工 ${pct(st.ai_precision)}</div></div>
+    </div>
+    ${r.matched.length?`<div class="hint" style="margin:4px 0">匹配对（人工 → AI）</div>${r.matched.map(m=>`<div class="box">${row(m.manual,m.manual_point)} → ${row(m.ai,m.ai_point)} ${vTag(m.verdict)}${m.reason?`<div class="hint">${esc(m.reason)}</div>`:''}</div>`).join('')}`:''}
+    ${r.manual_only.length?`<div class="hint" style="margin:8px 0 4px;color:var(--danger)">AI 遗漏：只有人工写到的测试点</div>${r.manual_only.map(m=>`<div class="box">${row(m.tp_id,m.point)} <span class="hint">${esc(m.module)}</span>${m.reason?`<div class="hint">${esc(m.reason)}</div>`:''}</div>`).join('')}`:''}
+    ${r.ai_only.length?`<div class="hint" style="margin:8px 0 4px">AI 额外发现：只有 AI 给出的测试点（请判断是补充还是超出需求）</div>${r.ai_only.map(m=>`<div class="box">${row(m.tp_id,m.point)} <span class="hint">${esc(m.module)}</span>${m.valuable===false?' <span class="tag">疑似超出需求</span>':m.valuable===true?' <span class="tag" style="background:var(--ok-bg,#e6f7ec);color:var(--ok)">有价值补充</span>':''}${m.reason?`<div class="hint">${esc(m.reason)}</div>`:''}</div>`).join('')}`:''}`;
+}
+function openCompareDlg() {
+  const hasManual = allPoints(currentTask).some(p => p.source === 'manual');
+  $('cpText').value = ''; $('cpModule').value = '';
+  $('cpGoBtn').textContent = hasManual ? '录入并对比' : '录入并对比';
+  $('compareDlg').showModal(); $('cpText').focus();
+}
+async function submitCompare(runCompare) {
+  const text = $('cpText').value.trim();
+  const hasManual = allPoints(currentTask).some(p => p.source === 'manual');
+  if (!text && !(runCompare && hasManual)) return toast('请先粘贴人工编写的测试点', 'warn');
+  const btn = $('cpGoBtn'); btn.disabled = true;
+  try {
+    if (text) {
+      const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/points/manual-batch`, {text, module: $('cpModule').value});
+      toast(`已录入 ${r.added.length} 条人工测试点`, 'ok');
+    }
+    if (runCompare) {
+      toast('对比中…');
+      const d = await api(`/api/v1/tasks/${currentTask.task_id}/points/compare`, {method:'POST'});
+      const st = d.point_compare.stats;
+      toast(`对比完成：AI 覆盖人工 ${st.ai_recall==null?'—':(st.ai_recall*100).toFixed(0)+'%'}，AI 遗漏 ${st.manual_only} 条，额外发现 ${st.ai_only} 条`, st.manual_only ? 'warn' : 'ok');
+    }
+    compareHidden = false;
+    $('compareDlg').close();
+    await openTask(currentTask.task_id, true);
+  } catch (e) { toast(e.message, 'err'); }
+  btn.disabled = false;
 }
 function renderPointDiff(d) {
   return `<div class="section-t">AI 定点修改结果<span class="hint">（修改前 → 修改后）</span></div>${d.diff.map(x=>`
@@ -4092,7 +4162,7 @@ function renderOfflineDiff(o) {
 /* ==================== AI 中心（M5）：任务中心 / 调用日志 / Prompt 管理 ==================== */
 const PROMPT_NAMES = {analyst:'需求拆解', requirement_analysis:'需求分析', generator:'用例生成', reviewer:'用例评审', fix_instruction:'定点修正指令',
   gap_check:'覆盖查漏', dup_judge:'语义查重', point_fix:'测试点修改', case_fix:'用例修改', requirement_diff:'需求变更', learning:'修改习惯学习',
-  point_supplement:'测试点补充', vision_image:'图片理解', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
+  point_supplement:'测试点补充', point_compare:'人工与 AI 测试点对比', vision_image:'图片理解', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
 let aiTab = 'tasks', aiStatus = '', aiMine = false, aiCallPage = 1, aiCallPurpose = '', aiCallStatus = '', aiCallModel = '', aiDays = 30;
 async function retryTask() {
   if (!currentTask) return;

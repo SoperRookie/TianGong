@@ -2478,6 +2478,51 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
     return {"task_id": task_id, "coverage": gap["coverage"], "added": added, "test_points": modules}
 
 
+class ManualPointsBody(BaseModel):
+    text: str                      # 每行一条，支持「模块|测试点」
+    module: str = ""               # 未写模块时的默认模块（空则「未分组」）
+
+
+@router.post("/api/v1/tasks/{task_id}/points/manual-batch")
+async def add_manual_points_batch(request: Request, task_id: str, body: ManualPointsBody) -> dict:
+    """人工测试点批量录入（人工 vs AI 对比用）：不做相似跳过——与 AI 相同的点正是要统计的一致项。"""
+    from app.tasks.points import add_points, parse_manual_points
+
+    store = request.app.state.tasks
+    record, modules = _points_record(request, task_id, "point.edit")
+    additions = parse_manual_points(body.text, body.module.strip())
+    if not additions:
+        raise HTTPException(status_code=400, detail="没有识别到测试点：每行一条，可写成「模块|测试点」")
+    added = add_points(modules, additions, source="manual", seq_floor=tp_seq_of(record.analysis), skip_similar=False)
+    bump_tp_seq(record.analysis)
+    record.point_compare = None  # 人工集合变了，旧对比报告作废
+    store.save(record)
+    return {"task_id": task_id, "added": added, "test_points": modules}
+
+
+@router.post("/api/v1/tasks/{task_id}/points/compare")
+async def compare_points(request: Request, task_id: str) -> dict:
+    """人工编写测试点 vs AI 生成测试点对比：语义逐条匹配，给出一致 / 部分覆盖 / AI 遗漏 / AI 额外发现与覆盖率。"""
+    from app.agents.quality import run_point_compare
+
+    store = request.app.state.tasks
+    record, modules = _points_record(request, task_id, "point.ai")
+    _ai_ctx(request, record)
+    from app.tasks.points import iter_points
+    if not any(p.get("source") == "manual" for _, p in iter_points(modules)):
+        raise HTTPException(status_code=409, detail="还没有人工编写的测试点，请先录入（手工新增或批量录入）再对比")
+    ctx = record.context or {}
+    try:
+        report = await run_point_compare(request.app.state.llm, ctx.get("requirement", ""), modules, ctx.get("model"))
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    report["at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    report["by"] = _operator(request)
+    record.point_compare = report
+    store.save(record)
+    return {"task_id": task_id, "point_compare": report}
+
+
 @router.post("/api/v1/tasks/{task_id}/points/dup-check")
 async def dup_check_points(request: Request, task_id: str) -> dict:
     """重复检查（需求十一~十三）：文字初筛 + 语义复核；AI 不删除，人工决定处置。"""
