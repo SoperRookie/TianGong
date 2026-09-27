@@ -18,6 +18,7 @@ for _env, _sub in [
 
 # 业务接口测试默认免登录；登录鉴权行为由 test_auth.py 显式开启后单独覆盖
 os.environ["TIANGONG_AUTH_ENABLED"] = "false"
+os.environ["TIANGONG_OPEN_PROJECTS"] = "false"   # 测试默认成员制隔离；开放模式由 test_auth.py 显式开启覆盖
 os.environ["TIANGONG_ADMIN_PASSWORD"] = "admin123"   # 测试固定初始口令（生产未配置时为随机口令）
 os.environ["TIANGONG_SINGLE_INSTANCE_LOCK"] = "false"
 os.environ["TIANGONG_LOG_RETENTION_DAYS"] = "0"
