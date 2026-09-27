@@ -38,6 +38,8 @@ PROMPT_DEFS: list[dict] = [
      "where": "任务 → 需求变更"},
     {"key": "learning", "name": "修改习惯学习", "kind": "system", "default": P.LEARNING_SYSTEM,
      "where": "学习规则 → 分析修改习惯"},
+    {"key": "point_compare", "name": "人工与 AI 测试点对比", "kind": "system", "default": P.POINT_COMPARE_SYSTEM,
+     "where": "测试点审核 → 人工对比"},
     {"key": "point_supplement", "name": "测试点人工补充", "kind": "system",
      "default": "你是资深测试分析师，负责按用户要求补充测试点。一个测试点对应一个明确验证目标。",
      "where": "测试点审核 → AI 补充测试点"},

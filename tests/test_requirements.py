@@ -229,3 +229,119 @@ async def test_合并需求_任务附件待确认并入_依赖边改指向(clien
     assert [(e["from"], e["to"]) for e in g["edges"]] == [(a["req_id"], c["req_id"])]
     logs = (await client.get("/api/v1/audit?days=0")).json()["items"]
     assert any(x["action"] == "合并需求" and x["target"] == b["req_id"] for x in logs)
+
+
+# ---- 需求链接抓取：网页 / 图片 / 文档直链下载后走既有解析器 ----
+
+
+def test_链接提取_去尾标点去重():
+    from app.parsers.link import extract_urls
+
+    text = "原型见 https://a.com/p/1.png，接口文档：https://b.com/doc)。重复 https://a.com/p/1.png"
+    assert extract_urls(text) == ["https://a.com/p/1.png", "https://b.com/doc"]
+    assert extract_urls("") == []
+
+
+def test_网页正文抽取_去脚本导航保留标题层级():
+    from app.parsers.link import html_to_markdown
+
+    raw = """<html><head><title>登录需求 - Wiki</title><style>p{}</style></head><body>
+    <nav>首页 &gt; 需求</nav><script>alert(1)</script>
+    <article><h1>登录</h1><p>用户输入账号密码登录。</p><h2>规则</h2><ul><li>密码错误 5 次锁定 30 分钟</li></ul></article>
+    <footer>版权</footer></body></html>"""
+    title, body = html_to_markdown(raw)
+    assert title == "登录需求 - Wiki"
+    assert "# 登录" in body and "## 规则" in body and "- 密码错误 5 次锁定 30 分钟" in body
+    assert "alert" not in body and "首页" not in body and "版权" not in body
+
+
+async def test_链接抓取_拒绝内网地址(tmp_path, monkeypatch):
+    import socket
+
+    from app.parsers.link import LinkFetchError, fetch_link
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("169.254.169.254", 0))])
+    with pytest.raises(LinkFetchError, match="内网或本机"):
+        await fetch_link("http://metadata.internal/latest", tmp_path, 1024)
+    with pytest.raises(LinkFetchError, match="有效的 http"):
+        await fetch_link("ftp://x.com/a", tmp_path, 1024)
+
+
+async def test_需求原文只有链接_后台抓取解析入附件(client, monkeypatch, tmp_path):
+    """需求原文只贴了一个图片链接：创建即返回「抓取中」的链接附件，后台下载后按图片走 Vision，正文进入设计输入。"""
+    import app.api.routes as routes
+
+    async def fake_fetch(url, save_dir, max_bytes, timeout=30.0):
+        if url.endswith(".png"):
+            from PIL import Image
+            dest = save_dir / "abcd1234_原型图.png"
+            Image.new("RGB", (64, 64), "white").save(dest)
+            return dest
+        if "bad" in url:
+            from app.parsers.link import LinkFetchError
+            raise LinkFetchError("链接返回 HTTP 404")
+        dest = save_dir / "abcd1234_wiki.md"
+        dest.write_text(f"来源链接：{url}\n\n# 登录需求\n\n密码错误 5 次锁定 30 分钟", encoding="utf-8")
+        return dest
+
+    monkeypatch.setattr(routes, "fetch_link", fake_fetch)
+    app.state.llm = StubLLM(["# 登录页原型\n\n账号、密码输入框与登录按钮"] * 3)
+    await client.post("/api/v1/projects", json={"name": "P"})
+    resp = await client.post("/api/v1/requirements", data={
+        "project": "P", "title": "链接需求", "text": "https://wiki.example.com/prototype.png",
+        "urls": "https://wiki.example.com/pages/login\nhttps://wiki.example.com/bad",
+    })
+    assert resp.status_code == 200, resp.text
+    r = resp.json()
+    assert r["source_type"] == "link" and r["parsing"] == 3 and r["raw_text"].startswith("https://")
+    assert all(a["source_url"] and a["parsing"] and not a["stored"] for a in r["attachments"])
+    r = await _wait_parsed(client, r["req_id"])
+    atts = {a["source_url"]: a for a in r["attachments"]}
+    assert atts["https://wiki.example.com/prototype.png"]["parsed"] and "原型" in atts["https://wiki.example.com/prototype.png"]["preview"]
+    assert atts["https://wiki.example.com/pages/login"]["parsed"] and atts["https://wiki.example.com/pages/login"]["filename"] == "wiki.md"
+    bad = atts["https://wiki.example.com/bad"]
+    assert not bad["parsed"] and "404" in bad["error"] and not bad["stored"]
+    # 抓取失败的链接可重新抓取（走 reparse 入口）
+    resp = await client.post(f"/api/v1/requirements/{r['req_id']}/attachments/{bad['att_id']}/reparse")
+    assert resp.status_code == 200 and resp.json()["parsing"] == 1
+    r = await _wait_parsed(client, r["req_id"])
+    # 设计输入包含链接抓到的正文，并标注来源
+    from app.requirements import design_brief
+    brief = design_brief(app.state.requirements.get(r["req_id"]))
+    assert "【链接：https://wiki.example.com/pages/login】" in brief and "锁定 30 分钟" in brief
+    # 追加链接接口：超过 10 个拒绝；文本与链接混合视为 mixed
+    many = "\n".join(f"https://x.com/{i}" for i in range(11))
+    assert (await client.post(f"/api/v1/requirements/{r['req_id']}/attachments", data={"urls": many})).status_code == 400
+    assert (await client.post(f"/api/v1/requirements/{r['req_id']}/attachments", data={})).status_code == 400
+    mixed = (await client.post("/api/v1/requirements", data={"project": "P", "title": "混合", "text": "正文 https://wiki.example.com/pages/x"})).json()
+    assert mixed["source_type"] == "mixed" and mixed["parsing"] == 1
+    await _wait_parsed(client, mixed["req_id"])
+
+
+async def test_删除需求_关联任务拦截_强制删除后任务保留并标记_可恢复(client):
+    r = await _req(client)
+    rid = r["req_id"]
+    # 未关联任务：直接删除，进回收站；列表默认不显示，include_deleted 可见并可恢复
+    assert (await client.delete(f"/api/v1/requirements/{rid}")).status_code == 200
+    assert (await client.get(f"/api/v1/requirements/{rid}")).status_code == 404
+    listed = (await client.get("/api/v1/requirements?project=P")).json()["requirements"]
+    assert all(x["req_id"] != rid for x in listed)
+    listed = (await client.get("/api/v1/requirements?project=P&include_deleted=true")).json()["requirements"]
+    assert next(x for x in listed if x["req_id"] == rid)["deleted_at"]
+    assert (await client.post(f"/api/v1/requirements/{rid}/restore")).status_code == 200
+    # 发起测试设计后再删：默认 409，force 才删，任务保留并标记来源已删除
+    app.state.llm = StubLLM([ANALYSIS_REPLY])
+    await client.post(f"/api/v1/requirements/{rid}/analyze", json={})
+    for q in (await client.get(f"/api/v1/requirements/{rid}")).json()["questions"]:
+        await client.post(f"/api/v1/requirements/{rid}/questions/{q['q_id']}", json={"answer": "按需求"})
+    from tests.stubs import ANALYST_REPLY
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+    d = await client.post(f"/api/v1/requirements/{rid}/design", json={"confirm_points": False, "async_mode": False})
+    assert d.status_code == 200, d.text
+    task_id = d.json()["task_id"]
+    resp = await client.delete(f"/api/v1/requirements/{rid}")
+    assert resp.status_code == 409 and "1 个测试设计任务" in resp.json()["detail"]
+    resp = await client.delete(f"/api/v1/requirements/{rid}?force=true")
+    assert resp.status_code == 200 and resp.json()["linked_tasks"] == 1
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert t["context"]["requirement_id"] == rid and t["context"]["requirement_deleted"] is True

@@ -204,8 +204,8 @@ def stats(since: str | None = None, visible: set[str] | None = None, project: st
         conds.append(ai_calls.c.project.in_(sorted(visible)) if visible else ai_calls.c.project == "__none__")
     with get_engine().begin() as conn:
         by_model = conn.execute(
-            select(ai_calls.c.model, func.count(), func.sum(ai_calls.c.prompt_tokens + ai_calls.c.completion_tokens),
-                   func.sum(ai_calls.c.elapsed_ms))
+            select(ai_calls.c.model, func.count(), func.sum(ai_calls.c.prompt_tokens),
+                   func.sum(ai_calls.c.completion_tokens), func.sum(ai_calls.c.elapsed_ms))
             .where(*conds).group_by(ai_calls.c.model)
         ).all()
         by_purpose = conn.execute(
@@ -219,9 +219,20 @@ def stats(since: str | None = None, visible: set[str] | None = None, project: st
         if status == "error":
             p["errors"] += n
     return {
-        "by_model": [{"model": m, "calls": n, "tokens": int(t or 0), "elapsed_ms": int(e or 0)} for m, n, t, e in by_model],
+        "by_model": [{"model": m, "calls": n, "prompt_tokens": int(pt or 0), "completion_tokens": int(ct or 0),
+                      "tokens": int(pt or 0) + int(ct or 0), "elapsed_ms": int(e or 0)} for m, n, pt, ct, e in by_model],
         "by_purpose": sorted(purposes.values(), key=lambda x: -x["calls"]),
     }
+
+
+def month_usage(since: str) -> list[dict]:
+    """当月各模型的输入 / 输出 token（全平台口径，供预算余额计算）。"""
+    with get_engine().begin() as conn:
+        rows = conn.execute(
+            select(ai_calls.c.model, func.sum(ai_calls.c.prompt_tokens), func.sum(ai_calls.c.completion_tokens))
+            .where(ai_calls.c.at >= since).group_by(ai_calls.c.model)
+        ).all()
+    return [{"model": m, "prompt_tokens": int(pt or 0), "completion_tokens": int(ct or 0)} for m, pt, ct in rows]
 
 
 def rename_project(old: str, new: str) -> int:

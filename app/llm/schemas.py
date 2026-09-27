@@ -18,6 +18,11 @@ class ModelConfig(BaseModel):
     max_tokens: int = 8192
     timeout: float = 120.0
     fallbacks: list[str] = Field(default_factory=list, description="备用模型降级链路（F-1-6），按顺序尝试")
+    input_price: float = Field(default=0.0, ge=0, description="输入单价：美元 / 百万 token，用于费用折算，0 表示未配置")
+    output_price: float = Field(default=0.0, ge=0, description="输出单价：美元 / 百万 token")
+
+    def cost_usd(self, prompt_tokens: int, completion_tokens: int) -> float:
+        return round((prompt_tokens * self.input_price + completion_tokens * self.output_price) / 1_000_000, 4)
 
     def resolve_api_key(self) -> str:
         if not self.api_key_env:

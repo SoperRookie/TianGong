@@ -41,6 +41,7 @@ class TaskRecord(BaseModel):
     fix_log: list[dict] = Field(default_factory=list, description="驳回定点修改 Diff 留痕（需求三十四）：修改前 vs 修改后")
     coverage: dict | None = Field(default=None, description="测试维度覆盖矩阵（需求八）：维度 -> 已覆盖/未覆盖/不适用/待确认")
     dup_report: dict | None = Field(default=None, description="重复检查结果（需求十一~十三）：疑似重复对与人工处置")
+    point_compare: dict | None = Field(default=None, description="人工 vs AI 测试点对比报告：匹配对、人工独有、AI 独有与覆盖率")
     reuse_hints: list[dict] = Field(default_factory=list, description="历史用例复用提示（需求二十九）：高度相关的正式用例")
     requirement_diff: dict | None = Field(default=None, description="需求变更差异分析（需求四十~四十五）：变化类型与受影响资产")
     quality: dict | None = Field(default=None, description="AI 自检评分（需求五十八）：仅作参考，不自动通过")

@@ -124,9 +124,10 @@ class KnowledgeStore:
         self._save_docs(doc.doc_id)
 
     @staticmethod
-    def _scope_filter(category: str | None, space: str | None):
+    def _scope_filter(category: str | None, space: str | list[str] | None):
         """检索范围（16 章三层）：space 指定项目时 = 该项目（含模块层）+ 公共层（public / 历史 default）；
-        space 为 None 时不限（仅管理员全局检索用）。项目知识绝不跨项目命中。"""
+        传列表时 = 这些项目（同业务线用例复用）+ 公共层；space 为 None 时不限（仅管理员全局检索用）。
+        除显式列出的同业务线项目外，项目知识绝不跨项目命中。"""
         from app.knowledge.schemas import DEFAULT_SPACE, PUBLIC_SPACE
 
         must = []
@@ -134,8 +135,9 @@ class KnowledgeStore:
             must.append(FieldCondition(key="category", match=MatchValue(value=category)))
         should = None
         if space:
+            spaces = [space] if isinstance(space, str) else [s for s in space if s]
             should = [FieldCondition(key="space", match=MatchValue(value=s))
-                      for s in dict.fromkeys([space, PUBLIC_SPACE, DEFAULT_SPACE])]
+                      for s in dict.fromkeys([*spaces, PUBLIC_SPACE, DEFAULT_SPACE])]
         if not must and not should:
             return None
         return Filter(must=must or None, should=should)
@@ -145,7 +147,7 @@ class KnowledgeStore:
         vector: list[float],
         top_k: int = 5,
         category: str | None = None,
-        space: str | None = None,
+        space: str | list[str] | None = None,
     ) -> list[SearchHit]:
         result = self._client.query_points(
             collection_name=_COLLECTION,
@@ -169,7 +171,7 @@ class KnowledgeStore:
         ]
 
     def iter_chunks(
-        self, category: str | None = None, space: str | None = None
+        self, category: str | None = None, space: str | list[str] | None = None
     ) -> list[SearchHit]:
         """遍历范围内全部切片（关键词侧检索用）。当前规模全量扫描可行；
         语料到万级后关键词侧迁移 Elasticsearch（PRD 选型），此接口即废弃。"""
