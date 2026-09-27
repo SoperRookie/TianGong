@@ -78,7 +78,7 @@ async def test_解析预览接口(client):
 async def test_不支持的文件格式返回400(client):
     resp = await client.post(
         "/api/v1/tasks",
-        files={"files": ("需求.exe", b"MZ", "application/octet-stream")},
+        files={"files": ("需求.exe", b"MZ\x00\x01\x90\x00", "application/octet-stream")},
     )
     assert resp.status_code == 400
     assert "不支持" in resp.json()["detail"]

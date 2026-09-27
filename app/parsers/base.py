@@ -59,10 +59,12 @@ class UnsupportedFormatError(ValueError):
 def _registry() -> dict[str, Parser]:
     from app.parsers.docx import DocxParser
     from app.parsers.pdf import PdfParser
+    from app.parsers.pptx import PptxParser
+    from app.parsers.table import TableParser
     from app.parsers.text import TextParser
 
     mapping: dict[str, Parser] = {}
-    for parser in (TextParser(), DocxParser(), PdfParser()):
+    for parser in (TextParser(), DocxParser(), PdfParser(), TableParser(), PptxParser()):
         for suffix in parser.suffixes:
             mapping[suffix] = parser
     return mapping
@@ -112,12 +114,29 @@ def read_text_any(path: str | Path) -> str:
 
 
 def parse_file(path: str | Path) -> ParsedDocument:
-    """按扩展名分发解析器（格式白名单校验，F-2-8 的一部分）；zip 类先做安全校验。"""
+    """按扩展名分发解析器；zip 类先做安全校验。
+
+    不限制上传格式：未登记的后缀（.json / .xml / .html / .log / .sql / 无后缀…）先按文本读取，
+    能按 UTF-8 / GBK 解码的就当纯文本解析；只有二进制且无解析器的文件才报不支持。
+    """
+    from app.parsers.text import TextParser
+
     path = Path(path)
     parser = _registry().get(path.suffix.lower())
     if parser is None:
-        supported = ", ".join(sorted(_registry()))
-        raise UnsupportedFormatError(f"不支持的文件格式 {path.suffix}，当前支持: {supported}")
+        try:
+            text = read_text_any(path)
+        except UnicodeDecodeError:
+            raise UnsupportedFormatError(
+                f"{path.name} 是不支持自动读取的二进制格式（{path.suffix or '无后缀'}）；"
+                "文件已保留可下载，可转成 PDF / Word / 图片 / 文本后重新上传"
+            ) from None
+        if "\x00" in text[:4096]:
+            raise UnsupportedFormatError(f"{path.name} 是不支持自动读取的二进制格式（{path.suffix or '无后缀'}）")
+        doc = TextParser().parse_string(text)
+        doc.source = path.name
+        doc.doc_type = path.suffix.lstrip(".").lower() or "txt"
+        return doc
     check_zip_safety(path)
     return parser.parse(path)
 

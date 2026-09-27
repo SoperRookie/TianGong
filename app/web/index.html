@@ -800,7 +800,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="d-b">
     <label class="f">需求文本<span class="hint">（可与文件混合提交）</span></label>
     <textarea id="reqText" rows="5" placeholder="粘贴需求内容…"></textarea>
-    <label class="f">需求文件<span class="hint">（PDF / Word / 图片 / 文本，可多选）</span></label>
+    <label class="f">需求文件<span class="hint">（不限格式，可多选：PDF / Word / Excel / PPT / 图片 / 文本类均可自动读取，其余格式保留可下载）</span></label>
     <input type="file" id="reqFiles" multiple>
     <label class="f">生成模型 / 评审模型</label>
     <div style="display:flex;gap:8px">
@@ -1109,7 +1109,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     </div>
     <label class="f">需求原文<span class="hint">（粘贴文本，永久保留；可与文件混合）</span></label>
     <textarea id="rqText" rows="6" placeholder="粘贴需求原文…"></textarea>
-    <label class="f">需求文件<span class="hint">（Word / PDF / Excel / 图片 / Markdown / TXT，可多选；解析失败会逐文件提示）</span></label>
+    <label class="f">需求文件<span class="hint">（不限格式，可多选：PDF / Word / Excel / PPT / 图片 / 文本类自动读取，其余格式保留可下载；读取失败逐文件提示）</span></label>
     <input type="file" id="rqFiles" multiple>
     <label class="f">需求链接<span class="hint">（每行一个：网页、图片、PDF / Word 直链；原文里出现的链接也会自动抓取，最多 10 个）</span></label>
     <textarea id="rqUrls" rows="2" placeholder="https://…/需求页面&#10;https://…/原型图.png"></textarea>
@@ -3626,7 +3626,7 @@ async function renderPlanDetail() {
     const item = p.items.find(i => i.item_id === a.item_id);
     return `<tr>
       <td><a onclick="downloadFile(${jsq('/api/v1/plans/'+p.plan_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a></td>
-      <td>${({image:'图片',video:'视频',log:'日志',archive:'压缩包'})[a.kind] || a.kind}</td>
+      <td>${({image:'图片',video:'视频',log:'日志',archive:'压缩包',doc:'文档',other:'其他'})[a.kind] || a.kind}</td>
       <td class="hint">${(a.size/1024).toFixed(1)} KB</td>
       <td>${item ? `<span class="cid">${esc(item.case_id)}</span>` : '<span class="hint">整轮</span>'}</td>
       <td class="hint">${esc(a.by)} · ${esc(fmtTime(a.at))}</td>
@@ -3634,7 +3634,7 @@ async function renderPlanDetail() {
   }).join('');
   const runsCard = `<div class="card" style="margin-top:14px"><div class="card-h">
     <h3>计划执行</h3>
-    <span class="meta">执行轮次挂计划 · 失败/阻塞须填原因 · 附件支持图片/视频/日志/压缩包</span>
+    <span class="meta">执行轮次挂计划 · 失败/阻塞须填原因 · 附件不限格式（截图 / 视频 / 日志 / 压缩包 / 文档）</span>
     <div class="grow">
       ${p.runs.length ? `<select style="width:220px" onchange="planRunId=this.value;renderPlanDetail()">
         ${p.runs.map(r => `<option value="${r.run_id}" ${run && r.run_id===run.run_id?'selected':''}>${esc(r.name)}${r.executor?` · 执行人 ${esc(r.executor)}`:''} · ${r.finished_at?'已结束':'进行中'}</option>`).join('')}
