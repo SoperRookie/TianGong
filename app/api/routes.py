@@ -4135,11 +4135,28 @@ async def update_requirement(request: Request, req_id: str, body: RequirementUpd
 
 
 @router.delete("/api/v1/requirements/{req_id}")
-async def delete_requirement(request: Request, req_id: str) -> dict:
-    """逻辑删除（核心规则 20）。"""
-    _req(request, req_id, "requirement.edit")
-    request.app.state.requirements.delete(req_id, operator=_operator(request))
-    return {"deleted": req_id}
+async def delete_requirement(request: Request, req_id: str, force: bool = False) -> dict:
+    """逻辑删除（核心规则 20）：进回收站可恢复。
+
+    已发起测试设计（关联任务）的需求默认拦截，force=true 才删：任务与用例保留，任务上标记来源需求已删除；
+    依赖关系图中指向该需求的边一并清理。
+    """
+    item = _req(request, req_id, "requirement.edit")
+    linked = [t for t in item.get("tasks") or [] if request.app.state.tasks.get(t) is not None]
+    if linked and not force:
+        raise HTTPException(status_code=409, detail=f"该需求已发起 {len(linked)} 个测试设计任务；确认删除后任务与用例保留，仅失去来源追溯")
+    rstore = request.app.state.requirements
+    rstore.delete(req_id, operator=_operator(request))
+    tstore = request.app.state.tasks
+    for tid in linked:
+        rec = tstore.get(tid)
+        if rec is not None and rec.context is not None:
+            rec.context["requirement_deleted"] = True
+            tstore.save(rec)
+    alive = {r["req_id"] for r in rstore.list(item["project"])}
+    request.app.state.dependencies.prune(item["project"], "requirement", alive)
+    logger.info("需求已删除：{}「{}」（关联任务 {} 个）", req_id, item["title"], len(linked))
+    return {"deleted": req_id, "linked_tasks": len(linked)}
 
 
 class MergeBody(BaseModel):

@@ -316,3 +316,32 @@ async def test_需求原文只有链接_后台抓取解析入附件(client, monk
     mixed = (await client.post("/api/v1/requirements", data={"project": "P", "title": "混合", "text": "正文 https://wiki.example.com/pages/x"})).json()
     assert mixed["source_type"] == "mixed" and mixed["parsing"] == 1
     await _wait_parsed(client, mixed["req_id"])
+
+
+async def test_删除需求_关联任务拦截_强制删除后任务保留并标记_可恢复(client):
+    r = await _req(client)
+    rid = r["req_id"]
+    # 未关联任务：直接删除，进回收站；列表默认不显示，include_deleted 可见并可恢复
+    assert (await client.delete(f"/api/v1/requirements/{rid}")).status_code == 200
+    assert (await client.get(f"/api/v1/requirements/{rid}")).status_code == 404
+    listed = (await client.get("/api/v1/requirements?project=P")).json()["requirements"]
+    assert all(x["req_id"] != rid for x in listed)
+    listed = (await client.get("/api/v1/requirements?project=P&include_deleted=true")).json()["requirements"]
+    assert next(x for x in listed if x["req_id"] == rid)["deleted_at"]
+    assert (await client.post(f"/api/v1/requirements/{rid}/restore")).status_code == 200
+    # 发起测试设计后再删：默认 409，force 才删，任务保留并标记来源已删除
+    app.state.llm = StubLLM([ANALYSIS_REPLY])
+    await client.post(f"/api/v1/requirements/{rid}/analyze", json={})
+    for q in (await client.get(f"/api/v1/requirements/{rid}")).json()["questions"]:
+        await client.post(f"/api/v1/requirements/{rid}/questions/{q['q_id']}", json={"answer": "按需求"})
+    from tests.stubs import ANALYST_REPLY
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+    d = await client.post(f"/api/v1/requirements/{rid}/design", json={"confirm_points": False, "async_mode": False})
+    assert d.status_code == 200, d.text
+    task_id = d.json()["task_id"]
+    resp = await client.delete(f"/api/v1/requirements/{rid}")
+    assert resp.status_code == 409 and "1 个测试设计任务" in resp.json()["detail"]
+    resp = await client.delete(f"/api/v1/requirements/{rid}?force=true")
+    assert resp.status_code == 200 and resp.json()["linked_tasks"] == 1
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert t["context"]["requirement_id"] == rid and t["context"]["requirement_deleted"] is True
