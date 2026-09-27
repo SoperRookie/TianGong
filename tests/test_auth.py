@@ -365,6 +365,17 @@ async def test_项目开放模式_所有人可见可建可改_删除仅管理员
         assert (await client.post("/api/v1/requirements", headers=u2,
                                   data={"project": "管理员建的", "title": "需求", "text": "原文"})).status_code == 200
         assert (await client.get("/api/v1/auth/users/lookup", headers=u2)).status_code == 200
+        # 项目内数据的删除也仅系统管理员：需求 / 计划 / 版本 / 依赖 / 用例批量删除均 403，管理员可删
+        rid = (await client.post("/api/v1/requirements", headers=u1,
+                                 data={"project": "u1建的", "title": "待删", "text": "原文"})).json()["req_id"]
+        assert (await client.delete(f"/api/v1/requirements/{rid}", headers=u2)).status_code == 403
+        assert (await client.delete(f"/api/v1/requirements/{rid}", headers=admin)).status_code == 200
+        pid = (await client.post("/api/v1/plans", headers=u1, json={"name": "计划", "project": "u1建的"})).json()["plan_id"]
+        assert (await client.delete(f"/api/v1/plans/{pid}", headers=u1)).status_code == 403
+        assert (await client.delete(f"/api/v1/plans/{pid}", headers=admin)).status_code == 200
+        vid = (await client.post("/api/v1/projects/u1建的/versions", headers=u1, json={"name": "V1"})).json()["version_id"]
+        assert (await client.delete(f"/api/v1/projects/u1建的/versions/{vid}", headers=u2)).status_code == 403
+        assert (await client.delete(f"/api/v1/projects/u1建的/versions/{vid}", headers=admin)).status_code == 200
         # 删除项目仍仅系统管理员
         assert (await client.delete("/api/v1/projects/u1建的", headers=u1)).status_code == 403
         assert (await client.delete("/api/v1/projects/u1建的", headers=admin)).status_code == 200
