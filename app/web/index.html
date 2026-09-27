@@ -637,11 +637,13 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div style="flex:1"><label class="f">项目</label><select id="kbProject" onchange="fillKbModules(this.value)"></select></div>
       <div style="flex:1" id="kbModuleWrap"><label class="f">模块</label><select id="kbModule"><option value="">—</option></select></div>
     </div>
-    <label class="f">文件<span class="hint">（Word / PDF / Markdown / TXT；分类为测试用例库时用「导入历史用例」）</span></label>
+    <label class="f">文件<span class="hint">（普通文档：Word / PDF / Markdown / TXT；历史用例：Excel / CSV / XMind；历史缺陷：禅道 / Jira 导出的 Excel / CSV）</span></label>
     <input type="file" id="kbFiles" multiple>
     <label class="f">或粘贴文本</label><textarea id="kbText" rows="5" placeholder="规则 / 需求 / 术语…"></textarea>
     <label class="f">文本来源名<span class="hint">（可选）</span></label><input type="text" id="kbSource" placeholder="如 赔率规则.md">
-    <label class="check" style="margin-top:8px"><input type="checkbox" id="kbAsCases"> 文件是历史用例（Excel / CSV / XMind），导入测试用例库</label>
+    <label class="f" style="margin-top:8px">文件类型</label>
+    <select id="kbFileKind"><option value="doc">普通知识文档（按上方分类入库）</option><option value="cases">历史用例表（Excel / CSV / XMind）→ 测试用例库</option><option value="bugs">历史缺陷表（禅道 / Jira / TAPD 导出）→ 历史缺陷库</option></select>
+    <div class="hint" style="margin-top:4px">历史缺陷在需求拆解与查漏阶段注入，提示相关功能曾在哪些场景出过问题；表头自动识别标题 / 模块 / 严重程度 / 复现步骤 / 预期 / 实际 / 解决方案</div>
   </div>
   <div class="dlg-f"><button class="btn ghost" onclick="$('kbDlg').close()">取消</button><button class="btn" id="kbSaveBtn" onclick="saveKb()">入库</button></div>
 </dialog>
@@ -4617,17 +4619,17 @@ async function openKbDlg() {
   $('kbProject').innerHTML = projects.map(p=>`<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
   if (curProjectName && projects.some(p=>p.project===curProjectName)) $('kbProject').value = curProjectName;
   await fillKbModules($('kbProject').value);
-  $('kbFiles').value = ''; $('kbText').value = ''; $('kbSource').value = ''; $('kbAsCases').checked = false;
+  $('kbFiles').value = ''; $('kbText').value = ''; $('kbSource').value = ''; $('kbFileKind').value = 'doc';
   kbLevelChanged(); $('kbDlg').showModal();
 }
 async function saveKb() {
-  const fd = new FormData(); const asCases = $('kbAsCases').checked;
+  const fd = new FormData(); const kind = $('kbFileKind').value;
   fd.append('level', $('kbLevel').value); fd.append('project', $('kbProject').value || ''); fd.append('module', $('kbModule').value || '');
-  if (!asCases) { fd.append('category', $('kbCategory').value); fd.append('text', $('kbText').value); fd.append('source', $('kbSource').value || 'text'); }
+  if (kind === 'doc') { fd.append('category', $('kbCategory').value); fd.append('text', $('kbText').value); fd.append('source', $('kbSource').value || 'text'); }
   for (const f of $('kbFiles').files) fd.append('files', f);
-  if (!$('kbFiles').files.length && !$('kbText').value.trim()) return toast('请上传文件或粘贴文本', 'warn');
+  if (!$('kbFiles').files.length && !(kind === 'doc' && $('kbText').value.trim())) return toast(kind === 'doc' ? '请上传文件或粘贴文本' : '请选择要导入的表格文件', 'warn');
   const btn = $('kbSaveBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 切片向量化中';
-  try { const r = await api(asCases ? '/api/v1/knowledge/cases' : '/api/v1/knowledge/docs', {method:'POST', body: fd}); $('kbDlg').close(); toast(`已入库 ${r.ingested.length} 个文档`, 'ok'); renderKnowledge(); }
+  try { const r = await api({doc:'/api/v1/knowledge/docs', cases:'/api/v1/knowledge/cases', bugs:'/api/v1/knowledge/bugs'}[kind], {method:'POST', body: fd}); $('kbDlg').close(); toast(`已入库 ${r.ingested.length} 个文档`, 'ok'); renderKnowledge(); }
   catch (e) { toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '入库';
 }

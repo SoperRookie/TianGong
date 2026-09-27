@@ -1,12 +1,14 @@
-"""知识库数据模型（F-7-1/3/4）：三大分类 + 知识空间隔离。"""
+"""知识库数据模型（F-7-1/3/4）：三大分类 + 历史缺陷库 + 知识空间隔离。"""
 
 from pydantic import BaseModel, Field
 
-# 三大知识库分类（PRD 固定枚举，注入配额 5:3:2 按此分类计算）
+# 知识库分类：PRD 三大分类（注入配额 5:3:2）+ 历史缺陷库（2026-09 新增：禅道 / Jira 导出的缺陷表，
+# 拆解与查漏阶段注入，提示曾经出过问题的场景）
 CATEGORIES: dict[str, str] = {
     "test_cases": "测试用例库",
     "requirement_docs": "需求文档库",
     "business_rules": "玩法与业务规则库",
+    "bug_history": "历史缺陷库",
 }
 
 DEFAULT_SPACE = "default"   # 历史空间：视同公共知识（迁移期兼容）

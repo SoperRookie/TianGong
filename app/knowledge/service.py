@@ -52,6 +52,18 @@ class KnowledgeService:
         self.invalidate_cache()
         return record
 
+    async def ingest_bugs(self, path: str | Path, space: str = DEFAULT_SPACE, **meta) -> KnowledgeDoc:
+        """历史缺陷入库：禅道 / Jira 导出表 → 历史缺陷库，每条缺陷一个切片。"""
+        from app.knowledge.importers import parse_bugs_file, render_bug_chunk
+
+        path = Path(path)
+        chunks = [render_bug_chunk(b) for b in parse_bugs_file(path)]
+        vectors = await self.embedder.embed(chunks)
+        record = self._new_doc(source=path.name, category="bug_history", space=space, chunk_count=len(chunks), **meta)
+        self.store.upsert_chunks(record, chunks, vectors)
+        self.invalidate_cache()
+        return record
+
     async def _ingest(self, text: str, source: str, category: str, space: str, **meta) -> KnowledgeDoc:
         if category not in CATEGORIES:
             raise InvalidCategoryError(category)

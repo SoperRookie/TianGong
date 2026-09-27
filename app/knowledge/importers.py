@@ -1,4 +1,4 @@
-"""历史用例入库（F-7-2）：Excel/CSV/XMind 存量用例 → 测试用例库。
+"""历史用例 / 历史缺陷入库（F-7-2）：Excel/CSV/XMind 存量用例 → 测试用例库；禅道 / Jira 导出的缺陷表 → 历史缺陷库。
 
 与导出器（app/exporters）互为镜像：表格列名复用模板识别的启发式映射
 （app/templates/custom.py），XMind 按团队模板层级解析（优先级在节点 labels、
@@ -69,6 +69,116 @@ def parse_cases_file(path: str | Path) -> list[dict]:
     raise CaseImportError(f"不支持的用例文件格式 {suffix}，当前支持: .xlsx / .csv / .xmind / 禅道导出的 .xls")
 
 
+# ---- 历史缺陷（禅道 / Jira / TAPD 等导出表）----
+
+_BUG_PATTERNS: list[tuple[str, list[str]]] = [
+    ("bug_id", ["bug编号", "缺陷编号", "缺陷id", "bugid", "bug id", "问题编号", "issue key", "issuekey", "id", "编号", "key"]),
+    ("module", ["所属模块", "功能模块", "模块", "组件", "component", "所属产品"]),
+    ("title", ["bug标题", "缺陷标题", "缺陷名称", "标题", "概要", "summary", "主题", "问题描述", "问题"]),
+    ("severity", ["严重程度", "严重级别", "严重性", "severity", "级别"]),
+    ("priority", ["优先级", "priority"]),
+    ("bug_type", ["bug类型", "缺陷类型", "类型", "issue type", "issuetype"]),
+    ("steps", ["重现步骤", "复现步骤", "重现路径", "复现路径", "操作步骤", "步骤", "steps", "description", "描述"]),
+    ("expected", ["预期结果", "期望结果", "预期"]),
+    ("actual", ["实际结果", "实际情况", "实际"]),
+    ("status", ["bug状态", "缺陷状态", "状态", "status"]),
+    ("resolution", ["解决方案", "解决方式", "处理结果", "resolution", "根因", "原因分析"]),
+    ("version", ["影响版本", "所属版本", "版本", "affects version", "affectsversion", "发现版本"]),
+    ("created_at", ["创建日期", "创建时间", "created", "提交时间", "发现时间"]),
+    ("created_by", ["创建者", "由谁创建", "提交人", "报告人", "reporter", "创建人"]),
+]
+
+
+def _map_bug(header: str) -> str:
+    from app.templates.custom import _normalize
+
+    normalized = _normalize(header)
+    for canonical, patterns in _BUG_PATTERNS:
+        if any(normalized == _normalize(p) or (len(normalized) > 1 and _normalize(p) in normalized) for p in patterns):
+            return canonical
+    return "custom"
+
+
+def parse_bugs_file(path: str | Path) -> list[dict]:
+    """解析缺陷导出表（xlsx / csv / 禅道 HTML 伪 xls），返回规范化缺陷字典列表。"""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix not in (".xlsx", ".csv", ".xls", ".html", ".htm"):
+        raise CaseImportError(f"不支持的缺陷文件格式 {suffix}，当前支持: .xlsx / .csv / 禅道导出的 .xls")
+    return _rows_to_bugs(_table_rows(path), path.name)
+
+
+def _rows_to_bugs(rows: list[list[str]], filename: str) -> list[dict]:
+    rows = [r for r in rows if any(str(c).strip() for c in r)]
+    if not rows:
+        raise CaseImportError(f"{filename} 内容为空")
+    headers = [str(h).strip() for h in rows[0]]
+    mapping: dict[int, str] = {}
+    used: set[str] = set()
+    for i, h in enumerate(headers):
+        if not h:
+            continue
+        canonical = _map_bug(h)
+        if canonical != "custom" and canonical in used:
+            continue
+        mapping[i] = canonical
+        used.add(canonical)
+    if "title" not in used:
+        raise CaseImportError(f"{filename} 表头未识别到缺陷标题列（首行表头: {[h for h in headers if h]}）")
+    bugs = []
+    for row in rows[1:]:
+        record: dict = {}
+        for i, canonical in mapping.items():
+            if canonical == "custom" or i >= len(row):
+                continue
+            record[canonical] = _clean_cell(row[i])
+        if not record.get("title"):
+            continue
+        if record.get("module"):
+            record["module"] = record["module"].strip().strip("/").strip()
+        if record.get("priority"):
+            record["priority"] = normalize_priority(record["priority"])
+        bugs.append(record)
+    if not bugs:
+        raise CaseImportError(f"{filename} 未解析到任何缺陷数据行")
+    return bugs
+
+
+def render_bug_chunk(bug: dict) -> str:
+    """一条历史缺陷 → 一个检索切片：标题 + 模块 / 严重程度 / 版本 + 复现步骤 + 预期与实际 + 解决方案。"""
+    head = [f"模块：{bug.get('module', '')}"]
+    for key, label in (("severity", "严重程度"), ("priority", "优先级"), ("bug_type", "类型"),
+                       ("version", "版本"), ("status", "状态"), ("bug_id", "编号")):
+        if bug.get(key):
+            head.append(f"{label}：{bug[key]}")
+    lines = [f"【历史缺陷】{bug.get('title', '')}", " | ".join(head)]
+    if bug.get("steps"):
+        lines.append("复现步骤：\n" + bug["steps"].strip())
+    if bug.get("expected"):
+        lines.append(f"预期结果：{bug['expected']}")
+    if bug.get("actual"):
+        lines.append(f"实际结果：{bug['actual']}")
+    if bug.get("resolution"):
+        lines.append(f"解决方案 / 根因：{bug['resolution']}")
+    return "\n".join(lines)
+
+
+def _table_rows(path: Path) -> list[list[str]]:
+    """xlsx / csv / 禅道 HTML 伪 xls → 二维文本表（首行为表头），用例与缺陷导入共用。"""
+    suffix = path.suffix.lower()
+    if suffix == ".xlsx":
+        from app.parsers.base import check_zip_safety
+
+        check_zip_safety(path)
+        ws = load_workbook(path, read_only=True, data_only=True).active
+        return [[_clean_cell(c) for c in row] for row in ws.iter_rows(values_only=True)]
+    if suffix == ".csv":
+        from app.parsers.base import read_text_any
+
+        return [[_clean_cell(c) for c in row] for row in csv.reader(io.StringIO(read_text_any(path)))]
+    return _html_table_rows(path)
+
+
 def render_case_chunk(case: dict) -> str:
     """将一条用例渲染为知识切片文本（检索与注入的最小单元）。"""
     head_parts = [f"模块：{case.get('module', '')}"]
@@ -97,15 +207,14 @@ def render_case_chunk(case: dict) -> str:
 
 
 def _parse_xlsx(path: Path) -> list[dict]:
-    from app.parsers.base import check_zip_safety
-
-    check_zip_safety(path)
-    ws = load_workbook(path, read_only=True, data_only=True).active
-    rows = [[_clean_cell(c) for c in row] for row in ws.iter_rows(values_only=True)]
-    return _rows_to_cases(rows, path.name)
+    return _rows_to_cases(_table_rows(path), path.name)
 
 
 def _parse_html_table(path: Path) -> list[dict]:
+    return _rows_to_cases(_html_table_rows(path), path.name)
+
+
+def _html_table_rows(path: Path) -> list[list[str]]:
     """禅道旧版「导出 Excel」得到的 .xls 实为 HTML 表格：解析第一个 <table>，单元格内 <br /> 作换行。"""
     from html.parser import HTMLParser
 
@@ -163,15 +272,11 @@ def _parse_html_table(path: Path) -> list[dict]:
     parser.feed(text)
     if not parser.rows:
         raise CaseImportError(f"{path.name} 未找到表格内容（禅道导出请选择 xlsx 或 csv 格式）")
-    return _rows_to_cases(parser.rows, path.name)
+    return parser.rows
 
 
 def _parse_csv(path: Path) -> list[dict]:
-    from app.parsers.base import read_text_any
-
-    text = read_text_any(path)
-    rows = [[_clean_cell(c) for c in row] for row in csv.reader(io.StringIO(text))]
-    return _rows_to_cases(rows, path.name)
+    return _rows_to_cases(_table_rows(path), path.name)
 
 
 def _rows_to_cases(rows: list[list[str]], filename: str) -> list[dict]:

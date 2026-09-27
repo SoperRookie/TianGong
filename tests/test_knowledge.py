@@ -142,3 +142,50 @@ async def test_knowledge_api_roundtrip(service):
                 "/api/v1/knowledge/docs", data={"category": "bad", "text": "x"}
             )
             assert resp.status_code == 400
+
+
+# ---- 历史缺陷导入（禅道 / Jira 导出表 → 历史缺陷库）----
+
+
+def test_parse_bugs_file_禅道表头识别与切片渲染(tmp_path):
+    from app.knowledge.importers import CaseImportError, parse_bugs_file, render_bug_chunk
+
+    csv_path = tmp_path / "bugs.csv"
+    csv_path.write_text(
+        "Bug编号,所属模块,Bug标题,严重程度,优先级,重现步骤,预期结果,实际结果,解决方案,影响版本,Bug状态,由谁创建\n"
+        "1024,/登录/找回密码,验证码过期后仍可重置密码,2,3,\"1. 获取验证码<br />2. 等待 10 分钟<br />3. 提交\",提示验证码过期,重置成功,服务端校验过期时间,v1.2,已解决,张三\n"
+        ",,,,,,,,,,,\n"
+        "1025,登录,,1,1,x,,,,,,\n",  # 无标题行跳过
+        encoding="utf-8",
+    )
+    bugs = parse_bugs_file(csv_path)
+    assert len(bugs) == 1
+    b = bugs[0]
+    assert b["bug_id"] == "1024" and b["module"] == "登录/找回密码" and b["priority"] == "P2" and b["severity"] == "2"
+    assert b["steps"] == "1. 获取验证码\n2. 等待 10 分钟\n3. 提交" and b["created_by"] == "张三"
+    chunk = render_bug_chunk(b)
+    assert chunk.startswith("【历史缺陷】验证码过期后仍可重置密码") and "实际结果：重置成功" in chunk and "解决方案 / 根因" in chunk
+    # Jira 英文表头同样可识别
+    jira = tmp_path / "jira.csv"
+    jira.write_text("Issue key,Summary,Component,Severity,Description,Status\nQA-1,登录超时无提示,Auth,Major,步骤...,Done\n", encoding="utf-8")
+    assert parse_bugs_file(jira)[0]["title"] == "登录超时无提示"
+    bad = tmp_path / "bad.csv"
+    bad.write_text("a,b\n1,2\n", encoding="utf-8")
+    with pytest.raises(CaseImportError, match="缺陷标题列"):
+        parse_bugs_file(bad)
+    with pytest.raises(CaseImportError, match="不支持"):
+        parse_bugs_file(tmp_path / "x.docx")
+
+
+async def test_ingest_bugs_入历史缺陷库并进入拆解阶段注入(service, tmp_path):
+    from app.knowledge.schemas import CATEGORIES
+    from app.knowledge.steward import ANALYSIS_CATEGORIES, GENERATION_CATEGORIES, QUOTA_SHARES
+
+    assert "bug_history" in CATEGORIES and "bug_history" in ANALYSIS_CATEGORIES and "bug_history" not in GENERATION_CATEGORIES
+    assert set(QUOTA_SHARES) == set(CATEGORIES)
+    csv_path = tmp_path / "bugs.csv"
+    csv_path.write_text("缺陷标题,模块,复现步骤\n下注金额为负数时余额反而增加,下注,输入 -100 下注\n", encoding="utf-8")
+    doc = await service.ingest_bugs(csv_path, space="P", level="project", created_by="u")
+    assert doc.category == "bug_history" and doc.chunk_count == 1
+    hits = await service.search("下注金额", category="bug_history", space="P")
+    assert hits and "【历史缺陷】下注金额为负数时余额反而增加" in hits[0].text

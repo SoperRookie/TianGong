@@ -1114,6 +1114,36 @@ async def ingest_history_cases(
     return {"ingested": [d.model_dump() for d in docs]}
 
 
+@router.post("/api/v1/knowledge/bugs")
+async def ingest_history_bugs(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    level: str = Form(default="project"),
+    project: str = Form(default=""),
+    module: str = Form(default=""),
+) -> dict:
+    """历史缺陷入库：禅道 / Jira / TAPD 导出的缺陷表（xlsx / csv / 禅道 xls）导入历史缺陷库，拆解与查漏阶段注入。"""
+    import openai as _openai
+
+    from app.knowledge.importers import CaseImportError
+
+    settings = get_settings()
+    space, level, module = _knowledge_scope(request, level, project, module)
+    meta = {"level": level, "module": module, "created_by": _operator(request)}
+    service = _knowledge_service(request.app)
+    save_dir = request.app.state.tasks.output_dir / "_knowledge_uploads"
+    docs = []
+    try:
+        for upload in files:
+            saved = await _read_upload(upload, save_dir, settings.max_upload_size_mb * 1024 * 1024)
+            docs.append(await service.ingest_bugs(saved, space=space, **meta))
+    except CaseImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, _openai.APIConnectionError, _openai.APIStatusError) as e:
+        raise HTTPException(status_code=502, detail=f"Embedding 服务调用失败: {e}")
+    return {"ingested": [d.model_dump() for d in docs]}
+
+
 @router.get("/api/v1/knowledge/docs")
 async def list_knowledge_docs(
     request: Request, space: str | None = None, category: str | None = None, level: str | None = None,

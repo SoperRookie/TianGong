@@ -129,6 +129,7 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [(m, re.compile(p), k, a) for m
     ("POST", r"^/api/v1/plans/(?P<target>[^/]+)/runs/[^/]+/finish$", "exec", "结束执行轮次"),
     ("POST", r"^/api/v1/plans/(?P<target>[^/]+)/runs/[^/]+/attachments$", "exec", "上传执行附件"),
     ("POST", r"^/api/v1/knowledge/docs$", "knowledge", "上传知识文档"),
+    ("POST", r"^/api/v1/knowledge/bugs$", "knowledge", "导入历史缺陷"),
     ("DELETE", r"^/api/v1/knowledge/docs/(?P<target>[^/]+)$", "knowledge", "删除知识文档"),
     ("POST", r"^/api/v1/knowledge/cases$", "knowledge", "导入历史用例"),
     ("POST", r"^/api/v1/learning/analyze$", "ai", "修改习惯分析"),

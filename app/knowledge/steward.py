@@ -13,15 +13,16 @@ from pydantic import BaseModel, Field
 from app.knowledge.schemas import CATEGORIES, SearchHit
 from app.knowledge.service import KnowledgeService
 
-# 配额比例（PRD 锁定 5:3:2，不可改）
+# 配额比例（PRD 三大分类锁定 5:3:2；历史缺陷库另占 2 份，只在拆解 / 评审阶段与用例库同场竞争）
 QUOTA_SHARES: dict[str, int] = {
     "test_cases": 5,
     "requirement_docs": 3,
     "business_rules": 2,
+    "bug_history": 2,
 }
 
 # 拆解/评审阶段注入的分类 与 生成前注入的分类（PRD 上下文隔离约束）
-ANALYSIS_CATEGORIES = ("test_cases",)
+ANALYSIS_CATEGORIES = ("test_cases", "bug_history")
 GENERATION_CATEGORIES = ("requirement_docs", "business_rules")
 
 # 每类候选检索条数：足量候选是让渡的前提
@@ -57,7 +58,7 @@ class KnowledgeSteward:
         self.budget_chars = budget_chars
 
     async def for_analysis(self, query: str, space: str | None = None) -> KnowledgeBundle:
-        """拆解阶段：只注入测试用例库（历史用例覆盖度查漏），占总预算的 5/10。"""
+        """拆解阶段：注入测试用例库（历史用例覆盖度查漏）与历史缺陷库（曾出错的场景重点覆盖）。"""
         return await self._gather(query, ANALYSIS_CATEGORIES, space, stage="analysis")
 
     async def for_generation(self, query: str, space: str | None = None) -> KnowledgeBundle:
