@@ -1323,11 +1323,19 @@ async def _launch_task(
     request: Request, task_id: str, task_dir: Path, sources: list[str], requirement: str,
     template, model: str | None, reviewer_model: str | None, knowledge_space: str | None,
     project: str | None, confirm_points: bool, async_mode: bool,
-    extra_context: dict | None = None,
+    extra_context: dict | None = None, resume: bool = False,
 ) -> dict:
-    """任务启动（拆解确认 / 直接生成，同步或后台）；需求中心发起测试设计复用此函数。"""
+    """任务启动（拆解确认 / 直接生成，同步或后台）；需求中心发起测试设计复用此函数。
+
+    resume=True 为断点续跑：沿用记录里的检查点（已拆解 / 已生成模块），只补缺失部分。
+    """
     settings = get_settings()
     store = request.app.state.tasks
+    if not resume:
+        _rec0 = store.get(task_id)
+        if _rec0 is not None and _rec0.checkpoint:
+            _rec0.checkpoint = None
+            store.save(_rec0)
     _ai_ctx(request, project=project, requirement_id=(extra_context or {}).get("requirement_id"))
     from app.llm.calllog import set_ai_context
     set_ai_context(task_id=task_id)
@@ -1435,6 +1443,8 @@ async def _launch_task(
         # 规则注入（需求三十九）：已确认生效的团队/项目规则
         rule_notes, rule_snapshot = _gather_rules(request.app, project)
         store.set_progress(task_id, progress="analyzing")
+        _rec = store.get(task_id)
+        checkpoint = (_rec.checkpoint if (resume and _rec is not None) else None) or None
         result = await run_generation(
             requirement,
             llm=request.app.state.llm,
@@ -1446,6 +1456,9 @@ async def _launch_task(
             memory_notes=memory_notes,
             rule_notes=rule_notes,
             on_analyzed=lambda: store.set_progress(task_id, progress="generating_reviewing"),
+            checkpoint=checkpoint,
+            on_analysis=lambda a: _save_checkpoint(store, task_id, analysis=a),
+            on_module_done=lambda m, r: _save_checkpoint(store, task_id, module=(m, r)),
         )
         store.set_progress(task_id, progress="exporting")
         return _finalize_task(
@@ -1471,6 +1484,60 @@ async def _launch_task(
     except Exception as e:  # 未预期异常：标记失败而不是永远 running
         _mark_failed(store, task_id, e, sources, task_context, creator)
         raise
+
+
+def _save_checkpoint(store, task_id: str, analysis: dict | None = None, module: tuple | None = None) -> None:
+    """生成过程中的检查点落盘：拆解结果 / 单个模块的生成结果；失败后据此断点续跑。"""
+    record = store.get(task_id)
+    if record is None:
+        return
+    ck = dict(record.checkpoint or {})
+    if analysis is not None:
+        ck["analysis"] = analysis
+    if module is not None:
+        name, result = module
+        mods = dict(ck.get("modules") or {})
+        mods[name] = result.model_dump() if hasattr(result, "model_dump") else result
+        ck["modules"] = mods
+    ck["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record.checkpoint = ck
+    store.save(record)
+
+
+_QUOTA_HINTS = ("insufficient_quota", "insufficient quota", "billing", "quota", "余额", "欠费", "credit", "hard limit",
+                "exceeded your current", "402", "payment required", "balance")
+
+
+def _error_kind(error: str | None) -> str | None:
+    """失败原因分类：quota（欠费 / 配额用尽）、auth（密钥）、model（模型不可用）、cancelled、其他。"""
+    if not error:
+        return None
+    e = error.lower()
+    if any(h in e for h in _QUOTA_HINTS):
+        return "quota"
+    if "取消" in error:
+        return "cancelled"
+    if "密钥" in error or "api key" in e or "401" in e or "invalid_api_key" in e:
+        return "auth"
+    if "模型" in error or "全链路失败" in error or "429" in e or "rate limit" in e or "timeout" in e or "timed out" in e:
+        return "model"
+    return "other"
+
+
+def _resume_info(record: TaskRecord) -> dict:
+    """断点续跑摘要：失败任务 = 检查点里已完成的模块；完成任务 = 生成失败可补全的模块。"""
+    ctx = record.context or {}
+    ck = record.checkpoint or {}
+    done = sorted((ck.get("modules") or {}).keys())
+    failed = list(((record.result or {}).get("failed_modules") or []))
+    if record.status == "failed":
+        resumable = bool((ctx.get("requirement") or "").strip())
+        return {"resumable": resumable, "mode": "resume" if (done or ck.get("analysis") or ctx.get("resume_stage") == "confirmed") else "retry",
+                "kept_modules": done, "analysis_kept": bool(ck.get("analysis") or ctx.get("resume_stage") == "confirmed"),
+                "failed_modules": []}
+    if record.status == "completed" and failed:
+        return {"resumable": True, "mode": "fill", "kept_modules": [], "analysis_kept": True, "failed_modules": failed}
+    return {"resumable": False, "mode": None, "kept_modules": [], "analysis_kept": False, "failed_modules": []}
 
 
 def _queued_record(store, task_id: str, sources: list[str], context: dict, creator: str) -> TaskRecord:
@@ -1531,6 +1598,7 @@ def _finalize_task(
     record.status = "completed"
     record.progress = None
     record.error = None
+    record.checkpoint = None  # 断点续跑检查点只在失败期间保留
     record.sources = sources
     record.result = result.model_dump()
     record.files = files_map
@@ -1634,10 +1702,23 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
         test_points = confirmable_points((record.analysis or {}).get("test_points", []))
     if not test_points:
         raise HTTPException(status_code=400, detail="测试点为空，无法生成（请先通过至少一条测试点）")
-    template = request.app.state.templates.get(ctx.get("template_id"))
-
     # 确认即锁定：状态先置 running（重复点击/重复请求直接 409，避免并行重复生成）
     store.set_progress(task_id, status="running", progress="generating_reviewing")
+    record.checkpoint = None  # 全新确认：不沿用旧检查点
+    store.save(record)
+    return await _generate_confirmed(request, task_id, test_points)
+
+
+async def _generate_confirmed(request: Request, task_id: str, test_points: list[dict], resume: bool = False) -> dict:
+    """已确认测试点 → 生成（多模块并行）。resume=True 时复用检查点里已生成的模块，只补缺失模块。
+
+    模型全链路失败（如欠费）时任务置失败但保留检查点，「继续完成」从断点恢复。
+    """
+    store = request.app.state.tasks
+    record = store.get(task_id)
+    ctx = record.context or {}
+    template = request.app.state.templates.get(ctx.get("template_id"))
+    checkpoint = (record.checkpoint if resume else None) or None
 
     # 生成前注入需求/规则库；历史用例注入评审 Agent（知识管家 F-7-6）
     knowledge, snapshot = await _gather_knowledge(
@@ -1659,6 +1740,8 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
             knowledge_cases=knowledge["cases"],
             memory_notes=memory_notes,
             rule_notes=rule_notes,
+            checkpoint=checkpoint,
+            on_module_done=lambda m, r: _save_checkpoint(store, task_id, module=(m, r)),
         )
     except (MissingAPIKeyError, LLMOutputError) as e:
         # 可重试的故障：恢复待确认状态，用户可再次点击确认
@@ -1668,8 +1751,9 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
         store.set_progress(task_id, status="awaiting_confirmation", progress=None)
         raise HTTPException(status_code=400, detail=str(e))
     except AllModelsFailedError as e:
-        record.status = "failed"
-        record.error = str(e)
+        record = store.get(task_id)
+        record.status, record.error, record.progress = "failed", str(e)[:1000], None
+        record.context = {**(record.context or {}), "resume_stage": "confirmed"}  # 续跑时不再重新拆解
         store.save(record)
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
@@ -1685,6 +1769,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     # 保留拆解阶段留痕
     saved = store.get(task_id)
     saved.analysis = record.analysis
+    saved.context = {k: v for k, v in (saved.context or {}).items() if k != "resume_stage"}
     store.save(saved)
     return response
 
@@ -5441,30 +5526,88 @@ async def cancel_task(request: Request, task_id: str) -> dict:
 
 @router.post("/api/v1/tasks/{task_id}/retry")
 async def retry_task(request: Request, task_id: str) -> dict:
-    """失败任务重试（15 章）：沿用原需求文本/模型/模板/项目，后台重新执行。"""
+    """失败任务「继续完成」（断点续跑）：沿用原需求 / 模型 / 模板 / 项目，复用检查点里已完成的拆解与模块，只补缺失部分。
+
+    模型欠费 / 配额用尽等导致中途失败的任务，充值或换模型后点此即可从断点恢复；已完成但有模块生成失败的任务同样可补全。
+    """
+    from app.agents.service import GenerationResult
+    from app.tasks.points import confirmable_points
+
+    store = request.app.state.tasks
     record = _task(request, task_id, "point.ai")
-    if record.status != "failed":
-        raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，只有失败任务可重试")
     ctx = record.context or {}
+    info = _resume_info(record)
+    if record.status not in ("failed", "completed") or not info["resumable"]:
+        raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，没有可继续的内容")
     if not (ctx.get("requirement") or "").strip():
-        raise HTTPException(status_code=409, detail="任务缺少需求文本，无法重试（请重新创建）")
+        raise HTTPException(status_code=409, detail="任务缺少需求文本，无法继续（请重新创建）")
     template = request.app.state.templates.get(ctx.get("template_id"))
     if template is None:
-        raise HTTPException(status_code=409, detail="任务使用的模板已不存在，无法重试")
-    task_dir = request.app.state.tasks.output_dir / task_id
+        raise HTTPException(status_code=409, detail="任务使用的模板已不存在，无法继续")
+    task_dir = store.output_dir / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     record.error = None
-    request.app.state.tasks.save(record)
-    extra = {k: ctx[k] for k in ("requirement_id", "requirement_title", "module_id", "version_id") if k in ctx}
-    extra["retried_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    extra["retry_count"] = int(ctx.get("retry_count") or 0) + 1
+    ctx = {**ctx, "retried_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "retry_count": int(ctx.get("retry_count") or 0) + 1}
+    record.context = ctx
+    store.save(record)
+
+    # 情形 A：已完成但有模块生成失败 → 把现有用例按模块装入检查点，只重新生成失败模块并合并
+    if info["mode"] == "fill":
+        from app.templates import TestCase
+
+        by_module: dict[str, list[dict]] = {}
+        for c in (record.result or {}).get("cases") or []:
+            by_module.setdefault(str(c.get("module", "")), []).append(c)
+        modules = {}
+        for name, cases in by_module.items():
+            if name in info["failed_modules"]:
+                continue
+            modules[name] = GenerationResult(cases=[TestCase.model_validate(c) for c in cases], passed=True,
+                                             review_rounds=0).model_dump()
+        record.checkpoint = {"modules": modules, "updated_at": ctx["retried_at"]}
+        store.save(record)
+        points = confirmable_points((record.analysis or {}).get("test_points", [])) if record.analysis else []
+        points = points or (record.result or {}).get("test_points") or []
+        if not points:
+            raise HTTPException(status_code=409, detail="任务没有可用的测试点，无法补全")
+        store.set_progress(task_id, status="running", progress="generating_reviewing")
+        _ai_ctx(request, record)
+
+        async def _fill() -> None:
+            await _generate_confirmed(request, task_id, points, resume=True)
+
+        store.submit(task_id, _fill)
+        logger.info("任务 {} 补全失败模块：{}（保留 {} 个模块）", task_id, info["failed_modules"], len(modules))
+        return {"task_id": task_id, "status": "queued", "mode": "fill", "failed_modules": info["failed_modules"],
+                "poll_url": f"/api/v1/tasks/{task_id}"}
+
+    # 情形 B：确认测试点之后失败 → 直接从已确认的测试点续生成，不重新拆解
+    if ctx.get("resume_stage") == "confirmed" and (record.analysis or {}).get("test_points"):
+        points = confirmable_points(record.analysis["test_points"])
+        if not points:
+            raise HTTPException(status_code=409, detail="没有已通过的测试点，无法继续")
+        store.set_progress(task_id, status="running", progress="generating_reviewing")
+        _ai_ctx(request, record)
+
+        async def _resume() -> None:
+            await _generate_confirmed(request, task_id, points, resume=True)
+
+        store.submit(task_id, _resume)
+        logger.info("任务 {} 从已确认测试点续跑（已完成模块 {}）", task_id, info["kept_modules"])
+        return {"task_id": task_id, "status": "queued", "mode": "resume", "kept_modules": info["kept_modules"],
+                "poll_url": f"/api/v1/tasks/{task_id}"}
+
+    # 情形 C：直接生成流程失败 → 复用检查点（已拆解 / 已生成模块）重新启动
+    extra = {k: ctx[k] for k in ("requirement_id", "requirement_title", "module_id", "version_id",
+                                 "retried_at", "retry_count") if k in ctx}
     resp = await _launch_task(
         request, task_id, task_dir, record.sources or ["text"], ctx["requirement"], template,
         ctx.get("model"), ctx.get("reviewer_model"), ctx.get("knowledge_space"), ctx.get("project"),
-        bool(ctx.get("confirm_points")), True, extra_context=extra,
+        bool(ctx.get("confirm_points")), True, extra_context=extra, resume=True,
     )
-    logger.info("任务 {} 第 {} 次重试已提交", task_id, extra["retry_count"])
-    return resp
+    logger.info("任务 {} 第 {} 次继续（模式 {}，已完成模块 {}）", task_id, ctx["retry_count"], info["mode"], info["kept_modules"])
+    return {**resp, "mode": info["mode"], "kept_modules": info["kept_modules"]}
 
 
 # ---- 我的工作台 / 全局搜索 / 覆盖追溯视图（18 章 / 21 章）----
@@ -5672,7 +5815,9 @@ def _task_partial(record: TaskRecord) -> list[str]:
             notes.append("评审未收敛（超轮次强制出稿）")
         if r.get("unresolved"):
             notes.append(f"{len(r['unresolved'])} 个评审问题未解决")
-        if any("失败" in str(t.get("action", "")) or t.get("error") for t in r.get("trace", [])):
+        if r.get("failed_modules"):
+            notes.append(f"{len(r['failed_modules'])} 个模块生成失败（可继续完成补全）")
+        elif any("失败" in str(t.get("action", "")) or t.get("error") for t in r.get("trace", [])):
             notes.append("部分分片失败")
     return notes
 
@@ -5694,8 +5839,9 @@ async def ai_tasks(request: Request, status: str = "", project: str = "", mine: 
             "project": ctx.get("project"), "requirement_id": ctx.get("requirement_id"),
             "requirement_title": ctx.get("requirement_title"), "model": ctx.get("model"),
             "created_by": r.created_by, "created_at": r.created_at, "sources": r.sources,
-            "error": r.error, "partial": _task_partial(r), "prompt_versions": r.prompt_versions,
-            "retry_count": int(ctx.get("retry_count") or 0), "retryable": r.status == "failed" and bool((ctx.get("requirement") or "").strip()),
+            "error": r.error, "error_kind": _error_kind(r.error), "partial": _task_partial(r), "prompt_versions": r.prompt_versions,
+            "retry_count": int(ctx.get("retry_count") or 0), "retryable": _resume_info(r)["resumable"],
+            "resume": _resume_info(r),
             "case_count": len((r.result or {}).get("cases", [])),
         })
         if len(out) >= limit:
@@ -5846,7 +5992,8 @@ async def archive_prompt_version(request: Request, key: str, version_no: int) ->
 @router.get("/api/v1/tasks/{task_id}")
 async def get_task(request: Request, task_id: str) -> dict:
     record = _task(request, task_id, "case.view")
-    return {**record.model_dump(), "editing": _active_editing(request.app, task_id)}
+    return {**record.model_dump(exclude={"checkpoint"}), "editing": _active_editing(request.app, task_id),
+            "error_kind": _error_kind(record.error), "resume": _resume_info(record)}
 
 
 # ---- 编辑占用提示（完整需求 11 章）：内存瞬态状态，重启即清（占用本就随会话失效）----

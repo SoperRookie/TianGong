@@ -1,9 +1,11 @@
 """M5-A：Prompt 版本化（全部 Prompt 纳管）、AI 调用日志与任务 Prompt 版本留痕、AI 任务中心与失败重试。"""
 
+import json
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 
+from app.llm.client import AllModelsFailedError
 from app.main import app
 from tests.stubs import ANALYST_REPLY, StubLLM, generator_reply, make_case, review_reply
 
@@ -139,3 +141,117 @@ async def test_用量统计_按单价折算费用与月预算余额(client):
     # 预算随模型配置读写
     cfg = (await client.get("/api/v1/models/config")).json()
     assert cfg["monthly_budget_usd"] == 100 and next(m for m in cfg["models"] if m["name"] == "paid")["input_price"] == 2
+
+
+# ---- 断点续跑：模型欠费等中途失败的任务继续完成 ----
+
+
+class _RoutingLLM:
+    """按 Prompt 角色路由回复：拆解返回两个模块；生成阶段对 fail_modules 中的模块抛全链路失败（模拟欠费）。"""
+
+    def __init__(self, fail_modules=()):
+        self.fail_modules = set(fail_modules)
+        self.calls = {"analyst": 0, "generator": 0, "reviewer": 0}
+
+    async def chat(self, messages, model=None, **kw):
+        from app.llm.calllog import record_call
+        from app.llm.client import ChatResult
+        from app.llm.schemas import UsageInfo
+        from app.prompts import prompt_text
+
+        system, user = messages[0]["content"], messages[-1]["content"]
+        if system.startswith(prompt_text("analyst")[:60]):
+            self.calls["analyst"] += 1
+            content = json.dumps({"modules": [{"module": "登录", "points": ["正常登录"]}, {"module": "找回密码", "points": ["验证码找回"]}],
+                                  "blind_spots": []}, ensure_ascii=False)
+        elif system.startswith(prompt_text("reviewer")[:60]):
+            self.calls["reviewer"] += 1
+            content = review_reply(True)
+        else:
+            self.calls["generator"] += 1
+            module = "找回密码" if "验证码找回" in user else "登录"  # 按本模块测试点路由（需求原文两个模块都含「找回密码」）
+            if module in self.fail_modules:
+                err = AllModelsFailedError("模型调用失败: Error code: 429 - insufficient_quota: You exceeded your current quota")
+                record_call(messages, None, error=err, model_name="gpt", provider="openai")
+                raise err
+            content = generator_reply(make_case(case_id=f"TC-{module}-001", module=module, title=f"{module}用例"))
+        result = ChatResult(content=content, model_name="gpt", provider="openai", usage=UsageInfo(), elapsed_ms=1)
+        record_call(messages, result)
+        return result
+
+
+async def _wait_done(client, task_id):
+    import asyncio
+    for _ in range(100):
+        await asyncio.sleep(0.03)
+        t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+        if t["status"] in ("completed", "failed"):
+            return t
+    raise AssertionError(f"任务未结束: {t['status']}")
+
+
+async def test_直接生成_一个模块欠费失败_补全失败模块并保留已生成用例(client):
+    llm = _RoutingLLM(fail_modules={"找回密码"})
+    app.state.llm = llm
+    resp = await client.post("/api/v1/tasks", data={"text": "登录与找回密码需求", "project": "P", "async_mode": "true"})
+    assert resp.status_code == 200
+    task_id = resp.json()["task_id"]
+    t = await _wait_done(client, task_id)
+    # 一个模块失败不阻塞交付：已完成模块出稿，失败模块明示并可补全
+    assert t["status"] == "completed" and t["result"]["failed_modules"] == ["找回密码"]
+    assert [c["module"] for c in t["result"]["cases"]] == ["登录"] and t["resume"]["mode"] == "fill"
+    assert any("找回密码" in u["problem"] and "继续完成" in u["problem"] for u in t["result"]["unresolved"])
+    listed = next(x for x in (await client.get("/api/v1/ai/tasks")).json()["tasks"] if x["task_id"] == task_id)
+    assert listed["retryable"] and any("模块生成失败" in n for n in listed["partial"])
+    login_uid = t["result"]["cases"][0]["uid"]
+    # 充值后补全：只生成失败模块，拆解不重做，已生成用例（uid）保留
+    llm.fail_modules = set()
+    before = dict(llm.calls)
+    r = (await client.post(f"/api/v1/tasks/{task_id}/retry")).json()
+    assert r["mode"] == "fill" and r["failed_modules"] == ["找回密码"]
+    t = await _wait_done(client, task_id)
+    assert t["status"] == "completed" and t["result"]["failed_modules"] == [] and t["resume"]["resumable"] is False
+    assert sorted(c["module"] for c in t["result"]["cases"]) == ["找回密码", "登录"]
+    assert next(c for c in t["result"]["cases"] if c["module"] == "登录")["uid"] == login_uid
+    assert llm.calls["analyst"] == before["analyst"] and llm.calls["generator"] == before["generator"] + 1
+    assert t["context"]["retry_count"] == 1 and t["checkpoint"] is None if "checkpoint" in t else True
+
+
+async def test_确认测试点后欠费失败_继续完成不重新拆解(client):
+    llm = _RoutingLLM()
+    app.state.llm = llm
+    resp = await client.post("/api/v1/tasks", data={"text": "登录与找回密码需求", "project": "P", "confirm_points": "true"})
+    assert resp.status_code == 200 and resp.json()["status"] == "awaiting_confirmation"
+    task_id = resp.json()["task_id"]
+    # 确认后两个模块都欠费失败 → 任务失败，错误分类为 quota，可从断点继续
+    llm.fail_modules = {"登录", "找回密码"}
+    resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={})
+    assert resp.status_code == 502
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert t["status"] == "failed" and t["error_kind"] == "quota" and t["resume"]["mode"] == "resume" and t["resume"]["analysis_kept"]
+    # 只有一个模块恢复：继续后另一个模块仍失败 → 完成但标注失败模块，成功模块进入检查点不重做
+    llm.fail_modules = {"找回密码"}
+    analyst_calls = llm.calls["analyst"]
+    r = (await client.post(f"/api/v1/tasks/{task_id}/retry")).json()
+    assert r["mode"] == "resume"
+    t = await _wait_done(client, task_id)
+    assert t["status"] == "completed" and t["result"]["failed_modules"] == ["找回密码"] and llm.calls["analyst"] == analyst_calls
+    assert t["analysis"]["test_points"]  # 拆解留痕保留
+    # 再补全剩余模块
+    llm.fail_modules = set()
+    gen_calls = llm.calls["generator"]
+    assert (await client.post(f"/api/v1/tasks/{task_id}/retry")).json()["mode"] == "fill"
+    t = await _wait_done(client, task_id)
+    assert t["status"] == "completed" and not t["result"]["failed_modules"] and llm.calls["generator"] == gen_calls + 1
+    assert sorted(c["module"] for c in t["result"]["cases"]) == ["找回密码", "登录"]
+
+
+def test_失败原因分类():
+    from app.api.routes import _error_kind
+
+    assert _error_kind("Error code: 429 - insufficient_quota") == "quota"
+    assert _error_kind("账户余额不足") == "quota"
+    assert _error_kind("模型 gpt 的密钥环境变量 OPENAI_API_KEY 未设置") == "auth"
+    assert _error_kind("模型调用失败（已尝试 2 次，链路: a → b）: 全链路失败") == "model"
+    assert _error_kind("任务已被用户取消") == "cancelled"
+    assert _error_kind(None) is None
