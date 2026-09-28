@@ -35,12 +35,17 @@ async def test_all_cases_filters_and_meta(client):
     )
     await _task(client, make_case(case_id="TC-支付-001", module="支付", title="验证支付成功"),
                 project="另一项目")
+    # 用例中心只收录审核通过的正式用例：未通过审核前不出现
+    assert (await client.get("/api/v1/cases")).json()["total"] == 0
     await client.post(f"/api/v1/tasks/{task_id}/review",
-                      json={"items": [{"case_id": "TC-登录-001", "action": "accept"}]})
+                      json={"items": [{"case_id": c, "action": "accept"} for c in ("TC-登录-001", "TC-登录-002", "TC-下单-001")]})
+    other = (await client.get("/api/v1/tasks", params={"limit": 10})).json()["tasks"]
+    other_id = next(t["task_id"] for t in other if t["task_id"] != task_id)
+    await client.post(f"/api/v1/tasks/{other_id}/review", json={"items": [{"case_id": "TC-支付-001", "action": "accept"}]})
 
     data = (await client.get("/api/v1/cases")).json()
     assert data["total"] == 4 and data["page"] == 1 and data["page_size"] == 20
-    assert data["pages"] == 1 and len(data["cases"]) == 4
+    assert data["pages"] == 1 and len(data["cases"]) == 4 and all(c["review"] == "approved" for c in data["cases"])
     assert set(data["modules"]) == {"登录", "下单", "支付"}
     assert {c["project"] for c in data["cases"]} == {"全库", "另一项目"}
 
@@ -51,14 +56,21 @@ async def test_all_cases_filters_and_meta(client):
     by_pri = (await client.get("/api/v1/cases", params={"priority": "P2"})).json()
     assert [c["case_id"] for c in by_pri["cases"]] == ["TC-登录-002"]
     approved = (await client.get("/api/v1/cases", params={"review": "approved"})).json()
-    assert [c["case_id"] for c in approved["cases"]] == ["TC-登录-001"]
+    assert approved["total"] == 4
     by_kw = (await client.get("/api/v1/cases", params={"keyword": "主流程"})).json()
     assert [c["case_id"] for c in by_kw["cases"]] == ["TC-下单-001"]
+    # 解锁回到待审核后退出用例中心；其他阶段筛选一律为空
+    r = await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": "TC-登录-002", "action": "unlock"}]})
+    assert r.status_code == 200, r.text
+    assert (await client.get("/api/v1/cases")).json()["total"] == 3
+    assert (await client.get("/api/v1/cases", params={"review": "pending"})).json()["total"] == 0
 
 
 async def test_all_cases_pagination(client):
     cases = [make_case(case_id=f"TC-登录-{i:03d}", title=f"场景 {i}") for i in range(1, 26)]
-    await _task(client, *cases)
+    task_id = await _task(client, *cases)
+    await client.post(f"/api/v1/tasks/{task_id}/review",
+                      json={"items": [{"case_id": c["case_id"], "action": "accept"} for c in cases]})
 
     # 非法页大小拒绝；合法档位 20/50/100/200
     assert (await client.get("/api/v1/cases", params={"page_size": 30})).status_code == 400

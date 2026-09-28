@@ -138,10 +138,12 @@ async def test_AI分析_待确认事项_确认后才能测试设计_追溯(clien
     assert detail["status"] == "designing" and detail["tasks"] == [task_id]
     t = detail["trace"]
     assert t["totals"]["cases"] == 1 and t["coverage"] == {"has_points": True, "has_cases": True, "in_plan": False, "executed": False}
+    # 用例中心只收录正式用例：通过前不出现，通过后带需求与来源测试点追溯
+    assert (await client.get("/api/v1/cases", params={"project": "P"})).json()["cases"] == []
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": case["case_id"], "action": "accept"}]})
     rows = (await client.get("/api/v1/cases", params={"project": "P"})).json()["cases"]
     assert rows[0]["requirement_id"] == rid and rows[0]["point_ids"] == ["TP001"]
     # 用例通过并入计划后覆盖识别更新
-    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": case["case_id"], "action": "accept"}]})
     plan = (await client.post("/api/v1/plans", json={"name": "冒烟", "project": "P"})).json()
     await client.post(f"/api/v1/plans/{plan['plan_id']}/cases", json={"task_id": task_id})
     t = (await client.get(f"/api/v1/requirements/{rid}")).json()["trace"]
