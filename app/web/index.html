@@ -1834,11 +1834,17 @@ function renderProjMenu(q) {
   const recentNames = prefs.recent.map(r => r.project);
   const recents = recentNames.map(n => all.find(p => p.project === n)).filter(p => p && !p.favorite && match(p)).slice(0, 5);
   const rest = all.filter(p => !p.favorite && !recents.includes(p) && match(p));
+  const byLine = new Map();
+  for (const p of rest) { const k = p.business_line || ''; if (!byLine.has(k)) byLine.set(k, []); byLine.get(k).push(p); }
+  const lineKeys = [...byLine.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, 'zh'));
+  const restHtml = byLine.size > 1 || (byLine.size === 1 && lineKeys[0])
+    ? lineKeys.map(k => `<div class="grp">${k ? esc(k) : '未分业务线'}</div>${byLine.get(k).map(item).join('')}`).join('')
+    : `<div class="grp">${favs.length||recents.length?'其他项目':'项目'}</div>${rest.map(item).join('')}`;
   const listHtml = `<div class="list">
       <div class="it ${!curProjectName?'on':''}" onclick="setCurrentProject('')"><span class="star"></span><span>全部项目</span><span class="role">不限定</span></div>
       ${favs.length?`<div class="grp">收藏</div>${favs.map(item).join('')}`:''}
       ${recents.length?`<div class="grp">最近访问</div>${recents.map(item).join('')}`:''}
-      ${rest.length?`<div class="grp">${favs.length||recents.length?'其他项目':'项目'}</div>${rest.map(item).join('')}`:''}
+      ${rest.length?restHtml:''}
       ${!all.length?'<div class="empty" style="padding:14px">暂无可访问的项目</div>':''}
     </div>`;
   if ($('cpSearch') && $('cpList')) { $('cpList').innerHTML = listHtml; return; }  // 输入中只重绘列表，输入框不重建
@@ -5083,7 +5089,7 @@ async function drawerNewProject() {
   } catch (e) { toast(e.message, 'err'); }
 }
 let curProject = null, projTab = 'overview';
-let _projectsCache = [], _businessLines = [], projListLine = '', _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
+let _projectsCache = [], _businessLines = [], projListLine = '', projGroupByLine = true, _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
 const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved'], draft:['草稿','candidate']};
 let _editingProject = null;
 async function fillUserNames() {
@@ -5092,6 +5098,16 @@ async function fillUserNames() {
     const users = (await api('/api/v1/auth/users/lookup')).users;
     $('userNames').innerHTML = users.map(u => `<option value="${esc(u.username)}">${esc(u.name||'')}</option>`).join('');
   } catch (e) {}
+}
+async function renameBusinessLine(name) {
+  const v = await askInput('重命名业务线', `「${name}」改为（该业务线下所有项目一起更新）`, name);
+  if (v === null || v === undefined || v === name) return;
+  try {
+    const r = await api('/api/v1/business-lines/' + encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({new_name: v})});
+    toast(`业务线已改为「${v}」，${r.projects} 个项目已更新`, 'ok');
+    if (projListLine === name) projListLine = v;
+    await getProjects(true); renderProjects();
+  } catch (e) { toast(e.message, 'err'); }
 }
 function openProjDlg(name) {
   _editingProject = name || null;
@@ -5179,7 +5195,7 @@ async function renderProjects() {
   const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus) && (!projListLine || p.business_line === projListLine)
     && (!kw || p.project.toLowerCase().includes(kw) || (p.code||'').toLowerCase().includes(kw) || (p.owner||'').toLowerCase().includes(kw)));
   const STATUS_CLS = {active:'approved', paused:'candidate', archived:'pending'};
-  const rows = shown.map(p => {
+  const rowOf = p => {
     const reviewed = p.approved + p.rejected + p.pending;
     const canEdit = !p.builtin && can(p.project, 'project.edit');
     return `<tr class="rowlink" onclick="openProject(${jsq(p.project)})">
@@ -5204,11 +5220,29 @@ async function renderProjects() {
         ${isSysAdmin()?`<button class="ibtn bad" title="删除（仅空项目）" onclick="deleteProject(${jsq(p.project)})">${IC.trash}</button>`:''}
       </div>`}</td>
     </tr>`;
-  }).join('');
+  };
+  let rows;
+  if (projGroupByLine) {
+    // 业务线维度：同一业务线的项目归在一起，未分业务线的排最后；组头显示项目数与任务 / 用例合计
+    const groups = new Map();
+    for (const p of shown) { const k = p.builtin ? '' : (p.business_line || ''); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); }
+    const keys = [...groups.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, 'zh'));
+    const canRename = isSysAdmin() || openProjects();
+    rows = keys.map(k => {
+      const ps = groups.get(k);
+      const tasks = ps.reduce((a, p) => a + (p.tasks || 0), 0), cases = ps.reduce((a, p) => a + (p.cases || 0), 0);
+      const head = `<tr class="module-head"><td colspan="12"><span style="font-weight:600">${k ? esc(k) : '未分业务线'}</span>
+        <span class="hint" style="margin-left:8px">${ps.length} 个项目 · ${tasks} 个任务 · ${cases} 条用例</span>
+        ${k && canRename ? `<button class="btn ghost sm" style="margin-left:10px" onclick="event.stopPropagation();renameBusinessLine(${jsq(k)})">重命名</button>` : ''}
+        ${!k && canRename && ps.some(p=>!p.builtin) ? '<span class="hint" style="margin-left:10px">在「编辑项目」里填写业务线即可归入</span>' : ''}</td></tr>`;
+      return head + ps.map(rowOf).join('');
+    }).join('');
+  } else rows = shown.map(rowOf).join('');
   $('projArea').innerHTML = `<div class="card">
     <div class="card-h"><h3>项目管理</h3><span class="meta">共 ${_projectsCache.filter(p=>!p.builtin).length} 个 · 收藏置顶 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
       <div class="grow">
         <input type="text" placeholder="搜索名称 / 编码 / 负责人（回车）" value="${esc(projListKw)}" style="width:190px" onchange="projListKw=this.value;renderProjects()">
+        <label class="check" title="按业务线分组展示"><input type="checkbox" ${projGroupByLine?'checked':''} onchange="projGroupByLine=this.checked;renderProjects()"> 按业务线分组</label>
         <select style="width:120px" onchange="projListLine=this.value;renderProjects()" title="按业务线筛选"><option value="">全部业务线</option>
           ${(_businessLines||[]).map(l=>`<option value="${esc(l)}" ${projListLine===l?'selected':''}>${esc(l)}</option>`).join('')}</select>
         <select style="width:120px" onchange="projListStatus=this.value;renderProjects()">

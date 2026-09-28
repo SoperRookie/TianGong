@@ -4614,6 +4614,40 @@ async def list_projects(
     return {"projects": merged, "business_lines": pstore.business_lines()}
 
 
+class BusinessLineBody(BaseModel):
+    new_name: str = ""   # 空表示解散该业务线（项目保留，只是不再归属）
+
+
+@router.get("/api/v1/business-lines")
+async def list_business_lines(request: Request) -> dict:
+    """业务线清单：名称 + 项目数（含归档），供项目管理页分组与录入联想。"""
+    pstore = request.app.state.projects
+    visible = _visible_projects(request)
+    counts: dict[str, int] = {}
+    for p in pstore.list():
+        if visible is not None and p["name"] not in visible:
+            continue
+        line = p.get("business_line") or ""
+        if line:
+            counts[line] = counts.get(line, 0) + 1
+    return {"business_lines": [{"name": k, "projects": v} for k, v in sorted(counts.items())]}
+
+
+@router.put("/api/v1/business-lines/{name}")
+async def rename_business_line(request: Request, name: str, body: BusinessLineBody) -> dict:
+    """业务线重命名 / 解散（系统管理员；开放模式下任何登录用户）：批量改写该业务线下所有项目。"""
+    from app.projects import ProjectError
+
+    if not get_settings().open_projects:
+        _require_admin(request)
+    try:
+        n = request.app.state.projects.rename_business_line(name, body.new_name)
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    logger.info("业务线「{}」→「{}」：{} 个项目已更新", name, body.new_name or "（解散）", n)
+    return {"renamed": name, "new_name": body.new_name, "projects": n}
+
+
 class ProjectBody(BaseModel):
     name: str
     description: str = ""

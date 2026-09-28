@@ -116,6 +116,20 @@ class ProjectStore:
         """已出现过的业务线名称（去重排序），供筛选与录入联想。"""
         return sorted({p.get("business_line", "") for p in self._projects.values() if p.get("business_line")})
 
+    def rename_business_line(self, old: str, new: str) -> int:
+        """业务线重命名：批量改写该业务线下所有项目，返回受影响项目数。new 为空表示解散业务线。"""
+        old, new = (old or "").strip(), (new or "").strip()[:100]
+        if not old:
+            raise ProjectError("业务线名称不能为空")
+        names = [p["name"] for p in self._projects.values() if p.get("business_line") == old]
+        if not names:
+            raise ProjectError(f"业务线不存在: {old}")
+        for n in names:
+            self._projects[n]["business_line"] = new
+            self._projects[n]["updated_at"] = _now()
+        self._persist(*names)
+        return len(names)
+
     def siblings(self, name: str, include_archived: bool = False) -> list[str]:
         """同业务线的其他项目名（用例复用范围）；项目无业务线时为空。"""
         p = self._projects.get(name)

@@ -39,3 +39,18 @@ async def test_项目业务线_增改查筛选与同线项目(client):
     # 清空业务线
     await client.put("/api/v1/projects/麻将", json={"business_line": ""})
     assert pstore.siblings("斗地主") == []
+
+
+async def test_业务线清单与重命名_解散(client):
+    for n, l in (("斗地主", "棋牌"), ("麻将", "棋牌"), ("老虎机", "电子")):
+        await client.post("/api/v1/projects", json={"name": n, "business_line": l})
+    lines = (await client.get("/api/v1/business-lines")).json()["business_lines"]
+    assert lines == [{"name": "棋牌", "projects": 2}, {"name": "电子", "projects": 1}]
+    r = await client.put("/api/v1/business-lines/棋牌", json={"new_name": "棋牌类"})
+    assert r.status_code == 200 and r.json()["projects"] == 2
+    by = {p["project"]: p["business_line"] for p in (await client.get("/api/v1/projects")).json()["projects"]}
+    assert by["斗地主"] == "棋牌类" and by["麻将"] == "棋牌类" and by["老虎机"] == "电子"
+    assert (await client.put("/api/v1/business-lines/不存在", json={"new_name": "x"})).status_code == 400
+    # 解散：项目保留，不再归属任何业务线
+    assert (await client.put("/api/v1/business-lines/电子", json={"new_name": ""})).json()["projects"] == 1
+    assert (await client.get("/api/v1/business-lines")).json()["business_lines"] == [{"name": "棋牌类", "projects": 2}]
