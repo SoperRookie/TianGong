@@ -4615,37 +4615,97 @@ async def list_projects(
 
 
 class BusinessLineBody(BaseModel):
-    new_name: str = ""   # 空表示解散该业务线（项目保留，只是不再归属）
+    name: str = ""
+    code: str = ""
+    description: str = ""
+    owner: str = ""
+
+
+class BusinessLineUpdateBody(BaseModel):
+    new_name: str | None = None
+    code: str | None = None
+    description: str | None = None
+    owner: str | None = None
+
+
+def _line_view(request: Request, line: dict) -> dict:
+    pstore = request.app.state.projects
+    visible = _visible_projects(request)
+    names = [p["name"] for p in pstore.list() if p.get("business_line") == line["name"]
+             and (visible is None or p["name"] in visible)]
+    return {**line, "projects": len(names), "project_names": sorted(names)}
+
+
+def _require_line_manage(request: Request) -> None:
+    """业务线的增改：系统管理员；开放模式下任何登录用户。删除另按删除规则（仅管理员）。"""
+    if not get_settings().open_projects:
+        _require_admin(request)
 
 
 @router.get("/api/v1/business-lines")
 async def list_business_lines(request: Request) -> dict:
-    """业务线清单：名称 + 项目数（含归档），供项目管理页分组与录入联想。"""
-    pstore = request.app.state.projects
-    visible = _visible_projects(request)
-    counts: dict[str, int] = {}
-    for p in pstore.list():
-        if visible is not None and p["name"] not in visible:
-            continue
-        line = p.get("business_line") or ""
-        if line:
-            counts[line] = counts.get(line, 0) + 1
-    return {"business_lines": [{"name": k, "projects": v} for k, v in sorted(counts.items())]}
+    """业务线清单（实体 + 项目数与项目名）：项目上出现过但未登记的业务线名自动登记。"""
+    lstore = request.app.state.business_lines
+    for p in request.app.state.projects.list():
+        lstore.ensure(p.get("business_line") or "", created_by=p.get("created_by"))
+    return {"business_lines": [_line_view(request, l) for l in lstore.list()]}
+
+
+@router.post("/api/v1/business-lines")
+async def create_business_line(request: Request, body: BusinessLineBody) -> dict:
+    from app.projects import ProjectError
+
+    _require_line_manage(request)
+    try:
+        line = request.app.state.business_lines.create(body.name, body.description, body.owner, body.code,
+                                                       created_by=_operator(request))
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _line_view(request, line)
 
 
 @router.put("/api/v1/business-lines/{name}")
-async def rename_business_line(request: Request, name: str, body: BusinessLineBody) -> dict:
-    """业务线重命名 / 解散（系统管理员；开放模式下任何登录用户）：批量改写该业务线下所有项目。"""
+async def update_business_line(request: Request, name: str, body: BusinessLineUpdateBody) -> dict:
+    """业务线编辑：改名会联动更新该业务线下所有项目。"""
     from app.projects import ProjectError
 
-    if not get_settings().open_projects:
-        _require_admin(request)
+    _require_line_manage(request)
+    lstore = request.app.state.business_lines
+    if lstore.get(name) is None:
+        # 只存在于项目字段上的历史业务线：先登记再改；完全不存在的 404
+        if any(p.get("business_line") == name for p in request.app.state.projects.list()):
+            lstore.ensure(name)
+        else:
+            raise HTTPException(status_code=404, detail=f"业务线不存在: {name}")
     try:
-        n = request.app.state.projects.rename_business_line(name, body.new_name)
+        line = lstore.update(name, new_name=body.new_name, description=body.description, owner=body.owner,
+                             code=body.code, operator=_operator(request))
     except ProjectError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    logger.info("业务线「{}」→「{}」：{} 个项目已更新", name, body.new_name or "（解散）", n)
-    return {"renamed": name, "new_name": body.new_name, "projects": n}
+    moved = 0
+    if body.new_name and body.new_name.strip() and body.new_name.strip() != name:
+        moved = request.app.state.projects.rename_business_line(name, line["name"])
+        logger.info("业务线「{}」→「{}」：{} 个项目已更新", name, line["name"], moved)
+    return {**_line_view(request, line), "moved_projects": moved}
+
+
+@router.delete("/api/v1/business-lines/{name}")
+async def delete_business_line(request: Request, name: str, detach: bool = False) -> dict:
+    """删除业务线（仅系统管理员）：仍有项目归属时拒绝；detach=true 则先把项目解除归属再删。"""
+    from app.projects import ProjectError
+
+    _require_admin(request)
+    pstore, lstore = request.app.state.projects, request.app.state.business_lines
+    attached = [p["name"] for p in pstore.list() if p.get("business_line") == name]
+    if attached and not detach:
+        raise HTTPException(status_code=400, detail=f"业务线下仍有 {len(attached)} 个项目（{'、'.join(attached[:3])}），请先改归属或勾选「解除归属后删除」")
+    if attached:
+        pstore.rename_business_line(name, "")
+    try:
+        lstore.delete(name)
+    except ProjectError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"deleted": name, "detached_projects": len(attached)}
 
 
 class ProjectBody(BaseModel):
@@ -4671,6 +4731,7 @@ async def create_project(request: Request, body: ProjectBody) -> dict:
             body.name, body.description, created_by=_operator(request),
             code=body.code, owner=body.owner, business_line=body.business_line,
         )
+        request.app.state.business_lines.ensure(body.business_line, created_by=_operator(request))
     except ProjectError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return _project_view(request, project)
@@ -4741,6 +4802,8 @@ async def update_project(request: Request, name: str, body: ProjectUpdateBody) -
             name, body.name, body.description, code=body.code, owner=body.owner,
             status=body.status, operator=_operator(request), business_line=body.business_line,
         )
+        if body.business_line:
+            request.app.state.business_lines.ensure(body.business_line, created_by=_operator(request))
     except ProjectError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return _project_view(request, project)

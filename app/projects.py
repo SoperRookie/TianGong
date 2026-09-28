@@ -122,8 +122,6 @@ class ProjectStore:
         if not old:
             raise ProjectError("业务线名称不能为空")
         names = [p["name"] for p in self._projects.values() if p.get("business_line") == old]
-        if not names:
-            raise ProjectError(f"业务线不存在: {old}")
         for n in names:
             self._projects[n]["business_line"] = new
             self._projects[n]["updated_at"] = _now()
@@ -279,6 +277,74 @@ class ProjectStore:
     @staticmethod
     def _admin_count(project: dict) -> int:
         return sum(1 for r in project["members"].values() if r == "project_admin")
+
+
+class BusinessLineStore:
+    """业务线实体（一条业务线包含多个项目）：名称为自然键，项目通过 business_line 字段归属。"""
+
+    def __init__(self):
+        from app.db import DocStore
+
+        self._doc = DocStore("business_lines")
+        self._lines: dict[str, dict] = self._doc.load_all()
+
+    def list(self) -> list[dict]:
+        return sorted(self._lines.values(), key=lambda x: x["name"])
+
+    def get(self, name: str) -> dict | None:
+        return self._lines.get((name or "").strip())
+
+    def ensure(self, name: str, created_by: str | None = None) -> dict | None:
+        """项目上出现了未登记的业务线名（历史数据 / 直接填写）：自动登记。"""
+        name = (name or "").strip()
+        if not name:
+            return None
+        if name not in self._lines:
+            self._lines[name] = {"name": name, "code": "", "description": "", "owner": "",
+                                 "created_by": created_by, "created_at": _now(), "updated_by": created_by, "updated_at": _now()}
+            self._doc.put(name, self._lines[name])
+        return self._lines[name]
+
+    def create(self, name: str, description: str = "", owner: str = "", code: str = "",
+               created_by: str | None = None) -> dict:
+        name = check_name(name, "业务线名称")
+        if name in self._lines:
+            raise ProjectError(f"业务线已存在: {name}")
+        line = {"name": name, "code": (code or "").strip()[:50], "description": (description or "").strip(),
+                "owner": (owner or "").strip(), "created_by": created_by, "created_at": _now(),
+                "updated_by": created_by, "updated_at": _now()}
+        self._lines[name] = line
+        self._doc.put(name, line)
+        return line
+
+    def update(self, name: str, new_name: str | None = None, description: str | None = None,
+               owner: str | None = None, code: str | None = None, operator: str | None = None) -> dict:
+        line = self._lines.get(name)
+        if line is None:
+            raise ProjectError(f"业务线不存在: {name}")
+        if new_name is not None and (new_name := new_name.strip()) and new_name != name:
+            new_name = check_name(new_name, "业务线名称")
+            if new_name in self._lines:
+                raise ProjectError(f"业务线已存在: {new_name}")
+            self._lines.pop(name)
+            self._doc.remove(name)
+            line["name"] = new_name
+            self._lines[new_name] = line
+        if description is not None:
+            line["description"] = description.strip()
+        if owner is not None:
+            line["owner"] = owner.strip()
+        if code is not None:
+            line["code"] = code.strip()[:50]
+        line["updated_by"], line["updated_at"] = operator, _now()
+        self._doc.put(line["name"], line)
+        return line
+
+    def delete(self, name: str) -> None:
+        if name not in self._lines:
+            raise ProjectError(f"业务线不存在: {name}")
+        self._lines.pop(name)
+        self._doc.remove(name)
 
 
 class UserPrefStore:

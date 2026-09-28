@@ -1003,6 +1003,25 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 </dialog>
 
 <!-- 项目：新建 / 编辑 -->
+<dialog id="lineDlg" style="width:720px">
+  <div class="dlg-h"><h3>业务线管理</h3><span class="meta hint">一条业务线包含多个项目；同业务线项目共享历史用例复用</span></div>
+  <div class="dlg-b">
+    <div id="lineList"></div>
+    <div class="section-t" id="lineFormTitle" style="margin-top:12px">新建业务线</div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:2"><label class="f">名称</label><input type="text" id="blName" placeholder="如：真人视讯"></div>
+      <div style="flex:1"><label class="f">编码<span class="hint">（可选）</span></label><input type="text" id="blCode" placeholder="如 LIVE"></div>
+      <div style="flex:1"><label class="f">负责人<span class="hint">（可选）</span></label><input type="text" id="blOwner" list="userNames" placeholder="用户名"></div>
+    </div>
+    <label class="f">描述<span class="hint">（可选）</span></label><input type="text" id="blDesc" placeholder="业务范围说明">
+    <div class="toolbar" style="margin-top:8px">
+      <button class="btn sm" id="blSaveBtn" onclick="saveLineForm()">新建</button>
+      <button class="btn ghost sm" id="blCancelBtn" style="display:none" onclick="resetLineForm()">取消编辑</button>
+    </div>
+  </div>
+  <div class="dlg-f"><button class="btn ghost" onclick="$('lineDlg').close()">关闭</button></div>
+</dialog>
+
 <dialog id="projDlg">
   <div class="dlg-h"><h3 id="pjTitle">新建项目</h3></div>
   <div class="dlg-b">
@@ -1010,9 +1029,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div style="flex:2"><label class="f">项目名</label><input type="text" id="pjName" placeholder="如：斗地主赛季玩法"></div>
       <div style="flex:1"><label class="f">编码<span class="hint">（接口识别，可选）</span></label><input type="text" id="pjCode" placeholder="如 DDZ"></div>
     </div>
-    <label class="f">业务线<span class="hint">（可选；同业务线的项目互相共享历史用例复用与知识检索，如「棋牌」「电子」）</span></label>
-    <input type="text" id="pjLine" list="lineNames" placeholder="如 棋牌">
-    <datalist id="lineNames"></datalist>
+    <label class="f">业务线<span class="hint">（可选；同业务线的项目互相共享历史用例复用与知识检索）</span></label>
+    <select id="pjLine" onchange="if(this.value==='__new__')pjNewLine()"></select>
     <div style="display:flex;gap:10px">
       <div style="flex:1"><label class="f">负责人<span class="hint">（登录用户名，自动成为项目管理员）</span></label><input type="text" id="pjOwner" list="userNames" placeholder="用户名"></div>
       <div style="flex:1"><label class="f">状态</label>
@@ -5099,24 +5117,87 @@ async function fillUserNames() {
     $('userNames').innerHTML = users.map(u => `<option value="${esc(u.username)}">${esc(u.name||'')}</option>`).join('');
   } catch (e) {}
 }
-async function renameBusinessLine(name) {
-  const v = await askInput('重命名业务线', `「${name}」改为（该业务线下所有项目一起更新）`, name);
-  if (v === null || v === undefined || v === name) return;
+/* ---- 业务线管理（实体：增删改查；项目通过业务线字段归属） ---- */
+let _lineList = [], _editingLine = null;
+async function loadLines() { try { _lineList = (await api('/api/v1/business-lines')).business_lines; } catch (e) { _lineList = []; } return _lineList; }
+function fillLineSelect(cur) {
+  const sel = $('pjLine');
+  sel.innerHTML = '<option value="">（不归属业务线）</option>' + _lineList.map(l => `<option value="${esc(l.name)}" ${l.name===cur?'selected':''}>${esc(l.name)}${l.code?` (${esc(l.code)})`:''}</option>`).join('')
+    + (isSysAdmin()||openProjects() ? '<option value="__new__">＋ 新建业务线…</option>' : '');
+  if (cur && ![..._lineList].some(l => l.name === cur)) { sel.add(new Option(cur, cur)); sel.value = cur; }
+}
+async function pjNewLine() {
+  $('pjLine').value = '';
+  const name = await askInput('新建业务线', '业务线名称');
+  if (!name) return;
+  try { await jpost('/api/v1/business-lines', {name}); await loadLines(); fillLineSelect(name); toast('业务线已创建', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function openLineDlg(editName) {
+  await loadLines(); fillUserNames();
+  renderLineList();
+  resetLineForm();
+  if (editName) editLine(editName);
+  $('lineDlg').showModal();
+}
+function renderLineList() {
+  $('lineList').innerHTML = _lineList.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
+    <tr><th>名称</th><th style="width:80px">编码</th><th>描述</th><th style="width:90px">负责人</th><th style="width:70px">项目数</th><th style="width:90px">操作</th></tr>
+    ${_lineList.map(l => `<tr>
+      <td><b>${esc(l.name)}</b></td><td class="hint">${esc(l.code||'—')}</td><td class="hint">${esc(l.description||'')}</td><td class="hint">${esc(l.owner||'—')}</td>
+      <td title="${esc((l.project_names||[]).join('、'))}">${l.projects}</td>
+      <td><div class="rowops">
+        <button class="ibtn" title="编辑" onclick="editLine(${jsq(l.name)})">${IC.edit}</button>
+        ${canDelete()?`<button class="ibtn bad" title="删除" onclick="deleteLine(${jsq(l.name)}, ${l.projects})">${IC.trash}</button>`:''}
+      </div></td></tr>`).join('')}
+  </table></div>` : '<div class="empty">还没有业务线，在下方新建</div>';
+}
+function resetLineForm() {
+  _editingLine = null;
+  for (const id of ['blName','blCode','blOwner','blDesc']) $(id).value = '';
+  $('lineFormTitle').textContent = '新建业务线'; $('blSaveBtn').textContent = '新建'; $('blCancelBtn').style.display = 'none';
+}
+function editLine(name) {
+  const l = _lineList.find(x => x.name === name); if (!l) return;
+  _editingLine = name;
+  $('blName').value = l.name; $('blCode').value = l.code || ''; $('blOwner').value = l.owner || ''; $('blDesc').value = l.description || '';
+  $('lineFormTitle').textContent = `编辑业务线「${name}」（改名会同步更新其下 ${l.projects} 个项目）`; $('blSaveBtn').textContent = '保存'; $('blCancelBtn').style.display = '';
+  $('blName').focus();
+}
+async function saveLineForm() {
+  const name = $('blName').value.trim(), code = $('blCode').value.trim(), owner = $('blOwner').value.trim(), description = $('blDesc').value.trim();
+  if (!name) return toast('业务线名称不能为空', 'warn');
   try {
-    const r = await api('/api/v1/business-lines/' + encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({new_name: v})});
-    toast(`业务线已改为「${v}」，${r.projects} 个项目已更新`, 'ok');
-    if (projListLine === name) projListLine = v;
-    await getProjects(true); renderProjects();
+    if (_editingLine) {
+      const r = await api('/api/v1/business-lines/' + encodeURIComponent(_editingLine), {method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({new_name: name, code, owner, description})});
+      if (projListLine === _editingLine) projListLine = name;
+      toast(r.moved_projects ? `已保存，${r.moved_projects} 个项目已更新归属` : '已保存', 'ok');
+    } else { await jpost('/api/v1/business-lines', {name, code, owner, description}); toast('业务线已创建', 'ok'); }
+    await loadLines(); renderLineList(); resetLineForm();
+    await getProjects(true); if (currentView === 'projects') renderProjects();
   } catch (e) { toast(e.message, 'err'); }
 }
-function openProjDlg(name) {
+async function deleteLine(name, count) {
+  const msg = count ? `该业务线下有 ${count} 个项目。删除后这些项目将不再归属任何业务线（项目本身保留）。` : '删除后可重新创建。';
+  if (!await uiConfirm(`删除业务线「${name}」？`, msg, true)) return;
+  try {
+    await api('/api/v1/business-lines/' + encodeURIComponent(name) + (count ? '?detach=true' : ''), {method:'DELETE'});
+    if (projListLine === name) projListLine = '';
+    toast('业务线已删除', 'ok'); await loadLines(); renderLineList(); await getProjects(true); if (currentView === 'projects') renderProjects();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function openProjDlg(name) {
+  await loadLines();
+  _openProjDlg(name);
+}
+function _openProjDlg(name) {
   _editingProject = name || null;
   const p = name ? _projectsCache.find(x => x.project === name) : null;
   $('pjTitle').textContent = name ? '编辑项目 ' + name : '新建项目';
   $('pjName').value = name || '';
   $('pjCode').value = p ? (p.code || '') : '';
-  $('pjLine').value = p ? (p.business_line || '') : '';
-  $('lineNames').innerHTML = (_businessLines || []).map(l => `<option value="${esc(l)}">`).join('');
+  fillLineSelect(p ? (p.business_line || '') : '');
   $('pjOwner').value = p ? (p.owner || '') : (curUser ? curUser.username : '');
   $('pjStatus').value = p ? (p.status || 'active') : 'active';
   $('pjStatus').parentElement.style.display = name ? '' : 'none';
@@ -5233,7 +5314,7 @@ async function renderProjects() {
       const tasks = ps.reduce((a, p) => a + (p.tasks || 0), 0), cases = ps.reduce((a, p) => a + (p.cases || 0), 0);
       const head = `<tr class="module-head"><td colspan="12"><span style="font-weight:600">${k ? esc(k) : '未分业务线'}</span>
         <span class="hint" style="margin-left:8px">${ps.length} 个项目 · ${tasks} 个任务 · ${cases} 条用例</span>
-        ${k && canRename ? `<button class="btn ghost sm" style="margin-left:10px" onclick="event.stopPropagation();renameBusinessLine(${jsq(k)})">重命名</button>` : ''}
+        ${k && canRename ? `<button class="btn ghost sm" style="margin-left:10px" onclick="event.stopPropagation();openLineDlg(${jsq(k)})">编辑</button>` : ''}
         ${!k && canRename && ps.some(p=>!p.builtin) ? '<span class="hint" style="margin-left:10px">在「编辑项目」里填写业务线即可归入</span>' : ''}</td></tr>`;
       return head + ps.map(rowOf).join('');
     }).join('');
@@ -5249,7 +5330,7 @@ async function renderProjects() {
           <option value="">全部状态</option>
           ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>`<option value="${v}" ${projListStatus===v?'selected':''}>${l}</option>`).join('')}
         </select>
-        ${isSysAdmin()||openProjects()?`<button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>`:''}
+        ${isSysAdmin()||openProjects()?`<button class="btn ghost sm" onclick="openLineDlg()">业务线管理</button><button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>`:''}
         <button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
     <div class="card-b">
       <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
