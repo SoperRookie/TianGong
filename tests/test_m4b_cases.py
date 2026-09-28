@@ -48,9 +48,9 @@ async def test_人工新增_复制_草稿提交评审(client):
     assert vers["versions"][0]["source"] == "manual"
     # 非法用例被拒
     assert (await client.post(f"/api/v1/tasks/{tid}/cases", json={**body, "title": ""})).status_code == 400
-    # 项目用例库生命周期含草稿
+    # 用例中心只收录正式用例：草稿不进入
     lib = (await client.get("/api/v1/cases", params={"project": "P"})).json()
-    assert {x["review"] for x in lib["cases"]} == {"approved", "draft"}
+    assert {x["review"] for x in lib["cases"]} == {"approved"} and all(x["uid"] != dup["uid"] for x in lib["cases"])
 
 
 async def test_Excel导入五步校验(client, tmp_path):

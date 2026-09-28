@@ -5043,7 +5043,8 @@ async def list_all_cases(
     request: Request, project: str | None = None, module: str = "", priority: str = "",
     review: str = "", keyword: str = "", page: int = 1, page_size: int = 20,
 ) -> dict:
-    """全库用例列表（测试用例页）：跨项目/任务聚合，支持筛选与分页（20/50/100/200，默认 20）。"""
+    """全库用例列表（测试用例页）：只收录审核通过的正式用例——待审核 / 已驳回 / 草稿用例留在各自任务的用例审核页，
+    不进入用例中心；跨项目/任务聚合，支持筛选与分页（20/50/100/200，默认 20）。"""
     from app.reports import project_cases
 
     if page_size not in CASE_PAGE_SIZES:
@@ -5055,14 +5056,15 @@ async def list_all_cases(
         _require_project(request, project, "case.view")
     records = (request.app.state.tasks.list(limit=100000, project=project) if project
                else request.app.state.tasks.list(limit=100000, projects=_visible_projects(request)))
-    rows = project_cases(records, project or None, plans=request.app.state.plans.list())
+    rows = [r for r in project_cases(records, project or None, plans=request.app.state.plans.list())
+            if r["review"] == "approved"]
     modules = sorted({r["module"] for r in rows if r["module"]})
     if module:
         rows = [r for r in rows if r["module"] == module]
     if priority:
         rows = [r for r in rows if r["priority"] == priority]
-    if review:
-        rows = [r for r in rows if r["review"] == review]
+    if review and review != "approved":  # 用例中心只有正式用例，其他阶段一律为空
+        rows = []
     if keyword:
         kw = keyword.lower()
         rows = [
