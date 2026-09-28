@@ -300,12 +300,12 @@ async def test_plan_run_flow_and_attachments(client, tmp_path):
     entry = resp.json()["results"][item_id]
     assert entry["status"] == "pass" and entry["history"][0]["status"] == "fail"
 
-    # 附件：类型白名单 + 上传人/时间/关联留痕 + 下载回读
+    # 附件不限类型：未知后缀归 other；上传人/时间/关联留痕 + 下载回读
     resp = await client.post(
         f"/api/v1/plans/{pid}/runs/{rid}/attachments",
         files={"file": ("payload.exe", b"MZ", "application/octet-stream")},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 200 and resp.json()["kind"] == "other"
     resp = await client.post(
         f"/api/v1/plans/{pid}/runs/{rid}/attachments",
         files={"file": ("失败截图.png", b"\x89PNG fake", "image/png")},

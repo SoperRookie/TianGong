@@ -14,9 +14,54 @@ from app.llm.client import LLMClient
 from app.parsers.base import ParsedDocument
 from app.parsers.text import TextParser
 
-IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+# Vision 直接接受的格式 + Pillow 可解码后转 PNG 的格式 + 需 LibreOffice 栅格化的矢量格式
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".ico",
+                  ".heic", ".heif", ".avif", ".psd", ".svg", ".emf", ".wmf")
+_VECTOR_SUFFIXES = (".svg", ".emf", ".wmf")
+_NATIVE_MIME = ("image/png", "image/jpeg", "image/webp", "image/gif")
 
-_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif",
+         ".bmp": "image/bmp", ".tif": "image/tiff", ".tiff": "image/tiff", ".ico": "image/x-icon",
+         ".heic": "image/heic", ".heif": "image/heif", ".avif": "image/avif", ".psd": "image/vnd.adobe.photoshop",
+         ".svg": "image/svg+xml", ".emf": "image/emf", ".wmf": "image/wmf"}
+
+
+def _register_plugins() -> None:
+    """HEIC / HEIF / AVIF 需要 Pillow 插件（pillow-heif / pillow-avif-plugin），未安装时静默跳过。"""
+    try:
+        import pillow_heif
+
+        pillow_heif.register_heif_opener()
+    except Exception:
+        pass
+    try:
+        import pillow_avif  # noqa: F401
+    except Exception:
+        pass
+
+
+def load_image_bytes(path: str | Path) -> tuple[bytes, str]:
+    """读取任意受支持格式的图片，返回 (字节, MIME)：矢量图先栅格化，模型不直接支持的格式转成 PNG。"""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix in _VECTOR_SUFFIXES:
+        from app.parsers.convert import rasterize_vector
+
+        return rasterize_vector(path), "image/png"
+    raw = path.read_bytes()
+    mime = _MIME.get(suffix, "image/png")
+    if mime in _NATIVE_MIME:
+        return raw, mime
+    _register_plugins()
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            buf = io.BytesIO()
+            img.convert("RGBA" if img.mode in ("RGBA", "LA", "P") else "RGB").save(buf, format="PNG")
+            return buf.getvalue(), "image/png"
+    except Image.DecompressionBombError:
+        raise ValueError("图片像素数异常巨大（疑似解压炸弹），已拒绝处理") from None
+    except Exception as e:
+        raise ValueError(f"{path.name} 无法解码为图片（{suffix}）：{e}") from None
 
 # 超大截图降采样上限（最长边像素）：控制视觉 token 数，避免撑爆私有化模型上下文
 MAX_IMAGE_SIDE = 2000
@@ -91,8 +136,8 @@ async def understand_image_bytes(
 async def parse_image(path: str | Path, llm: LLMClient) -> ParsedDocument:
     """独立图片文件的解析入口。"""
     path = Path(path)
-    mime = _MIME.get(path.suffix.lower(), "image/png")
-    content = await understand_image_bytes(path.read_bytes(), mime, llm)
+    data, mime = load_image_bytes(path)
+    content = await understand_image_bytes(data, mime, llm)
     # 模型输出为 Markdown 结构，复用文本解析器还原章节层级
     doc = TextParser().parse_string(content)
     doc.source = path.name

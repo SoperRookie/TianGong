@@ -66,7 +66,7 @@ async def test_附件解析失败显式记录并可重新解析(client):
     await client.post("/api/v1/projects", json={"name": "P"})
     resp = await client.post("/api/v1/requirements", data={"project": "P", "title": "带附件"},
                              files=[("files", ("需求.txt", "登录需求原文".encode(), "text/plain")),
-                                    ("files", ("坏文件.xyz", b"???", "application/octet-stream"))])
+                                    ("files", ("坏文件.xyz", b"\x00\x01\xff\xfe", "application/octet-stream"))])
     assert resp.status_code == 200, resp.text
     r = resp.json()
     # 上传立即返回：附件处于「解析中」，解析在后台进行；解析中不能发起 AI 分析 / 测试设计

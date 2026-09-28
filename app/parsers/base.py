@@ -56,19 +56,55 @@ class UnsupportedFormatError(ValueError):
     pass
 
 
+# 有内容但不参与文本解析的类型：保留可下载，解析时给出明确说明而不是「不支持」
+NON_TEXT_SUFFIXES: dict[str, str] = {
+    **{s: "视频" for s in (".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm", ".m4v")},
+    **{s: "字体" for s in (".ttf", ".otf", ".woff", ".woff2")},
+    **{s: "设计源文件" for s in (".indd",)},
+    **{s: "邮箱数据文件" for s in (".pst", ".ost")},
+}
+
+
+class NonTextParser:
+    suffixes = tuple(NON_TEXT_SUFFIXES)
+
+    def parse(self, path: Path) -> ParsedDocument:
+        kind = NON_TEXT_SUFFIXES[path.suffix.lower()]
+        raise UnsupportedFormatError(f"{path.name} 是{kind}文件，不参与文本解析，已保留可下载")
+
+
+class HtmlParser:
+    suffixes = (".html", ".htm", ".xhtml", ".mht")
+
+    def parse(self, path: Path) -> ParsedDocument:
+        from app.parsers.link import html_to_markdown
+        from app.parsers.text import TextParser
+
+        title, body = html_to_markdown(read_text_any(path))
+        doc = TextParser().parse_string((f"# {title}\n\n" if title else "") + body)
+        doc.source, doc.doc_type = path.name, "html"
+        return doc
+
+
 def _registry() -> dict[str, Parser]:
+    from app.parsers.container import ArchiveParser, EmailParser
+    from app.parsers.convert import OfficeConvertParser
     from app.parsers.docx import DocxParser
     from app.parsers.pdf import PdfParser
+    from app.parsers.pptx import PptxParser
+    from app.parsers.table import TableParser
     from app.parsers.text import TextParser
 
     mapping: dict[str, Parser] = {}
-    for parser in (TextParser(), DocxParser(), PdfParser()):
+    for parser in (TextParser(), DocxParser(), PdfParser(), TableParser(), PptxParser(), OfficeConvertParser(),
+                   HtmlParser(), ArchiveParser(), EmailParser(), NonTextParser()):
         for suffix in parser.suffixes:
             mapping[suffix] = parser
     return mapping
 
 
-ZIP_SUFFIXES = {".docx", ".xlsx", ".xmind", ".pptx"}
+ZIP_SUFFIXES = {".docx", ".xlsx", ".xmind", ".pptx", ".docm", ".dotx", ".dotm", ".xlsm", ".xltx", ".xltm",
+                ".pptm", ".ppsx", ".ppsm", ".potx", ".potm", ".sldx", ".sldm", ".odt", ".ods", ".odp"}
 
 
 class UnsafeFileError(ValueError):
@@ -111,14 +147,33 @@ def read_text_any(path: str | Path) -> str:
     raise UnicodeDecodeError("utf-8", raw[:16], 0, 1, f"{Path(path).name} 不是 UTF-8 或 GBK 编码的文本文件")
 
 
-def parse_file(path: str | Path) -> ParsedDocument:
-    """按扩展名分发解析器（格式白名单校验，F-2-8 的一部分）；zip 类先做安全校验。"""
+def parse_file(path: str | Path, _depth: int = 0) -> ParsedDocument:
+    """按扩展名分发解析器；zip 类先做安全校验。_depth 为压缩包 / 邮件递归层级（内部使用）。
+
+    不限制上传格式：未登记的后缀（.json / .xml / .html / .log / .sql / 无后缀…）先按文本读取，
+    能按 UTF-8 / GBK 解码的就当纯文本解析；只有二进制且无解析器的文件才报不支持。
+    """
+    from app.parsers.text import TextParser
+
     path = Path(path)
     parser = _registry().get(path.suffix.lower())
     if parser is None:
-        supported = ", ".join(sorted(_registry()))
-        raise UnsupportedFormatError(f"不支持的文件格式 {path.suffix}，当前支持: {supported}")
+        try:
+            text = read_text_any(path)
+        except UnicodeDecodeError:
+            raise UnsupportedFormatError(
+                f"{path.name} 是不支持自动读取的二进制格式（{path.suffix or '无后缀'}）；"
+                "文件已保留可下载，可转成 PDF / Word / 图片 / 文本后重新上传"
+            ) from None
+        if "\x00" in text[:4096]:
+            raise UnsupportedFormatError(f"{path.name} 是不支持自动读取的二进制格式（{path.suffix or '无后缀'}）")
+        doc = TextParser().parse_string(text)
+        doc.source = path.name
+        doc.doc_type = path.suffix.lstrip(".").lower() or "txt"
+        return doc
     check_zip_safety(path)
+    if _depth and hasattr(parser, "suffixes") and parser.__class__.__name__ in ("ArchiveParser", "EmailParser"):
+        return parser.parse(path, _depth=_depth)
     return parser.parse(path)
 
 
