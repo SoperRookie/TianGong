@@ -30,6 +30,7 @@ class GenerationResult(BaseModel):
     test_points: list[dict] = Field(default_factory=list)
     trace: list[dict] = Field(default_factory=list, description="Agent 调用链路")
     chunks: int = Field(default=1, description="分片数（F-2-6），1 表示未分片")
+    failed_modules: list[str] = Field(default_factory=list, description="生成失败的模块（可断点续跑补全）")
 
 
 class AnalysisResult(BaseModel):
@@ -110,8 +111,14 @@ async def run_generation(
     memory_notes: str | None = None,
     rule_notes: str | None = None,
     on_analyzed=None,
+    checkpoint: dict | None = None,
+    on_module_done=None,
+    on_analysis=None,
 ) -> GenerationResult:
     """执行「拆解 → 生成 → 评审（≤3 轮回环）」全流程。
+
+    断点续跑：checkpoint = {"analysis": {...}, "modules": {模块名: GenerationResult}}——已拆解 / 已生成的模块直接复用；
+    on_analysis(analysis) / on_module_done(module, result) 在各阶段完成时回调，调用方据此持久化检查点。
 
     model / reviewer_model 为任务级模型选择；reviewer_model 不传时评审与生成同模型。
     template 为自定义用例模板，缺省用内置默认模板（F-4-2）。
@@ -123,16 +130,18 @@ async def run_generation(
     """
     kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases,
           "memory_notes": memory_notes, "rule_notes": rule_notes}
+    ck = {"checkpoint": checkpoint, "on_module_done": on_module_done}
     if test_points:
         return await _run_from_points(
-            requirement, llm, model, reviewer_model, template, test_points, **kw
+            requirement, llm, model, reviewer_model, template, test_points, **kw, **ck
         )
 
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     chunks = split_text(requirement, chunk_max_chars)
     if len(chunks) == 1:
         return await _analyze_then_generate(
-            requirement, llm, model, reviewer_model, template, on_analyzed=on_analyzed, **kw
+            requirement, llm, model, reviewer_model, template, on_analyzed=on_analyzed,
+            on_analysis=on_analysis, **kw, **ck
         )
 
     logger.info("需求 {} 字超过分片阈值，切分为 {} 片并行处理", len(requirement), len(chunks))
@@ -157,19 +166,32 @@ async def _analyze_then_generate(
     memory_notes: str | None = None,
     rule_notes: str | None = None,
     on_analyzed=None,
+    checkpoint: dict | None = None,
+    on_module_done=None,
+    on_analysis=None,
 ) -> GenerationResult:
     """先拆解，再按模块并行生成（PRD 4.1a 生成 Agent 多实例）。
 
     单次生成调用只输出一个模块的用例，避免大需求下输出超过模型 max_tokens 被截断
     （多数模型单次输出上限 8K～16K，全模块一次性输出必然超限）。
+    检查点里已有拆解结果时跳过拆解（断点续跑）。
     """
-    analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
+    saved = (checkpoint or {}).get("analysis")
+    if saved and saved.get("test_points"):
+        analysis = {"test_points": saved["test_points"], "blind_spots": saved.get("blind_spots", []),
+                    "model_name": saved.get("model_name", "")}
+        logger.info("断点续跑：复用已保存的拆解结果（{} 个模块）", len(analysis["test_points"]))
+    else:
+        analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
+        if on_analysis:
+            on_analysis({"test_points": analysis["test_points"], "blind_spots": analysis["blind_spots"],
+                         "model_name": analysis.get("model_name", "")})
     if on_analyzed:
         on_analyzed()
     result = await _run_from_points(
         requirement, llm, model, reviewer_model, template, analysis["test_points"],
         knowledge_refs=knowledge_refs, knowledge_cases=knowledge_cases,
-        memory_notes=memory_notes, rule_notes=rule_notes,
+        memory_notes=memory_notes, rule_notes=rule_notes, checkpoint=checkpoint, on_module_done=on_module_done,
     )
     for spot in analysis["blind_spots"]:
         if spot not in result.blind_spots:
@@ -189,25 +211,39 @@ async def _run_from_points(
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
     rule_notes: str | None = None,
+    checkpoint: dict | None = None,
+    on_module_done=None,
 ) -> GenerationResult:
-    """从已确认测试点继续：单模块直接生成；多模块按模块并行多实例（PRD 4.1a 并行加速）。"""
+    """从已确认测试点继续：单模块直接生成；多模块按模块并行多实例（PRD 4.1a 并行加速）。
+
+    断点续跑：checkpoint["modules"] 里已完成的模块直接复用结果，只生成缺失模块；
+    每个模块成功后回调 on_module_done(模块名, 结果) 供调用方落盘检查点。
+    """
     kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases,
           "memory_notes": memory_notes, "rule_notes": rule_notes}
+    done = (checkpoint or {}).get("modules") or {}
     if not test_points:  # 拆解为空的兜底：回退图内拆解
         return await _run_single(requirement, llm, model, reviewer_model, template, **kw)
+
+    async def _module(tp: dict) -> GenerationResult:
+        name = str(tp.get("module", ""))
+        if name in done:
+            logger.info("断点续跑：模块「{}」复用已生成结果", name)
+            return GenerationResult.model_validate(done[name])
+        result = await _run_single(requirement, llm, model, reviewer_model, template, test_points=[tp], **kw)
+        if on_module_done:
+            try:
+                on_module_done(name, result)
+            except Exception as e:  # 检查点落盘失败不影响生成
+                logger.warning("模块「{}」检查点保存失败：{}", name, e)
+        return result
+
     if len(test_points) == 1:
-        return await _run_single(
-            requirement, llm, model, reviewer_model, template, test_points=test_points, **kw
-        )
-    logger.info("按 {} 个模块并行生成：{}", len(test_points), [str(tp.get("module", "")) for tp in test_points])
-    outcomes = await asyncio.gather(
-        *[
-            _run_single(requirement, llm, model, reviewer_model, template, test_points=[tp], **kw)
-            for tp in test_points
-        ],
-        return_exceptions=True,
-    )
-    merged = _merge(outcomes)
+        return await _module(test_points[0])
+    logger.info("按 {} 个模块并行生成：{}（复用 {} 个）", len(test_points),
+                [str(tp.get("module", "")) for tp in test_points], sum(1 for tp in test_points if str(tp.get("module", "")) in done))
+    outcomes = await asyncio.gather(*[_module(tp) for tp in test_points], return_exceptions=True)
+    merged = _merge(outcomes, modules=[str(tp.get("module", "")) for tp in test_points], points=test_points)
     merged.chunks = 1  # 并行维度是模块而非文档分片
     return merged
 
@@ -315,9 +351,15 @@ def _lenient_cases(final: dict) -> list[TestCase]:
 _CASE_ID_PREFIX_RE = re.compile(r"^(.*?)(\d+)\s*$")
 
 
-def _merge(outcomes: list) -> GenerationResult:
-    """合并分片结果：用例去重（模块+标题）、模块内重编号、失败分片显式标注。"""
+def _merge(outcomes: list, modules: list[str] | None = None, points: list[dict] | None = None) -> GenerationResult:
+    """合并分片 / 模块结果：用例去重（模块+标题）、模块内重编号、失败分片显式标注。
+
+    modules 给出时按模块并行：失败项记入 failed_modules，供「继续完成」只补这些模块。
+    """
     merged = GenerationResult(cases=[], passed=True, review_rounds=0, chunks=len(outcomes))
+    if outcomes and all(isinstance(o, BaseException) for o in outcomes):
+        # 全部分片 / 模块都失败（典型：模型欠费）：没有任何产出，按任务失败处理并保留检查点供续跑
+        raise outcomes[0]
     seen_cases: set[tuple[str, str]] = set()
     seen_notes: dict[str, set[str]] = {"blind_spots": set(), "missing": set(), "suggestions": set()}
     module_points: dict[str, list[str]] = {}
@@ -332,9 +374,19 @@ def _merge(outcomes: list) -> GenerationResult:
                 raise outcome  # 取消 / 编程错误：不能伪装成"分片失败"以 completed 出稿
             # 分片失败不阻塞整体交付，显式标注缺失范围（PRD 异常流程）
             merged.passed = False
-            merged.unresolved.append({"case_id": f"<分片{i}>", "problem": f"分片处理失败: {outcome}"})
-            logger.error("分片 {} 处理失败（不阻塞整体交付）：{}", i, outcome)
+            if modules is not None:
+                name = modules[i - 1]
+                merged.failed_modules.append(name)
+                if points:  # 失败模块的测试点也要留在结果里，补全时据此重新生成
+                    module_points.setdefault(name, []).extend(points[i - 1].get("points", []))
+                merged.unresolved.append({"case_id": f"<模块:{name}>", "module": name,
+                                          "problem": f"模块「{name}」生成失败（可点「继续完成」补全）: {outcome}"})
+                logger.error("模块「{}」生成失败（不阻塞整体交付）：{}", name, outcome)
+            else:
+                merged.unresolved.append({"case_id": f"<分片{i}>", "problem": f"分片处理失败: {outcome}"})
+                logger.error("分片 {} 处理失败（不阻塞整体交付）：{}", i, outcome)
             continue
+        merged.failed_modules.extend(m for m in outcome.failed_modules if m not in merged.failed_modules)
         merged.passed = merged.passed and outcome.passed
         merged.review_rounds = max(merged.review_rounds, outcome.review_rounds)
         merged.unresolved.extend(outcome.unresolved)

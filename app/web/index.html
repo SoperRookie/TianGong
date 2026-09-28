@@ -2300,7 +2300,8 @@ function renderDetail() {
         ${running?'<button class="btn ghost sm" onclick="cancelTask()">取消任务</button>':''}
         <span class="hint">${t.created_by?esc(t.created_by)+' · ':''}${(t.context||{}).requirement_title?esc(t.context.requirement_title):(srcText_(t.sources)||'-')} · ${relTime(t.created_at)}</span></div>
     </div>
-    ${t.error?'<div class="card-b" style="color:var(--danger);padding-top:0;display:flex;align-items:center;gap:10px"><span>'+esc(t.error)+'</span>'+(t.status==='failed'&&(t.context||{}).requirement?'<button class="btn ghost sm" onclick="retryTask()">重试</button>':'')+'</div>':''}
+    ${t.error?`<div class="card-b" style="color:var(--danger);padding-top:0;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>${esc(t.error)}</span>${resumeHint(t)}${t.resume&&t.resume.resumable?`<button class="btn sm" onclick="retryTask()">${resumeLabel(t)}</button>`:''}</div>`:''}
+    ${t.status==='completed'&&t.resume&&t.resume.mode==='fill'?`<div class="card-b" style="padding-top:0"><div class="warnline" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>${t.resume.failed_modules.length} 个模块生成失败（${t.resume.failed_modules.map(esc).join('、')}），已生成的用例保留</span>${resumeHint(t)}<button class="btn sm" onclick="retryTask()">补全失败模块</button></div></div>`:''}
     <div class="dtabs">${tabs.map(([k,label,badge]) =>
       `<button class="${detailTab===k?'on':''}" onclick="setTab('${k}')">${label}${badge}</button>`).join('')}</div>
     <div class="card-b">${running ? renderProgress(t) + body : body}</div>
@@ -4244,13 +4245,28 @@ const PROMPT_NAMES = {analyst:'需求拆解', requirement_analysis:'需求分析
   gap_check:'覆盖查漏', dup_judge:'语义查重', point_fix:'测试点修改', case_fix:'用例修改', requirement_diff:'需求变更', learning:'修改习惯学习',
   point_supplement:'测试点补充', point_compare:'人工与 AI 测试点对比', vision_image:'图片理解', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
 let aiTab = 'tasks', aiStatus = '', aiMine = false, aiCallPage = 1, aiCallPurpose = '', aiCallStatus = '', aiCallModel = '', aiDays = 30;
+const ERROR_KIND_HINT = {
+  quota: '模型欠费或配额用尽：请充值，或在「模型配置」切换默认模型后继续',
+  auth: '模型密钥无效或未配置：请检查 .env 中的密钥后继续',
+  model: '模型暂时不可用：稍后继续，或切换默认模型',
+  cancelled: '任务已取消，可从断点继续',
+};
+function resumeHint(t) {
+  const r = t.resume || {};
+  const parts = [];
+  if (t.error_kind && ERROR_KIND_HINT[t.error_kind]) parts.push(ERROR_KIND_HINT[t.error_kind]);
+  if (r.mode === 'resume') parts.push(`已完成${r.analysis_kept ? '拆解' : ''}${r.kept_modules.length ? `与 ${r.kept_modules.length} 个模块（${r.kept_modules.map(esc).join('、')}）` : ''}，继续时不重做`);
+  else if (r.mode === 'fill') parts.push('只重新生成失败的模块，其余用例与审核状态不变');
+  return parts.length ? `<span class="hint" style="color:var(--text-2)">${parts.join('；')}</span>` : '';
+}
+function resumeLabel(t) { const m = (t.resume||{}).mode; return m === 'fill' ? '补全失败模块' : m === 'resume' ? '继续完成' : '重试'; }
 async function retryTask() {
   if (!currentTask) return;
-  try { await jpost(`/api/v1/tasks/${currentTask.task_id}/retry`, {}); toast('已重新提交，后台执行中', 'ok'); await refreshList(); openTask(currentTask.task_id); }
+  try { const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/retry`, {}); toast(r.mode==='fill'?`已开始补全 ${r.failed_modules.length} 个模块`:r.mode==='resume'?`已从断点继续（保留 ${r.kept_modules.length} 个已完成模块）`:'已重新提交，后台执行中', 'ok'); await refreshList(); openTask(currentTask.task_id); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function retryFromCenter(id) {
-  try { await jpost(`/api/v1/tasks/${id}/retry`, {}); toast('已重新提交', 'ok'); renderAiCenter(); }
+  try { const r = await jpost(`/api/v1/tasks/${id}/retry`, {}); toast(r.mode==='fill'?'已开始补全失败模块':r.mode==='resume'?'已从断点继续':'已重新提交', 'ok'); renderAiCenter(); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function renderAiCenter() {
@@ -4285,9 +4301,9 @@ async function aiTasksHtml() {
         <td class="hint">${esc(t.model||'默认')}</td>
         <td onclick="event.stopPropagation()">${promptVersionsCell(t.prompt_versions)}</td>
         <td>${t.status==='completed'?`<b>${t.case_count}</b> 条${t.partial.length?`<div class="hint" style="color:var(--warn)">部分成功：${t.partial.map(esc).join('；')}</div>`:''}`
-            :t.status==='failed'?`<div class="hint" style="color:var(--danger)">${esc(t.error||'失败')}</div>`:'<span class="hint">—</span>'}${t.retry_count?`<div class="hint">已重试 ${t.retry_count} 次</div>`:''}</td>
+            :t.status==='failed'?`<div class="hint" style="color:var(--danger)">${esc(t.error||'失败')}</div>${t.error_kind&&ERROR_KIND_HINT[t.error_kind]?`<div class="hint">${ERROR_KIND_HINT[t.error_kind]}</div>`:''}`:'<span class="hint">—</span>'}${t.retry_count?`<div class="hint">已重试 ${t.retry_count} 次</div>`:''}</td>
         <td class="hint">${esc(t.created_by||'')}</td><td class="hint">${relTime(t.created_at)}</td>
-        <td onclick="event.stopPropagation()">${t.retryable?`<button class="btn ghost sm" onclick="retryFromCenter('${t.task_id}')">重试</button>`:''}</td></tr>`).join('')
+        <td onclick="event.stopPropagation()">${t.retryable?`<button class="btn ghost sm" onclick="retryFromCenter('${t.task_id}')">${resumeLabel(t)}</button>`:''}</td></tr>`).join('')
         || '<tr><td colspan="10"><div class="empty">暂无 AI 任务</div></td></tr>'}</tbody></table></div>`;
 }
 function promptVersionsCell(pv) {
