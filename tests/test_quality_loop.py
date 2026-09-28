@@ -570,7 +570,7 @@ async def test_后台任务先入库再解析_文件解析失败留痕(client):
 
     # 不支持的格式：解析在后台失败，任务留痕
     app.state.llm = StubLLM([])
-    resp = await client.post("/api/v1/tasks", files={"files": ("需求.xyz", b"???", "application/octet-stream")},
+    resp = await client.post("/api/v1/tasks", files={"files": ("需求.xyz", b"\x00\x01\xff\xfe", "application/octet-stream")},
                              data={"confirm_points": "true", "async_mode": "true"})
     assert resp.status_code == 200 and resp.json()["status"] == "queued"
     task_id = resp.json()["task_id"]

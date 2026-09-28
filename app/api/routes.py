@@ -684,22 +684,30 @@ async def _parse_saved(saved: list[tuple[Path, str]], text: str, llm) -> list:
     import asyncio
 
     docs = []
-    try:
-        for path, source in saved:
+    failed: list[str] = []
+    for path, source in saved:
+        try:
             if path.suffix.lower() in IMAGE_SUFFIXES:
                 doc = await parse_image(path, llm)
             else:
                 # 文档解析是 CPU 密集同步代码：放线程池；内嵌图片经 Vision 理解后回填原位置
                 doc = await enrich_images(await asyncio.to_thread(parse_file, path), llm)
-            doc.source = source  # 来源显示原始文件名（落盘名带随机前缀）
-            docs.append(doc)
-        if text.strip():
-            docs.append(parse_text(text))
-    except (UnsupportedFormatError, ScannedPDFError, NoVisionModelError, UnsafeFileError, UnicodeDecodeError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except AllModelsFailedError as e:
-        raise HTTPException(status_code=502, detail=f"图片解析失败（Vision 模型不可用）：{e}")
+        except (UnsupportedFormatError, ScannedPDFError, UnsafeFileError, UnicodeDecodeError, ValueError) as e:
+            # 不限制上传格式：单个文件读不出来只记录并跳过，其余文件与文本照常解析；全部失败才报错
+            logger.warning("需求文件跳过 {}：{}", source, e)
+            failed.append(f"{source}：{e}")
+            continue
+        except NoVisionModelError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except AllModelsFailedError as e:
+            raise HTTPException(status_code=502, detail=f"图片解析失败（Vision 模型不可用）：{e}")
+        doc.source = source  # 来源显示原始文件名（落盘名带随机前缀）
+        docs.append(doc)
+    if text.strip():
+        docs.append(parse_text(text))
     if not docs:
+        if failed:
+            raise HTTPException(status_code=400, detail="上传的文件都无法读取：" + "；".join(failed))
         raise HTTPException(status_code=400, detail="请上传需求文件或粘贴需求文本")
     return docs
 
@@ -3635,10 +3643,12 @@ async def assign_plan_cases(request: Request, plan_id: str, body: PlanAssignBody
 
 # 附件类型白名单（13.4：图片/视频/日志/压缩包）
 _ATTACHMENT_SUFFIXES = {
-    "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"},
-    "video": {".mp4", ".mov", ".avi", ".mkv", ".webm"},
-    "log": {".log", ".txt", ".json", ".xml", ".har"},
-    "archive": {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz"},
+    "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".ico", ".heic", ".heif", ".avif", ".psd"},
+    "video": {".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv", ".flv", ".m4v"},
+    "log": {".log", ".txt", ".json", ".xml", ".har", ".yaml", ".yml"},
+    "archive": {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz"},
+    "doc": {".pdf", ".doc", ".docx", ".docm", ".rtf", ".odt", ".wps", ".xls", ".xlsx", ".xlsm", ".csv", ".ods", ".et",
+            ".ppt", ".pptx", ".pptm", ".odp", ".dps", ".md", ".html", ".htm", ".eml", ".msg"},
 }
 
 
@@ -3801,10 +3811,8 @@ async def upload_plan_attachment(
     plan = _plan(request, plan_id, "exec.attach")
     run = _plan_run(plan, run_id)
     suffix = Path(file.filename or "").suffix.lower()
-    kind = next((k for k, s in _ATTACHMENT_SUFFIXES.items() if suffix in s), None)
-    if kind is None:
-        allowed = "、".join(sorted(s for v in _ATTACHMENT_SUFFIXES.values() for s in v))
-        raise HTTPException(status_code=400, detail=f"不支持的附件类型 {suffix or '（无后缀）'}（可用 {allowed}）")
+    # 附件不限类型：已知类型用于图标 / 分类展示，其余归 other
+    kind = next((k for k, s in _ATTACHMENT_SUFFIXES.items() if suffix in s), "other")
     if item_id and not any(i["item_id"] == item_id for i in plan["items"]):
         raise HTTPException(status_code=400, detail=f"用例不在计划中: {item_id}")
     if run.get("finished_at") or plan["status"] == "archived":

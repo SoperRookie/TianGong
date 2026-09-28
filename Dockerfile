@@ -7,8 +7,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TZ=Asia/Shanghai
 
+# LibreOffice：老版 Office / WPS / OpenDocument / 矢量图转换；fonts-noto-cjk：中文渲染；libarchive-tools：rar 解压
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tzdata ca-certificates \
+       libreoffice-writer libreoffice-calc libreoffice-impress libreoffice-draw fonts-noto-cjk libarchive-tools \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 1000 -m -d /app -s /usr/sbin/nologin tiangong
 
