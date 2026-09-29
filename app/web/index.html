@@ -2290,7 +2290,8 @@ async function openTask(id, keepLocal) {
 }
 function setTab(tab) { detailTab = tab; renderDetail(); }
 
-function renderDetail() {
+function renderDetail() { return (() => keepScroll('detail', [currentTask && currentTask.task_id, detailTab, caseTab].join('|'), _renderDetail__impl))(); }
+function _renderDetail__impl() {
   const t = currentTask;
   if (!t) return;
   if (currentView === 'board') crumbForBoard();
@@ -3188,6 +3189,26 @@ async function mSave() {
     await openTask(t.task_id, true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
 }
+
+/* ---- 重绘保持滚动位置：同一页面（同一任务 / 计划 / 需求 / 列表页）因操作而重绘时，窗口与表格容器的滚动位置不变 ----
+   之前修改测试点、审核用例、展开步骤等操作后页面会跳回顶部，需要重新往下找。 */
+let _scrollKeys = {};
+function keepScroll(group, key, fn) {
+  const same = _scrollKeys[group] === key;
+  _scrollKeys[group] = key;
+  if (!same) return fn();
+  const win = [window.scrollX, window.scrollY];
+  const boxes = [...document.querySelectorAll('.tbl-wrap, .drawer .d-b, .dlg-b')].map((el, i) => [i, el.scrollTop, el.scrollLeft]).filter(x => x[1] || x[2]);
+  const restore = () => {
+    if (window.scrollY !== win[1] || window.scrollX !== win[0]) window.scrollTo(win[0], win[1]);
+    const els = document.querySelectorAll('.tbl-wrap, .drawer .d-b, .dlg-b');
+    for (const [i, top, left] of boxes) { const el = els[i]; if (el) { el.scrollTop = top; el.scrollLeft = left; } }
+  };
+  const r = fn();
+  if (r && typeof r.then === 'function') return r.then(v => { restore(); requestAnimationFrame(restore); return v; });
+  restore(); requestAnimationFrame(restore);
+  return r;
+}
 function _rerenderSteps() {
   if (currentView === 'plans') { if (curPlan) renderPlanDetail(); else renderPlans(); }
   else if (currentView === 'cases') renderAllCases();
@@ -3412,7 +3433,8 @@ function backToPlans() { curPlan = null; _planDetail = null; planRunId = null; r
 function openPlan(id, filter) { planExecFilter = filter || ''; return _openPlan(id); }
 function _openPlan(pid) { curPlan = pid; planRunId = null; switchView('plans'); }
 
-async function renderPlans() {
+async function renderPlans() { return (() => keepScroll('plans', ['plans', plansPage, plansMine].join('|'), _renderPlans__impl))(); }
+async function _renderPlans__impl() {
   if (curPlan) return renderPlanDetail();
   crumbForPlans();
   const _s = tick('plans');
@@ -3551,7 +3573,8 @@ function curPlanRun(p) {
   return p.runs.length ? p.runs[p.runs.length - 1] : null;
 }
 
-async function renderPlanDetail() {
+async function renderPlanDetail() { return (() => keepScroll('plan', curPlan, _renderPlanDetail__impl))(); }
+async function _renderPlanDetail__impl() {
   const _s = tick('plans');
   let p;
   try { p = await api('/api/v1/plans/' + curPlan); }
@@ -4009,7 +4032,8 @@ async function acDelete(entries, caseId) {
   if (ok) toast(`已删除 ${ok} 条用例${fail?`，${fail} 条失败`:''}`, fail ? 'warn' : 'ok');
   renderAllCases();
 }
-async function renderAllCases() {
+async function renderAllCases() { return (() => keepScroll('cases', ['cases', acPage, acSize, acProject, acModule, acPriority, acKeyword, acView].join('|'), _renderAllCases__impl))(); }
+async function _renderAllCases__impl() {
   const q = new URLSearchParams({page: acPage, page_size: acSize});
   if (acProject) q.set('project', acProject);
   if (acModule) q.set('module', acModule);
@@ -4444,7 +4468,8 @@ async function runSearch(q) {
 /* ---- 知识库（16 章三层） ---- */
 let kbLevelFilter = '', kbCatFilter = '', _kbMeta = null, kbQuery = '', _kbAutoSearch = false;
 let kbMode = 'docs', depKind = 'requirement', depModule = '', depFocus = null, _depGraph = null;
-async function renderKnowledge() {
+async function renderKnowledge() { return (() => keepScroll('kb', 'kb', _renderKnowledge__impl))(); }
+async function _renderKnowledge__impl() {
   setCrumb('知识库');
   if (kbMode === 'deps') return renderDependencies();
   let data, meta;
@@ -4803,7 +4828,8 @@ function crumbForReqs() {
   else setCrumb('需求列表');
 }
 function openRequirement(id, tab) { curReq = id; reqTab = tab || 'raw'; switchView('requirements'); }
-async function renderRequirements() {
+async function renderRequirements() { return (() => keepScroll('reqs', ['reqs', curReq, reqStatus, reqKw, reqDeleted].join('|'), _renderRequirements__impl))(); }
+async function _renderRequirements__impl() {
   if (curReq) return renderRequirementDetail();
   crumbForReqs();
   const _s = tick('reqs');
@@ -4878,7 +4904,8 @@ async function saveReqDlg() {
   } catch (e) { toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '创建';
 }
-async function renderRequirementDetail() {
+async function renderRequirementDetail() { return (() => keepScroll('req', curReq, _renderRequirementDetail__impl))(); }
+async function _renderRequirementDetail__impl() {
   const _s = tick('reqs');
   let r;
   try { r = await api('/api/v1/requirements/' + curReq); } catch (e) { toast(e.message, 'err'); curReq = null; return renderRequirements(); }
@@ -5357,7 +5384,8 @@ function openProject(name) {
 let _projDetail = null;
 function setProjTab(tab) { projTab = tab; renderProjectWorkspace(); }
 
-async function renderProjectWorkspace() {
+async function renderProjectWorkspace() { return (() => keepScroll('ws', [curProject, projTab].join('|'), _renderProjectWorkspace__impl))(); }
+async function _renderProjectWorkspace__impl() {
   crumbForProjects();
   const _s = tick('projects');
   const p = _projectsCache.find(x => x.project === curProject) ||
@@ -6076,7 +6104,8 @@ async function saveTotpPolicy(enabled) {
     renderUserBox();
   } catch (e) { toast(e.message, 'err'); refreshUsers(); }
 }
-async function refreshUsers() {
+async function refreshUsers() { return (() => keepScroll('users', [usersPage, usersSize, usersKw, usersRole, usersStatus].join('|'), _refreshUsers__impl))(); }
+async function _refreshUsers__impl() {
   try {
     window._authSettings = await api('/api/v1/auth/settings').catch(()=>window._authSettings);
     if ($('totpPolicySwitch')) $('totpPolicySwitch').checked = (window._authSettings||{}).totp_enabled !== false;
