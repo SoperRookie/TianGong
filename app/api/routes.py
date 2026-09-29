@@ -5659,6 +5659,9 @@ async def list_tasks(
                 "requirement_title": (r.context or {}).get("requirement_title"),
                 "created_by": r.created_by,
                 "case_count": len((r.result or {}).get("cases", [])),
+                "point_count": sum(len(m.get("points") or []) for m in (r.analysis or {}).get("test_points") or []),
+                "point_approved": sum(1 for m in (r.analysis or {}).get("test_points") or [] for p in m.get("points") or []
+                                      if isinstance(p, dict) and p.get("status") == "approved"),
                 "revision_count": len(r.revisions),
                 "error": r.error,
             }
