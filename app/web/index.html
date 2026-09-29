@@ -2542,6 +2542,8 @@ function renderPointWorkbench(t) {
   const rejected = pts.filter(p=>p.status==='rejected').length;
   const pending = pts.length - approved - rejected;
   const confirmable = t.status === 'awaiting_confirmation';
+  const pendingGen = t.points_pending_generation || [];
+  const generatedIds = new Set((t.context||{}).generated_tp_ids || []);
   const canReviewPt = can((t.context||{}).project, 'point.review'), canEditPt = can((t.context||{}).project, 'point.edit');
 
   const rows = modules.map(m => {
@@ -2559,6 +2561,7 @@ function renderPointWorkbench(t) {
         <td style="width:84px">${p.dimension?`<span class="tag">${esc(p.dimension)}</span>`:'<span class="hint">—</span>'}</td>
         <td style="width:76px">${p.legacy?'':srcChip(p.source||'ai')}</td>
         <td style="width:92px"><span class="st ${p.status}">${pStatusText[p.status]||p.status}</span>
+          ${t.status==='completed'&&p.status==='approved'?(generatedIds.has(p.tp_id)?'<div class="hint">已生成用例</div>':pendingGen.includes(p.tp_id)?'<div class="hint" style="color:var(--warn)">待生成用例</div>':''):''}
           ${p.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${p.reject_count} 次</div>`:''}</td>
         <td style="width:132px">${p.legacy?'':`<div class="rowops">
           ${canReviewPt?`<button class="ibtn ok" title="通过（锁定）" onclick="pointAct(${jsq(p.tp_id)},'approve')">${IC.check}</button>`:''}
@@ -2602,7 +2605,10 @@ function renderPointWorkbench(t) {
     ${confirmable?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
       <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">确认并生成用例${approved?`（仅已通过的 ${approved} 条）`:'（全部未驳回项）'}</button>
       <span class="hint">通过 = 锁定为正式测试点；驳回项修改后需再审核，不进入生成</span>
-    </div>`:'<div class="hint" style="margin-top:12px">该任务已完成生成，此页为测试点留档视图</div>'}`;
+    </div>`:t.status==='completed'?(pendingGen.length?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
+      <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">为新通过的 ${pendingGen.length} 条测试点生成用例</button>
+      <span class="hint">分批审核、分批生成：只为这些测试点生成，并入现有用例，已有用例与审核状态不变</span>
+    </div>`:'<div class="hint" style="margin-top:12px">该任务已完成生成；继续通过新的测试点后，这里会出现「为新通过的测试点生成用例」</div>'):''}`;
 }
 
 /* 测试点脑图：需求 → 模块 → 测试点（维度 / 状态标签）→ 驳回意见；选中节点后用工具栏审核，双击修改 */

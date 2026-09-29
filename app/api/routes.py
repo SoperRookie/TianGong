@@ -1681,6 +1681,15 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     store = request.app.state.tasks
     record = _task(request, task_id, "point.review")
     _ai_ctx(request, record)
+    if record.status == "completed":
+        # 分批审核、分批生成：第一批生成后又审核通过了新的测试点 → 只为这些点增量生成，并入现有用例
+        pending = _points_pending_generation(record)
+        if not pending:
+            raise HTTPException(status_code=409, detail="没有新通过、尚未生成用例的测试点")
+        store.set_progress(task_id, status="running", progress="generating_reviewing")
+        record.checkpoint = None
+        store.save(record)
+        return await _generate_confirmed(request, task_id, pending, merge_existing=True)
     if record.status != "awaiting_confirmation":
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无待确认的拆解结果")
     if record.progress == "quality_check":
@@ -1709,8 +1718,25 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     return await _generate_confirmed(request, task_id, test_points)
 
 
-async def _generate_confirmed(request: Request, task_id: str, test_points: list[dict], resume: bool = False) -> dict:
-    """已确认测试点 → 生成（多模块并行）。resume=True 时复用检查点里已生成的模块，只补缺失模块。
+def _points_pending_generation(record: TaskRecord) -> list[dict]:
+    """已通过但尚未生成过用例的测试点（按模块分组），供任务完成后的增量生成。"""
+    from app.tasks.points import iter_points
+
+    generated = set((record.context or {}).get("generated_tp_ids") or [])
+    if not generated:  # 旧任务没有记录：以用例的 point_ids 追溯为准
+        for c in (record.result or {}).get("cases") or []:
+            generated.update(str(x) for x in (c.get("point_ids") or []))
+    out: dict[str, list[dict]] = {}
+    for entry, p in iter_points((record.analysis or {}).get("test_points") or []):
+        if p.get("status") == "approved" and p.get("tp_id") and p["tp_id"] not in generated:
+            out.setdefault(entry["module"], []).append({"point": p["point"], "dimension": p.get("dimension", ""), "tp_id": p["tp_id"]})
+    return [{"module": m, "points": pts} for m, pts in out.items()]
+
+
+async def _generate_confirmed(request: Request, task_id: str, test_points: list[dict], resume: bool = False,
+                              merge_existing: bool = False) -> dict:
+    """已确认测试点 → 生成（多模块并行）。resume=True 时复用检查点里已生成的模块，只补缺失模块；
+    merge_existing=True 为增量生成：只生成传入的测试点，结果并入现有用例（现有用例、审核状态与 uid 不变）。
 
     模型全链路失败（如欠费）时任务置失败但保留检查点，「继续完成」从断点恢复。
     """
@@ -1757,8 +1783,30 @@ async def _generate_confirmed(request: Request, task_id: str, test_points: list[
         store.save(record)
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
-        store.set_progress(task_id, status="awaiting_confirmation", progress=None)
+        store.set_progress(task_id, status="completed" if merge_existing else "awaiting_confirmation", progress=None)
         raise
+
+    if merge_existing and (record.result or {}).get("cases"):
+        from app.agents.service import GenerationResult
+        from app.templates import TestCase
+
+        old = record.result or {}
+        existing = [TestCase.model_validate(c) for c in old.get("cases") or []]
+        new_modules = {str(tp.get("module", "")) for tp in test_points}
+        result = GenerationResult(
+            cases=existing + list(result.cases),
+            passed=bool(old.get("passed", True)) and result.passed,
+            review_rounds=max(int(old.get("review_rounds", 0) or 0), result.review_rounds),
+            unresolved=[u for u in old.get("unresolved") or [] if u.get("module") not in new_modules] + result.unresolved,
+            blind_spots=list(dict.fromkeys([*(old.get("blind_spots") or []), *result.blind_spots])),
+            missing=list(dict.fromkeys([*(old.get("missing") or []), *result.missing])),
+            suggestions=list(dict.fromkeys([*(old.get("suggestions") or []), *result.suggestions])),
+            test_points=_merge_module_points(old.get("test_points") or [], result.test_points),
+            trace=[*(old.get("trace") or []), {"agent": "主控", "action": "增量生成", "modules": sorted(new_modules)}, *result.trace],
+            failed_modules=[m for m in old.get("failed_modules") or [] if m not in new_modules] + result.failed_modules,
+        )
+        from app.agents.service import _renumber
+        _renumber(result.cases)  # 两批用例在同一模块内连续编号（uid 不变，审核状态跟随 uid）
 
     task_dir = store.output_dir / task_id
     response = _finalize_task(
@@ -1766,12 +1814,22 @@ async def _generate_confirmed(request: Request, task_id: str, test_points: list[
         knowledge=record.knowledge + snapshot,  # 拆解阶段 + 生成阶段的知识快照合并留痕
         memories=memory_snapshot, rules=rule_snapshot,
     )
-    # 保留拆解阶段留痕
+    # 保留拆解阶段留痕；记录已生成过用例的测试点，供分批生成判断
     saved = store.get(task_id)
     saved.analysis = record.analysis
-    saved.context = {k: v for k, v in (saved.context or {}).items() if k != "resume_stage"}
+    done = set((saved.context or {}).get("generated_tp_ids") or []) if merge_existing else set()
+    done.update(p["tp_id"] for tp in test_points for p in tp.get("points", []) if isinstance(p, dict) and p.get("tp_id"))
+    saved.context = {**{k: v for k, v in (saved.context or {}).items() if k != "resume_stage"},
+                     "generated_tp_ids": sorted(done)}
     store.save(saved)
     return response
+
+
+def _merge_module_points(old: list[dict], new: list[dict]) -> list[dict]:
+    merged: dict[str, list] = {}
+    for tp in [*old, *new]:
+        merged.setdefault(str(tp.get("module", "")), []).extend(tp.get("points", []))
+    return [{"module": m, "points": pts} for m, pts in merged.items()]
 
 
 class ReviseBody(BaseModel):
@@ -6091,8 +6149,10 @@ async def archive_prompt_version(request: Request, key: str, version_no: int) ->
 @router.get("/api/v1/tasks/{task_id}")
 async def get_task(request: Request, task_id: str) -> dict:
     record = _task(request, task_id, "case.view")
+    pending = _points_pending_generation(record) if record.status == "completed" else []
     return {**record.model_dump(exclude={"checkpoint"}), "editing": _active_editing(request.app, task_id),
-            "error_kind": _error_kind(record.error), "resume": _resume_info(record)}
+            "error_kind": _error_kind(record.error), "resume": _resume_info(record),
+            "points_pending_generation": [p["tp_id"] for tp in pending for p in tp["points"]]}
 
 
 # ---- 编辑占用提示（完整需求 11 章）：内存瞬态状态，重启即清（占用本就随会话失效）----
