@@ -63,6 +63,8 @@ async def lifespan(app: FastAPI):
     from app.projects import ModuleStore, ProjectStore, UserPrefStore, VersionStore
 
     app.state.projects = ProjectStore(storage_path=settings.data_dir / "projects.json")
+    from app.projects import BusinessLineStore
+    app.state.business_lines = BusinessLineStore()
     app.state.user_prefs = UserPrefStore()
     app.state.versions = VersionStore()
     app.state.modules = ModuleStore()
