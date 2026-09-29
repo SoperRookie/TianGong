@@ -683,3 +683,37 @@ async def test_points_compare_人工与AI逐条匹配与覆盖率(client):
     app.state.llm = _Boom()
     r = (await client.post(f"/api/v1/tasks/{task_id}/points/compare")).json()["point_compare"]
     assert r["degraded"] and r["matched"] and r["matched"][0]["verdict"] == "待复核"
+
+
+async def test_分批审核分批生成_完成后为新通过的测试点增量生成(client):
+    data = await _create_confirm_task(client)
+    task_id = data["task_id"]
+    pts = [p for m in data["test_points"] for p in m["points"]]
+    assert len(pts) >= 2
+    first, second = pts[0], pts[1]
+    # 第一批：只通过一条 → 生成
+    await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [{"tp_id": first["tp_id"], "action": "approve"}]})
+    app.state.llm = StubLLM([generator_reply(make_case(case_id="TC-登录-001", point_ids=[first["tp_id"]])), review_reply(True)])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={})
+    assert resp.status_code == 200, resp.text
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert t["status"] == "completed" and len(t["result"]["cases"]) == 1
+    assert t["context"]["generated_tp_ids"] == [first["tp_id"]] and t["points_pending_generation"] == []
+    uid1 = t["result"]["cases"][0]["uid"]
+    # 没有新通过的测试点：再点生成 409
+    assert (await client.post(f"/api/v1/tasks/{task_id}/confirm", json={})).status_code == 409
+    # 第二批：完成后继续审核通过另一条 → 详情标出待生成 → 增量生成并入现有用例
+    r = await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [{"tp_id": second["tp_id"], "action": "approve"}]})
+    assert r.status_code == 200, r.text
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert t["points_pending_generation"] == [second["tp_id"]]
+    # 新一批生成时模型仍从 001 编号；并入后按模块连续重编号，uid 不变
+    app.state.llm = StubLLM([generator_reply(make_case(case_id="TC-登录-001", title="第二批用例", point_ids=[second["tp_id"]])), review_reply(True)])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={})
+    assert resp.status_code == 200, resp.text
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert t["status"] == "completed" and len(t["result"]["cases"]) == 2
+    assert t["result"]["cases"][0]["uid"] == uid1 and t["result"]["cases"][1]["title"] == "第二批用例"
+    assert [c["case_id"] for c in t["result"]["cases"]] == ["TC-登录-001", "TC-登录-002"]
+    assert set(t["context"]["generated_tp_ids"]) == {first["tp_id"], second["tp_id"]} and t["points_pending_generation"] == []
+    assert any(x.get("action") == "增量生成" for x in t["result"]["trace"])

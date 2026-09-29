@@ -1003,6 +1003,25 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 </dialog>
 
 <!-- 项目：新建 / 编辑 -->
+<dialog id="lineDlg" style="width:720px">
+  <div class="dlg-h"><h3>业务线管理</h3><span class="meta hint">一条业务线包含多个项目；同业务线项目共享历史用例复用</span></div>
+  <div class="dlg-b">
+    <div id="lineList"></div>
+    <div class="section-t" id="lineFormTitle" style="margin-top:12px">新建业务线</div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:2"><label class="f">名称</label><input type="text" id="blName" placeholder="如：真人视讯"></div>
+      <div style="flex:1"><label class="f">编码<span class="hint">（可选）</span></label><input type="text" id="blCode" placeholder="如 LIVE"></div>
+      <div style="flex:1"><label class="f">负责人<span class="hint">（可选）</span></label><input type="text" id="blOwner" list="userNames" placeholder="用户名"></div>
+    </div>
+    <label class="f">描述<span class="hint">（可选）</span></label><input type="text" id="blDesc" placeholder="业务范围说明">
+    <div class="toolbar" style="margin-top:8px">
+      <button class="btn sm" id="blSaveBtn" onclick="saveLineForm()">新建</button>
+      <button class="btn ghost sm" id="blCancelBtn" style="display:none" onclick="resetLineForm()">取消编辑</button>
+    </div>
+  </div>
+  <div class="dlg-f"><button class="btn ghost" onclick="$('lineDlg').close()">关闭</button></div>
+</dialog>
+
 <dialog id="projDlg">
   <div class="dlg-h"><h3 id="pjTitle">新建项目</h3></div>
   <div class="dlg-b">
@@ -1010,9 +1029,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div style="flex:2"><label class="f">项目名</label><input type="text" id="pjName" placeholder="如：斗地主赛季玩法"></div>
       <div style="flex:1"><label class="f">编码<span class="hint">（接口识别，可选）</span></label><input type="text" id="pjCode" placeholder="如 DDZ"></div>
     </div>
-    <label class="f">业务线<span class="hint">（可选；同业务线的项目互相共享历史用例复用与知识检索，如「棋牌」「电子」）</span></label>
-    <input type="text" id="pjLine" list="lineNames" placeholder="如 棋牌">
-    <datalist id="lineNames"></datalist>
+    <label class="f">业务线<span class="hint">（可选；同业务线的项目互相共享历史用例复用与知识检索）</span></label>
+    <select id="pjLine" onchange="if(this.value==='__new__')pjNewLine()"></select>
     <div style="display:flex;gap:10px">
       <div style="flex:1"><label class="f">负责人<span class="hint">（登录用户名，自动成为项目管理员）</span></label><input type="text" id="pjOwner" list="userNames" placeholder="用户名"></div>
       <div style="flex:1"><label class="f">状态</label>
@@ -1834,11 +1852,17 @@ function renderProjMenu(q) {
   const recentNames = prefs.recent.map(r => r.project);
   const recents = recentNames.map(n => all.find(p => p.project === n)).filter(p => p && !p.favorite && match(p)).slice(0, 5);
   const rest = all.filter(p => !p.favorite && !recents.includes(p) && match(p));
+  const byLine = new Map();
+  for (const p of rest) { const k = p.business_line || ''; if (!byLine.has(k)) byLine.set(k, []); byLine.get(k).push(p); }
+  const lineKeys = [...byLine.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, 'zh'));
+  const restHtml = byLine.size > 1 || (byLine.size === 1 && lineKeys[0])
+    ? lineKeys.map(k => `<div class="grp">${k ? esc(k) : '未分业务线'}</div>${byLine.get(k).map(item).join('')}`).join('')
+    : `<div class="grp">${favs.length||recents.length?'其他项目':'项目'}</div>${rest.map(item).join('')}`;
   const listHtml = `<div class="list">
       <div class="it ${!curProjectName?'on':''}" onclick="setCurrentProject('')"><span class="star"></span><span>全部项目</span><span class="role">不限定</span></div>
       ${favs.length?`<div class="grp">收藏</div>${favs.map(item).join('')}`:''}
       ${recents.length?`<div class="grp">最近访问</div>${recents.map(item).join('')}`:''}
-      ${rest.length?`<div class="grp">${favs.length||recents.length?'其他项目':'项目'}</div>${rest.map(item).join('')}`:''}
+      ${rest.length?restHtml:''}
       ${!all.length?'<div class="empty" style="padding:14px">暂无可访问的项目</div>':''}
     </div>`;
   if ($('cpSearch') && $('cpList')) { $('cpList').innerHTML = listHtml; return; }  // 输入中只重绘列表，输入框不重建
@@ -2266,7 +2290,8 @@ async function openTask(id, keepLocal) {
 }
 function setTab(tab) { detailTab = tab; renderDetail(); }
 
-function renderDetail() {
+function renderDetail() { return (() => keepScroll('detail', [currentTask && currentTask.task_id, detailTab, caseTab].join('|'), _renderDetail__impl))(); }
+function _renderDetail__impl() {
   const t = currentTask;
   if (!t) return;
   if (currentView === 'board') crumbForBoard();
@@ -2518,6 +2543,8 @@ function renderPointWorkbench(t) {
   const rejected = pts.filter(p=>p.status==='rejected').length;
   const pending = pts.length - approved - rejected;
   const confirmable = t.status === 'awaiting_confirmation';
+  const pendingGen = t.points_pending_generation || [];
+  const generatedIds = new Set((t.context||{}).generated_tp_ids || []);
   const canReviewPt = can((t.context||{}).project, 'point.review'), canEditPt = can((t.context||{}).project, 'point.edit');
 
   const rows = modules.map(m => {
@@ -2535,6 +2562,7 @@ function renderPointWorkbench(t) {
         <td style="width:84px">${p.dimension?`<span class="tag">${esc(p.dimension)}</span>`:'<span class="hint">—</span>'}</td>
         <td style="width:76px">${p.legacy?'':srcChip(p.source||'ai')}</td>
         <td style="width:92px"><span class="st ${p.status}">${pStatusText[p.status]||p.status}</span>
+          ${t.status==='completed'&&p.status==='approved'?(generatedIds.has(p.tp_id)?'<div class="hint">已生成用例</div>':pendingGen.includes(p.tp_id)?'<div class="hint" style="color:var(--warn)">待生成用例</div>':''):''}
           ${p.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${p.reject_count} 次</div>`:''}</td>
         <td style="width:132px">${p.legacy?'':`<div class="rowops">
           ${canReviewPt?`<button class="ibtn ok" title="通过（锁定）" onclick="pointAct(${jsq(p.tp_id)},'approve')">${IC.check}</button>`:''}
@@ -2578,7 +2606,10 @@ function renderPointWorkbench(t) {
     ${confirmable?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
       <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">确认并生成用例${approved?`（仅已通过的 ${approved} 条）`:'（全部未驳回项）'}</button>
       <span class="hint">通过 = 锁定为正式测试点；驳回项修改后需再审核，不进入生成</span>
-    </div>`:'<div class="hint" style="margin-top:12px">该任务已完成生成，此页为测试点留档视图</div>'}`;
+    </div>`:t.status==='completed'?(pendingGen.length?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
+      <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">为新通过的 ${pendingGen.length} 条测试点生成用例</button>
+      <span class="hint">分批审核、分批生成：只为这些测试点生成，并入现有用例，已有用例与审核状态不变</span>
+    </div>`:'<div class="hint" style="margin-top:12px">该任务已完成生成；继续通过新的测试点后，这里会出现「为新通过的测试点生成用例」</div>'):''}`;
 }
 
 /* 测试点脑图：需求 → 模块 → 测试点（维度 / 状态标签）→ 驳回意见；选中节点后用工具栏审核，双击修改 */
@@ -3158,6 +3189,26 @@ async function mSave() {
     await openTask(t.task_id, true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
 }
+
+/* ---- 重绘保持滚动位置：同一页面（同一任务 / 计划 / 需求 / 列表页）因操作而重绘时，窗口与表格容器的滚动位置不变 ----
+   之前修改测试点、审核用例、展开步骤等操作后页面会跳回顶部，需要重新往下找。 */
+let _scrollKeys = {};
+function keepScroll(group, key, fn) {
+  const same = _scrollKeys[group] === key;
+  _scrollKeys[group] = key;
+  if (!same) return fn();
+  const win = [window.scrollX, window.scrollY];
+  const boxes = [...document.querySelectorAll('.tbl-wrap, .drawer .d-b, .dlg-b')].map((el, i) => [i, el.scrollTop, el.scrollLeft]).filter(x => x[1] || x[2]);
+  const restore = () => {
+    if (window.scrollY !== win[1] || window.scrollX !== win[0]) window.scrollTo(win[0], win[1]);
+    const els = document.querySelectorAll('.tbl-wrap, .drawer .d-b, .dlg-b');
+    for (const [i, top, left] of boxes) { const el = els[i]; if (el) { el.scrollTop = top; el.scrollLeft = left; } }
+  };
+  const r = fn();
+  if (r && typeof r.then === 'function') return r.then(v => { restore(); requestAnimationFrame(restore); return v; });
+  restore(); requestAnimationFrame(restore);
+  return r;
+}
 function _rerenderSteps() {
   if (currentView === 'plans') { if (curPlan) renderPlanDetail(); else renderPlans(); }
   else if (currentView === 'cases') renderAllCases();
@@ -3382,7 +3433,8 @@ function backToPlans() { curPlan = null; _planDetail = null; planRunId = null; r
 function openPlan(id, filter) { planExecFilter = filter || ''; return _openPlan(id); }
 function _openPlan(pid) { curPlan = pid; planRunId = null; switchView('plans'); }
 
-async function renderPlans() {
+async function renderPlans() { return (() => keepScroll('plans', ['plans', plansPage, plansMine].join('|'), _renderPlans__impl))(); }
+async function _renderPlans__impl() {
   if (curPlan) return renderPlanDetail();
   crumbForPlans();
   const _s = tick('plans');
@@ -3521,7 +3573,8 @@ function curPlanRun(p) {
   return p.runs.length ? p.runs[p.runs.length - 1] : null;
 }
 
-async function renderPlanDetail() {
+async function renderPlanDetail() { return (() => keepScroll('plan', curPlan, _renderPlanDetail__impl))(); }
+async function _renderPlanDetail__impl() {
   const _s = tick('plans');
   let p;
   try { p = await api('/api/v1/plans/' + curPlan); }
@@ -3979,7 +4032,8 @@ async function acDelete(entries, caseId) {
   if (ok) toast(`已删除 ${ok} 条用例${fail?`，${fail} 条失败`:''}`, fail ? 'warn' : 'ok');
   renderAllCases();
 }
-async function renderAllCases() {
+async function renderAllCases() { return (() => keepScroll('cases', ['cases', acPage, acSize, acProject, acModule, acPriority, acKeyword, acView].join('|'), _renderAllCases__impl))(); }
+async function _renderAllCases__impl() {
   const q = new URLSearchParams({page: acPage, page_size: acSize});
   if (acProject) q.set('project', acProject);
   if (acModule) q.set('module', acModule);
@@ -4414,7 +4468,8 @@ async function runSearch(q) {
 /* ---- 知识库（16 章三层） ---- */
 let kbLevelFilter = '', kbCatFilter = '', _kbMeta = null, kbQuery = '', _kbAutoSearch = false;
 let kbMode = 'docs', depKind = 'requirement', depModule = '', depFocus = null, _depGraph = null;
-async function renderKnowledge() {
+async function renderKnowledge() { return (() => keepScroll('kb', 'kb', _renderKnowledge__impl))(); }
+async function _renderKnowledge__impl() {
   setCrumb('知识库');
   if (kbMode === 'deps') return renderDependencies();
   let data, meta;
@@ -4773,7 +4828,8 @@ function crumbForReqs() {
   else setCrumb('需求列表');
 }
 function openRequirement(id, tab) { curReq = id; reqTab = tab || 'raw'; switchView('requirements'); }
-async function renderRequirements() {
+async function renderRequirements() { return (() => keepScroll('reqs', ['reqs', curReq, reqStatus, reqKw, reqDeleted].join('|'), _renderRequirements__impl))(); }
+async function _renderRequirements__impl() {
   if (curReq) return renderRequirementDetail();
   crumbForReqs();
   const _s = tick('reqs');
@@ -4848,7 +4904,8 @@ async function saveReqDlg() {
   } catch (e) { toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '创建';
 }
-async function renderRequirementDetail() {
+async function renderRequirementDetail() { return (() => keepScroll('req', curReq, _renderRequirementDetail__impl))(); }
+async function _renderRequirementDetail__impl() {
   const _s = tick('reqs');
   let r;
   try { r = await api('/api/v1/requirements/' + curReq); } catch (e) { toast(e.message, 'err'); curReq = null; return renderRequirements(); }
@@ -5083,7 +5140,7 @@ async function drawerNewProject() {
   } catch (e) { toast(e.message, 'err'); }
 }
 let curProject = null, projTab = 'overview';
-let _projectsCache = [], _businessLines = [], projListLine = '', _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
+let _projectsCache = [], _businessLines = [], projListLine = '', projGroupByLine = true, _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
 const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved'], draft:['草稿','candidate']};
 let _editingProject = null;
 async function fillUserNames() {
@@ -5093,14 +5150,87 @@ async function fillUserNames() {
     $('userNames').innerHTML = users.map(u => `<option value="${esc(u.username)}">${esc(u.name||'')}</option>`).join('');
   } catch (e) {}
 }
-function openProjDlg(name) {
+/* ---- 业务线管理（实体：增删改查；项目通过业务线字段归属） ---- */
+let _lineList = [], _editingLine = null;
+async function loadLines() { try { _lineList = (await api('/api/v1/business-lines')).business_lines; } catch (e) { _lineList = []; } return _lineList; }
+function fillLineSelect(cur) {
+  const sel = $('pjLine');
+  sel.innerHTML = '<option value="">（不归属业务线）</option>' + _lineList.map(l => `<option value="${esc(l.name)}" ${l.name===cur?'selected':''}>${esc(l.name)}${l.code?` (${esc(l.code)})`:''}</option>`).join('')
+    + (isSysAdmin()||openProjects() ? '<option value="__new__">＋ 新建业务线…</option>' : '');
+  if (cur && ![..._lineList].some(l => l.name === cur)) { sel.add(new Option(cur, cur)); sel.value = cur; }
+}
+async function pjNewLine() {
+  $('pjLine').value = '';
+  const name = await askInput('新建业务线', '业务线名称');
+  if (!name) return;
+  try { await jpost('/api/v1/business-lines', {name}); await loadLines(); fillLineSelect(name); toast('业务线已创建', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function openLineDlg(editName) {
+  await loadLines(); fillUserNames();
+  renderLineList();
+  resetLineForm();
+  if (editName) editLine(editName);
+  $('lineDlg').showModal();
+}
+function renderLineList() {
+  $('lineList').innerHTML = _lineList.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
+    <tr><th>名称</th><th style="width:80px">编码</th><th>描述</th><th style="width:90px">负责人</th><th style="width:70px">项目数</th><th style="width:90px">操作</th></tr>
+    ${_lineList.map(l => `<tr>
+      <td><b>${esc(l.name)}</b></td><td class="hint">${esc(l.code||'—')}</td><td class="hint">${esc(l.description||'')}</td><td class="hint">${esc(l.owner||'—')}</td>
+      <td title="${esc((l.project_names||[]).join('、'))}">${l.projects}</td>
+      <td><div class="rowops">
+        <button class="ibtn" title="编辑" onclick="editLine(${jsq(l.name)})">${IC.edit}</button>
+        ${canDelete()?`<button class="ibtn bad" title="删除" onclick="deleteLine(${jsq(l.name)}, ${l.projects})">${IC.trash}</button>`:''}
+      </div></td></tr>`).join('')}
+  </table></div>` : '<div class="empty">还没有业务线，在下方新建</div>';
+}
+function resetLineForm() {
+  _editingLine = null;
+  for (const id of ['blName','blCode','blOwner','blDesc']) $(id).value = '';
+  $('lineFormTitle').textContent = '新建业务线'; $('blSaveBtn').textContent = '新建'; $('blCancelBtn').style.display = 'none';
+}
+function editLine(name) {
+  const l = _lineList.find(x => x.name === name); if (!l) return;
+  _editingLine = name;
+  $('blName').value = l.name; $('blCode').value = l.code || ''; $('blOwner').value = l.owner || ''; $('blDesc').value = l.description || '';
+  $('lineFormTitle').textContent = `编辑业务线「${name}」（改名会同步更新其下 ${l.projects} 个项目）`; $('blSaveBtn').textContent = '保存'; $('blCancelBtn').style.display = '';
+  $('blName').focus();
+}
+async function saveLineForm() {
+  const name = $('blName').value.trim(), code = $('blCode').value.trim(), owner = $('blOwner').value.trim(), description = $('blDesc').value.trim();
+  if (!name) return toast('业务线名称不能为空', 'warn');
+  try {
+    if (_editingLine) {
+      const r = await api('/api/v1/business-lines/' + encodeURIComponent(_editingLine), {method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({new_name: name, code, owner, description})});
+      if (projListLine === _editingLine) projListLine = name;
+      toast(r.moved_projects ? `已保存，${r.moved_projects} 个项目已更新归属` : '已保存', 'ok');
+    } else { await jpost('/api/v1/business-lines', {name, code, owner, description}); toast('业务线已创建', 'ok'); }
+    await loadLines(); renderLineList(); resetLineForm();
+    await getProjects(true); if (currentView === 'projects') renderProjects();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function deleteLine(name, count) {
+  const msg = count ? `该业务线下有 ${count} 个项目。删除后这些项目将不再归属任何业务线（项目本身保留）。` : '删除后可重新创建。';
+  if (!await uiConfirm(`删除业务线「${name}」？`, msg, true)) return;
+  try {
+    await api('/api/v1/business-lines/' + encodeURIComponent(name) + (count ? '?detach=true' : ''), {method:'DELETE'});
+    if (projListLine === name) projListLine = '';
+    toast('业务线已删除', 'ok'); await loadLines(); renderLineList(); await getProjects(true); if (currentView === 'projects') renderProjects();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function openProjDlg(name) {
+  await loadLines();
+  _openProjDlg(name);
+}
+function _openProjDlg(name) {
   _editingProject = name || null;
   const p = name ? _projectsCache.find(x => x.project === name) : null;
   $('pjTitle').textContent = name ? '编辑项目 ' + name : '新建项目';
   $('pjName').value = name || '';
   $('pjCode').value = p ? (p.code || '') : '';
-  $('pjLine').value = p ? (p.business_line || '') : '';
-  $('lineNames').innerHTML = (_businessLines || []).map(l => `<option value="${esc(l)}">`).join('');
+  fillLineSelect(p ? (p.business_line || '') : '');
   $('pjOwner').value = p ? (p.owner || '') : (curUser ? curUser.username : '');
   $('pjStatus').value = p ? (p.status || 'active') : 'active';
   $('pjStatus').parentElement.style.display = name ? '' : 'none';
@@ -5179,7 +5309,7 @@ async function renderProjects() {
   const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus) && (!projListLine || p.business_line === projListLine)
     && (!kw || p.project.toLowerCase().includes(kw) || (p.code||'').toLowerCase().includes(kw) || (p.owner||'').toLowerCase().includes(kw)));
   const STATUS_CLS = {active:'approved', paused:'candidate', archived:'pending'};
-  const rows = shown.map(p => {
+  const rowOf = p => {
     const reviewed = p.approved + p.rejected + p.pending;
     const canEdit = !p.builtin && can(p.project, 'project.edit');
     return `<tr class="rowlink" onclick="openProject(${jsq(p.project)})">
@@ -5204,18 +5334,36 @@ async function renderProjects() {
         ${isSysAdmin()?`<button class="ibtn bad" title="删除（仅空项目）" onclick="deleteProject(${jsq(p.project)})">${IC.trash}</button>`:''}
       </div>`}</td>
     </tr>`;
-  }).join('');
+  };
+  let rows;
+  if (projGroupByLine) {
+    // 业务线维度：同一业务线的项目归在一起，未分业务线的排最后；组头显示项目数与任务 / 用例合计
+    const groups = new Map();
+    for (const p of shown) { const k = p.builtin ? '' : (p.business_line || ''); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); }
+    const keys = [...groups.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, 'zh'));
+    const canRename = isSysAdmin() || openProjects();
+    rows = keys.map(k => {
+      const ps = groups.get(k);
+      const tasks = ps.reduce((a, p) => a + (p.tasks || 0), 0), cases = ps.reduce((a, p) => a + (p.cases || 0), 0);
+      const head = `<tr class="module-head"><td colspan="12"><span style="font-weight:600">${k ? esc(k) : '未分业务线'}</span>
+        <span class="hint" style="margin-left:8px">${ps.length} 个项目 · ${tasks} 个任务 · ${cases} 条用例</span>
+        ${k && canRename ? `<button class="btn ghost sm" style="margin-left:10px" onclick="event.stopPropagation();openLineDlg(${jsq(k)})">编辑</button>` : ''}
+        ${!k && canRename && ps.some(p=>!p.builtin) ? '<span class="hint" style="margin-left:10px">在「编辑项目」里填写业务线即可归入</span>' : ''}</td></tr>`;
+      return head + ps.map(rowOf).join('');
+    }).join('');
+  } else rows = shown.map(rowOf).join('');
   $('projArea').innerHTML = `<div class="card">
     <div class="card-h"><h3>项目管理</h3><span class="meta">共 ${_projectsCache.filter(p=>!p.builtin).length} 个 · 收藏置顶 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
       <div class="grow">
         <input type="text" placeholder="搜索名称 / 编码 / 负责人（回车）" value="${esc(projListKw)}" style="width:190px" onchange="projListKw=this.value;renderProjects()">
+        <label class="check" title="按业务线分组展示"><input type="checkbox" ${projGroupByLine?'checked':''} onchange="projGroupByLine=this.checked;renderProjects()"> 按业务线分组</label>
         <select style="width:120px" onchange="projListLine=this.value;renderProjects()" title="按业务线筛选"><option value="">全部业务线</option>
           ${(_businessLines||[]).map(l=>`<option value="${esc(l)}" ${projListLine===l?'selected':''}>${esc(l)}</option>`).join('')}</select>
         <select style="width:120px" onchange="projListStatus=this.value;renderProjects()">
           <option value="">全部状态</option>
           ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>`<option value="${v}" ${projListStatus===v?'selected':''}>${l}</option>`).join('')}
         </select>
-        ${isSysAdmin()||openProjects()?`<button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>`:''}
+        ${isSysAdmin()||openProjects()?`<button class="btn ghost sm" onclick="openLineDlg()">业务线管理</button><button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>`:''}
         <button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
     <div class="card-b">
       <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
@@ -5236,7 +5384,8 @@ function openProject(name) {
 let _projDetail = null;
 function setProjTab(tab) { projTab = tab; renderProjectWorkspace(); }
 
-async function renderProjectWorkspace() {
+async function renderProjectWorkspace() { return (() => keepScroll('ws', [curProject, projTab].join('|'), _renderProjectWorkspace__impl))(); }
+async function _renderProjectWorkspace__impl() {
   crumbForProjects();
   const _s = tick('projects');
   const p = _projectsCache.find(x => x.project === curProject) ||
@@ -5955,7 +6104,8 @@ async function saveTotpPolicy(enabled) {
     renderUserBox();
   } catch (e) { toast(e.message, 'err'); refreshUsers(); }
 }
-async function refreshUsers() {
+async function refreshUsers() { return (() => keepScroll('users', [usersPage, usersSize, usersKw, usersRole, usersStatus].join('|'), _refreshUsers__impl))(); }
+async function _refreshUsers__impl() {
   try {
     window._authSettings = await api('/api/v1/auth/settings').catch(()=>window._authSettings);
     if ($('totpPolicySwitch')) $('totpPolicySwitch').checked = (window._authSettings||{}).totp_enabled !== false;
