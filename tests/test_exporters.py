@@ -29,7 +29,7 @@ def test_excel导出(tmp_path):
     ws = load_workbook(str(path)).active
 
     assert [c.value for c in ws[1]] == [
-        "用例编号", "所属模块", "用例标题", "优先级", "前置条件", "测试步骤", "预期结果", "关键词", "备注",
+        "用例编号", "所属模块", "用例标题", "优先级", "前置条件", "测试步骤", "预期结果", "关键词", "备注", "来源测试点",
     ]
     assert ws.max_row == 3
     # 步骤与预期结果编号对应
@@ -50,3 +50,81 @@ def test_csv导出_带BOM(tmp_path):
     assert rows[0][0] == "用例编号"
     assert rows[1][0] == "TC-登录-001"
     assert len(rows) == 3
+
+
+# ---- 导出文件与页面一致：删除 / 修改 / 审核后下载即重新导出；可只导出正式用例 ----
+
+
+async def test_导出文件随用例改动重新生成_可只导正式用例(tmp_path):
+    import httpx
+    from asgi_lifespan import LifespanManager
+
+    from app.main import app
+    from tests.stubs import ANALYST_REPLY, StubLLM, generator_reply, make_case, review_reply
+
+    def rows_of(content: bytes) -> list[str]:
+        f = tmp_path / "dl.xlsx"
+        f.write_bytes(content)
+        ws = load_workbook(str(f)).active
+        return [str(r[0]) for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]]
+
+    async with LifespanManager(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case(), make_case(case_id="TC-登录-002", title="密码错误"),
+                                                                  make_case(case_id="TC-登录-003", title="账号锁定")), review_reply(True)])
+            task_id = (await client.post("/api/v1/tasks", data={"text": "登录需求", "project": "P"})).json()["task_id"]
+            r = await client.get(f"/api/v1/tasks/{task_id}/files/xlsx")
+            assert r.status_code == 200 and len(rows_of(r.content)) == 3
+            # 单条审核里删除一条（此前这条路径不会标记重新导出，下载到的是旧文件）
+            assert (await client.post(f"/api/v1/tasks/{task_id}/review",
+                                      json={"items": [{"case_id": "TC-登录-003", "action": "delete"}]})).status_code == 200
+            r = await client.get(f"/api/v1/tasks/{task_id}/files/xlsx")
+            assert len(rows_of(r.content)) == 2
+            # 没有正式用例时 scope=approved 为 404
+            assert (await client.get(f"/api/v1/tasks/{task_id}/files/xlsx?scope=approved")).status_code == 404
+            # 人工修改标题（人工定稿即通过）后导出内容同步；只导正式用例时只有这一条
+            await client.post(f"/api/v1/tasks/{task_id}/review",
+                              json={"items": [{"case_id": "TC-登录-002", "action": "modify", "case": {**make_case(case_id="TC-登录-002", title="密码错误提示文案")}}]})
+            r = await client.get(f"/api/v1/tasks/{task_id}/files/csv")
+            assert "密码错误提示文案" in r.content.decode("utf-8-sig")
+            r = await client.get(f"/api/v1/tasks/{task_id}/files/xlsx?scope=approved")
+            assert r.status_code == 200 and rows_of(r.content) == ["TC-登录-002"]
+            # 再通过一条：正式用例 2 行，全量仍 2 行
+            await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": "TC-登录-001", "action": "accept"}]})
+            assert rows_of((await client.get(f"/api/v1/tasks/{task_id}/files/xlsx?scope=approved")).content) == ["TC-登录-001", "TC-登录-002"]
+            assert len(rows_of((await client.get(f"/api/v1/tasks/{task_id}/files/xlsx")).content)) == 2
+            assert (await client.get(f"/api/v1/tasks/{task_id}/files/exe")).status_code == 404
+
+
+async def test_测试点导出xlsx_全部与仅已通过(tmp_path):
+    import httpx
+    from asgi_lifespan import LifespanManager
+
+    from app.main import app
+    from tests.stubs import StubLLM
+    from tests.test_quality_loop import ANALYST_REPLY_V2, GAP_REPLY
+
+    def rows_of(content: bytes) -> list[list[str]]:
+        f = tmp_path / "pts.xlsx"
+        f.write_bytes(content)
+        ws = load_workbook(str(f)).active
+        return [[str(c) if c is not None else "" for c in r] for r in ws.iter_rows(values_only=True)]
+
+    async with LifespanManager(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            app.state.llm = StubLLM([ANALYST_REPLY_V2, GAP_REPLY])
+            data = (await client.post("/api/v1/tasks", data={"text": "登录需求", "confirm_points": "true"})).json()
+            task_id = data["task_id"]
+            pts = [p for m in data["test_points"] for p in m["points"]]
+            await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [{"tp_id": pts[0]["tp_id"], "action": "approve"}]})
+            r = await client.get(f"/api/v1/tasks/{task_id}/points/export")
+            assert r.status_code == 200
+            rows = rows_of(r.content)
+            assert rows[0][:6] == ["编号", "模块", "测试点", "维度", "来源", "状态"] and len(rows) == 1 + len(pts)
+            by_id = {row[0]: row for row in rows[1:]}
+            assert by_id[pts[0]["tp_id"]][5] == "已通过" and by_id[pts[0]["tp_id"]][4] == "AI 拆解" and by_id[pts[0]["tp_id"]][8] == "否"
+            assert any(row[4] == "查漏新增" for row in rows[1:])
+            r = await client.get(f"/api/v1/tasks/{task_id}/points/export?scope=approved")
+            rows = rows_of(r.content)
+            assert len(rows) == 2 and rows[1][0] == pts[0]["tp_id"]
+            assert (await client.get("/api/v1/tasks/none/points/export")).status_code == 404

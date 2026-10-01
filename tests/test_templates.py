@@ -111,7 +111,7 @@ def test_按模板导出excel列序一致(tmp_path):
     path = export_excel([case], tmp_path / "自定义.xlsx", template)
 
     ws = load_workbook(str(path)).active
-    assert [c.value for c in ws[1]] == ["用例编号", "模块", "标题", "优先级", "测试步骤", "预期结果", "测试类型"]
+    assert [c.value for c in ws[1]] == ["用例编号", "模块", "标题", "优先级", "测试步骤", "预期结果", "测试类型", "来源测试点"]
     assert ws.cell(row=2, column=7).value == "功能"  # 自定义列取 extras
 
 
