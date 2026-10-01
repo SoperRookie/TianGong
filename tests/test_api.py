@@ -148,7 +148,7 @@ async def test_模板API_上传识别调整并按模板生成(client):
     assert resp.status_code == 200
     xlsx = await client.get(resp.json()["downloads"]["xlsx"])
     ws = load_workbook(BytesIO(xlsx.content)).active
-    assert [c.value for c in ws[1]] == ["用例ID", "所属模块", "用例名称", "优先级", "操作步骤", "预期结果", "测试类型"]
+    assert [c.value for c in ws[1]] == ["用例ID", "所属模块", "用例名称", "优先级", "操作步骤", "预期结果", "测试类型", "来源测试点"]
 
     # 清理：恢复内置默认，避免影响其他用例
     await client.post("/api/v1/templates/builtin-default/default")

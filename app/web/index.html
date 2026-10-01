@@ -255,6 +255,7 @@ td .cid { font-family:var(--mono); font-size:11.5px; color:var(--ink-2); }
 .stepbox:not(.open).long::after { content:"展开 ▾"; position:absolute; right:0; bottom:0;
   background:linear-gradient(90deg,transparent,#fff 30%); padding:0 2px 0 26px; color:var(--primary); font-size:11.5px; }
 tbody tr:hover .stepbox:not(.open).long::after { background:linear-gradient(90deg,transparent,#fafbfd 30%); }
+.stepbox.open.long:hover::after { content:"收起 ▴"; position:absolute; right:0; bottom:0; color:var(--primary); font-size:11.5px; background:#fff; padding:0 2px 0 8px; }
 
 /* ================= 任务列表 ================= */
 tr.rowlink { cursor:pointer; }
@@ -2188,7 +2189,7 @@ function renderTaskListPage() {
       <div class="card-b">
         <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
           <thead><tr><th style="width:110px">状态</th><th style="width:130px">任务 ID</th><th style="width:140px">项目</th><th>来源</th>
-          <th style="width:100px">创建人</th><th style="width:80px">用例数</th><th style="width:60px">修订</th><th style="width:100px">创建时间</th></tr></thead>
+          <th style="width:100px">创建人</th><th style="width:80px">测试点</th><th style="width:80px">用例数</th><th style="width:60px">修订</th><th style="width:100px">创建时间</th></tr></thead>
           <tbody id="taskTbody"></tbody>
         </table></div>
       </div></div>`;
@@ -2220,10 +2221,11 @@ function renderTaskListRows() {
       <td>${srcText_(t.sources)||'-'}
         ${t.error?`<div class="hint" style="color:var(--danger)">${esc(t.error)}</div>`:''}</td>
       <td>${t.created_by?`<span class="tag">${esc(t.created_by)}</span>`:'<span class="hint">—</span>'}</td>
+      <td>${t.point_count ? `<b>${t.point_count}</b> 条${t.point_approved?`<div class="hint">通过 ${t.point_approved}</div>`:''}` : '<span class="hint">—</span>'}</td>
       <td>${t.case_count ? `<b>${t.case_count}</b> 条` : '<span class="hint">—</span>'}</td>
       <td>${t.revision_count ? t.revision_count + ' 轮' : '<span class="hint">—</span>'}</td>
       <td class="hint" title="${esc(t.created_at||'')}">${relTime(t.created_at)}</td>
-    </tr>`).join('') || `<tr><td colspan="8"><div class="empty" style="display:flex;flex-direction:column;align-items:center;gap:10px;padding:34px 0">
+    </tr>`).join('') || `<tr><td colspan="9"><div class="empty" style="display:flex;flex-direction:column;align-items:center;gap:10px;padding:34px 0">
       ${owlSvg('idle', 64)}${_tasksCache.length ? '当前筛选下无任务' : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
 }
 function backToList() {
@@ -2470,8 +2472,10 @@ function renderOverview(t) {
           <div><dt>测试点</dt><dd>${pts.length||'—'}</dd></div>
           <div><dt>创建时间</dt><dd>${esc(fmtTime(t.created_at, true))}</dd></div>
         </dl>
-        ${hasCases ? `<div class="section-t">导出下载</div><div class="toolbar" style="margin-top:4px">
-          ${Object.keys(t.files||{}).map(f=>`<a class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/files/'+f)}, ${jsq('测试用例.'+f)})">${esc(f)}</a>`).join('')}</div>` : ''}
+        ${hasCases ? `<div class="section-t">导出下载</div><div class="toolbar" style="margin-top:4px;flex-wrap:wrap">
+          ${['xlsx','csv','xmind'].map(f=>`<a class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/files/'+f)}+(exportApprovedOnly?'?scope=approved':''), ${jsq('测试用例.'+f)})">${esc(f)}</a>`).join('')}
+          <label class="check" title="默认导出任务内全部用例（含待审核、已驳回、草稿）；勾选后只导出审核通过的正式用例"><input type="checkbox" ${exportApprovedOnly?'checked':''} onchange="exportApprovedOnly=this.checked"> 只导出正式用例</label>
+          <span class="hint">文件按当前内容即时生成，与页面一致</span></div>` : ''}
       </div>
       <div>
         <div class="section-t">质量提示与注入<span class="hint">（AI 自检仅供参考，不作为自动通过依据）</span></div>
@@ -2588,6 +2592,8 @@ function renderPointWorkbench(t) {
         <button class="btn ghost sm" onclick="supplementPoints()">AI 补充</button>
         <button class="btn ghost sm" onclick="manualAddPoint()">手工新增</button>`:''}
         ${canEditPt&&!pts.every(p=>p.legacy)?`<button class="btn ghost sm" onclick="openCompareDlg()" title="录入人工编写的测试点，与 AI 生成的逐条对比">人工对比</button>`:''}
+        ${pts.length?`<button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export')}+(exportApprovedOnly?'?scope=approved':''), '测试点.xlsx')" title="导出测试点 Excel：编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例">导出 xlsx</button>
+        <label class="check" title="勾选后只导出已通过的测试点"><input type="checkbox" ${exportApprovedOnly?'checked':''} onchange="exportApprovedOnly=this.checked"> 只导已通过</label>`:''}
       </div></div>
     ${renderCoverage(t)}
     ${renderReuseHints(t)}
@@ -2685,7 +2691,7 @@ function renderDupReport(t) {
         <button class="btn ghost sm" onclick="hiddenDupPairs.add(${jsq(p.a+'|'+p.b)});renderDetail()">忽略</button>
       </div></div>`).join('')}`;
 }
-let compareHidden = false;
+let compareHidden = false, exportApprovedOnly = false;
 function renderPointCompare(t) {
   const r = t.point_compare;
   if (!r || compareHidden) return '';
@@ -2905,7 +2911,7 @@ function renderCases(t) {
         ${nRejected&&!(t.pending_fix&&t.pending_fix.kind==='cases')?`<button class="btn soft sm" onclick="fixCases()" id="fixCaseBtn">AI 修改驳回用例（${nRejected}）</button>`:''}
       </div></div>
     ${t.pending_fix&&t.pending_fix.kind==='cases'?renderFixProposals(t.pending_fix):''}
-    ${caseView==='mind' ? renderCaseMind(t, visible) : `<div class="tbl-wrap"><table>
+    ${caseView==='mind' ? renderCaseMind(t, visible) : `<div class="toolbar" style="margin:6px 0 0">${stepsToggleHtml()}<span class="hint">操作步骤 / 预期结果</span></div><div class="tbl-wrap"><table>
       <tr><th><input type="checkbox" class="allck" onclick="document.querySelectorAll('.cck').forEach(c=>c.checked=this.checked)"></th>
       <th>编号 / 版本</th><th>模块</th><th>标题 / 关键词</th><th>优先级</th><th>操作步骤</th><th>预期结果</th><th>状态</th><th>操作</th></tr>
       ${rows || `<tr><td colspan="9"><div class="empty">该筛选下暂无用例</div></td></tr>`}</table></div>`}
@@ -3221,12 +3227,26 @@ function _applySteps(keys) {
   for (const k of keys) {
     const boxes = document.querySelectorAll(`.stepbox[data-key="${CSS.escape(k)}"]`);
     if (!boxes.length) { missing = true; continue; }
-    boxes.forEach(b => b.classList.toggle('open', expandedSteps.has(k)));
+    boxes.forEach(b => b.classList.toggle('open', stepOpen(k)));
   }
   if (missing) _rerenderSteps();
 }
-function stepsExpandAll(keysJson) { const ks = JSON.parse(keysJson); for (const k of ks) expandedSteps.add(k); _applySteps(ks); }
-function stepsCollapseAll(keysJson) { const ks = JSON.parse(keysJson); for (const k of ks) expandedSteps.delete(k); _applySteps(ks); }
+// 步骤 / 预期默认全部展开（可一键收起，偏好记在本机）；expandedSteps 记录被单独点开 / 收起的例外
+let stepsDefaultOpen = (() => { try { return localStorage.getItem('tg_steps_open') !== '0'; } catch (e) { return true; } })();
+const stepOpen = key => stepsDefaultOpen !== expandedSteps.has(key);
+function stepsSetAll(open) {
+  stepsDefaultOpen = open; expandedSteps = new Set();
+  try { localStorage.setItem('tg_steps_open', open ? '1' : '0'); } catch (e) {}
+  document.querySelectorAll('.stepbox').forEach(b => b.classList.toggle('open', open));
+  document.querySelectorAll('.steps-toggle button').forEach(b => b.classList.toggle('on', (b.dataset.open === '1') === open));
+}
+function stepsToggleHtml() {
+  return `<div class="seg steps-toggle" title="所有用例的操作步骤与预期结果一键展开 / 收起（记住偏好）">
+    <button class="${stepsDefaultOpen?'on':''}" data-open="1" onclick="stepsSetAll(true)">全部展开</button>
+    <button class="${stepsDefaultOpen?'':'on'}" data-open="0" onclick="stepsSetAll(false)">全部收起</button></div>`;
+}
+function stepsExpandAll() { stepsSetAll(true); }
+function stepsCollapseAll() { stepsSetAll(false); }
 function toggleSteps(key) {
   if (expandedSteps.has(key)) expandedSteps.delete(key); else expandedSteps.add(key);
   _applySteps([key]);
@@ -3235,7 +3255,7 @@ function stepCells(key, steps, width) {
   const acts = (steps||[]).map((x,i)=>`${i+1}. ${esc(x.action)}`).join('\n');
   const exps = (steps||[]).map((x,i)=>`${i+1}. ${esc(x.expected)}`).join('\n');
   const long = (steps||[]).length > 2;
-  const open = expandedSteps.has(key);
+  const open = stepOpen(key);
   const box = txt => `<div class="stepbox ${long?'long':''} ${open?'open':''}" data-key="${esc(key)}" onclick="event.stopPropagation();toggleSteps(${jsq(key)})">${txt}</div>`;
   return `<td style="max-width:${width||240}px">${box(acts)}</td><td style="max-width:${width||240}px">${box(exps)}</td>`;
 }
@@ -3475,10 +3495,7 @@ async function _renderPlans__impl() {
         <h3>我的待执行用例<span class="cnt" style="margin-left:6px">${mine.pending}</span></h3>
         <span class="meta">分配给我、本轮尚未执行的用例，可在此直接打结果${myShowDone ? ` · 本轮已执行 ${mine.executed}` : ''}</span>
         <div class="grow">
-          <div class="seg" title="展开 / 收起全部用例的操作步骤与预期结果">
-            <button onclick="stepsExpandAll(${jsq(JSON.stringify(mine.items.map(it => 'my-' + it.item_id)))})">全部展开</button>
-            <button onclick="stepsCollapseAll(${jsq(JSON.stringify(mine.items.map(it => 'my-' + it.item_id)))})">全部收起</button>
-          </div>
+          ${stepsToggleHtml()}
           <label class="check">显示本轮已执行 <input type="checkbox" ${myShowDone?'checked':''} onchange="myShowDone=this.checked;renderPlans()"></label></div></div>
         <div class="card-b">${mine.items.length ? Object.entries(byPlan).map(([pid, g]) => `
           <div class="section-t" style="display:flex;align-items:center;gap:8px"><a onclick="openPlan('${pid}','__me')">${esc(g.name)}</a><span class="hint">${esc(g.project)} · ${g.run ? esc(g.run) : '尚未开始执行轮次'}${g.active ? '' : (can(g.project,'plan.manage') ? ` · <button class="btn ghost sm" onclick="myStartRun('${pid}')">开始新一轮执行</button>` : ' · <span style="color:var(--warn)">轮次未开始或已结束，需负责人新建轮次后才能执行</span>')}</span></div>
@@ -3642,10 +3659,7 @@ async function _renderPlanDetail__impl() {
     <h3>用例快照<span class="cnt" style="margin-left:6px">${shownItems.length}${planExecFilter ? ` / ${p.items.length}` : ''}</span></h3>
     <span class="meta">已分配 ${p.summary.assigned}/${p.summary.cases}${myItems.length ? ` · <b>我的：待执行 ${myItems.length - myDone} / 已执行 ${myDone}</b>` : ''} · 快照引用版本记录</span>
     <div class="grow">
-      <div class="seg" title="展开 / 收起全部用例的操作步骤与预期结果">
-        <button onclick="stepsExpandAll(${jsq(JSON.stringify(shownItems.map(it => it.item_id)))})">全部展开</button>
-        <button onclick="stepsCollapseAll(${jsq(JSON.stringify(shownItems.map(it => it.item_id)))})">全部收起</button>
-      </div>
+      ${stepsToggleHtml()}
       <select style="width:150px" onchange="planExecFilter=this.value;renderPlanDetail()" title="按执行人筛选">
         <option value="">全部执行人</option>
         <option value="__me" ${planExecFilter==='__me'?'selected':''}>分配给我的</option>
@@ -4113,7 +4127,7 @@ async function _renderAllCases__impl() {
         </div></div></div>
     <div class="card-b">
       ${data.total && acView==='mind' ? mindFromRows(data.cases, acProject || '全部项目', !acProject) + pager : ''}
-      ${data.total && acView!=='mind' ? `<div class="tbl-wrap"><table>
+      ${data.total && acView!=='mind' ? `<div class="toolbar" style="margin:0 0 6px">${stepsToggleHtml()}<span class="hint">操作步骤 / 预期结果</span></div><div class="tbl-wrap"><table>
         <thead><tr>${anyEdit?`<th style="width:30px"><input type="checkbox" title="全选本页" onchange="acToggleAll(this.checked)"></th>`:''}<th style="width:104px">编号 / 版本</th><th style="width:100px">项目</th><th style="width:80px">模块</th>
         <th>标题</th><th>操作步骤</th><th>预期结果</th><th style="width:110px">标签</th><th style="width:44px">优先级</th><th style="width:80px">生命周期</th>
         <th style="width:90px">最新执行</th><th style="width:70px">执行次数</th><th style="width:80px">创建人</th><th style="width:90px">创建时间</th>${anyEdit?'<th style="width:40px"></th>':''}</tr></thead>
@@ -5838,7 +5852,7 @@ async function projCasesHtml() {
         <button class="${projCaseView==='table'?'on':''}" onclick="projCaseView='table';renderProjectWorkspace()">表格</button>
         <button class="${projCaseView==='mind'?'on':''}" onclick="projCaseView='mind';renderProjectWorkspace()">脑图</button>
       </div></div>
-    ${projCaseView==='mind' ? mindFromRows(list, curProject, false) : `<div class="tbl-wrap" style="max-height:calc(100vh - 320px)"><table>
+    ${projCaseView==='mind' ? mindFromRows(list, curProject, false) : `<div class="toolbar" style="margin:6px 0 0">${stepsToggleHtml()}<span class="hint">操作步骤 / 预期结果</span></div><div class="tbl-wrap" style="max-height:calc(100vh - 320px)"><table>
       <thead><tr><th style="width:104px">编号 / 版本</th><th style="width:90px">模块</th><th>标题 / 关键词</th>
       <th>操作步骤</th><th>预期结果</th>
       <th style="width:44px">优先级</th><th style="width:96px">生命周期</th><th style="width:130px">执行状态</th>
