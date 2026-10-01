@@ -37,8 +37,12 @@ _CANONICAL_GETTERS: dict[str, Callable[[TestCase], str]] = {
 }
 
 
+# 模板列之外固定追加的追溯列：用例由哪些测试点生成（完整需求 8.2 / 21 章追溯）
+_TRACE_HEADER = "来源测试点"
+
+
 def _headers(template: CustomTemplate) -> list[str]:
-    return [col.name for col in template.columns]
+    return [col.name for col in template.columns] + [_TRACE_HEADER]
 
 
 _CONTROL_RE = __import__("re").compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -60,6 +64,7 @@ def _rows(cases: list[TestCase], template: CustomTemplate) -> list[list[str]]:
         for col in template.columns:
             getter = _CANONICAL_GETTERS.get(col.maps_to)
             row.append(safe_cell(getter(case) if getter else case.extras.get(col.name, "")))
+        row.append(safe_cell("、".join(str(x) for x in (case.point_ids or []))))
         rows.append(row)
     return rows
 
