@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from app.agents import run_analysis, run_generation
 from app.agents.json_utils import LLMOutputError
 from app.config import get_settings
-from app.exporters import export_csv, export_excel, export_xmind
+from app.exporters import export_csv, export_excel, export_points_excel, export_xmind
 from app.llm.client import AllModelsFailedError
 from app.llm.registry import NoVisionModelError, UnknownModelError
 from app.llm.schemas import MissingAPIKeyError
@@ -6228,6 +6228,26 @@ _MEDIA_TYPES = {
     "csv": "text/csv",
     "xmind": "application/vnd.xmind.workbook",
 }
+
+
+@router.get("/api/v1/tasks/{task_id}/points/export")
+async def export_points(request: Request, task_id: str, scope: str = "all") -> FileResponse:
+    """测试点导出（xlsx）：编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例与覆盖用例编号；scope=approved 只导已通过的。"""
+    import asyncio
+
+    record = _task(request, task_id, "case.export")
+    modules = (record.analysis or {}).get("test_points") or []
+    if not modules:
+        raise HTTPException(status_code=404, detail="任务没有测试点拆解结果")
+    links: dict[str, list[str]] = {}
+    for c in (record.result or {}).get("cases") or []:
+        for tp in c.get("point_ids") or []:
+            links.setdefault(str(tp), []).append(str(c.get("case_id") or ""))
+    generated = set((record.context or {}).get("generated_tp_ids") or [])
+    task_dir = request.app.state.tasks.output_dir / task_id
+    name = "正式测试点.xlsx" if scope == "approved" else "测试点.xlsx"
+    path = await asyncio.to_thread(export_points_excel, modules, task_dir / name, links, generated, scope == "approved")
+    return FileResponse(path, media_type=_MEDIA_TYPES.get("xlsx"), filename=name)
 
 
 def _cases_fingerprint(record: TaskRecord) -> str:

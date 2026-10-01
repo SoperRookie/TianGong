@@ -94,3 +94,37 @@ async def test_导出文件随用例改动重新生成_可只导正式用例(tmp
             assert rows_of((await client.get(f"/api/v1/tasks/{task_id}/files/xlsx?scope=approved")).content) == ["TC-登录-001", "TC-登录-002"]
             assert len(rows_of((await client.get(f"/api/v1/tasks/{task_id}/files/xlsx")).content)) == 2
             assert (await client.get(f"/api/v1/tasks/{task_id}/files/exe")).status_code == 404
+
+
+async def test_测试点导出xlsx_全部与仅已通过(tmp_path):
+    import httpx
+    from asgi_lifespan import LifespanManager
+
+    from app.main import app
+    from tests.stubs import StubLLM
+    from tests.test_quality_loop import ANALYST_REPLY_V2, GAP_REPLY
+
+    def rows_of(content: bytes) -> list[list[str]]:
+        f = tmp_path / "pts.xlsx"
+        f.write_bytes(content)
+        ws = load_workbook(str(f)).active
+        return [[str(c) if c is not None else "" for c in r] for r in ws.iter_rows(values_only=True)]
+
+    async with LifespanManager(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            app.state.llm = StubLLM([ANALYST_REPLY_V2, GAP_REPLY])
+            data = (await client.post("/api/v1/tasks", data={"text": "登录需求", "confirm_points": "true"})).json()
+            task_id = data["task_id"]
+            pts = [p for m in data["test_points"] for p in m["points"]]
+            await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [{"tp_id": pts[0]["tp_id"], "action": "approve"}]})
+            r = await client.get(f"/api/v1/tasks/{task_id}/points/export")
+            assert r.status_code == 200
+            rows = rows_of(r.content)
+            assert rows[0][:6] == ["编号", "模块", "测试点", "维度", "来源", "状态"] and len(rows) == 1 + len(pts)
+            by_id = {row[0]: row for row in rows[1:]}
+            assert by_id[pts[0]["tp_id"]][5] == "已通过" and by_id[pts[0]["tp_id"]][4] == "AI 拆解" and by_id[pts[0]["tp_id"]][8] == "否"
+            assert any(row[4] == "查漏新增" for row in rows[1:])
+            r = await client.get(f"/api/v1/tasks/{task_id}/points/export?scope=approved")
+            rows = rows_of(r.content)
+            assert len(rows) == 2 and rows[1][0] == pts[0]["tp_id"]
+            assert (await client.get("/api/v1/tasks/none/points/export")).status_code == 404

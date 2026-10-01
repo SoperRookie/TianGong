@@ -126,3 +126,53 @@ def export_csv(
         writer.writerow([safe_cell(h) for h in _headers(template)])
         writer.writerows(_rows(cases, template))
     return path
+
+
+# ---- 测试点导出（xlsx）----
+
+_POINT_HEADERS = ["编号", "模块", "测试点", "维度", "来源", "状态", "审核意见", "驳回类型", "已生成用例", "覆盖用例编号"]
+_POINT_SOURCE = {"ai": "AI 拆解", "gap": "查漏新增", "supplement": "AI 补充", "manual": "人工", "ai_fix": "修改新增"}
+_POINT_STATUS = {"pending": "待审核", "approved": "已通过", "rejected": "已驳回"}
+
+
+def export_points_excel(modules: list[dict], path: str | Path, case_links: dict[str, list[str]] | None = None,
+                        generated: set[str] | None = None, approved_only: bool = False) -> Path:
+    """测试点 → Excel：编号 / 模块 / 测试点 / 维度 / 来源 / 状态 / 审核意见 / 驳回类型 / 是否已生成用例 / 覆盖的用例编号。"""
+    path = Path(path)
+    case_links = case_links or {}
+    generated = generated or set()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "测试点"
+    ws.append(_POINT_HEADERS)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = _HEADER_FILL
+        cell.alignment = Alignment(vertical="center")
+    for entry in modules:
+        for p in entry.get("points") or []:
+            if isinstance(p, str):
+                p = {"point": p}
+            if approved_only and p.get("status") != "approved":
+                continue
+            tp = str(p.get("tp_id") or "")
+            linked = case_links.get(tp) or []
+            row = [tp, str(entry.get("module", "")), str(p.get("point", "")), str(p.get("dimension", "")),
+                   _POINT_SOURCE.get(p.get("source", "ai"), str(p.get("source", ""))),
+                   _POINT_STATUS.get(p.get("status", "pending"), str(p.get("status", ""))),
+                   str(p.get("comment") or ""), "、".join(p.get("reject_types") or []),
+                   "是" if (tp in generated or linked) else "否", "、".join(linked)]
+            ws.append([safe_cell(v) for v in row])
+            for cell in ws[ws.max_row]:
+                cell.data_type = "s"
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+    for col_idx in range(1, len(_POINT_HEADERS) + 1):
+        max_len = 0
+        for row_idx in range(1, ws.max_row + 1):
+            value = ws.cell(row=row_idx, column=col_idx).value or ""
+            for line in str(value).splitlines():
+                max_len = max(max_len, sum(2 if ord(ch) > 127 else 1 for ch in line))
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 4, _MAX_COL_WIDTH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(str(path))
+    return path

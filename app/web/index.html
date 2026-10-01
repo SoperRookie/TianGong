@@ -2592,6 +2592,8 @@ function renderPointWorkbench(t) {
         <button class="btn ghost sm" onclick="supplementPoints()">AI 补充</button>
         <button class="btn ghost sm" onclick="manualAddPoint()">手工新增</button>`:''}
         ${canEditPt&&!pts.every(p=>p.legacy)?`<button class="btn ghost sm" onclick="openCompareDlg()" title="录入人工编写的测试点，与 AI 生成的逐条对比">人工对比</button>`:''}
+        ${pts.length?`<button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export')}+(exportApprovedOnly?'?scope=approved':''), '测试点.xlsx')" title="导出测试点 Excel：编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例">导出 xlsx</button>
+        <label class="check" title="勾选后只导出已通过的测试点"><input type="checkbox" ${exportApprovedOnly?'checked':''} onchange="exportApprovedOnly=this.checked"> 只导已通过</label>`:''}
       </div></div>
     ${renderCoverage(t)}
     ${renderReuseHints(t)}
