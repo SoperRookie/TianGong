@@ -32,7 +32,13 @@ def _attach(parent: dict, child: dict) -> dict:
     return child
 
 
-def _case_topic(case: TestCase) -> dict:
+def _case_topic(case: TestCase, compact: bool = False) -> dict:
+    """用例节点。默认：标题 → 每步操作 → 预期结果 三层子主题（XMind 里每层都计为一个主题）；
+    compact：只到用例一层，步骤与预期写进备注，节点数 = 用例数 + 模块数 + 1。"""
+    if compact:
+        lines = [f"前置条件：{case.precondition}"] if case.precondition else []
+        lines += [f"{i}. {s.action}\n   预期：{s.expected}" for i, s in enumerate(case.steps, 1)]
+        return _topic(f"{case.case_id} {case.title}", labels=[case.priority], notes="\n".join(lines))
     node = _topic(case.title, labels=[case.priority], notes=case.precondition)
     for step in case.steps:
         step_node = _attach(node, _topic(step.action))
@@ -40,8 +46,8 @@ def _case_topic(case: TestCase) -> dict:
     return node
 
 
-def export_xmind(cases: list[TestCase], path: str | Path, root_title: str = "测试用例") -> Path:
-    """生成 .xmind 文件；用例按 module 分组为一级子节点，组内保持原有顺序。"""
+def export_xmind(cases: list[TestCase], path: str | Path, root_title: str = "测试用例", compact: bool = False) -> Path:
+    """生成 .xmind 文件；用例按 module 分组为一级子节点，组内保持原有顺序。compact 见 _case_topic。"""
     path = Path(path)
 
     root = _topic(root_title)
@@ -50,7 +56,7 @@ def export_xmind(cases: list[TestCase], path: str | Path, root_title: str = "测
     for case in cases:
         if case.module not in module_nodes:
             module_nodes[case.module] = _attach(root, _topic(case.module))
-        _attach(module_nodes[case.module], _case_topic(case))
+        _attach(module_nodes[case.module], _case_topic(case, compact))
 
     sheet = {
         "id": uuid.uuid4().hex,

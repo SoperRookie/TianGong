@@ -128,3 +128,32 @@ async def test_测试点导出xlsx_全部与仅已通过(tmp_path):
             rows = rows_of(r.content)
             assert len(rows) == 2 and rows[1][0] == pts[0]["tp_id"]
             assert (await client.get("/api/v1/tasks/none/points/export")).status_code == 404
+
+
+def test_xmind紧凑模式_节点数等于用例数(tmp_path):
+    import json
+    import zipfile
+
+    from app.exporters import export_xmind
+
+    cases = _cases()
+
+    def count(path):
+        with zipfile.ZipFile(path) as zf:
+            root = json.loads(zf.read("content.json"))[0]["rootTopic"]
+        n = 0
+        stack = [root]
+        while stack:
+            t = stack.pop(); n += 1
+            stack.extend((t.get("children") or {}).get("attached") or [])
+        return n
+
+    full = count(export_xmind(cases, tmp_path / "full.xmind"))
+    compact = count(export_xmind(cases, tmp_path / "compact.xmind", compact=True))
+    modules = len({c.module for c in cases})
+    assert compact == 1 + modules + len(cases)
+    assert full == compact + sum(2 * len(c.steps) for c in cases)
+    with zipfile.ZipFile(tmp_path / "compact.xmind") as zf:
+        root = json.loads(zf.read("content.json"))[0]["rootTopic"]
+    leaf = root["children"]["attached"][0]["children"]["attached"][0]
+    assert leaf["title"].startswith(cases[0].case_id) and "预期：" in leaf["notes"]["plain"]["content"]
