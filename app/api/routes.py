@@ -6261,16 +6261,18 @@ def _cases_fingerprint(record: TaskRecord) -> str:
 
 
 @router.get("/api/v1/tasks/{task_id}/files/{fmt}")
-async def download_file(request: Request, task_id: str, fmt: str, scope: str = "all") -> FileResponse:
+async def download_file(request: Request, task_id: str, fmt: str, scope: str = "all", layout: str = "") -> FileResponse:
     """下载导出文件：用例内容（含删除 / 修改 / 审核状态）与上次导出不一致时先重新导出，保证文件与页面一致。
 
-    scope=approved 只导出审核通过的正式用例（即时生成，不缓存）。
+    scope=approved 只导出审核通过的正式用例（即时生成，不缓存）；
+    layout=compact 仅对 xmind 生效：脑图只到用例一层，步骤与预期放备注（节点数 = 用例数）。
     """
     record = _task(request, task_id, "case.export")
     if fmt not in _MEDIA_TYPES:
         raise HTTPException(status_code=404, detail=f"不支持的导出格式: {fmt}")
-    if scope == "approved":
-        path = await _export_task_files(request, record, approved_only=True, fmt=fmt)
+    if scope == "approved" or (fmt == "xmind" and layout == "compact"):
+        path = await _export_task_files(request, record, approved_only=(scope == "approved"), fmt=fmt,
+                                        compact=(layout == "compact"))
         if path is None:
             raise HTTPException(status_code=404, detail="没有审核通过的正式用例可导出")
         return FileResponse(path, media_type=_MEDIA_TYPES.get(fmt), filename=Path(path).name)
@@ -6286,7 +6288,7 @@ async def download_file(request: Request, task_id: str, fmt: str, scope: str = "
 
 
 async def _export_task_files(request: Request, record: TaskRecord, approved_only: bool = False,
-                             fmt: str | None = None) -> Path | None:
+                             fmt: str | None = None, compact: bool = False) -> Path | None:
     """按需导出三种格式（线程池执行，不阻塞事件循环），完成后记录内容指纹并清除 dirty 标记。
 
     approved_only=True 只导出正式用例到独立文件（不缓存、不影响全量产物），返回该文件路径。
@@ -6301,13 +6303,17 @@ async def _export_task_files(request: Request, record: TaskRecord, approved_only
     task_dir.mkdir(parents=True, exist_ok=True)
     sources = record.sources or []
     root_title = Path(sources[0]).stem if sources and sources[0] != "text" else "测试用例"
-    if approved_only:
-        cases = [c for c in result.cases if (record.case_reviews.get(c.uid) or {}).get("status") == "approved"]
+    if approved_only or compact:
+        cases = [c for c in result.cases if (record.case_reviews.get(c.uid) or {}).get("status") == "approved"] \
+            if approved_only else list(result.cases)
         if not cases:
             return None
-        exporters = {"xlsx": lambda: export_excel(cases, task_dir / "正式用例.xlsx", template),
-                     "csv": lambda: export_csv(cases, task_dir / "正式用例.csv", template),
-                     "xmind": lambda: export_xmind(cases, task_dir / "正式用例.xmind", root_title=root_title)}
+        stem = "正式用例" if approved_only else "测试用例"
+        if compact:
+            stem += "-紧凑"
+        exporters = {"xlsx": lambda: export_excel(cases, task_dir / f"{stem}.xlsx", template),
+                     "csv": lambda: export_csv(cases, task_dir / f"{stem}.csv", template),
+                     "xmind": lambda: export_xmind(cases, task_dir / f"{stem}.xmind", root_title=root_title, compact=compact)}
         return Path(await asyncio.to_thread(exporters[fmt or "xlsx"]))
 
     def _do():

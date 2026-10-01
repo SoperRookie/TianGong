@@ -2473,8 +2473,9 @@ function renderOverview(t) {
           <div><dt>创建时间</dt><dd>${esc(fmtTime(t.created_at, true))}</dd></div>
         </dl>
         ${hasCases ? `<div class="section-t">导出下载</div><div class="toolbar" style="margin-top:4px;flex-wrap:wrap">
-          ${['xlsx','csv','xmind'].map(f=>`<a class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/files/'+f)}+(exportApprovedOnly?'?scope=approved':''), ${jsq('测试用例.'+f)})">${esc(f)}</a>`).join('')}
+          ${['xlsx','csv','xmind'].map(f=>`<a class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/files/'+f)}+'?scope='+(exportApprovedOnly?'approved':'all')+(exportCompactMind?'&layout=compact':''), ${jsq('测试用例.'+f)})">${esc(f)}</a>`).join('')}
           <label class="check" title="默认导出任务内全部用例（含待审核、已驳回、草稿）；勾选后只导出审核通过的正式用例"><input type="checkbox" ${exportApprovedOnly?'checked':''} onchange="exportApprovedOnly=this.checked"> 只导出正式用例</label>
+          <label class="check" title="XMind 默认每步操作与预期各占一个节点，节点数远多于用例数；勾选后脑图只到用例一层，步骤与预期放在备注里，节点数与用例数一致"><input type="checkbox" ${exportCompactMind?'checked':''} onchange="exportCompactMind=this.checked"> 紧凑脑图</label>
           <span class="hint">文件按当前内容即时生成，与页面一致</span></div>` : ''}
       </div>
       <div>
@@ -2691,7 +2692,7 @@ function renderDupReport(t) {
         <button class="btn ghost sm" onclick="hiddenDupPairs.add(${jsq(p.a+'|'+p.b)});renderDetail()">忽略</button>
       </div></div>`).join('')}`;
 }
-let compareHidden = false, exportApprovedOnly = false;
+let compareHidden = false, exportApprovedOnly = false, exportCompactMind = false;
 function renderPointCompare(t) {
   const r = t.point_compare;
   if (!r || compareHidden) return '';
