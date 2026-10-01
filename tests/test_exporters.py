@@ -50,3 +50,47 @@ def test_csv导出_带BOM(tmp_path):
     assert rows[0][0] == "用例编号"
     assert rows[1][0] == "TC-登录-001"
     assert len(rows) == 3
+
+
+# ---- 导出文件与页面一致：删除 / 修改 / 审核后下载即重新导出；可只导出正式用例 ----
+
+
+async def test_导出文件随用例改动重新生成_可只导正式用例(tmp_path):
+    import httpx
+    from asgi_lifespan import LifespanManager
+
+    from app.main import app
+    from tests.stubs import ANALYST_REPLY, StubLLM, generator_reply, make_case, review_reply
+
+    def rows_of(content: bytes) -> list[str]:
+        f = tmp_path / "dl.xlsx"
+        f.write_bytes(content)
+        ws = load_workbook(str(f)).active
+        return [str(r[0]) for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0]]
+
+    async with LifespanManager(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case(), make_case(case_id="TC-登录-002", title="密码错误"),
+                                                                  make_case(case_id="TC-登录-003", title="账号锁定")), review_reply(True)])
+            task_id = (await client.post("/api/v1/tasks", data={"text": "登录需求", "project": "P"})).json()["task_id"]
+            r = await client.get(f"/api/v1/tasks/{task_id}/files/xlsx")
+            assert r.status_code == 200 and len(rows_of(r.content)) == 3
+            # 单条审核里删除一条（此前这条路径不会标记重新导出，下载到的是旧文件）
+            assert (await client.post(f"/api/v1/tasks/{task_id}/review",
+                                      json={"items": [{"case_id": "TC-登录-003", "action": "delete"}]})).status_code == 200
+            r = await client.get(f"/api/v1/tasks/{task_id}/files/xlsx")
+            assert len(rows_of(r.content)) == 2
+            # 没有正式用例时 scope=approved 为 404
+            assert (await client.get(f"/api/v1/tasks/{task_id}/files/xlsx?scope=approved")).status_code == 404
+            # 人工修改标题（人工定稿即通过）后导出内容同步；只导正式用例时只有这一条
+            await client.post(f"/api/v1/tasks/{task_id}/review",
+                              json={"items": [{"case_id": "TC-登录-002", "action": "modify", "case": {**make_case(case_id="TC-登录-002", title="密码错误提示文案")}}]})
+            r = await client.get(f"/api/v1/tasks/{task_id}/files/csv")
+            assert "密码错误提示文案" in r.content.decode("utf-8-sig")
+            r = await client.get(f"/api/v1/tasks/{task_id}/files/xlsx?scope=approved")
+            assert r.status_code == 200 and rows_of(r.content) == ["TC-登录-002"]
+            # 再通过一条：正式用例 2 行，全量仍 2 行
+            await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": "TC-登录-001", "action": "accept"}]})
+            assert rows_of((await client.get(f"/api/v1/tasks/{task_id}/files/xlsx?scope=approved")).content) == ["TC-登录-001", "TC-登录-002"]
+            assert len(rows_of((await client.get(f"/api/v1/tasks/{task_id}/files/xlsx")).content)) == 2
+            assert (await client.get(f"/api/v1/tasks/{task_id}/files/exe")).status_code == 404

@@ -6230,13 +6230,34 @@ _MEDIA_TYPES = {
 }
 
 
+def _cases_fingerprint(record: TaskRecord) -> str:
+    """当前用例内容的指纹（含审核状态与模板）：导出文件与之不一致就重新生成，兜底所有改动路径。"""
+    import hashlib
+    import json as _json
+
+    payload = {"cases": (record.result or {}).get("cases") or [], "reviews": record.case_reviews,
+               "template": (record.context or {}).get("template_id")}
+    return hashlib.sha1(_json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+
+
 @router.get("/api/v1/tasks/{task_id}/files/{fmt}")
-async def download_file(request: Request, task_id: str, fmt: str) -> FileResponse:
+async def download_file(request: Request, task_id: str, fmt: str, scope: str = "all") -> FileResponse:
+    """下载导出文件：用例内容（含删除 / 修改 / 审核状态）与上次导出不一致时先重新导出，保证文件与页面一致。
+
+    scope=approved 只导出审核通过的正式用例（即时生成，不缓存）。
+    """
     record = _task(request, task_id, "case.export")
+    if fmt not in _MEDIA_TYPES:
+        raise HTTPException(status_code=404, detail=f"不支持的导出格式: {fmt}")
+    if scope == "approved":
+        path = await _export_task_files(request, record, approved_only=True, fmt=fmt)
+        if path is None:
+            raise HTTPException(status_code=404, detail="没有审核通过的正式用例可导出")
+        return FileResponse(path, media_type=_MEDIA_TYPES.get(fmt), filename=Path(path).name)
     path = record.files.get(fmt)
-    if path is None:
+    if path is None and not (record.result or {}).get("cases"):
         raise HTTPException(status_code=404, detail=f"任务 {task_id} 无 {fmt} 产物")
-    if record.files_dirty or not Path(path).exists():
+    if record.files_dirty or path is None or not Path(path).exists() or record.files_hash != _cases_fingerprint(record):
         await _export_task_files(request, record)
         path = record.files.get(fmt)
     if not path or not Path(path).exists():
@@ -6244,8 +6265,12 @@ async def download_file(request: Request, task_id: str, fmt: str) -> FileRespons
     return FileResponse(path, media_type=_MEDIA_TYPES.get(fmt), filename=Path(path).name)
 
 
-async def _export_task_files(request: Request, record: TaskRecord) -> None:
-    """按需导出三种格式（线程池执行，不阻塞事件循环），完成后清除 dirty 标记。"""
+async def _export_task_files(request: Request, record: TaskRecord, approved_only: bool = False,
+                             fmt: str | None = None) -> Path | None:
+    """按需导出三种格式（线程池执行，不阻塞事件循环），完成后记录内容指纹并清除 dirty 标记。
+
+    approved_only=True 只导出正式用例到独立文件（不缓存、不影响全量产物），返回该文件路径。
+    """
     import asyncio
 
     from app.agents import GenerationResult
@@ -6256,6 +6281,14 @@ async def _export_task_files(request: Request, record: TaskRecord) -> None:
     task_dir.mkdir(parents=True, exist_ok=True)
     sources = record.sources or []
     root_title = Path(sources[0]).stem if sources and sources[0] != "text" else "测试用例"
+    if approved_only:
+        cases = [c for c in result.cases if (record.case_reviews.get(c.uid) or {}).get("status") == "approved"]
+        if not cases:
+            return None
+        exporters = {"xlsx": lambda: export_excel(cases, task_dir / "正式用例.xlsx", template),
+                     "csv": lambda: export_csv(cases, task_dir / "正式用例.csv", template),
+                     "xmind": lambda: export_xmind(cases, task_dir / "正式用例.xmind", root_title=root_title)}
+        return Path(await asyncio.to_thread(exporters[fmt or "xlsx"]))
 
     def _do():
         return {
@@ -6266,4 +6299,6 @@ async def _export_task_files(request: Request, record: TaskRecord) -> None:
 
     record.files = await asyncio.to_thread(_do)
     record.files_dirty = False
+    record.files_hash = _cases_fingerprint(record)
     request.app.state.tasks.save(record)
+    return None
