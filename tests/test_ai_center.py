@@ -255,3 +255,29 @@ def test_失败原因分类():
     assert _error_kind("模型调用失败（已尝试 2 次，链路: a → b）: 全链路失败") == "model"
     assert _error_kind("任务已被用户取消") == "cancelled"
     assert _error_kind(None) is None
+
+
+def test_内置默认Prompt随代码更新_自定义版本不受影响(tmp_path, monkeypatch):
+    from app.prompts import PROMPT_DEFS, PromptStore
+
+    store = PromptStore()
+    gen = store._items["generator"]
+    default = next(d["default"] for d in PROMPT_DEFS if d["key"] == "generator")
+    # 模拟线上存的是旧版默认文本
+    gen["versions"][0]["content"] = "旧版默认文本"
+    gen["versions"][0]["note"] = "内置默认"
+    store._doc.put("generator", gen)
+    store2 = PromptStore()
+    v1 = store2._items["generator"]["versions"][0]
+    assert v1["content"] == default and "随代码更新" in v1["note"]
+    # 已自定义（生效版本不是 v1）：生效内容不变，v1 仍刷新
+    rev = store2._items["reviewer"]
+    rev["versions"].append({"version_no": 2, "content": "团队自定义评审规则", "status": "active", "note": "自定义",
+                            "created_by": "admin", "created_at": "2026-01-01T00:00:00+00:00"})
+    rev["active_version"] = 2
+    rev["versions"][0]["content"] = "旧版"
+    store2._doc.put("reviewer", rev)
+    store3 = PromptStore()
+    item = store3._items["reviewer"]
+    assert item["active_version"] == 2 and item["versions"][1]["content"] == "团队自定义评审规则"
+    assert item["versions"][0]["content"] == next(d["default"] for d in PROMPT_DEFS if d["key"] == "reviewer")
