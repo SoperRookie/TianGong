@@ -82,3 +82,26 @@ async def test_openai厂商改传max_completion_tokens(monkeypatch):
     await client.chat([{"role": "user", "content": "hi"}], max_tokens=64)
     assert "max_tokens" not in captured
     assert captured["max_completion_tokens"] == 64
+
+
+async def test_推理强度_只对配置了reasoning_effort的模型下发_阶段可覆盖(monkeypatch):
+    from app.llm.registry import ModelRegistry
+    from app.llm.schemas import ModelConfig
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    registry = ModelRegistry(default_model="r", models=[
+        ModelConfig(name="r", provider="openai", base_url="https://api.openai.com/v1", api_key_env="OPENAI_API_KEY",
+                    model="gpt-6-sol", reasoning_effort="medium"),
+        ModelConfig(name="plain", provider="openai", base_url="https://api.openai.com/v1", api_key_env="OPENAI_API_KEY",
+                    model="gpt-5.4"),
+    ])
+    client = LLMClient(registry)
+    cap_r, cap_p = {}, {}
+    client._clients["r"] = _stub_openai(cap_r)
+    client._clients["plain"] = _stub_openai(cap_p)
+    await client.chat([{"role": "user", "content": "hi"}], model="r")
+    assert cap_r["reasoning_effort"] == "medium"
+    await client.chat([{"role": "user", "content": "hi"}], model="r", reasoning_effort="high")
+    assert cap_r["reasoning_effort"] == "high"
+    await client.chat([{"role": "user", "content": "hi"}], model="plain", reasoning_effort="high")
+    assert "reasoning_effort" not in cap_p  # 未配置推理强度的模型：阶段覆盖也不下发

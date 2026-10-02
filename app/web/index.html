@@ -1334,6 +1334,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     </div>
     <label class="f">降级链路<span class="hint">（备用模型名，逗号分隔，按顺序尝试）</span></label>
     <input type="text" id="mdFallbacks" placeholder="gpt-6-luna">
+    <label class="f" style="margin-top:8px">推理强度<span class="hint">（仅推理型模型：GPT-6 / 5.6 / 5.5 等；留「不传」表示模型不支持。拆解与评审阶段自动用 high）</span></label>
+    <select id="mdReasoning"><option value="">不传</option><option value="none">none</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select>
     <label class="check" style="margin-top:10px"><input type="checkbox" id="mdVision"> 支持 Vision（图片需求自动路由）</label>
   </div>
   <div class="dlg-f">
@@ -6077,6 +6079,7 @@ function openModelDlg(name) {
   window._editingTimeout = m.timeout;  // 超时不在界面配置：编辑沿用原值，新增用默认
   $('mdFallbacks').value = (m.fallbacks||[]).join(', ');
   $('mdVision').checked = !!m.supports_vision;
+  $('mdReasoning').value = m.reasoning_effort || '';
   $('modelDlg').showModal();
 }
 async function saveModelDlg() {
@@ -6089,6 +6092,7 @@ async function saveModelDlg() {
     timeout: window._editingTimeout || 120,
     fallbacks: $('mdFallbacks').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean),
     supports_vision: $('mdVision').checked,
+    reasoning_effort: $('mdReasoning').value || null,
     input_price: parseFloat($('mdInPrice').value || '0') || 0,
     output_price: parseFloat($('mdOutPrice').value || '0') || 0,
   };

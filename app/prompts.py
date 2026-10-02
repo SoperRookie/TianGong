@@ -18,6 +18,8 @@ from app.agents import prompts as P
 PROMPT_DEFS: list[dict] = [
     {"key": "analyst", "name": "需求拆解（测试点）", "kind": "system", "default": P.ANALYST_SYSTEM,
      "where": "任务创建 → 拆解测试点"},
+    {"key": "requirement_outline", "name": "长需求模块大纲", "kind": "system", "default": P.REQUIREMENT_OUTLINE_SYSTEM,
+     "where": "长需求分片拆解前 → 全文模块大纲"},
     {"key": "requirement_analysis", "name": "需求分析（11 项）", "kind": "system", "default": P.REQUIREMENT_ANALYSIS_SYSTEM,
      "where": "需求中心 → AI 需求分析"},
     {"key": "generator", "name": "用例生成", "kind": "system", "default": P.GENERATOR_SYSTEM,

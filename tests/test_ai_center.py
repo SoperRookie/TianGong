@@ -22,7 +22,7 @@ async def test_prompt_全部纳管_版本_占位符校验_激活回滚(client):
     listed = (await client.get("/api/v1/ai/prompts")).json()["prompts"]
     keys = {p["key"] for p in listed}
     assert keys >= {"analyst", "generator", "reviewer", "fix_instruction", "gap_check", "dup_judge", "point_fix",
-                    "case_fix", "requirement_diff", "learning", "requirement_analysis", "point_supplement", "point_compare",
+                    "case_fix", "requirement_diff", "learning", "requirement_analysis", "point_supplement", "point_compare", "requirement_outline",
                     "vision_image", "knowledge_cases_block", "rules_block", "memory_block", "knowledge_refs_block"}
     assert all(p["active_version"] == 1 and not p["customized"] for p in listed)
     gen = (await client.get("/api/v1/ai/prompts/generator")).json()

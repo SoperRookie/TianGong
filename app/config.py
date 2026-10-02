@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 100
 
     # 大文档分片阈值（F-2-6），单位字符：超过则按章节切分并行分段生成
-    chunk_max_chars: int = 10000
+    chunk_max_chars: int = 20000  # 分片阈值：现用模型上下文百万级，整篇一次拆解优于碎片化；超限才分片并注入全文大纲
 
     # 知识库（F-7-x）：本地向量库目录与检索切片大小（字符）
     knowledge_dir: Path = BASE_DIR / "data" / "knowledge"
