@@ -10,7 +10,7 @@ import re
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app.agents.graph import analyze_requirement, build_graph
+from app.agents.graph import analyze_requirement, build_graph, outline_requirement
 from app.agents.state import MAX_REVIEW_ROUNDS
 from app.agents.prompts import wrap_data
 from app.config import get_settings
@@ -52,8 +52,16 @@ async def run_analysis(
     """
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     chunks = split_text(requirement, chunk_max_chars)
+    outline: list[str] = []
+    if len(chunks) > 1:
+        # 长需求：先用全文出模块大纲，再分片拆解并注入大纲，避免各片各自命名、漏掉跨片的模块
+        try:
+            outline = await outline_requirement(llm, requirement, model)
+        except Exception as e:  # 大纲失败不阻塞拆解
+            logger.warning("需求大纲生成失败，分片拆解不注入大纲：{}", e)
     analyses = await asyncio.gather(
-        *[analyze_requirement(llm, chunk, model, knowledge_cases=knowledge_cases) for chunk in chunks]
+        *[analyze_requirement(llm, chunk, model, knowledge_cases=knowledge_cases, outline=outline,
+                              chunk_no=i, chunk_total=len(chunks)) for i, chunk in enumerate(chunks, 1)]
     )
     module_points: dict[str, list[str]] = {}
     blind_spots: list[str] = []

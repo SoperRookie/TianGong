@@ -18,6 +18,7 @@ class ModelConfig(BaseModel):
     max_tokens: int = 8192
     timeout: float = 120.0
     fallbacks: list[str] = Field(default_factory=list, description="备用模型降级链路（F-1-6），按顺序尝试")
+    reasoning_effort: str | None = Field(default=None, description="推理型模型的默认推理强度（none/low/medium/high）；为空表示模型不支持、调用不传")
     input_price: float = Field(default=0.0, ge=0, description="输入单价：美元 / 百万 token，用于费用折算，0 表示未配置")
     output_price: float = Field(default=0.0, ge=0, description="输出单价：美元 / 百万 token")
 

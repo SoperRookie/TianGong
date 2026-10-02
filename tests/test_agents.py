@@ -203,3 +203,23 @@ def test_extract_json_still_raises_on_hopeless_output():
 
     with _pytest.raises(LLMOutputError):
         extract_json("完全不是 JSON 的输出")
+
+
+async def test_长需求分片拆解_先出全文大纲再注入各片():
+    import json
+
+    from app.agents.service import run_analysis
+    from tests.stubs import StubLLM
+
+    outline = json.dumps({"modules": ["道具系统-背包", "关卡系统-选关"]}, ensure_ascii=False)
+    a1 = json.dumps({"modules": [{"module": "道具系统-背包", "points": ["切换分类"]}], "blind_spots": []}, ensure_ascii=False)
+    a2 = json.dumps({"modules": [{"module": "关卡系统-选关", "points": ["选关进入"]}], "blind_spots": []}, ensure_ascii=False)
+    llm = StubLLM([outline, a1, a2])
+    text = "# 道具系统\n" + "背包规则。\n" * 300 + "# 关卡系统\n" + "选关规则。\n" * 300
+    result = await run_analysis(text, llm, chunk_max_chars=2000)
+    assert [m["module"] for m in result.test_points] == ["道具系统-背包", "关卡系统-选关"]
+    assert len(llm.calls) == 3
+    first_user = llm.calls[1]["messages"][-1]["content"]
+    assert "全文模块大纲" in first_user and "第 1/2 片" in first_user and "道具系统-背包" in first_user
+    # 大纲用 low、拆解用 high
+    assert llm.calls[0].get("reasoning_effort", None) in (None, "low")

@@ -70,3 +70,26 @@ async def test_业务线实体_增删改查_改名联动项目_删除规则(clie
     assert (await client.delete("/api/v1/business-lines/空线")).status_code == 200
     assert {l["name"] for l in (await client.get("/api/v1/business-lines")).json()["business_lines"]} == {"电子游戏"}
     assert (await client.delete("/api/v1/business-lines/不存在")).status_code == 404
+
+
+async def test_各列表按业务线筛选(client):
+    from tests.stubs import ANALYST_REPLY, StubLLM, generator_reply, make_case, review_reply
+
+    await client.post("/api/v1/projects", json={"name": "斗地主", "business_line": "棋牌"})
+    await client.post("/api/v1/projects", json={"name": "老虎机", "business_line": "电子"})
+    for proj in ("斗地主", "老虎机"):
+        await client.post("/api/v1/requirements", data={"project": proj, "title": f"{proj}需求", "text": "原文"})
+        app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+        tid = (await client.post("/api/v1/tasks", data={"text": "登录需求", "project": proj})).json()["task_id"]
+        await client.post(f"/api/v1/tasks/{tid}/review", json={"items": [{"case_id": "TC-登录-001", "action": "accept"}]})
+        await client.post("/api/v1/plans", json={"name": f"{proj}计划", "project": proj})
+    reqs = (await client.get("/api/v1/requirements?business_line=棋牌")).json()["requirements"]
+    assert [r["project"] for r in reqs] == ["斗地主"]
+    tasks = (await client.get("/api/v1/tasks?business_line=电子")).json()["tasks"]
+    assert {t["project"] for t in tasks} == {"老虎机"}
+    plans = (await client.get("/api/v1/plans?business_line=棋牌&page=1")).json()["plans"]
+    assert [p["project"] for p in plans] == ["斗地主"]
+    cases = (await client.get("/api/v1/cases?business_line=电子")).json()
+    assert cases["total"] == 1 and cases["cases"][0]["project"] == "老虎机"
+    assert (await client.get("/api/v1/cases?business_line=不存在")).json()["total"] == 0
+    assert len((await client.get("/api/v1/requirements")).json()["requirements"]) == 2

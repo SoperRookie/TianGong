@@ -16,7 +16,7 @@ class StubLLM:
     async def chat(self, messages, model=None, require_vision=False, **overrides):
         from app.llm.calllog import record_call
 
-        self.calls.append({"messages": messages, "model": model, "require_vision": require_vision})
+        self.calls.append({"messages": messages, "model": model, "require_vision": require_vision, **overrides})
         result = ChatResult(
             content=self.replies.pop(0),
             model_name=model or "stub",

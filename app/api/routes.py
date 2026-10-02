@@ -162,6 +162,13 @@ def _visible_projects(request: Request) -> set[str] | None:
     return visible
 
 
+def _line_projects(request: Request, business_line: str | None) -> set[str] | None:
+    """业务线筛选：返回该业务线下的项目名集合；未指定业务线返回 None（不过滤）。"""
+    if not business_line:
+        return None
+    return {p["name"] for p in request.app.state.projects.list() if p.get("business_line") == business_line}
+
+
 def _record_visible(request: Request, project: str | None) -> bool:
     from app.reports import UNASSIGNED
 
@@ -3462,7 +3469,7 @@ async def my_plan_items(request: Request, include_done: bool = False) -> dict:
 async def list_plans(
     request: Request, project: str | None = None, mine: bool = False,
     task_id: str | None = None, keyword: str | None = None, status: str | None = None,
-    owner: str | None = None, page: int = 0, page_size: int = 20,
+    owner: str | None = None, page: int = 0, page_size: int = 20, business_line: str = "",
 ) -> dict:
     """计划列表（可按项目过滤）；mine=true 只看分配给我的；task_id 只看引用该任务快照的计划。
 
@@ -3479,7 +3486,10 @@ async def list_plans(
     kw = (keyword or "").strip().lower()
     out = []
     owners: set[str] = set()
+    line_projects = _line_projects(request, business_line)
     for plan in request.app.state.plans.list(project=project):
+        if line_projects is not None and plan.get("project") not in line_projects:
+            continue
         if not _record_visible(request, plan.get("project")):
             continue
         task_items = [i for i in plan["items"] if i["task_id"] == task_id] if task_id else []
@@ -4247,16 +4257,19 @@ def _req_trace(request: Request, item: dict) -> dict:
 @router.get("/api/v1/requirements")
 async def list_requirements(
     request: Request, project: str | None = None, status: str = "", keyword: str = "",
-    module_id: str = "", version_id: str = "", include_deleted: bool = False,
+    module_id: str = "", version_id: str = "", include_deleted: bool = False, business_line: str = "",
 ) -> dict:
     from app.requirements import REQ_STATUSES
 
     if project:
         _require_project(request, project, "requirement.view")
     kw = keyword.strip().lower()
+    line_projects = _line_projects(request, business_line)
     out = []
     for item in request.app.state.requirements.list(project or None, include_deleted=include_deleted):
         if not _record_visible(request, item["project"]):
+            continue
+        if line_projects is not None and item["project"] not in line_projects:
             continue
         if status and item["status"] != status:
             continue
@@ -5196,7 +5209,7 @@ async def get_project(request: Request, name: str) -> dict:
 @router.get("/api/v1/cases")
 async def list_all_cases(
     request: Request, project: str | None = None, module: str = "", priority: str = "",
-    review: str = "", keyword: str = "", page: int = 1, page_size: int = 20,
+    review: str = "", keyword: str = "", page: int = 1, page_size: int = 20, business_line: str = "",
 ) -> dict:
     """全库用例列表（测试用例页）：只收录审核通过的正式用例——待审核 / 已驳回 / 草稿用例留在各自任务的用例审核页，
     不进入用例中心；跨项目/任务聚合，支持筛选与分页（20/50/100/200，默认 20）。"""
@@ -5211,6 +5224,9 @@ async def list_all_cases(
         _require_project(request, project, "case.view")
     records = (request.app.state.tasks.list(limit=100000, project=project) if project
                else request.app.state.tasks.list(limit=100000, projects=_visible_projects(request)))
+    line_projects = _line_projects(request, business_line)
+    if line_projects is not None:
+        records = [r for r in records if (r.context or {}).get("project") in line_projects]
     rows = [r for r in project_cases(records, project or None, plans=request.app.state.plans.list())
             if r["review"] == "approved"]
     modules = sorted({r["module"] for r in rows if r["module"]})
@@ -5637,12 +5653,15 @@ async def upload_final_cases(
 @router.get("/api/v1/tasks")
 async def list_tasks(
     request: Request, status: str | None = None, project: str | None = None,
-    created_by: str | None = None, limit: int = 50
+    created_by: str | None = None, limit: int = 50, business_line: str = "",
 ) -> dict:
-    """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人过滤。"""
+    """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人/业务线过滤。"""
     records = request.app.state.tasks.list(status=status, limit=100000, projects=_visible_projects(request))
     if project is not None:
         records = [r for r in records if (r.context or {}).get("project") == project]
+    line_projects = _line_projects(request, business_line)
+    if line_projects is not None:
+        records = [r for r in records if (r.context or {}).get("project") in line_projects]
     if created_by is not None:
         records = [r for r in records if r.created_by == created_by]
     records = records[:limit]

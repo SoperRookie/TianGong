@@ -108,8 +108,8 @@ def _content(case: dict) -> dict:
 _JSON_RETRIES = 1
 
 
-async def _chat_json(llm: LLMClient, messages: list[dict], model: str | None) -> tuple[dict, "object"]:
-    """调用 LLM 并解析 JSON；解析失败自动重试（输出截断/格式异常兜底）。"""
+async def _chat_json(llm: LLMClient, messages: list[dict], model: str | None, **overrides) -> tuple[dict, "object"]:
+    """调用 LLM 并解析 JSON；解析失败自动重试（输出截断/格式异常兜底）。overrides 透传给 chat（如 reasoning_effort）。"""
     from app.llm.calllog import used_prompts
 
     last_error: Exception | None = None
@@ -119,7 +119,7 @@ async def _chat_json(llm: LLMClient, messages: list[dict], model: str | None) ->
     for attempt in range(1 + _JSON_RETRIES):
         if attempt:
             used_prompts.set(dict(noted))
-        result = await llm.chat(messages, model=model)
+        result = await llm.chat(messages, model=model, **overrides)
         try:
             return extract_json(result.content), result
         except LLMOutputError as e:
@@ -186,14 +186,33 @@ def _template_check(raw: dict, template: CustomTemplate) -> list[str]:
     return problems
 
 
+async def outline_requirement(llm: LLMClient, requirement: str, model: str | None) -> list[str]:
+    """长需求的全文大纲：先用整篇文本列出功能模块清单，分片拆解时注入，保证模块命名一致、不漏模块。"""
+    data, _ = await _chat_json(
+        llm,
+        [
+            {"role": "system", "content": prompt_text("requirement_outline")},
+            {"role": "user", "content": wrap_data("需求原文", requirement)},
+        ],
+        model,
+        reasoning_effort="low",
+    )
+    return [str(m).strip() for m in data.get("modules", []) if str(m).strip()]
+
+
 async def analyze_requirement(
-    llm: LLMClient, requirement: str, model: str | None, knowledge_cases: str | None = None
+    llm: LLMClient, requirement: str, model: str | None, knowledge_cases: str | None = None,
+    outline: list[str] | None = None, chunk_no: int = 0, chunk_total: int = 0,
 ) -> dict:
     """需求分析 Agent：测试点拆解 + 盲区识别（拆解确认流程 F-3-3 亦单独调用）。
 
     knowledge_cases：测试用例库检索结果，拆解阶段注入做覆盖度查漏（PRD 检索时机约束）。
+    outline / chunk_no：长需求分片拆解时注入全文模块大纲与分片序号，模块命名与大纲一致、只拆本片内容。
     """
     user = wrap_data("需求原文", requirement)
+    if outline:
+        user = (f"这是一份长需求的第 {chunk_no}/{chunk_total} 片。全文模块大纲如下（模块命名必须与大纲一致；"
+                f"只拆解本片实际包含的内容，本片未涉及的模块不要凭空生成）：\n{wrap_data('全文模块大纲', chr(10).join(outline))}\n\n") + user
     if knowledge_cases:
         user += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))
     data, result = await _chat_json(
@@ -203,6 +222,7 @@ async def analyze_requirement(
             {"role": "user", "content": user},
         ],
         model,
+        reasoning_effort="high",  # 拆解是理解需求的关键一步：推理型模型用最高强度
     )
     from app.tasks.points import normalize_points
 
@@ -314,6 +334,7 @@ def build_graph(
                 },
             ],
             state.get("reviewer_model") or state.get("model"),
+            reasoning_effort="high",
         )
         missing = data.get("missing", [])
         if not data.get("passed", False):
