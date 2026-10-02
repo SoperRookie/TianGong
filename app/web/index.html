@@ -1334,6 +1334,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     </div>
     <label class="f">降级链路<span class="hint">（备用模型名，逗号分隔，按顺序尝试）</span></label>
     <input type="text" id="mdFallbacks" placeholder="gpt-6-luna">
+    <label class="f" style="margin-top:8px">推理强度<span class="hint">（仅推理型模型：GPT-6 / 5.6 / 5.5 等；留「不传」表示模型不支持。拆解与评审阶段自动用 high）</span></label>
+    <select id="mdReasoning"><option value="">不传</option><option value="none">none</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select>
     <label class="check" style="margin-top:10px"><input type="checkbox" id="mdVision"> 支持 Vision（图片需求自动路由）</label>
   </div>
   <div class="dlg-f">
@@ -2161,10 +2163,12 @@ const LIST_FILTERS = [
 ];
 const matchStatus = (t, f) => !f || (f === 'active' ? ['queued','running'].includes(t.status) : t.status === f);
 const matchProject = (t, p) => !p || (p === '__none__' ? !t.project : t.project === p);
+let listLine = '';
+const matchLine = (t, l) => !l || (!!t.project && projLineOf(t.project) === l);
 const matchCreator = (t, c) => !c || t.created_by === c;
 function filteredTasks() {
   const q = listQuery.trim().toLowerCase();
-  return _tasksCache.filter(t => matchStatus(t, listStatus) && matchProject(t, listProject) &&
+  return _tasksCache.filter(t => matchStatus(t, listStatus) && matchProject(t, listProject) && matchLine(t, listLine) &&
     matchCreator(t, listCreator) &&
     (!q || t.task_id.includes(q) || (t.project||'').toLowerCase().includes(q) ||
       (t.created_by||'').toLowerCase().includes(q) ||
@@ -2176,6 +2180,7 @@ function renderTaskListPage() {
       <div class="card-h"><h3>任务列表</h3><span class="meta" id="taskTotal"></span>
         <div class="grow">
           <div class="seg" id="listSeg"></div>
+          <select id="lineSel" style="width:120px" onchange="listLine=this.value;listProject='';renderTaskListRows()" title="按业务线筛选"></select>
           <select id="projectSel" style="width:140px" onchange="listProject=this.value;renderTaskListRows()"></select>
           <select id="creatorSel" style="width:120px" onchange="listCreator=this.value;renderTaskListRows()"></select>
           <div class="search" style="width:210px">
@@ -2199,12 +2204,13 @@ function renderTaskListPage() {
 function renderTaskListRows() {
   const tasks = filteredTasks();
   $('listSeg').innerHTML = LIST_FILTERS.map(([v, label]) => {
-    const n = _tasksCache.filter(t => matchStatus(t, v) && matchProject(t, listProject)).length;
+    const n = _tasksCache.filter(t => matchStatus(t, v) && matchProject(t, listProject) && matchLine(t, listLine)).length;
     return `<button class="${listStatus===v?'on':''}" onclick="listStatus='${v}';renderTaskListRows()">${label} ${n}</button>`;
   }).join('');
   // 项目过滤下拉：由当前任务集合聚合（保持已选值，轮询不打断）
-  const projects = [...new Set(_tasksCache.map(t => t.project).filter(Boolean))].sort();
-  const hasNone = _tasksCache.some(t => !t.project);
+  if ($('lineSel')) $('lineSel').innerHTML = `<option value="">全部业务线</option>` + (_businessLines||[]).map(l => `<option value="${esc(l)}" ${listLine===l?'selected':''}>${esc(l)}</option>`).join('');
+  const projects = [...new Set(_tasksCache.filter(t => matchLine(t, listLine)).map(t => t.project).filter(Boolean))].sort();
+  const hasNone = !listLine && _tasksCache.some(t => !t.project);
   $('projectSel').innerHTML = `<option value="">全部项目</option>`
     + projects.map(p => `<option value="${esc(p)}" ${listProject===p?'selected':''}>${esc(p)}</option>`).join('')
     + (hasNone ? `<option value="__none__" ${listProject==='__none__'?'selected':''}>（未指定项目）</option>` : '');
@@ -3433,7 +3439,7 @@ async function projRecyclePurge(taskId, itemId) {
 const EXEC_LABEL = {pass:'通过', fail:'失败', blocked:'阻塞', skipped:'跳过'};
 const EXEC_CLS = {pass:'approved', fail:'rejected', blocked:'candidate', skipped:'pending'};
 /* ---------- 测试计划视图（M4：计划实体 + 快照 + 分配 + 计划执行与附件） ---------- */
-let curPlan = null, planRunId = null, plansMine = false, plansProject = '', planExecFilter = '';
+let curPlan = null, planRunId = null, plansMine = false, plansProject = '', plansLine = '', planExecFilter = '';
 let plansKw = '', plansStatus = '', plansOwner = '', plansPage = 1, plansSize = 20;
 function plansSet(field, value) {  // 任何筛选/页大小变化回到第一页
   if (field === 'plansKw') plansKw = value;
@@ -3441,6 +3447,7 @@ function plansSet(field, value) {  // 任何筛选/页大小变化回到第一�
   else if (field === 'plansOwner') plansOwner = value;
   else if (field === 'plansSize') plansSize = value;
   else if (field === 'plansProject') plansProject = value;
+  else if (field === 'plansLine') { plansLine = value; plansProject = ''; }
   plansPage = 1; renderPlans();
 }
 let _planDetail = null;
@@ -3462,6 +3469,7 @@ async function _renderPlans__impl() {
   let data;
   const q = new URLSearchParams();
   if (plansProject) q.set('project', plansProject);
+  if (plansLine) q.set('business_line', plansLine);
   if (plansMine) q.set('mine', 'true');
   if (plansKw.trim()) q.set('keyword', plansKw.trim());
   if (plansStatus) q.set('status', plansStatus);
@@ -3526,9 +3534,10 @@ async function _renderPlans__impl() {
       </div></div>
     <div class="card-b">
       <div class="filters" style="margin-bottom:10px">
+        ${lineSelectHtml(plansLine, "plansSet('plansLine', this.value)")}
         <select style="width:150px" onchange="plansSet('plansProject', this.value)">
           <option value="">全部项目</option>
-          ${projects.map(p => `<option value="${esc(p.project)}" ${plansProject===p.project?'selected':''}>${esc(p.project)}</option>`).join('')}
+          ${projects.filter(p => !plansLine || p.business_line === plansLine).map(p => `<option value="${esc(p.project)}" ${plansProject===p.project?'selected':''}>${esc(p.project)}</option>`).join('')}
         </select>
         <select style="width:110px" onchange="plansSet('plansStatus', this.value)">
           <option value="">全部状态</option>
@@ -4012,11 +4021,12 @@ function mindFromRows(rows, rootLabel, withProject) {
 
 /* ---------- 测试用例视图：全库用例分页浏览（20/50/100/200，默认 20） ---------- */
 const CASE_PAGE_SIZES = [20, 50, 100, 200];
-let acPage = 1, acSize = 20, acProject = '', acModule = '', acPriority = '', acReview = '', acKeyword = '', acView = 'table';
+let acPage = 1, acSize = 20, acProject = '', acModule = '', acPriority = '', acReview = '', acKeyword = '', acView = 'table', acLine = '';
 
 function acSet(field, value) {
   if (field === 'acSize') acSize = value;
   else if (field === 'acProject') acProject = value;
+  else if (field === 'acLine') { acLine = value; acProject = ''; acModule = ''; }
   else if (field === 'acModule') acModule = value;
   else if (field === 'acPriority') acPriority = value;
   else if (field === 'acReview') acReview = value;
@@ -4051,6 +4061,7 @@ async function renderAllCases() { return (() => keepScroll('cases', ['cases', ac
 async function _renderAllCases__impl() {
   const q = new URLSearchParams({page: acPage, page_size: acSize});
   if (acProject) q.set('project', acProject);
+  if (acLine) q.set('business_line', acLine);
   if (acModule) q.set('module', acModule);
   if (acPriority) q.set('priority', acPriority);
   if (acReview) q.set('review', acReview);
@@ -4105,9 +4116,10 @@ async function _renderAllCases__impl() {
       <span class="meta">只收录审核通过的正式用例 · 待审核 / 已驳回的用例留在各任务的用例审核页 · 点击行进入所属任务</span>
       <div class="grow">
         ${acChecked.size?`<button class="btn danger sm" onclick="acDelete([...acChecked.entries()])">删除选中 ${acChecked.size} 条</button>`:''}
+        ${lineSelectHtml(acLine, "acSet('acLine', this.value)")}
         <select style="width:150px" onchange="acModule='';acSet('acProject', this.value)">
           <option value="">全部项目</option>
-          ${projects.map(p => `<option value="${esc(p.project)}" ${acProject===p.project?'selected':''}>${esc(p.project)}</option>`).join('')}
+          ${projects.filter(p => !acLine || p.business_line === acLine).map(p => `<option value="${esc(p.project)}" ${acProject===p.project?'selected':''}>${esc(p.project)}</option>`).join('')}
         </select>
         <select style="width:130px" onchange="acSet('acModule', this.value)">
           <option value="">全部模块</option>
@@ -4835,7 +4847,7 @@ async function archivePrompt(no) {
 }
 
 /* ==================== 需求中心（M2） ==================== */
-let curReq = null, _reqDetail = null, _reqsCache = [], reqStatus = '', reqKw = '', reqTab = 'raw', reqDeleted = false;
+let curReq = null, _reqDetail = null, _reqsCache = [], reqStatus = '', reqKw = '', reqTab = 'raw', reqDeleted = false, reqLine = '';
 const REQ_ST_CLS = {draft:'pending', analyzed:'candidate', pending_confirm:'rejected', confirmed:'approved', designing:'candidate', done:'approved', archived:'pending'};
 const REQ_ST_LABEL = {draft:'草稿', analyzed:'已分析', pending_confirm:'待确认', confirmed:'已确认', designing:'设计中', done:'已完成', archived:'已归档'};
 function crumbForReqs() {
@@ -4853,6 +4865,7 @@ async function _renderRequirements__impl() {
   if (reqStatus) q.set('status', reqStatus);
   if (reqKw.trim()) q.set('keyword', reqKw.trim());
   if (reqDeleted) q.set('include_deleted', 'true');
+  if (reqLine) q.set('business_line', reqLine);
   let data;
   try { data = await api('/api/v1/requirements?' + q); } catch (e) { return toast(e.message, 'err'); }
   if (stale('reqs', _s)) return;
@@ -4873,6 +4886,7 @@ async function _renderRequirements__impl() {
     <div class="card-h"><h3>需求列表</h3><span class="meta">原文永久保留 · AI 分析 11 项 · 待确认事项确认后才能开始测试设计 · 需求 → 测试点 → 用例 → 计划 → 执行 追溯</span>
       <div class="grow">
         <input type="text" placeholder="搜索标题 / 原文" value="${esc(reqKw)}" style="width:180px" onchange="reqKw=this.value;renderRequirements()">
+        ${lineSelectHtml(reqLine, "reqLine=this.value;renderRequirements()")}
         <select style="width:120px" onchange="reqStatus=this.value;renderRequirements()"><option value="">全部状态</option>
           ${Object.entries(data.statuses).map(([k,v])=>`<option value="${k}" ${reqStatus===k?'selected':''}>${v}</option>`).join('')}</select>
         <label class="check" title="回收站：已删除的需求可恢复"><input type="checkbox" ${reqDeleted?'checked':''} onchange="reqDeleted=this.checked;renderRequirements()"> 显示已删除</label>
@@ -5155,6 +5169,8 @@ async function drawerNewProject() {
   } catch (e) { toast(e.message, 'err'); }
 }
 let curProject = null, projTab = 'overview';
+const projLineOf = name => { const p = _projectsCache.find(x => x.project === name); return p ? (p.business_line || '') : ''; };
+const lineSelectHtml = (cur, setter, width) => `<select style="width:${width||120}px" onchange="${setter}" title="按业务线筛选"><option value="">全部业务线</option>${(_businessLines||[]).map(l=>`<option value="${esc(l)}" ${cur===l?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
 let _projectsCache = [], _businessLines = [], projListLine = '', projGroupByLine = true, _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
 const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved'], draft:['草稿','candidate']};
 let _editingProject = null;
@@ -6063,6 +6079,7 @@ function openModelDlg(name) {
   window._editingTimeout = m.timeout;  // 超时不在界面配置：编辑沿用原值，新增用默认
   $('mdFallbacks').value = (m.fallbacks||[]).join(', ');
   $('mdVision').checked = !!m.supports_vision;
+  $('mdReasoning').value = m.reasoning_effort || '';
   $('modelDlg').showModal();
 }
 async function saveModelDlg() {
@@ -6075,6 +6092,7 @@ async function saveModelDlg() {
     timeout: window._editingTimeout || 120,
     fallbacks: $('mdFallbacks').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean),
     supports_vision: $('mdVision').checked,
+    reasoning_effort: $('mdReasoning').value || null,
     input_price: parseFloat($('mdInPrice').value || '0') || 0,
     output_price: parseFloat($('mdOutPrice').value || '0') || 0,
   };

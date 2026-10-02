@@ -74,12 +74,14 @@ def test_excel与csv按表格解析(tmp_path):
     wb.save(x)
     doc = parse_file(x)
     text = doc.full_text
-    assert doc.doc_type == "xlsx" and len(doc.tables) == 2
-    assert "# 功能清单" in text and "登录 | 账号密码登录 | 错误 5 次锁定" in text and "# 接口" in text and "/api/login | POST" in text
+    assert doc.doc_type == "xlsx"
+    # 数据型工作表按「列名：值」展开；两列的小表按文档型逐行输出
+    assert "# 功能清单" in text and "模块：登录；功能：账号密码登录；说明：错误 5 次锁定" in text
+    assert "# 接口" in text and "/api/login ｜ POST" in text
     c = tmp_path / "需求.csv"
     c.write_text("模块,功能\n登录,找回密码\n", encoding="utf-8")
     doc = parse_file(c)
-    assert doc.tables == [[["模块", "功能"], ["登录", "找回密码"]]] and "登录 | 找回密码" in doc.full_text
+    assert "登录 ｜ 找回密码" in doc.full_text
 
 
 def test_pptx按页解析文字与图片占位(tmp_path):
@@ -136,7 +138,7 @@ def test_压缩包递归解析_文档合并_图片转内嵌占位(tmp_path):
     doc = parse_file(z)
     text = doc.full_text
     assert doc.doc_type == "zip"
-    assert "文件：docs/需求.md" in text and "账号密码登录" in text and "登录 | 找回密码" in text
+    assert "文件：docs/需求.md" in text and "账号密码登录" in text and "登录 ｜ 找回密码" in text
     assert len(doc.embedded_images) == 1 and "[[图片:1]]" in text
     assert "demo.mp4" in text and "视频文件" in text and "junk" not in text
     # tar.gz 同样可读
@@ -197,3 +199,43 @@ def test_老版Office需LibreOffice_未安装给出明确提示(tmp_path, monkey
     v.write_bytes(b"\x00" * 16)
     with pytest.raises(UnsupportedFormatError, match="视频文件"):
         parse_file(v)
+
+
+def test_excel文档型渲染_去空单元格_内嵌截图占位(tmp_path):
+    from openpyxl import Workbook
+    from openpyxl.drawing.image import Image as XImage
+    from PIL import Image
+
+    img = tmp_path / "shot.png"
+    Image.new("RGB", (160, 120), "white").save(img)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "道具系统"
+    ws["I2"] = "背包系统"
+    ws["I3"] = "1.道具分类按钮，点击可以切换物品显示的种类"
+    ws["I4"] = "参考左图"
+    ws["I6"] = "道具详情弹窗"
+    ws.add_image(XImage(str(img)), "B3")
+    f = tmp_path / "需求.xlsx"
+    wb.save(f)
+    doc = parse_file(f)
+    text = doc.full_text
+    assert "# 道具系统" in text and "|  |" not in text and " ｜ " not in text
+    assert text.index("1.道具分类按钮") < text.index("参考左图") < text.index("道具详情弹窗")
+    assert len(doc.embedded_images) == 1 and "[[图片:1]]" in text
+    assert text.index("[[图片:1]]") < text.index("道具详情弹窗")
+
+
+def test_excel数据型渲染_按列名展开(tmp_path):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["模块", "功能", "规则", "优先级"])
+    ws.append(["登录", "密码登录", "错误 5 次锁定 30 分钟", "P0"])
+    ws.append(["登录", "验证码登录", "60 秒内只能发一次", "P1"])
+    f = tmp_path / "清单.xlsx"
+    wb.save(f)
+    text = parse_file(f).full_text
+    assert "模块：登录；功能：密码登录；规则：错误 5 次锁定 30 分钟；优先级：P0" in text
+    assert "功能：验证码登录" in text

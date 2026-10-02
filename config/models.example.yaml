@@ -29,7 +29,8 @@ models:
     input_price: 10      # 美元 / 百万 token，AI 中心据此折算费用与预算余额
     output_price: 50
     temperature: 1
-    max_tokens: 16384
+    reasoning_effort: medium   # 推理型模型：拆解 / 评审阶段自动提升到 high
+    max_tokens: 32768
     timeout: 300
     fallbacks: [gpt-6-sol, gpt-6-luna]
 
@@ -43,7 +44,8 @@ models:
     input_price: 2      # 美元 / 百万 token，AI 中心据此折算费用与预算余额
     output_price: 10
     temperature: 1
-    max_tokens: 16384
+    reasoning_effort: medium   # 推理型模型：拆解 / 评审阶段自动提升到 high
+    max_tokens: 32768
     timeout: 300
     fallbacks: [gpt-6-luna, gpt-5.4]
 
@@ -57,7 +59,8 @@ models:
     input_price: 0.1      # 美元 / 百万 token，AI 中心据此折算费用与预算余额
     output_price: 0.5
     temperature: 1
-    max_tokens: 16384
+    reasoning_effort: medium   # 推理型模型：拆解 / 评审阶段自动提升到 high
+    max_tokens: 32768
     timeout: 180
     fallbacks: [gpt-5.4-nano]
 

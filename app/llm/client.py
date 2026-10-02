@@ -125,6 +125,10 @@ class LLMClient:
             "max_tokens": cfg.max_tokens,
         }
         params.update(overrides)
+        # 推理强度：只对配置了 reasoning_effort 的模型生效（说明它是推理型）；阶段可覆盖（拆解 / 评审用 high）
+        effort = params.pop("reasoning_effort", None)
+        if cfg.reasoning_effort:
+            params["reasoning_effort"] = effort or cfg.reasoning_effort
         if cfg.provider == "openai" and "max_tokens" in params:
             # OpenAI 官方新模型（GPT-5 系）已废弃 max_tokens，统一改传 max_completion_tokens；
             # 其余 OpenAI 兼容厂商（DeepSeek/Ollama 等）仍只认 max_tokens，不能一概替换
