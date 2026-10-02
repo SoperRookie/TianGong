@@ -4193,6 +4193,7 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
         "status_label": REQ_STATUSES.get(item["status"], item["status"]),
         "source_label": SOURCE_TYPES.get(item["source_type"], item["source_type"]),
         "open_questions": len(rstore.open_questions(item)),
+        "blocking_questions": len(rstore.blocking_questions(item)),
         "task_count": len(item["tasks"]),
         "analysis_labels": REQUIREMENT_ANALYSIS_LABELS,
         "parse_failed": sum(1 for a in item["attachments"] if not a.get("parsed") and not a.get("parsing")),
@@ -4540,6 +4541,26 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
 
 class QuestionBody(BaseModel):
     question: str
+    level: str = "must"        # must：必须确认后才能生成；suggest：可带假设继续
+    assumption: str = ""
+
+
+class QuestionLevelBody(BaseModel):
+    level: str
+    assumption: str | None = None
+
+
+@router.put("/api/v1/requirements/{req_id}/questions/{q_id}/level")
+async def set_requirement_question_level(request: Request, req_id: str, q_id: str, body: QuestionLevelBody) -> dict:
+    """调整待确认事项等级（必须确认 / 建议确认）；降为建议级时可补充不确认时采用的假设。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    try:
+        item = request.app.state.requirements.set_question_level(req_id, q_id, body.level, body.assumption, _operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _req_view(request, item)
 
 
 @router.post("/api/v1/requirements/{req_id}/questions")
@@ -4548,7 +4569,8 @@ async def add_requirement_question(request: Request, req_id: str, body: Question
 
     _req(request, req_id, "requirement.edit")
     try:
-        item = request.app.state.requirements.add_question(req_id, body.question, operator=_operator(request))
+        item = request.app.state.requirements.add_question(req_id, body.question, operator=_operator(request),
+                                                           level=body.level, assumption=body.assumption)
     except RequirementError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return _req_view(request, item)
@@ -4592,8 +4614,8 @@ async def design_from_requirement(request: Request, req_id: str, body: DesignBod
     item = _req(request, req_id, "point.ai")
     _require_attachments_ready(item)
     rstore = request.app.state.requirements
-    if rstore.open_questions(item):
-        raise HTTPException(status_code=409, detail=f"仍有 {len(rstore.open_questions(item))} 项待确认事项未确认，确认后才能开始测试设计")
+    if rstore.blocking_questions(item):
+        raise HTTPException(status_code=409, detail=f"仍有 {len(rstore.blocking_questions(item))} 项必须确认的事项未确认，确认后才能开始测试设计（建议级事项可带假设继续）")
     template = request.app.state.templates.get(body.template_id)
     if template is None:
         raise HTTPException(status_code=404, detail=f"模板不存在: {body.template_id}")

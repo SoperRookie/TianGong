@@ -4991,17 +4991,21 @@ async function _renderRequirementDetail__impl() {
     </div>`:''}`;
 
   const qs = r.questions || [];
-  const openN = qs.filter(q=>q.status==='open').length;
-  const qTab = `<div class="hint" style="margin-bottom:8px">AI 遇到需求缺失/含糊时输出待确认事项；全部确认后才能开始测试设计（核心规则 4）。确认结论会作为需求的一部分参与拆解与生成。</div>
-    ${canEdit?`<div class="toolbar" style="margin-bottom:10px"><input type="text" id="rqNewQ" placeholder="人工补充一条待确认事项…" style="flex:1"><button class="btn ghost sm" onclick="addReqQuestion()">添加</button></div>`:''}
-    ${qs.length?`<div class="tbl-wrap"><table><tr><th style="width:36px">#</th><th>问题</th><th style="width:90px">状态</th><th>确认结论</th><th style="width:120px">确认人</th><th style="width:150px">操作</th></tr>
+  const openAll = qs.filter(q=>q.status==='open');
+  const openN = openAll.filter(q=>(q.level||'must')==='must').length;
+  const suggestN = openAll.length - openN;
+  const qTab = `<div class="hint" style="margin-bottom:8px">待确认事项分两级：<b>必须确认</b>（影响规则 / 预期 / 数值 / 分支，不确认不能开始测试设计）与 <b>建议确认</b>（可按假设继续，假设会写进用例备注）。确认结论会作为需求的一部分参与拆解与生成。</div>
+    ${canEdit?`<div class="toolbar" style="margin-bottom:10px"><input type="text" id="rqNewQ" placeholder="人工补充一条待确认事项…" style="flex:1"><select id="rqNewQLevel" style="width:110px"><option value="must">必须确认</option><option value="suggest">建议确认</option></select><button class="btn ghost sm" onclick="addReqQuestion()">添加</button></div>`:''}
+    ${qs.length?`<div class="tbl-wrap"><table><tr><th style="width:36px">#</th><th>问题</th><th style="width:96px">等级</th><th style="width:90px">状态</th><th>确认结论</th><th style="width:120px">确认人</th><th style="width:150px">操作</th></tr>
       ${qs.map((q,i)=>`<tr>
-        <td class="hint">${i+1}</td><td>${esc(q.question)}${q.source==='manual'?' <span class="tag">人工</span>':''}</td>
+        <td class="hint">${i+1}</td><td>${esc(q.question)}${q.source==='manual'?' <span class="tag">人工</span>':''}${q.reason?`<div class="hint">${esc(q.reason)}</div>`:''}${(q.level||'must')==='suggest'&&q.status==='open'?`<div class="hint">不确认时假设：${esc(q.assumption||'按行业惯例处理')}</div>`:''}</td>
+        <td>${(q.level||'must')==='must'?'<span class="tag" style="background:var(--danger-bg);color:var(--danger)">必须确认</span>':'<span class="tag">建议确认</span>'}${canEdit&&q.status==='open'?`<div><a class="hint" onclick="setReqQuestionLevel('${q.q_id}','${(q.level||'must')==='must'?'suggest':'must'}')">${(q.level||'must')==='must'?'降为建议':'升为必须'}</a></div>`:''}</td>
         <td>${q.status==='open'?'<span class="st rejected">待确认</span>':'<span class="st approved">已确认</span>'}</td>
         <td>${q.status==='open'?(canEdit?`<input type="text" id="qa-${q.q_id}" placeholder="填写确认结论（产品/开发口径）" style="width:100%;box-sizing:border-box">`:'<span class="hint">—</span>'):esc(q.answer)}</td>
         <td class="hint">${q.status==='open'?'':`${esc(q.by||'')}<div>${esc(fmtTime(q.at))}</div>`}</td>
         <td><div class="rowops">${canEdit?(q.status==='open'?`<button class="btn sm" onclick="answerReqQuestion('${q.q_id}')">确认</button>`:`<button class="btn ghost sm" onclick="answerReqQuestion('${q.q_id}',true)">重新打开</button>`):''}</div></td></tr>`).join('')}
-    </table></div>`:'<div class="empty">暂无待确认事项</div>'}`;
+    </table></div>`:'<div class="empty">暂无待确认事项</div>'}
+    ${suggestN?`<div class="hint" style="margin-top:8px">${suggestN} 项建议级事项未确认，不阻塞测试设计，将按各自假设处理</div>`:''}`;
 
   const body = reqTab==='raw' ? rawTab : reqTab==='analysis' ? analysisTab : reqTab==='questions' ? qTab : trace;
   const designDisabled = openN>0 || r.status==='archived';
@@ -5016,7 +5020,7 @@ async function _renderRequirementDetail__impl() {
         ${canEdit&&r.status==='designing'?`<button class="btn ghost sm" onclick="setReqStatus('done')">标记完成</button>`:''}
         ${canEdit&&r.status!=='archived'?`<button class="btn ghost sm" onclick="openMergeDlg()" title="同一份文档重复导入时，把本需求并入另一条">合并到…</button><button class="btn ghost sm" onclick="setReqStatus('archived')">归档</button>`:`${canEdit?`<button class="btn ghost sm" onclick="setReqStatus('designing')">恢复</button>`:''}`}
         ${canEdit&&canDelete()?`<button class="btn ghost sm danger" onclick="deleteReq()">删除</button>`:''}
-        ${canDesign?`<button class="btn sm" ${designDisabled?'disabled':''} title="${openN?`还有 ${openN} 项待确认事项`:''}" onclick="openDesignDlg()">开始测试设计</button>`:''}
+        ${canDesign?`<button class="btn sm" ${designDisabled?'disabled':''} title="${openN?`还有 ${openN} 项必须确认的事项`:''}" onclick="openDesignDlg()">开始测试设计</button>`:''}
       </div></div>
     <div class="dtabs">
       <button class="${reqTab==='raw'?'on':''}" onclick="reqTab='raw';renderRequirementDetail()">原文与附件${r.parse_failed?`<span class="cnt hot">${r.parse_failed}</span>`:''}${r.parsing?` <span class="spin"></span>`:''}</button>
@@ -5101,7 +5105,13 @@ async function analyzeReq() {
 }
 async function addReqQuestion() {
   const q = $('rqNewQ').value.trim(); if (!q) return;
-  try { await jpost(`/api/v1/requirements/${curReq}/questions`, {question: q}); renderRequirementDetail(); }
+  try { await jpost(`/api/v1/requirements/${curReq}/questions`, {question: q, level: ($('rqNewQLevel')||{}).value || 'must'}); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function setReqQuestionLevel(qid, level) {
+  let assumption = null;
+  if (level === 'suggest') { assumption = await askInput('降为建议确认', '不确认时按什么假设处理（写进用例备注）', '按行业惯例处理'); if (assumption === null || assumption === undefined) return; }
+  try { await api(`/api/v1/requirements/${curReq}/questions/${qid}/level`, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({level, assumption})}); renderRequirementDetail(); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function answerReqQuestion(qid, reopen) {
