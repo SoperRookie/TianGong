@@ -347,3 +347,42 @@ async def test_删除需求_关联任务拦截_强制删除后任务保留并标
     assert resp.status_code == 200 and resp.json()["linked_tasks"] == 1
     t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
     assert t["context"]["requirement_id"] == rid and t["context"]["requirement_deleted"] is True
+
+
+async def test_待确认事项分级_必须项阻塞设计_建议项带假设继续(client):
+    r = await _req(client)
+    rid = r["req_id"]
+    reply = json.dumps({
+        "features": ["账号密码登录"], "rules": ["密码错误 5 次锁定 30 分钟"], "preconditions": [], "normal_flows": [],
+        "exception_flows": [], "boundaries": [], "state_changes": [], "permissions": [], "dependencies": [], "risks": [],
+        "open_questions": [
+            {"question": "锁定期间是否允许找回密码？", "level": "must", "reason": "决定锁定态预期", "assumption": ""},
+            {"question": "锁定提示文案是什么？", "level": "suggest", "reason": "文案细节", "assumption": "按「账号已锁定，请 30 分钟后重试」"},
+            "历史字符串格式的问题？",
+        ],
+    }, ensure_ascii=False)
+    app.state.llm = StubLLM([reply])
+    a = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
+    by = {q["question"]: q for q in a["questions"]}
+    assert by["锁定期间是否允许找回密码？"]["level"] == "must" and by["锁定提示文案是什么？"]["level"] == "suggest"
+    assert by["历史字符串格式的问题？"]["level"] == "must"  # 旧格式默认必须确认
+    assert a["status"] == "pending_confirm" and a["open_questions"] == 3 and a["blocking_questions"] == 2
+    # 两条必须项未确认：不能设计
+    assert (await client.post(f"/api/v1/requirements/{rid}/design", json={})).status_code == 409
+    # 把一条必须项降为建议并给假设，另一条确认 → 不再阻塞
+    hist = by["历史字符串格式的问题？"]["q_id"]
+    r2 = await client.put(f"/api/v1/requirements/{rid}/questions/{hist}/level", json={"level": "suggest", "assumption": "按默认处理"})
+    assert r2.status_code == 200 and r2.json()["blocking_questions"] == 1
+    assert (await client.put(f"/api/v1/requirements/{rid}/questions/{hist}/level", json={"level": "bad"})).status_code == 400
+    must = by["锁定期间是否允许找回密码？"]["q_id"]
+    a = (await client.post(f"/api/v1/requirements/{rid}/questions/{must}", json={"answer": "允许找回密码"})).json()
+    assert a["status"] == "confirmed" and a["blocking_questions"] == 0 and a["open_questions"] == 2
+    # 建议级未确认事项带假设进入设计输入；确认结论也在
+    from app.requirements import design_brief
+    brief = design_brief(app.state.requirements.get(rid))
+    assert "确认：允许找回密码" in brief and "假设：按「账号已锁定，请 30 分钟后重试」" in brief and "假设：按默认处理" in brief
+    # 人工补充建议级事项不阻塞；补充必须级则阻塞
+    a = (await client.post(f"/api/v1/requirements/{rid}/questions", json={"question": "按钮颜色？", "level": "suggest", "assumption": "沿用主题色"})).json()
+    assert a["status"] == "confirmed"
+    a = (await client.post(f"/api/v1/requirements/{rid}/questions", json={"question": "并发下注如何处理？"})).json()
+    assert a["status"] == "pending_confirm" and a["blocking_questions"] == 1

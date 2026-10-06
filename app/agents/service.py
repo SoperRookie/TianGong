@@ -98,6 +98,14 @@ async def run_requirement_analysis(
         model_name = result.model_name
         for key in REQUIREMENT_ANALYSIS_KEYS:
             for item in data.get(key) or []:
+                if key == "open_questions" and isinstance(item, dict):
+                    q = str(item.get("question", "")).strip()
+                    if q and all((x.get("question") if isinstance(x, dict) else x) != q for x in merged[key]):
+                        level = str(item.get("level", "must")).strip().lower()
+                        merged[key].append({"question": q, "level": level if level in ("must", "suggest") else "must",
+                                            "reason": str(item.get("reason", "")).strip(),
+                                            "assumption": str(item.get("assumption", "")).strip()})
+                    continue
                 item = str(item).strip()
                 if item and item not in merged[key]:
                     merged[key].append(item)

@@ -101,8 +101,16 @@ class PromptStore:
                 }
                 self._items[d["key"]] = item
                 self._doc.put(d["key"], item)
-            else:  # 元信息随代码更新，版本内容不动
+            else:
+                # 元信息随代码更新；内置默认版本（version 1）的内容也随代码更新：
+                # 未自定义过的 Prompt 立即生效，已自定义的保留管理员的生效版本、只刷新 v1 供回滚参考
                 item.update({"name": d["name"], "kind": d["kind"], "where": d["where"]})
+                v1 = next((v for v in item["versions"] if v["version_no"] == 1), None)
+                if v1 is not None and v1.get("note", "").startswith("内置默认") and v1["content"] != default:
+                    v1["content"] = default
+                    v1["note"] = "内置默认（随代码更新）"
+                    v1["created_at"] = _now()
+                    self._doc.put(d["key"], item)
 
     # ---- 读取 ----
 

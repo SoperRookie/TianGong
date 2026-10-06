@@ -150,11 +150,22 @@ class RequirementStore:
         existing = {q["question"]: q for q in item["questions"]}
         questions = []
         for q in analysis.get("open_questions") or []:
-            if q in existing:
-                questions.append(existing[q])
+            meta = q if isinstance(q, dict) else {"question": str(q)}
+            text = str(meta.get("question", "")).strip()
+            if not text:
+                continue
+            if text in existing:
+                old = existing[text]
+                old.setdefault("level", meta.get("level") or "must")
+                old.setdefault("reason", meta.get("reason", "")); old.setdefault("assumption", meta.get("assumption", ""))
+                questions.append(old)
             else:
-                questions.append({"q_id": _hex8(), "question": q, "status": "open",
+                questions.append({"q_id": _hex8(), "question": text, "status": "open",
+                                  "level": meta.get("level") if meta.get("level") in ("must", "suggest") else "must",
+                                  "reason": str(meta.get("reason", "")), "assumption": str(meta.get("assumption", "")),
                                   "answer": "", "by": None, "at": None, "source": "ai"})
+        # 分析结果里的待确认事项统一存成问题文本，便于展示与比对
+        item["analysis"]["open_questions"] = [q["question"] for q in questions]
         # 人工补充的问题保留
         questions.extend(q for q in item["questions"] if q.get("source") == "manual" and q["question"] not in
                          {x["question"] for x in questions})
@@ -163,13 +174,33 @@ class RequirementStore:
         self._persist(item)
         return item
 
-    def add_question(self, req_id: str, question: str, operator: str | None = None) -> dict:
+    def add_question(self, req_id: str, question: str, operator: str | None = None, level: str = "must",
+                     assumption: str = "") -> dict:
         item = self._get_alive(req_id)
         question = (question or "").strip()
         if not question:
             raise RequirementError("待确认事项不能为空")
         item["questions"].append({"q_id": _hex8(), "question": question, "status": "open",
+                                  "level": level if level in ("must", "suggest") else "must", "reason": "",
+                                  "assumption": (assumption or "").strip(),
                                   "answer": "", "by": operator, "at": _now(), "source": "manual"})
+        self._refresh_status(item)
+        self._persist(item)
+        return item
+
+    def set_question_level(self, req_id: str, q_id: str, level: str, assumption: str | None = None,
+                           operator: str | None = None) -> dict:
+        """调整待确认事项等级：must（必须确认后才能生成）/ suggest（可带假设继续）。"""
+        if level not in ("must", "suggest"):
+            raise RequirementError("等级只能是 must 或 suggest")
+        item = self._get_alive(req_id)
+        q = next((x for x in item["questions"] if x["q_id"] == q_id), None)
+        if q is None:
+            raise RequirementError(f"待确认事项不存在: {q_id}")
+        q["level"] = level
+        if assumption is not None:
+            q["assumption"] = assumption.strip()
+        q["level_by"], q["level_at"] = operator, _now()
         self._refresh_status(item)
         self._persist(item)
         return item
@@ -194,6 +225,10 @@ class RequirementStore:
 
     def open_questions(self, item: dict) -> list[dict]:
         return [q for q in item.get("questions", []) if q["status"] == "open"]
+
+    def blocking_questions(self, item: dict) -> list[dict]:
+        """必须确认的未确认事项：不确认不能发起测试设计；建议级可带假设继续。"""
+        return [q for q in self.open_questions(item) if (q.get("level") or "must") == "must"]
 
     def link_task(self, req_id: str, task_id: str) -> dict:
         item = self._get_alive(req_id)
@@ -286,7 +321,7 @@ class RequirementStore:
             return
         if item["analysis"] is None:
             item["status"] = "draft"
-        elif self.open_questions(item):
+        elif self.blocking_questions(item):
             item["status"] = "pending_confirm"
         else:
             item["status"] = "confirmed" if item["questions"] else "analyzed"
@@ -307,6 +342,10 @@ def design_brief(item: dict) -> str:
     if confirmed:
         parts.append("【待确认事项的确认结论（以此为准）】\n" + "\n".join(
             f"- 问：{q['question']}\n  确认：{q['answer']}" for q in confirmed))
+    assumed = [q for q in item.get("questions", []) if q["status"] == "open" and (q.get("level") or "must") == "suggest"]
+    if assumed:
+        parts.append("【未确认的建议级事项（按下列假设处理，并在用例 remark 中注明假设）】\n" + "\n".join(
+            f"- 问：{q['question']}\n  假设：{q.get('assumption') or '按行业惯例处理'}" for q in assumed))
     analysis = item.get("analysis") or {}
     keep = [k for k in ("rules", "boundaries", "state_changes", "permissions") if analysis.get(k)]
     if keep:
