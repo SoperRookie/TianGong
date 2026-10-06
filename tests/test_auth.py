@@ -211,13 +211,13 @@ async def test_两步验证总开关(client, auth_on):
 
     token = await _login(client)
     headers = {"Authorization": f"Bearer {token}"}
-    assert (await client.get("/api/v1/auth/settings", headers=headers)).json() == {"totp_enabled": True}
+    assert (await client.get("/api/v1/auth/settings", headers=headers)).json()["totp_enabled"] is True
 
     # 绑定后关闭总开关：登录不再要求动态码；不可新绑定
     secret = (await client.post("/api/v1/auth/totp/setup", headers=headers)).json()["secret"]
     await client.post("/api/v1/auth/totp/enable", headers=headers, json={"code": totp_now(secret)})
     resp = await client.put("/api/v1/auth/settings", headers=headers, json={"totp_enabled": False})
-    assert resp.json() == {"totp_enabled": False}
+    assert resp.json()["totp_enabled"] is False
     resp = await client.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
     assert resp.status_code == 200 and "token" in resp.json()  # 无需动态码直接放行
     assert (await client.post("/api/v1/auth/totp/setup", headers=headers)).status_code == 400
@@ -381,3 +381,86 @@ async def test_项目开放模式_所有人可见可建可改_删除仅管理员
         assert (await client.delete("/api/v1/projects/u1建的", headers=admin)).status_code == 200
     finally:
         settings.open_projects = False
+
+
+async def test_按业务线模式_成员只见所属业务线项目_角色折算_计划删除仅管理员(client, auth_on):
+    admin = {"Authorization": f"Bearer {await _login(client)}"}
+    for u in ("la", "lm", "lv", "outsider"):
+        await client.post("/api/v1/auth/users", headers=admin, json={"username": u, "password": "Pass1234!", "role": "member"})
+    hdr = {u: {"Authorization": f"Bearer {await _login(client, u, 'Pass1234!')}"} for u in ("la", "lm", "lv", "outsider")}
+    # 默认沿用环境变量（conftest 成员制）；管理员切到「按业务线」
+    assert (await client.get("/api/v1/auth/settings", headers=admin)).json()["access_mode"] == "member"
+    assert (await client.put("/api/v1/auth/settings", headers=hdr["la"], json={"access_mode": "line"})).status_code == 403
+    assert (await client.put("/api/v1/auth/settings", headers=admin, json={"access_mode": "nope"})).status_code == 400
+    r = await client.put("/api/v1/auth/settings", headers=admin, json={"access_mode": "line"})
+    assert r.status_code == 200 and r.json()["access_mode"] == "line"
+    try:
+        await client.post("/api/v1/business-lines", headers=admin, json={"name": "棋牌"})
+        await client.post("/api/v1/business-lines", headers=admin, json={"name": "电子"})
+        await client.post("/api/v1/projects", headers=admin, json={"name": "斗地主", "business_line": "棋牌"})
+        await client.post("/api/v1/projects", headers=admin, json={"name": "老虎机", "business_line": "电子"})
+        await client.post("/api/v1/projects", headers=admin, json={"name": "无业务线项目"})
+        # 成员管理：不存在的用户 / 非法角色拒绝；非业务线管理员不能维护成员
+        assert (await client.put("/api/v1/business-lines/棋牌/members/ghost", headers=admin, json={"role": "member"})).status_code == 400
+        assert (await client.put("/api/v1/business-lines/棋牌/members/lm", headers=admin, json={"role": "boss"})).status_code == 400
+        assert (await client.put("/api/v1/business-lines/棋牌/members/lm", headers=hdr["lm"], json={"role": "member"})).status_code == 403
+        r = await client.put("/api/v1/business-lines/棋牌/members/la", headers=admin, json={"role": "line_admin"})
+        assert r.status_code == 200 and r.json()["members"] == {"la": "line_admin"}
+        # 业务线管理员可以给自己的业务线加人，不能动别的业务线
+        assert (await client.put("/api/v1/business-lines/棋牌/members/lm", headers=hdr["la"], json={"role": "member"})).status_code == 200
+        assert (await client.put("/api/v1/business-lines/棋牌/members/lv", headers=hdr["la"], json={"role": "viewer"})).status_code == 200
+        assert (await client.put("/api/v1/business-lines/电子/members/lm", headers=hdr["la"], json={"role": "member"})).status_code == 403
+        # 可见范围：成员只见所属业务线项目；外人什么都看不到；无业务线项目仅管理员 / 项目成员可见
+        async def visible(h):
+            return sorted(p["project"] for p in (await client.get("/api/v1/projects", headers=h)).json()["projects"])
+        assert await visible(hdr["lm"]) == ["斗地主"]
+        assert await visible(hdr["outsider"]) == []
+        assert (await client.get("/api/v1/projects/老虎机", headers=hdr["lm"])).status_code in (403, 404)
+        # 角色折算：业务线管理员=项目管理员，成员=测试负责人，只读=只读；/auth/me 返回有效角色与业务线
+        me = (await client.get("/api/v1/auth/me", headers=hdr["lm"])).json()
+        assert me["access_mode"] == "line" and me["open_projects"] is False
+        assert me["projects"] == [{"project": "斗地主", "role": "test_lead", "status": "active"}]
+        assert me["business_lines"] == [{"business_line": "棋牌", "role": "member"}]
+        assert (await client.post("/api/v1/requirements", headers=hdr["lm"],
+                                  data={"project": "斗地主", "title": "需求", "text": "原文"})).status_code == 200
+        assert (await client.post("/api/v1/requirements", headers=hdr["lv"],
+                                  data={"project": "斗地主", "title": "需求", "text": "原文"})).status_code == 403
+        assert (await client.post("/api/v1/requirements", headers=hdr["outsider"],
+                                  data={"project": "斗地主", "title": "需求", "text": "原文"})).status_code in (403, 404)
+        # 建项目：业务线管理员可在自己的业务线下建，成员 / 别的业务线不行
+        assert (await client.post("/api/v1/projects", headers=hdr["la"], json={"name": "麻将", "business_line": "棋牌"})).status_code == 200
+        assert (await client.post("/api/v1/projects", headers=hdr["la"], json={"name": "捕鱼", "business_line": "电子"})).status_code == 403
+        assert (await client.post("/api/v1/projects", headers=hdr["lm"], json={"name": "跑得快", "business_line": "棋牌"})).status_code == 403
+        assert await visible(hdr["lm"]) == ["斗地主", "麻将"]
+        # 项目成员身份与业务线角色取高者
+        await client.put("/api/v1/projects/老虎机/members", headers=admin, json={"username": "lv", "role": "test_lead"})
+        me = (await client.get("/api/v1/auth/me", headers=hdr["lv"])).json()
+        assert {p["project"]: p["role"] for p in me["projects"]} == {"斗地主": "viewer", "麻将": "viewer", "老虎机": "test_lead"}
+        # 测试计划增删改查：成员可建可改，删除只有系统管理员（业务线管理员、创建人都不行）
+        pid = (await client.post("/api/v1/plans", headers=hdr["lm"], json={"name": "冒烟", "project": "斗地主"})).json()["plan_id"]
+        r = await client.put(f"/api/v1/plans/{pid}", headers=hdr["lm"],
+                             json={"name": "冒烟 V2", "owner": "la", "start_date": "2026-10-10", "end_date": "2026-10-20"})
+        assert r.status_code == 200 and r.json()["name"] == "冒烟 V2" and r.json()["owner"] == "la" and r.json()["end_date"] == "2026-10-20"
+        assert (await client.put(f"/api/v1/plans/{pid}", headers=hdr["lv"], json={"name": "x"})).status_code == 403
+        assert (await client.get(f"/api/v1/plans/{pid}", headers=hdr["lv"])).status_code == 200
+        assert (await client.delete(f"/api/v1/plans/{pid}", headers=hdr["lm"])).status_code == 403
+        assert (await client.delete(f"/api/v1/plans/{pid}", headers=hdr["la"])).status_code == 403
+        assert (await client.delete(f"/api/v1/plans/{pid}", headers=admin)).status_code == 200
+        # 移除成员后不可见
+        assert (await client.delete("/api/v1/business-lines/棋牌/members/lm", headers=hdr["la"])).status_code == 200
+        assert (await client.delete("/api/v1/business-lines/棋牌/members/lm", headers=hdr["la"])).status_code == 400
+        assert await visible(hdr["lm"]) == []
+    finally:
+        await client.put("/api/v1/auth/settings", headers=admin, json={"access_mode": "member"})
+
+
+async def test_成员制下计划删除也仅系统管理员(client, auth_on):
+    admin = {"Authorization": f"Bearer {await _login(client)}"}
+    await client.post("/api/v1/auth/users", headers=admin, json={"username": "lead", "password": "Pass1234!", "role": "member"})
+    lead = {"Authorization": f"Bearer {await _login(client, 'lead', 'Pass1234!')}"}
+    await client.post("/api/v1/projects", headers=admin, json={"name": "P"})
+    await client.put("/api/v1/projects/P/members", headers=admin, json={"username": "lead", "role": "project_admin"})
+    pid = (await client.post("/api/v1/plans", headers=lead, json={"name": "计划", "project": "P"})).json()["plan_id"]
+    assert (await client.put(f"/api/v1/plans/{pid}", headers=lead, json={"name": "改名"})).status_code == 200
+    assert (await client.delete(f"/api/v1/plans/{pid}", headers=lead)).status_code == 403   # 创建人 + 项目管理员仍不能删
+    assert (await client.delete(f"/api/v1/plans/{pid}", headers=admin)).status_code == 200

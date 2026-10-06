@@ -102,6 +102,19 @@ class AuthStore:
         self._settings["totp_enabled"] = bool(enabled)
         self._persist()
 
+    ACCESS_MODES = ("open", "line", "member")
+
+    def access_mode(self) -> str | None:
+        """数据可见范围模式：open 全员可见 / line 按业务线成员 / member 按项目成员；None 表示沿用环境变量默认。"""
+        mode = self._settings.get("access_mode")
+        return mode if mode in self.ACCESS_MODES else None
+
+    def set_access_mode(self, mode: str) -> None:
+        if mode not in self.ACCESS_MODES:
+            raise AuthError(f"未知访问模式: {mode}")
+        self._settings["access_mode"] = mode
+        self._persist()
+
     # ---- 用户管理 ----
 
     def ensure_admin(self, username: str, password: str) -> None:
