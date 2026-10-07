@@ -346,6 +346,44 @@ class BusinessLineStore:
         self._lines.pop(name)
         self._doc.remove(name)
 
+    # ---- 业务线成员（按产品线管理数据可见范围）----
+    LINE_ROLES = {"line_admin": "业务线管理员", "member": "成员", "viewer": "只读"}
+
+    def set_member(self, name: str, username: str, role: str) -> dict:
+        if role not in self.LINE_ROLES:
+            raise ProjectError(f"未知业务线角色: {role}（可用 {'/'.join(self.LINE_ROLES)}）")
+        line = self._lines.get(name)
+        if line is None:
+            raise ProjectError(f"业务线不存在: {name}")
+        username = (username or "").strip()
+        if not username:
+            raise ProjectError("用户名不能为空")
+        line.setdefault("members", {})[username] = role
+        line["updated_at"] = _now()
+        self._doc.put(name, line)
+        return line
+
+    def remove_member(self, name: str, username: str) -> dict:
+        line = self._lines.get(name)
+        if line is None:
+            raise ProjectError(f"业务线不存在: {name}")
+        if username not in (line.get("members") or {}):
+            raise ProjectError(f"{username} 不是该业务线成员")
+        line["members"].pop(username)
+        line["updated_at"] = _now()
+        self._doc.put(name, line)
+        return line
+
+    def role_in_line(self, name: str, username: str | None) -> str | None:
+        line = self._lines.get(name or "")
+        if line is None or not username:
+            return None
+        return (line.get("members") or {}).get(username)
+
+    def lines_of(self, username: str) -> list[dict]:
+        return [{"business_line": l["name"], "role": l["members"][username]}
+                for l in self._lines.values() if username in (l.get("members") or {})]
+
 
 class UserPrefStore:
     """个人偏好：项目收藏与最近访问（按用户名一文档）。"""
