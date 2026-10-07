@@ -105,13 +105,42 @@ def _is_admin(request: Request) -> bool:
     return _current_user(request)["role"] == "admin"
 
 
+# 业务线角色 → 项目角色：业务线管理员视同项目管理员，成员视同测试负责人，只读视同只读
+_LINE_ROLE_TO_PROJECT = {"line_admin": "project_admin", "member": "test_lead", "viewer": "viewer"}
+_ROLE_RANK = {"viewer": 0, "tester": 1, "test_lead": 2, "project_admin": 3}
+
+
+def _access_mode(request: Request) -> str:
+    """数据可见范围：open 全员可见 / line 按业务线成员 / member 按项目成员。页面设置优先，否则沿用环境变量。"""
+    mode = request.app.state.auth.access_mode()
+    if mode:
+        return mode
+    return "open" if get_settings().open_projects else "member"
+
+
+def _line_role_for_project(request: Request, project: str | None) -> str | None:
+    """按业务线模式：用户在项目所属业务线中的角色折算成项目角色。"""
+    entity = request.app.state.projects.get(project) if project else None
+    line = (entity or {}).get("business_line") or ""
+    if not line:
+        return None
+    role = request.app.state.business_lines.role_in_line(line, _operator(request))
+    return _LINE_ROLE_TO_PROJECT.get(role or "")
+
+
 def _project_role(request: Request, project: str | None) -> str | None:
     if _is_admin(request):
         return "project_admin"
-    if get_settings().open_projects:
-        # 开放模式：所有登录用户视同项目管理员（删除项目另行限制为系统管理员）
+    mode = _access_mode(request)
+    if mode == "open":
+        # 开放模式：所有登录用户视同项目管理员（删除另行限制为系统管理员）
         return "project_admin"
-    return request.app.state.projects.role_of(project, _operator(request))
+    direct = request.app.state.projects.role_of(project, _operator(request))
+    if mode == "line":
+        via_line = _line_role_for_project(request, project)
+        candidates = [r for r in (direct, via_line) if r]
+        return max(candidates, key=lambda r: _ROLE_RANK.get(r, 0)) if candidates else None
+    return direct
 
 
 def _require_project(request: Request, project: str | None, action: str) -> dict | None:
@@ -140,8 +169,9 @@ def _require_project(request: Request, project: str | None, action: str) -> dict
 
 
 def _require_delete(request: Request) -> None:
-    """开放模式下项目内数据（需求 / 测试点 / 用例 / 计划 / 版本 / 模块 / 知识 / 依赖）的删除仅系统管理员（2026-09-27 决策）。"""
-    if get_settings().open_projects and not _is_admin(request):
+    """项目内数据（需求 / 测试点 / 用例 / 计划 / 版本 / 模块 / 知识 / 依赖）的删除仅系统管理员（2026-09-27 决策）。
+    仅在旧的「项目成员制」下沿用项目角色矩阵。"""
+    if _access_mode(request) != "member" and not _is_admin(request):
         raise HTTPException(status_code=403, detail="删除操作仅系统管理员可执行")
 
 
@@ -156,8 +186,15 @@ def _visible_projects(request: Request) -> set[str] | None:
     cached = getattr(request.state, "_visible", ...)
     if cached is not ...:
         return cached
-    visible = None if (_is_admin(request) or get_settings().open_projects) \
-        else {p["project"] for p in request.app.state.projects.projects_of(_operator(request))}
+    mode = _access_mode(request)
+    if _is_admin(request) or mode == "open":
+        visible = None
+    else:
+        me = _operator(request)
+        visible = {p["project"] for p in request.app.state.projects.projects_of(me)}
+        if mode == "line":
+            lines = {l["business_line"] for l in request.app.state.business_lines.lines_of(me)}
+            visible |= {p["name"] for p in request.app.state.projects.list() if p.get("business_line") in lines}
     request.state._visible = visible
     return visible
 
@@ -248,12 +285,14 @@ async def auth_login(request: Request, body: LoginBody) -> dict:
 
 @router.get("/api/v1/auth/settings")
 async def auth_settings(request: Request) -> dict:
+    """系统级开关：两步验证、数据可见范围模式。"""
     """安全设置：两步验证功能总开关状态（登录用户可读，用于界面展隐）。"""
-    return {"totp_enabled": request.app.state.auth.totp_policy()}
+    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request)}
 
 
 class AuthSettingsBody(BaseModel):
-    totp_enabled: bool
+    totp_enabled: bool | None = None
+    access_mode: str | None = None   # open / line / member
 
 
 @router.put("/api/v1/auth/settings")
@@ -261,9 +300,18 @@ async def update_auth_settings(request: Request, body: AuthSettingsBody) -> dict
     """更新安全设置（管理员）：关闭两步验证后全平台登录不再校验动态码，也不可新绑定；
     已绑定用户的密钥保留，重新开启后继续生效。"""
     _require_admin(request)
-    request.app.state.auth.set_totp_policy(body.totp_enabled)
-    logger.info("两步验证功能总开关：{}", "开启" if body.totp_enabled else "关闭")
-    return {"totp_enabled": request.app.state.auth.totp_policy()}
+    if body.totp_enabled is not None:
+        request.app.state.auth.set_totp_policy(body.totp_enabled)
+        logger.info("两步验证功能总开关：{}", "开启" if body.totp_enabled else "关闭")
+    if body.access_mode is not None:
+        from app.auth import AuthError
+
+        try:
+            request.app.state.auth.set_access_mode(body.access_mode)
+        except AuthError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        logger.info("数据可见范围模式：{}", body.access_mode)
+    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request)}
 
 
 # ---- 两步验证（TOTP：Google Authenticator / 海月盾等标准验证器）----
@@ -328,11 +376,23 @@ async def auth_logout(request: Request) -> dict:
 
 def _with_memberships(request: Request, user: dict) -> dict:
     """用户信息附加：所属项目与项目角色（3.4）、收藏/最近访问（3.2）。"""
-    projects = request.app.state.projects.projects_of(user["username"]) if user["role"] != "admin" \
-        else [{"project": p["name"], "role": "project_admin", "status": p["status"]}
-              for p in request.app.state.projects.list()]
+    mode = _access_mode(request)
+    if user["role"] == "admin":
+        projects = [{"project": p["name"], "role": "project_admin", "status": p["status"]}
+                    for p in request.app.state.projects.list()]
+    else:
+        # 有效角色：项目成员角色与业务线角色折算后取高者（前端显隐与后端 _project_role 同口径）
+        visible = _visible_projects(request)
+        projects = []
+        for p in request.app.state.projects.list():
+            if visible is not None and p["name"] not in visible:
+                continue
+            role = _project_role(request, p["name"])
+            if role:
+                projects.append({"project": p["name"], "role": role, "status": p["status"]})
     return {**user, "projects": projects, "prefs": request.app.state.user_prefs.get(user["username"]),
-            "open_projects": get_settings().open_projects}
+            "open_projects": mode == "open", "access_mode": mode,
+            "business_lines": request.app.state.business_lines.lines_of(user["username"])}
 
 
 @router.get("/api/v1/auth/me")
@@ -427,7 +487,7 @@ async def auth_list_users(
 async def auth_lookup_users(request: Request) -> dict:
     """成员添加时的用户名联想：系统管理员或任一项目的项目管理员可用，只返回正常状态用户的用户名与姓名。"""
     user = _current_user(request)
-    if user["role"] != "admin" and not get_settings().open_projects and not any(
+    if user["role"] != "admin" and _access_mode(request) == "member" and not any(
         p.get("role") == "project_admin" for p in request.app.state.projects.projects_of(user["username"])
     ):
         raise HTTPException(status_code=403, detail="仅项目管理员可查询用户列表")
@@ -3593,11 +3653,8 @@ async def update_plan(request: Request, plan_id: str, body: PlanUpdateBody) -> d
 async def delete_plan(request: Request, plan_id: str) -> dict:
     from app.plans import PlanError
 
-    plan = _plan(request, plan_id, "plan.manage")
-    _require_delete(request)
-    user = _current_user(request)
-    if user["role"] != "admin" and user["username"] not in (plan["created_by"], plan["owner"]):
-        raise HTTPException(status_code=403, detail="仅计划创建人/负责人或管理员可删除计划")
+    plan = _plan(request, plan_id, "plan.view")
+    _require_admin(request)  # 测试计划删除仅系统管理员（2026-10-06 决策）
     try:
         request.app.state.plans.delete(plan_id)
     except PlanError as e:
@@ -4726,13 +4783,19 @@ def _line_view(request: Request, line: dict) -> dict:
     visible = _visible_projects(request)
     names = [p["name"] for p in pstore.list() if p.get("business_line") == line["name"]
              and (visible is None or p["name"] in visible)]
-    return {**line, "projects": len(names), "project_names": sorted(names)}
+    return {**line, "members": line.get("members") or {}, "projects": len(names), "project_names": sorted(names)}
 
 
-def _require_line_manage(request: Request) -> None:
-    """业务线的增改：系统管理员；开放模式下任何登录用户。删除另按删除规则（仅管理员）。"""
-    if not get_settings().open_projects:
-        _require_admin(request)
+def _require_line_manage(request: Request, name: str | None = None) -> None:
+    """业务线的增改：系统管理员；开放模式下任何登录用户；按业务线模式下该业务线的管理员可改自己的业务线。"""
+    if _is_admin(request):
+        return
+    mode = _access_mode(request)
+    if mode == "open":
+        return
+    if mode == "line" and name and request.app.state.business_lines.role_in_line(name, _operator(request)) == "line_admin":
+        return
+    raise HTTPException(status_code=403, detail="仅系统管理员或该业务线管理员可维护业务线")
 
 
 @router.get("/api/v1/business-lines")
@@ -4762,7 +4825,7 @@ async def update_business_line(request: Request, name: str, body: BusinessLineUp
     """业务线编辑：改名会联动更新该业务线下所有项目。"""
     from app.projects import ProjectError
 
-    _require_line_manage(request)
+    _require_line_manage(request, name)
     lstore = request.app.state.business_lines
     if lstore.get(name) is None:
         # 只存在于项目字段上的历史业务线：先登记再改；完全不存在的 404
@@ -4780,6 +4843,37 @@ async def update_business_line(request: Request, name: str, body: BusinessLineUp
         moved = request.app.state.projects.rename_business_line(name, line["name"])
         logger.info("业务线「{}」→「{}」：{} 个项目已更新", name, line["name"], moved)
     return {**_line_view(request, line), "moved_projects": moved}
+
+
+class LineMemberBody(BaseModel):
+    role: str = "member"   # line_admin / member / viewer
+
+
+@router.put("/api/v1/business-lines/{name}/members/{username}")
+async def set_line_member(request: Request, name: str, username: str, body: LineMemberBody) -> dict:
+    """业务线成员与角色：按业务线模式下，成员可见并可操作该业务线全部项目（管理员=项目管理员，成员=测试负责人，只读=只读）。"""
+    from app.projects import ProjectError
+
+    _require_line_manage(request, name)
+    if get_settings().auth_enabled and not request.app.state.auth.exists(username):
+        raise HTTPException(status_code=400, detail=f"用户不存在: {username}")
+    try:
+        line = request.app.state.business_lines.set_member(name, username, body.role)
+    except ProjectError as e:
+        raise HTTPException(status_code=400 if "不存在: " + name not in str(e) else 404, detail=str(e))
+    return _line_view(request, line)
+
+
+@router.delete("/api/v1/business-lines/{name}/members/{username}")
+async def remove_line_member(request: Request, name: str, username: str) -> dict:
+    from app.projects import ProjectError
+
+    _require_line_manage(request, name)
+    try:
+        line = request.app.state.business_lines.remove_member(name, username)
+    except ProjectError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _line_view(request, line)
 
 
 @router.delete("/api/v1/business-lines/{name}")
@@ -4811,11 +4905,14 @@ class ProjectBody(BaseModel):
 
 @router.post("/api/v1/projects")
 async def create_project(request: Request, body: ProjectBody) -> dict:
-    """创建项目：开放模式下任何登录用户可建，否则仅系统管理员；创建人与负责人自动成为项目管理员。"""
+    """创建项目：开放模式任何登录用户；按业务线模式该业务线的管理员；否则仅系统管理员。创建人与负责人自动成为项目管理员。"""
     from app.projects import ProjectError
 
-    if not get_settings().open_projects:
-        _require_admin(request)
+    mode = _access_mode(request)
+    if not _is_admin(request) and mode != "open":
+        if not (mode == "line" and body.business_line
+                and request.app.state.business_lines.role_in_line(body.business_line, _operator(request)) == "line_admin"):
+            raise HTTPException(status_code=403, detail="按业务线模式下，只有该业务线的管理员或系统管理员可创建项目")
     auth = request.app.state.auth
     if body.owner.strip() and not auth.exists(body.owner.strip()) and get_settings().auth_enabled:
         raise HTTPException(status_code=400, detail=f"负责人不存在: {body.owner}")

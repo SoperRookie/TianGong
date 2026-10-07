@@ -736,6 +736,12 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <div class="card-h"><h3>用户管理</h3>
       <span class="meta">admin 可管理用户与模型配置；member 使用平台功能</span>
       <div class="grow">
+        <label class="check" title="开放：所有登录用户可见并可操作全部项目；按业务线：成员只能看到自己所属业务线下的项目与数据，业务线管理员可建项目与维护成员；按项目成员：只看自己被加入的项目。任何模式下删除都只有系统管理员">
+          数据可见范围
+          <select id="accessModeSel" style="width:150px" onchange="saveAccessMode(this.value)">
+            <option value="open">开放（全员可见）</option><option value="line">按业务线成员</option><option value="member">按项目成员</option>
+          </select>
+        </label>
         <label class="check" title="关闭后全平台登录不再校验动态码，也不可新绑定；已绑定密钥保留，重新开启后继续生效">
           两步验证功能
           <span class="switch"><input type="checkbox" id="totpPolicySwitch" onchange="saveTotpPolicy(this.checked)"><i></i></span>
@@ -1015,6 +1021,16 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div style="flex:1"><label class="f">负责人<span class="hint">（可选）</span></label><input type="text" id="blOwner" list="userNames" placeholder="用户名"></div>
     </div>
     <label class="f">描述<span class="hint">（可选）</span></label><input type="text" id="blDesc" placeholder="业务范围说明">
+    <div id="lineMembers" style="display:none;margin-top:10px">
+      <div class="section-t">成员与数据权限 <span class="hint" id="lineMembersHint"></span></div>
+      <div id="lineMemberList"></div>
+      <div style="display:flex;gap:8px;align-items:flex-end;margin-top:6px">
+        <div style="flex:2"><label class="f">添加成员</label><input type="text" id="lmUser" list="userNames" placeholder="用户名"></div>
+        <div style="flex:1"><label class="f">业务线角色</label>
+          <select id="lmRole"><option value="member">成员（可建需求 / 生成用例 / 管理计划）</option><option value="line_admin">业务线管理员（可建项目、维护成员）</option><option value="viewer">只读</option></select></div>
+        <button class="btn sm" onclick="addLineMember()">添加</button>
+      </div>
+    </div>
     <div class="toolbar" style="margin-top:8px">
       <button class="btn sm" id="blSaveBtn" onclick="saveLineForm()">新建</button>
       <button class="btn ghost sm" id="blCancelBtn" style="display:none" onclick="resetLineForm()">取消编辑</button>
@@ -1346,7 +1362,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 
 <!-- 用例编辑 -->
 <dialog id="planDlg">
-  <div class="dlg-h"><h3>新建测试计划</h3></div>
+  <div class="dlg-h"><h3 id="plTitle">新建测试计划</h3></div>
   <div class="dlg-b">
     <label class="f">计划名称</label><input type="text" id="plName" placeholder="如：V1.0 冒烟计划">
     <label class="f">所属项目</label><select id="plProject"></select>
@@ -1356,7 +1372,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
   <div class="dlg-f">
     <button class="btn ghost" onclick="$('planDlg').close()">取消</button>
-    <button class="btn" onclick="savePlanDlg()">创建</button>
+    <button class="btn" id="plSaveBtn" onclick="savePlanDlg()">创建</button>
   </div>
 </dialog>
 
@@ -1793,7 +1809,8 @@ const ROLE_ACTIONS = {
 };
 const isSysAdmin = () => !!curUser && curUser.role === 'admin';
 const openProjects = () => !!curUser && curUser.open_projects === true;  // 项目开放模式：所有人视同项目管理员
-const canDelete = () => isSysAdmin() || !openProjects();  // 开放模式下项目内数据的删除仅系统管理员
+const accessMode = () => (curUser && curUser.access_mode) || (openProjects() ? 'open' : 'member');  // open / line / member
+const canDelete = () => isSysAdmin() || accessMode() === 'member';  // 开放 / 按业务线模式下项目内数据的删除仅系统管理员
 function myRole(project) {
   if (isSysAdmin()) return 'project_admin';
   if (!project || project === '（未指定）') return null;  // 遗留未指定项目：仅系统管理员
@@ -3571,24 +3588,47 @@ async function _renderPlans__impl() {
   </div>`;
 }
 
-async function openPlanDlg() {
+let _editingPlan = null;
+async function openPlanDlg(editId) {
+  _editingPlan = editId || null;
+  const p = editId ? _planDetail : null;
+  if (p) {
+    // 编辑：项目不可改，只改名称 / 负责人 / 周期
+    $('plProject').innerHTML = `<option value="${esc(p.project)}">${esc(p.project)}</option>`;
+    $('plProject').disabled = true;
+    $('plName').value = p.name; $('plOwner').value = p.owner || '';
+    $('plStart').value = p.start_date || ''; $('plEnd').value = p.end_date || '';
+    $('plTitle').textContent = '编辑测试计划'; $('plSaveBtn').textContent = '保存';
+    return $('planDlg').showModal();
+  }
   let projects = [];
   try { projects = (await getProjects()).filter(p => !p.builtin && p.status !== 'archived' && can(p.project, 'plan.manage')); } catch (e) {}
   if (!projects.length) return toast('没有可创建计划的项目（需要测试负责人及以上项目角色）', 'warn');
   $('plProject').innerHTML = projects.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
+  $('plProject').disabled = false;
   if (plansProject) $('plProject').value = plansProject;
   $('plName').value = ''; $('plOwner').value = curUser ? curUser.username : '';
   $('plStart').value = ''; $('plEnd').value = '';
+  $('plTitle').textContent = '新建测试计划'; $('plSaveBtn').textContent = '创建';
   $('planDlg').showModal();
 }
 async function savePlanDlg() {
   const name = $('plName').value.trim();
   if (!name) return toast('计划名称不能为空', 'warn');
   if (!$('plProject').value) return toast('请先创建项目', 'warn');
+  const start = $('plStart').value, end = $('plEnd').value;
+  if (start && end && start > end) return toast('开始日期不能晚于结束日期', 'warn');
   try {
+    if (_editingPlan) {
+      await api('/api/v1/plans/' + _editingPlan, {method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name, owner: $('plOwner').value.trim(), start_date: start, end_date: end})});
+      $('planDlg').close(); toast('计划已保存', 'ok');
+      renderPlanDetail();
+      return;
+    }
     const plan = await jpost('/api/v1/plans', {
       name, project: $('plProject').value, owner: $('plOwner').value.trim(),
-      start_date: $('plStart').value, end_date: $('plEnd').value,
+      start_date: start, end_date: end,
     });
     $('planDlg').close(); toast('计划已创建', 'ok');
     openPlan(plan.plan_id);
@@ -3619,10 +3659,11 @@ async function _renderPlanDetail__impl() {
     <h3>${esc(p.name)} <span class="st ${st[1]}" style="margin-left:6px">${st[0]}</span></h3>
     <span class="meta">${esc(p.project)} · 负责人 ${esc(p.owner || '—')}${p.start_date || p.end_date ? ` · ${esc(p.start_date)} ~ ${esc(p.end_date)}` : ''} · 创建人 ${esc(p.created_by || '—')}</span>
     <div class="grow">
-      <select style="width:110px" onchange="planSetStatus(this.value)">
+      <select style="width:110px" ${can(p.project,'plan.manage')?'':'disabled'} onchange="planSetStatus(this.value)">
         ${Object.entries(PLAN_ST).map(([k, v]) => `<option value="${k}" ${p.status===k?'selected':''}>${v[0]}</option>`).join('')}
       </select>
-      ${canDelete()?`<button class="btn ghost sm" onclick="deletePlan()">删除</button>`:''}
+      ${can(p.project,'plan.manage')&&editable?`<button class="btn ghost sm" onclick="openPlanDlg(curPlan)">编辑</button>`:''}
+      ${isSysAdmin()?`<button class="btn ghost sm" onclick="deletePlan()">删除</button>`:''}
     </div></div></div>`;
 
   const me = curUser ? curUser.username : '';
@@ -3757,7 +3798,7 @@ async function planSetStatus(status) {
   catch (e) { toast(e.message, 'err'); renderPlanDetail(); }
 }
 async function deletePlan() {
-  if (!await uiConfirm('删除计划', `确定删除「${_planDetail.name}」？已有执行记录的计划不可删除（请归档）。`, true)) return;
+  if (!await uiConfirm('删除计划', `确定删除「${_planDetail.name}」？删除仅系统管理员可执行；已有执行记录的计划不可删除（请归档）。`, true)) return;
   try { await api('/api/v1/plans/' + curPlan, {method:'DELETE'}); toast('计划已删除', 'ok'); backToPlans(); }
   catch (e) { toast(e.message, 'err'); }
 }
@@ -5216,18 +5257,51 @@ async function openLineDlg(editName) {
 }
 function renderLineList() {
   $('lineList').innerHTML = _lineList.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
-    <tr><th>名称</th><th style="width:80px">编码</th><th>描述</th><th style="width:90px">负责人</th><th style="width:70px">项目数</th><th style="width:90px">操作</th></tr>
+    <tr><th>名称</th><th style="width:80px">编码</th><th>描述</th><th style="width:90px">负责人</th><th style="width:70px">项目数</th><th style="width:70px">成员</th><th style="width:90px">操作</th></tr>
     ${_lineList.map(l => `<tr>
       <td><b>${esc(l.name)}</b></td><td class="hint">${esc(l.code||'—')}</td><td class="hint">${esc(l.description||'')}</td><td class="hint">${esc(l.owner||'—')}</td>
       <td title="${esc((l.project_names||[]).join('、'))}">${l.projects}</td>
+      <td title="${esc(Object.keys(l.members||{}).join('、'))}">${Object.keys(l.members||{}).length}</td>
       <td><div class="rowops">
         <button class="ibtn" title="编辑" onclick="editLine(${jsq(l.name)})">${IC.edit}</button>
         ${canDelete()?`<button class="ibtn bad" title="删除" onclick="deleteLine(${jsq(l.name)}, ${l.projects})">${IC.trash}</button>`:''}
       </div></td></tr>`).join('')}
   </table></div>` : '<div class="empty">还没有业务线，在下方新建</div>';
 }
+const LINE_ROLES = {line_admin:'业务线管理员', member:'成员', viewer:'只读'};
+function renderLineMembers(l) {
+  const members = Object.entries(l.members || {});
+  $('lineMembers').style.display = '';
+  $('lineMembersHint').textContent = accessMode() === 'line'
+    ? '成员可见并可操作该业务线下全部项目（管理员=项目管理员，成员=测试负责人，只读=只读）'
+    : `当前为「${accessMode()==='open'?'开放':'按项目成员'}」模式，此处设置在系统管理员把数据可见范围切为「按业务线成员」后生效`;
+  $('lineMemberList').innerHTML = members.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
+    <tr><th>用户名</th><th style="width:220px">角色</th><th style="width:60px">操作</th></tr>
+    ${members.map(([u, r]) => `<tr><td><b>${esc(u)}</b></td>
+      <td><select style="width:200px" onchange="setLineMember(${jsq(u)}, this.value)">${Object.entries(LINE_ROLES).map(([k,v]) => `<option value="${k}" ${r===k?'selected':''}>${v}</option>`).join('')}</select></td>
+      <td><button class="ibtn bad" title="移除" onclick="removeLineMember(${jsq(u)})">${IC.trash}</button></td></tr>`).join('')}
+  </table></div>` : '<div class="hint">还没有成员；按业务线模式下，未加入的普通用户看不到该业务线的项目</div>';
+}
+async function _lineMemberReq(method, username, body) {
+  const url = `/api/v1/business-lines/${encodeURIComponent(_editingLine)}/members/${encodeURIComponent(username)}`;
+  const l = await api(url, {method, headers:{'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined});
+  const i = _lineList.findIndex(x => x.name === l.name); if (i >= 0) _lineList[i] = l;
+  renderLineMembers(l);
+}
+async function addLineMember() {
+  const u = $('lmUser').value.trim(); if (!u) return toast('请输入用户名', 'warn');
+  try { await _lineMemberReq('PUT', u, {role: $('lmRole').value}); $('lmUser').value = ''; toast('已添加', 'ok'); } catch (e) { toast(e.message, 'err'); }
+}
+async function setLineMember(u, role) {
+  try { await _lineMemberReq('PUT', u, {role}); toast('角色已更新', 'ok'); } catch (e) { toast(e.message, 'err'); }
+}
+async function removeLineMember(u) {
+  if (!await uiConfirm('移除成员', `把 ${u} 从业务线「${_editingLine}」移除？按业务线模式下该用户将看不到此业务线的项目。`, true)) return;
+  try { await _lineMemberReq('DELETE', u); toast('已移除', 'ok'); } catch (e) { toast(e.message, 'err'); }
+}
 function resetLineForm() {
   _editingLine = null;
+  $('lineMembers').style.display = 'none';
   for (const id of ['blName','blCode','blOwner','blDesc']) $(id).value = '';
   $('lineFormTitle').textContent = '新建业务线'; $('blSaveBtn').textContent = '新建'; $('blCancelBtn').style.display = 'none';
 }
@@ -5236,6 +5310,7 @@ function editLine(name) {
   _editingLine = name;
   $('blName').value = l.name; $('blCode').value = l.code || ''; $('blOwner').value = l.owner || ''; $('blDesc').value = l.description || '';
   $('lineFormTitle').textContent = `编辑业务线「${name}」（改名会同步更新其下 ${l.projects} 个项目）`; $('blSaveBtn').textContent = '保存'; $('blCancelBtn').style.display = '';
+  renderLineMembers(l);
   $('blName').focus();
 }
 async function saveLineForm() {
@@ -6147,11 +6222,24 @@ async function saveTotpPolicy(enabled) {
     renderUserBox();
   } catch (e) { toast(e.message, 'err'); refreshUsers(); }
 }
+async function saveAccessMode(mode) {
+  const label = {open:'开放（全员可见）', line:'按业务线成员', member:'按项目成员'}[mode] || mode;
+  const tip = mode === 'line' ? '切换后普通用户只能看到自己所属业务线下的项目，请先在「项目 → 业务线管理」里为各业务线添加成员。'
+    : mode === 'member' ? '切换后普通用户只能看到被加入为成员的项目。' : '切换后所有登录用户可见并可操作全部项目。';
+  if (!await uiConfirm(`切换为「${label}」？`, tip + ' 删除权限在任何模式下都只有系统管理员。')) { refreshUsers(); return; }
+  try {
+    window._authSettings = await api('/api/v1/auth/settings', {method:'PUT',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({access_mode: mode})});
+    toast(`数据可见范围已切换为「${label}」`, 'ok');
+    await reloadMe(); getProjects(true);
+  } catch (e) { toast(e.message, 'err'); refreshUsers(); }
+}
 async function refreshUsers() { return (() => keepScroll('users', [usersPage, usersSize, usersKw, usersRole, usersStatus].join('|'), _refreshUsers__impl))(); }
 async function _refreshUsers__impl() {
   try {
     window._authSettings = await api('/api/v1/auth/settings').catch(()=>window._authSettings);
     if ($('totpPolicySwitch')) $('totpPolicySwitch').checked = (window._authSettings||{}).totp_enabled !== false;
+    if ($('accessModeSel')) $('accessModeSel').value = (window._authSettings||{}).access_mode || (openProjects() ? 'open' : 'member');
     const q = new URLSearchParams({page: usersPage, page_size: usersSize});
     if (usersKw.trim()) q.set('keyword', usersKw.trim());
     if (usersRole) q.set('role', usersRole);
