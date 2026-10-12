@@ -239,3 +239,15 @@ def test_excel数据型渲染_按列名展开(tmp_path):
     text = parse_file(f).full_text
     assert "模块：登录；功能：密码登录；规则：错误 5 次锁定 30 分钟；优先级：P0" in text
     assert "功能：验证码登录" in text
+
+
+def test_压缩包不限文件数(tmp_path):
+    import zipfile
+
+    z = tmp_path / "大包.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for i in range(1, 602):
+            zf.writestr(f"docs/需求{i:03d}.txt", f"第 {i} 条需求")
+    doc = parse_file(z)
+    text = doc.full_text
+    assert "文件：docs/需求001.txt" in text and "文件：docs/需求601.txt" in text and "第 601 条需求" in text

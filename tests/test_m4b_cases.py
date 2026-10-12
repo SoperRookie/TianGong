@@ -124,3 +124,31 @@ async def test_批量维护_乐观锁_回收站(client):
     assert len(bin_items) == 2
     assert (await client.post(f"/api/v1/tasks/{tid}/recycle-bin/restore", json={"item_id": bin_items[0]["id"]})).status_code == 200
     assert (await client.post(f"/api/v1/tasks/{tid}/cases/batch", json={"uids": uids, "action": "explode"})).status_code == 400
+
+
+async def test_Excel导入多文件合并预览(client, tmp_path):
+    from openpyxl import Workbook
+
+    tid = await _manual_task(client)
+    header = ["用例编号", "模块", "用例标题", "优先级", "前置条件", "操作步骤", "预期结果", "关键词", "备注"]
+    wb = Workbook(); ws = wb.active; ws.append(header)
+    ws.append(["TC-登录-001", "登录", "正常登录", "P1", "", "1. 输入正确账号", "1. 登录成功", "", ""])
+    ws.append(["TC-登录-002", "登录", "密码错误", "P2", "", "1. 输入错误密码", "1. 提示错误", "", ""])
+    a = tmp_path / "登录.xlsx"; wb.save(a)
+    wb = Workbook(); ws = wb.active; ws.append(header)
+    ws.append(["TC-注册-001", "注册", "正常注册", "P1", "", "1. 填写资料", "1. 注册成功", "", ""])
+    ws.append(["TC-注册-002", "注册", "正常登录", "P2", "", "1. 跨文件重复标题", "1. z", "", ""])
+    b = tmp_path / "注册.xlsx"; wb.save(b)
+    files = [("files", ("登录.xlsx", a.read_bytes(), "application/octet-stream")),
+             ("files", ("注册.xlsx", b.read_bytes(), "application/octet-stream"))]
+    resp = await client.post(f"/api/v1/tasks/{tid}/cases/import/preview", files=files)
+    assert resp.status_code == 200, resp.text
+    pv = resp.json()
+    assert pv["files"] == ["登录.xlsx", "注册.xlsx"] and pv["total"] == 4 and pv["errors"] == 1
+    rows = {(r["file"], r["row"]): r for r in pv["rows"]}
+    assert rows[("登录.xlsx", 1)]["errors"] == [] and rows[("注册.xlsx", 1)]["errors"] == []
+    assert any("登录.xlsx 第 1 行标题重复" in e for e in rows[("注册.xlsx", 2)]["errors"])
+    resp = await client.post(f"/api/v1/tasks/{tid}/cases/import/confirm", json={"token": pv["token"], "only_valid": True})
+    assert resp.status_code == 200 and resp.json()["imported"] == 3 and resp.json()["skipped"] == 1
+    # 一个文件都没选 → 400
+    assert (await client.post(f"/api/v1/tasks/{tid}/cases/import/preview")).status_code == 400

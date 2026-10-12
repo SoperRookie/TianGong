@@ -139,6 +139,25 @@ async def test_offline_final_upload_diff(client, tmp_path):
     assert record["offline_review"]["stats"] == stats
 
 
+async def test_offline_final_multi_files_merged(client, tmp_path):
+    task_id = await _create_task(client, make_case(), make_case(case_id="TC-登录-002", title="验证密码错误"))
+    p1 = export_excel([TestCase.model_validate(make_case(priority="P0"))], tmp_path / "登录-1.xlsx")
+    p2 = export_excel([TestCase.model_validate(make_case(case_id="TC-登录-009", title="验证断线重连"))], tmp_path / "登录-2.xlsx")
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    resp = await client.post(
+        f"/api/v1/tasks/{task_id}/final",
+        files=[("files", ("登录-1.xlsx", p1.read_bytes(), mime)), ("files", ("登录-2.xlsx", p2.read_bytes(), mime))],
+    )
+    assert resp.status_code == 200, resp.text
+    stats = resp.json()["stats"]
+    # 两个文件合并为一份终稿：改 1（优先级）、增 1（断线重连）、删 1（密码错误）
+    assert stats["added"] == 1 and stats["deleted"] == 1 and stats["modified"] == 1
+    record = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert record["offline_review"]["files"] == ["登录-1.xlsx", "登录-2.xlsx"]
+    assert record["offline_review"]["filename"] == "登录-1.xlsx、登录-2.xlsx"
+    assert (await client.post(f"/api/v1/tasks/{task_id}/final")).status_code == 400
+
+
 async def test_offline_final_rejects_bad_file(client):
     task_id = await _create_task(client, make_case())
     resp = await client.post(
