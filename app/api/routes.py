@@ -731,6 +731,16 @@ async def _read_upload(upload: UploadFile, task_dir: Path, max_bytes: int, uniqu
     return dest
 
 
+def _upload_list(files: list[UploadFile] | None, file: UploadFile | None, what: str = "文件") -> list[UploadFile]:
+    """多文件上传统一入口：`files` 多选为主，兼容旧的单文件字段 `file`；一个都没有则 400。"""
+    uploads = [u for u in (files or []) if u is not None and (u.filename or "").strip()]
+    if file is not None and (file.filename or "").strip():
+        uploads.insert(0, file)
+    if not uploads:
+        raise HTTPException(status_code=400, detail=f"请选择{what}")
+    return uploads
+
+
 async def _save_uploads(files: list[UploadFile], text: str, save_dir: Path, max_bytes: int) -> list[tuple[Path, str]]:
     """上传落盘（请求内完成，快）：返回 [(落盘路径, 原始文件名)]；无文件也无文本时 400。"""
     try:
@@ -2389,10 +2399,14 @@ def _validate_import_rows(record: TaskRecord, parsed: list[dict]) -> list[dict]:
     from app.templates.default import TestCase
 
     existing_titles = {str(c.get("title", "")).strip() for c in record.result.get("cases", [])}
-    seen: dict[str, int] = {}
+    seen: dict[str, str] = {}
     rows = []
+    multi = len({raw.get("_file") for raw in parsed}) > 1
     for i, raw in enumerate(parsed, 1):
         errors, warnings = [], []
+        file_name = raw.get("_file") or ""
+        row_no = int(raw.get("_row") or i)
+        label = f"{file_name} 第 {row_no} 行" if multi else f"第 {row_no} 行"
         title = str(raw.get("title", "")).strip()
         if not title:
             errors.append("缺少用例标题")
@@ -2414,9 +2428,9 @@ def _validate_import_rows(record: TaskRecord, parsed: list[dict]) -> list[dict]:
             if title in existing_titles:
                 errors.append("与任务内已有用例标题重复")
             if title in seen:
-                errors.append(f"与第 {seen[title]} 行标题重复")
+                errors.append(f"与{seen[title]}标题重复")
             else:
-                seen[title] = i
+                seen[title] = label
         case = {"module": module, "title": title, "priority": pr, "precondition": str(raw.get("precondition", "")),
                 "steps": steps or [{"action": "", "expected": ""}], "keywords": str(raw.get("keywords", "")),
                 "remark": str(raw.get("remark", "")), "extras": raw.get("extras") or {}}
@@ -2425,33 +2439,48 @@ def _validate_import_rows(record: TaskRecord, parsed: list[dict]) -> list[dict]:
                 TestCase.model_validate({**case, "case_id": "TC-X-001"})
             except Exception as e:
                 errors.append(f"字段不合法: {str(e).splitlines()[0][:80]}")
-        rows.append({"row": i, "case": case, "errors": errors, "warnings": warnings})
+        rows.append({"row": row_no, "file": file_name, "case": case, "errors": errors, "warnings": warnings})
     return rows
 
 
 @router.post("/api/v1/tasks/{task_id}/cases/import/preview")
-async def import_cases_preview(request: Request, task_id: str, file: UploadFile = File(...)) -> dict:
-    """Excel 导入第 1~4 步：上传 → 解析 → 预览 → 逐行校验（Excel / CSV / XMind）。"""
+async def import_cases_preview(
+    request: Request, task_id: str,
+    files: list[UploadFile] = File(default=[]), file: UploadFile | None = File(default=None),
+) -> dict:
+    """Excel 导入第 1~4 步：上传 → 解析 → 预览 → 逐行校验（Excel / CSV / XMind）。
+
+    支持一次选多个文件：逐个解析后合并预览，行号按文件内计，标题重复校验跨文件生效。
+    """
     import asyncio
 
     from app.knowledge.importers import CaseImportError, parse_cases_file
 
     record = _case_task(request, task_id)
+    uploads = _upload_list(files, file, "要导入的文件")
     save_dir = request.app.state.tasks.output_dir / "_imports" / task_id
-    saved = await _read_upload(file, save_dir, get_settings().max_upload_size_mb * 1024 * 1024)
-    try:
-        parsed = await asyncio.to_thread(parse_cases_file, saved)
-    except (CaseImportError, UnsafeFileError, UnicodeDecodeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        saved.unlink(missing_ok=True)
+    max_bytes = get_settings().max_upload_size_mb * 1024 * 1024
+    parsed: list[dict] = []
+    names: list[str] = []
+    for upload in uploads:
+        name = _safe_filename(upload.filename)
+        saved = await _read_upload(upload, save_dir, max_bytes)
+        try:
+            items = await asyncio.to_thread(parse_cases_file, saved)
+        except (CaseImportError, UnsafeFileError, UnicodeDecodeError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=f"{name}：{e}" if len(uploads) > 1 else str(e))
+        finally:
+            saved.unlink(missing_ok=True)
+        names.append(name)
+        for i, raw in enumerate(items, 1):
+            parsed.append({**raw, "_file": name, "_row": i})
     rows = _validate_import_rows(record, parsed)
     token = uuid.uuid4().hex[:16]
     now = datetime.now(timezone.utc)
     for k in [k for k, v in _IMPORT_CACHE.items() if (now - v["at"]).total_seconds() > 1800]:
         _IMPORT_CACHE.pop(k, None)
     _IMPORT_CACHE[token] = {"task_id": task_id, "rows": rows, "at": now, "by": _operator(request)}
-    return {"token": token, "filename": _safe_filename(file.filename), "rows": rows,
+    return {"token": token, "filename": "、".join(names), "files": names, "rows": rows,
             "total": len(rows), "errors": sum(1 for r in rows if r["errors"]),
             "warnings": sum(1 for r in rows if r["warnings"] and not r["errors"])}
 
@@ -4013,49 +4042,60 @@ async def finish_plan_run(request: Request, plan_id: str, run_id: str) -> dict:
 @router.post("/api/v1/plans/{plan_id}/runs/{run_id}/attachments")
 async def upload_plan_attachment(
     request: Request, plan_id: str, run_id: str,
-    file: UploadFile = File(...), item_id: str = Form(""),
+    files: list[UploadFile] = File(default=[]), file: UploadFile | None = File(default=None),
+    item_id: str = Form(""),
 ) -> dict:
-    """执行附件（13.4）：图片/视频/日志/压缩包，记录上传人、时间与关联执行记录。"""
+    """执行附件（13.4）：图片/视频/日志/压缩包，记录上传人、时间与关联执行记录。
+
+    支持一次选多个文件（`files`），兼容旧的单文件字段 `file`；返回本次上传的全部附件。
+    """
     import uuid as _uuid
 
     plan = _plan(request, plan_id, "exec.attach")
     run = _plan_run(plan, run_id)
-    suffix = Path(file.filename or "").suffix.lower()
-    # 附件不限类型：已知类型用于图标 / 分类展示，其余归 other
-    kind = next((k for k, s in _ATTACHMENT_SUFFIXES.items() if suffix in s), "other")
+    uploads = _upload_list(files, file, "附件")
     if item_id and not any(i["item_id"] == item_id for i in plan["items"]):
         raise HTTPException(status_code=400, detail=f"用例不在计划中: {item_id}")
     if run.get("finished_at") or plan["status"] == "archived":
         raise HTTPException(status_code=409, detail="该执行轮次已结束或计划已归档，不可再上传附件")
-    att_id = _uuid.uuid4().hex[:12]
     dest_dir = get_settings().outputs_dir / "attachments" / plan_id / run_id
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{att_id}{suffix}"
     max_bytes = get_settings().max_attachment_size_mb * 1024 * 1024
-    size = 0
-    with dest.open("wb") as fh:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > max_bytes:
-                fh.close()
-                dest.unlink(missing_ok=True)
-                raise HTTPException(status_code=413, detail=f"附件超过大小上限 {get_settings().max_attachment_size_mb}MB")
-            fh.write(chunk)
-    att = {
-        "att_id": att_id, "item_id": item_id or None, "kind": kind,
-        "filename": _safe_filename(file.filename), "stored": str(dest),
-        "content_type": file.content_type, "size": size,
-        "by": _operator(request),
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-    run["attachments"].append(att)
+    added: list[dict] = []
+    for upload in uploads:
+        suffix = Path(upload.filename or "").suffix.lower()
+        # 附件不限类型：已知类型用于图标 / 分类展示，其余归 other
+        kind = next((k for k, s in _ATTACHMENT_SUFFIXES.items() if suffix in s), "other")
+        att_id = _uuid.uuid4().hex[:12]
+        dest = dest_dir / f"{att_id}{suffix}"
+        size = 0
+        with dest.open("wb") as fh:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    fh.close()
+                    dest.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"附件 {upload.filename} 超过大小上限 {get_settings().max_attachment_size_mb}MB",
+                    )
+                fh.write(chunk)
+        att = {
+            "att_id": att_id, "item_id": item_id or None, "kind": kind,
+            "filename": _safe_filename(upload.filename), "stored": str(dest),
+            "content_type": upload.content_type, "size": size,
+            "by": _operator(request),
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        run["attachments"].append(att)
+        added.append(att)
+        logger.info("计划 {} 轮次 {} 上传附件 {}（{}，{} 字节）",
+                    plan_id, run_id, upload.filename, kind, size)
     request.app.state.plans.save(plan)
-    logger.info("计划 {} 轮次 {} 上传附件 {}（{}，{} 字节）",
-                plan_id, run_id, file.filename, kind, size)
-    return att
+    return {**added[0], "attachments": added, "count": len(added)}
 
 
 @router.get("/api/v1/plans/{plan_id}/attachments/{att_id}")
@@ -5733,12 +5773,16 @@ async def delete_rule(request: Request, rule_id: str) -> dict:
 
 @router.post("/api/v1/tasks/{task_id}/final")
 async def upload_final_cases(
-    request: Request, task_id: str, file: UploadFile = File(...)
+    request: Request, task_id: str,
+    files: list[UploadFile] = File(default=[]), file: UploadFile | None = File(default=None),
 ) -> dict:
     """离线评审终稿回传（F-6-8）：上传人工定稿文件，与生成结果做字段级 diff 留痕。
 
     与在线评审（F-6-6）构成评审闭环双通道，diff 是离线通道的学习语料入口。
+    终稿可分多个文件上传（如按模块拆分的多个 Excel），合并后作为一份终稿对比。
     """
+    import asyncio
+
     from app.knowledge.importers import CaseImportError, parse_cases_file
     from app.tasks.diff import diff_cases
 
@@ -5748,18 +5792,23 @@ async def upload_final_cases(
     if not (record.result or {}).get("cases"):
         raise HTTPException(status_code=409, detail="任务无生成结果，无法对比终稿")
 
-    saved = await _read_upload(
-        file, store.output_dir / task_id / "final", settings.max_upload_size_mb * 1024 * 1024
-    )
-    try:
-        final_cases = parse_cases_file(saved)
-    except CaseImportError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    uploads = _upload_list(files, file, "终稿文件")
+    final_cases: list[dict] = []
+    names: list[str] = []
+    for upload in uploads:
+        name = _safe_filename(upload.filename)
+        saved = await _read_upload(upload, store.output_dir / task_id / "final", settings.max_upload_size_mb * 1024 * 1024)
+        try:
+            final_cases.extend(await asyncio.to_thread(parse_cases_file, saved))
+        except (CaseImportError, UnsafeFileError, UnicodeDecodeError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=f"{name}：{e}" if len(uploads) > 1 else str(e))
+        names.append(name)
 
     diff = diff_cases(record.result["cases"], final_cases)
     logger.info("任务 {} 终稿回传 diff：{}", task_id, diff["stats"])
     record.offline_review = {
-        "filename": file.filename,
+        "filename": "、".join(names),
+        "files": names,
         "by": _operator(request),
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         **diff,

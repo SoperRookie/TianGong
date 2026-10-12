@@ -2973,23 +2973,25 @@ function openImportDlg() {
   _importPreview = null;
   $('imMeta').textContent = '第 1 步 · 上传文件（Excel / CSV / XMind / 禅道导出）';
   $('imBody').innerHTML = `<div class="hint" style="margin-bottom:10px">按模板列头准备文件：用例编号、模块、用例标题、优先级、前置条件、操作步骤（每行一步）、预期结果（与步骤逐行对应）、关键词、备注。<a onclick="downloadFile('/api/v1/cases/import-template','用例导入模板.xlsx')">下载导入模板</a><br>禅道「导出用例」的 xlsx / csv / xls 可直接导入：优先级 1–4 对应 P0–P3，模块路径「/父/子」自动去掉斜杠，步骤与预期按行配对。</div>
-    <input type="file" id="imFile" accept=".xlsx,.csv,.xmind,.xls,.html">
+    <input type="file" id="imFile" accept=".xlsx,.csv,.xmind,.xls,.html" multiple>
+    <div class="hint" style="margin-top:4px">可一次选择多个文件，解析后合并预览；标题重复校验跨文件生效。</div>
     <div class="hint" style="margin-top:8px">解析后逐行校验：标题与步骤必填（预期结果可为空，历史简化用例按空导入后可补）、优先级须为 P0–P3、标题不得与任务内或文件内重复；有错误的行不会被静默导入。</div>`;
   $('imFoot').innerHTML = `<button class="btn ghost" onclick="$('importDlg').close()">取消</button><button class="btn" id="imNext" onclick="importPreview()">解析并预览</button>`;
   $('importDlg').showModal();
 }
 async function importPreview() {
-  const f = $('imFile').files[0]; if (!f) return toast('请选择文件', 'warn');
-  const fd = new FormData(); fd.append('file', f);
+  const fs = Array.from($('imFile').files || []); if (!fs.length) return toast('请选择文件', 'warn');
+  const fd = new FormData(); for (const f of fs) fd.append('files', f);
   const btn = $('imNext'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 解析中';
   try {
     const pv = await api(`/api/v1/tasks/${currentTask.task_id}/cases/import/preview`, {method:'POST', body: fd});
     _importPreview = pv;
-    $('imMeta').textContent = `第 3/4 步 · 预览与校验：${pv.filename} · 共 ${pv.total} 行，错误 ${pv.errors} 行，警告 ${pv.warnings} 行`;
+    const multi = (pv.files || []).length > 1;
+    $('imMeta').textContent = `第 3/4 步 · 预览与校验：${multi ? `${pv.files.length} 个文件` : pv.filename} · 共 ${pv.total} 行，错误 ${pv.errors} 行，警告 ${pv.warnings} 行`;
     $('imBody').innerHTML = `<div class="tbl-wrap" style="max-height:50vh;margin-top:0"><table>
-      <tr><th style="width:40px">行</th><th style="width:90px">模块</th><th>标题</th><th style="width:60px">优先级</th><th style="width:60px">步骤</th><th>校验结果</th></tr>
+      <tr>${multi?'<th style="width:120px">文件</th>':''}<th style="width:40px">行</th><th style="width:90px">模块</th><th>标题</th><th style="width:60px">优先级</th><th style="width:60px">步骤</th><th>校验结果</th></tr>
       ${pv.rows.map(r => `<tr style="${r.errors.length?'background:var(--danger-bg)':''}">
-        <td>${r.row}</td><td>${esc(r.case.module)}</td><td>${esc(r.case.title)||'<span class="hint">（空）</span>'}</td><td>${esc(r.case.priority)}</td><td>${(r.case.steps||[]).filter(s=>s.action).length}</td>
+        ${multi?`<td class="hint" title="${esc(r.file||'')}">${esc(r.file||'')}</td>`:''}<td>${r.row}</td><td>${esc(r.case.module)}</td><td>${esc(r.case.title)||'<span class="hint">（空）</span>'}</td><td>${esc(r.case.priority)}</td><td>${(r.case.steps||[]).filter(s=>s.action).length}</td>
         <td>${r.errors.length?`<span style="color:var(--danger)">${r.errors.map(esc).join('；')}</span>`:r.warnings.length?`<span style="color:var(--warn)">${r.warnings.map(esc).join('；')}</span>`:'<span class="st approved">通过</span>'}</td></tr>`).join('')}
     </table></div>`;
     $('imFoot').innerHTML = `<button class="btn ghost" onclick="openImportDlg()">重新上传</button>
@@ -3788,7 +3790,7 @@ async function _renderPlanDetail__impl() {
           </tr>`; }).join('')}
         </table></div>` : ''}
     </div></div>
-    <input type="file" id="planAttFile" style="display:none" onchange="planUploadAtt(this)">`;
+    <input type="file" id="planAttFile" multiple style="display:none" onchange="planUploadAtt(this)">`;
 
   $('plansArea').innerHTML = info + itemsCard + peopleCard + runsCard;
 }
@@ -4032,18 +4034,19 @@ async function planFinishRun() {
 let _attItemId = null;  // 附件关联的用例：行内按钮设置，整轮上传为空
 function planPickAtt(itemId) { _attItemId = itemId || null; $('planAttFile').click(); }
 async function planUploadAtt(input) {
-  const file = input.files[0];
+  const files = Array.from(input.files || []);
   const itemId = _attItemId;
   input.value = ''; _attItemId = null;
-  if (!file) return;
+  if (!files.length) return;
   const run = curPlanRun(_planDetail);
   const fd = new FormData();
-  fd.append('file', file);
+  for (const f of files) fd.append('files', f);
   if (itemId) fd.append('item_id', itemId);
   try {
-    await api(`/api/v1/plans/${curPlan}/runs/${run.run_id}/attachments`, {method:'POST', body: fd});
+    const r = await api(`/api/v1/plans/${curPlan}/runs/${run.run_id}/attachments`, {method:'POST', body: fd});
     const item = itemId && _planDetail.items.find(i => i.item_id === itemId);
-    toast(item ? `附件已上传并关联 ${item.case_id}` : '附件已上传（整轮）', 'ok');
+    const n = r.count || files.length;
+    toast(item ? `${n} 个附件已上传并关联 ${item.case_id}` : `${n} 个附件已上传（整轮）`, 'ok');
     renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
 }
@@ -4115,6 +4118,9 @@ async function _renderAllCases__impl() {
   try { projects = await getProjects(); } catch (e) {}
 
   _acRows = data.cases;
+  // 表头「全选」随重绘恢复勾选态：本页可编辑行全部已选才勾上，否则再点一次会被当成「全选」而非「取消全选」
+  const editableRows = data.cases.filter(c => can(c.project, 'case.edit'));
+  const allChecked = editableRows.length > 0 && editableRows.every(c => acChecked.has(c.uid));
   const anyEdit = canDelete() && data.cases.some(c => can(c.project, 'case.edit'));
   for (const k of [...acChecked.keys()]) if (!data.cases.some(c => c.uid === k)) acChecked.delete(k);
   const rows = data.cases.map(c => {
@@ -4182,7 +4188,7 @@ async function _renderAllCases__impl() {
     <div class="card-b">
       ${data.total && acView==='mind' ? mindFromRows(data.cases, acProject || '全部项目', !acProject) + pager : ''}
       ${data.total && acView!=='mind' ? `<div class="toolbar" style="margin:0 0 6px">${stepsToggleHtml()}<span class="hint">操作步骤 / 预期结果</span></div><div class="tbl-wrap"><table>
-        <thead><tr>${anyEdit?`<th style="width:30px"><input type="checkbox" title="全选本页" onchange="acToggleAll(this.checked)"></th>`:''}<th style="width:104px">编号 / 版本</th><th style="width:100px">项目</th><th style="width:80px">模块</th>
+        <thead><tr>${anyEdit?`<th style="width:30px"><input type="checkbox" title="全选本页" ${allChecked?'checked':''} onchange="acToggleAll(this.checked)"></th>`:''}<th style="width:104px">编号 / 版本</th><th style="width:100px">项目</th><th style="width:80px">模块</th>
         <th>标题</th><th>操作步骤</th><th>预期结果</th><th style="width:110px">标签</th><th style="width:44px">优先级</th><th style="width:80px">生命周期</th>
         <th style="width:90px">最新执行</th><th style="width:70px">执行次数</th><th style="width:80px">创建人</th><th style="width:90px">创建时间</th>${anyEdit?'<th style="width:40px"></th>':''}</tr></thead>
         <tbody>${rows}</tbody></table></div>${pager}` : ''}
@@ -4326,7 +4332,7 @@ function renderHistory(t) {
     </div>
     <div class="section-t">离线终稿回传</div>
     <div class="toolbar" style="margin-top:4px">
-      <input type="file" id="finalFile" accept=".xlsx,.csv,.xmind" style="width:auto;flex:1">
+      <input type="file" id="finalFile" accept=".xlsx,.csv,.xmind" multiple style="width:auto;flex:1" title="可选多个文件，合并后作为一份终稿对比">
       <button class="btn ghost sm" onclick="uploadFinal()">上传并对比</button>
     </div>
     ${t.offline_review ? renderOfflineDiff(t.offline_review) : '<div class="hint" style="margin-top:6px">下载导出文件离线评审后，回传定稿自动计算差异，作为学习语料（「学习规则」页可提炼规则）</div>'}
@@ -6406,9 +6412,9 @@ async function deleteUser(username) {
 }
 
 async function uploadFinal() {
-  const f = $('finalFile').files[0];
-  if (!f) return toast('请选择终稿文件', 'warn');
-  const fd = new FormData(); fd.append('file', f);
+  const fs = Array.from($('finalFile').files || []);
+  if (!fs.length) return toast('请选择终稿文件', 'warn');
+  const fd = new FormData(); for (const f of fs) fd.append('files', f);
   try {
     await api(`/api/v1/tasks/${currentTask.task_id}/final`, {method:'POST', body:fd});
     await openTask(currentTask.task_id, true);

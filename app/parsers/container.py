@@ -1,7 +1,7 @@
 """容器类文件：压缩包（zip / tar / gz / bz2 / xz / 7z / rar）与邮件（eml / msg）。
 
 递归解析内部成员：文档按各自解析器读取，图片作为内嵌图片占位由 Vision 理解，视频 / 字体等只记录名称。
-解压受总大小、文件数与路径穿越校验约束。
+解压受总大小与路径穿越校验约束（不限制文件数）。
 """
 
 import email
@@ -14,7 +14,6 @@ from pathlib import Path
 
 from app.parsers.base import EmbeddedImage, ParsedDocument, Section, UnsafeFileError, UnsupportedFormatError
 
-MAX_MEMBERS = 500
 MAX_DEPTH = 2
 _SKIP_PREFIX = ("__MACOSX/", ".", "~$")
 _NOISE = {"Thumbs.db", ".DS_Store", "desktop.ini"}
@@ -42,8 +41,6 @@ def _extract(path: Path, dest: Path) -> list[Path]:
     if suffix == ".zip":
         with zipfile.ZipFile(path) as zf:
             infos = [i for i in zf.infolist() if not i.is_dir() and _safe_member(i.filename)]
-            if len(infos) > MAX_MEMBERS:
-                raise UnsafeFileError(f"{path.name} 内含 {len(infos)} 个文件，超过 {MAX_MEMBERS} 上限")
             for i in infos:
                 total += i.file_size
                 if total > limit:
@@ -70,8 +67,6 @@ def _extract(path: Path, dest: Path) -> list[Path]:
             raise UnsupportedFormatError(f"{path.name} 不是有效的压缩文件") from None
         with tf:
             members = [m for m in tf.getmembers() if m.isfile() and _safe_member(m.name)]
-            if len(members) > MAX_MEMBERS:
-                raise UnsafeFileError(f"{path.name} 内含 {len(members)} 个文件，超过 {MAX_MEMBERS} 上限")
             for m in members:
                 total += m.size
                 if total > limit:
@@ -85,8 +80,6 @@ def _extract(path: Path, dest: Path) -> list[Path]:
             raise UnsupportedFormatError("读取 .7z 需要安装 py7zr（pip install py7zr）") from None
         with py7zr.SevenZipFile(path) as z:
             names = [n for n in z.getnames() if _safe_member(n)]
-            if len(names) > MAX_MEMBERS:
-                raise UnsafeFileError(f"{path.name} 内含 {len(names)} 个文件，超过 {MAX_MEMBERS} 上限")
             if sum(i.uncompressed for i in z.list() if not i.is_directory) > limit:
                 raise UnsafeFileError(f"{path.name} 解压后超过 {limit // (1024 * 1024)}MB 上限")
             z.extract(dest, targets=names)
@@ -99,8 +92,6 @@ def _extract(path: Path, dest: Path) -> list[Path]:
         try:
             with rarfile.RarFile(path) as rf:
                 infos = [i for i in rf.infolist() if not i.is_dir() and _safe_member(i.filename)]
-                if len(infos) > MAX_MEMBERS:
-                    raise UnsafeFileError(f"{path.name} 内含 {len(infos)} 个文件，超过 {MAX_MEMBERS} 上限")
                 if sum(i.file_size for i in infos) > limit:
                     raise UnsafeFileError(f"{path.name} 解压后超过 {limit // (1024 * 1024)}MB 上限")
                 for i in infos:
