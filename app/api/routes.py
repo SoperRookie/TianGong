@@ -4507,7 +4507,11 @@ async def delete_requirement(request: Request, req_id: str, force: bool = False)
     for tid in linked:
         rec = tstore.get(tid)
         if rec is not None and rec.context is not None:
-            rec.context["requirement_deleted"] = True
+            gone = [x for x in rec.context.get("deleted_requirement_ids") or [] if x != req_id] + [req_id]
+            rec.context["deleted_requirement_ids"] = gone
+            # 多需求合并的任务：全部来源需求都删除了才算失去来源
+            all_ids = rec.context.get("requirement_ids") or [rec.context.get("requirement_id")]
+            rec.context["requirement_deleted"] = all(x in gone for x in all_ids if x)
             tstore.save(rec)
     alive = {r["req_id"] for r in rstore.list(item["project"])}
     request.app.state.dependencies.prune(item["project"], "requirement", alive)
@@ -4545,9 +4549,17 @@ async def restore_requirement(request: Request, req_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"需求不存在: {req_id}")
     _require_project(request, item["project"], "requirement.edit")
     try:
-        return _req_view(request, request.app.state.requirements.restore(req_id))
+        item = request.app.state.requirements.restore(req_id)
     except RequirementError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    tstore = request.app.state.tasks
+    for tid in item.get("tasks") or []:  # 恢复后关联任务重新获得来源追溯
+        rec = tstore.get(tid)
+        if rec is not None and rec.context and req_id in (rec.context.get("deleted_requirement_ids") or []):
+            rec.context["deleted_requirement_ids"] = [x for x in rec.context["deleted_requirement_ids"] if x != req_id]
+            rec.context["requirement_deleted"] = False
+            tstore.save(rec)
+    return _req_view(request, item)
 
 
 @router.post("/api/v1/requirements/{req_id}/attachments")
@@ -4702,35 +4714,87 @@ class DesignBody(BaseModel):
     async_mode: bool = True
 
 
-@router.post("/api/v1/requirements/{req_id}/design")
-async def design_from_requirement(request: Request, req_id: str, body: DesignBody | None = None) -> dict:
-    """从需求发起测试设计：创建生成任务，任务上下文回挂需求/模块/版本（追溯链源头）。"""
+class MultiDesignBody(DesignBody):
+    req_ids: list[str] = []
+
+
+MAX_DESIGN_REQUIREMENTS = 20
+
+
+async def _design_from_requirements(request: Request, items: list[dict], body: DesignBody) -> dict:
+    """从一条或多条需求发起测试设计（公共实现）。
+
+    多条需求合并为一份需求文本（每条一段，标注序号与标题）走同一拆解 / 生成链路；任务上下文记录全部需求
+    （requirement_ids / requirement_titles），requirement_id 取第一条作为主需求以兼容既有单需求逻辑；
+    每条需求都回挂该任务（追溯链）。所有需求必须属于同一项目、附件解析完成、没有未确认的必须项。
+    """
     from app.requirements import design_brief
 
-    body = body or DesignBody()
-    item = _req(request, req_id, "point.ai")
-    _require_attachments_ready(item)
     rstore = request.app.state.requirements
-    if rstore.blocking_questions(item):
-        raise HTTPException(status_code=409, detail=f"仍有 {len(rstore.blocking_questions(item))} 项必须确认的事项未确认，确认后才能开始测试设计（建议级事项可带假设继续）")
+    projects = {it["project"] for it in items}
+    if len(projects) > 1:
+        raise HTTPException(status_code=400, detail="合并设计的需求必须属于同一项目：" + "、".join(sorted(projects)))
+    blocked = []
+    for it in items:
+        _require_attachments_ready(it)
+        n = len(rstore.blocking_questions(it))
+        if n:
+            blocked.append(f"「{it['title']}」{n} 项")
+    if blocked:
+        raise HTTPException(status_code=409, detail="仍有必须确认的事项未确认，确认后才能开始测试设计（建议级事项可带假设继续）："
+                            + "；".join(blocked))
     template = request.app.state.templates.get(body.template_id)
     if template is None:
         raise HTTPException(status_code=404, detail=f"模板不存在: {body.template_id}")
     store = request.app.state.tasks
     task_id, task_dir = store.new_task_dir()
-    sources = [a["filename"] for a in item["attachments"] if a.get("parsed")] or ["text"]
+    sources: list[str] = []
+    for it in items:
+        for a in it["attachments"]:
+            if a.get("parsed") and a["filename"] not in sources:
+                sources.append(a["filename"])
+    sources = sources or ["text"]
     if body.model:
         request.app.state.memory.record_usage("model", body.model)
     request.app.state.memory.record_usage("template", template.template_id)
-    extra = {"requirement_id": req_id, "requirement_title": item["title"],
-             "module_id": item.get("module_id"), "version_id": item.get("version_id")}
+    project = items[0]["project"]
+    ids = [it["req_id"] for it in items]
+    titles = [it["title"] for it in items]
+    same = lambda key: items[0].get(key) if len({it.get(key) for it in items}) == 1 else None  # noqa: E731
+    extra = {"requirement_id": ids[0], "requirement_title": " + ".join(titles) if len(items) > 1 else titles[0],
+             "requirement_ids": ids, "requirement_titles": titles,
+             "module_id": same("module_id"), "version_id": same("version_id")}
+    if len(items) == 1:
+        brief = design_brief(items[0])
+    else:
+        brief = "\n\n".join(f"【需求 {i}/{len(items)}：{it['title']}】\n{design_brief(it)}" for i, it in enumerate(items, 1))
     resp = await _launch_task(
-        request, task_id, task_dir, sources, design_brief(item), template, body.model, body.reviewer_model,
-        body.knowledge_space, item["project"], body.confirm_points, body.async_mode, extra_context=extra,
+        request, task_id, task_dir, sources, brief, template, body.model, body.reviewer_model,
+        body.knowledge_space, project, body.confirm_points, body.async_mode, extra_context=extra,
     )
-    rstore.link_task(req_id, task_id)  # 任务已入库/已提交后再关联，失败不会留下悬空任务
-    logger.info("需求 {} 发起测试设计：任务 {}（确认拆解={} 异步={}）", req_id, task_id, body.confirm_points, body.async_mode)
-    return {**resp, "requirement_id": req_id}
+    for rid in ids:
+        rstore.link_task(rid, task_id)  # 任务已入库/已提交后再关联，失败不会留下悬空任务
+    logger.info("需求 {} 发起测试设计：任务 {}（确认拆解={} 异步={}）", "、".join(ids), task_id, body.confirm_points, body.async_mode)
+    return {**resp, "requirement_id": ids[0], "requirement_ids": ids}
+
+
+@router.post("/api/v1/requirements/design")
+async def design_from_requirements(request: Request, body: MultiDesignBody) -> dict:
+    """选择多条需求合并发起测试设计：一个任务覆盖全部所选需求，各需求均回挂该任务。"""
+    ids = list(dict.fromkeys(r.strip() for r in body.req_ids if r and r.strip()))
+    if not ids:
+        raise HTTPException(status_code=400, detail="请至少选择一条需求")
+    if len(ids) > MAX_DESIGN_REQUIREMENTS:
+        raise HTTPException(status_code=400, detail=f"一次最多合并 {MAX_DESIGN_REQUIREMENTS} 条需求")
+    items = [_req(request, rid, "point.ai") for rid in ids]
+    return await _design_from_requirements(request, items, body)
+
+
+@router.post("/api/v1/requirements/{req_id}/design")
+async def design_from_requirement(request: Request, req_id: str, body: DesignBody | None = None) -> dict:
+    """从需求发起测试设计：创建生成任务，任务上下文回挂需求/模块/版本（追溯链源头）。"""
+    item = _req(request, req_id, "point.ai")
+    return await _design_from_requirements(request, [item], body or DesignBody())
 
 
 # ---- 项目视角（项目管理信息架构 / 完整需求 3.2 多项目管理）----
@@ -5457,7 +5521,7 @@ def _dep_nodes(request: Request, project: str, kind: str, module: str = "", requ
     for row in project_cases(records, project):
         if module and row["module"] != module:
             continue
-        if requirement_id and row.get("requirement_id") != requirement_id:
+        if requirement_id and requirement_id not in (row.get("requirement_ids") or [row.get("requirement_id")]):
             continue
         nodes[row["uid"]] = {"id": row["uid"], "case_id": row["case_id"], "title": row["title"], "module": row["module"],
                              "task_id": row["task_id"], "requirement_id": row.get("requirement_id"),
@@ -5946,7 +6010,8 @@ async def retry_task(request: Request, task_id: str) -> dict:
                 "poll_url": f"/api/v1/tasks/{task_id}"}
 
     # 情形 C：直接生成流程失败 → 复用检查点（已拆解 / 已生成模块）重新启动
-    extra = {k: ctx[k] for k in ("requirement_id", "requirement_title", "module_id", "version_id",
+    extra = {k: ctx[k] for k in ("requirement_id", "requirement_title", "requirement_ids", "requirement_titles",
+                                 "deleted_requirement_ids", "requirement_deleted", "module_id", "version_id",
                                  "retried_at", "retry_count") if k in ctx}
     resp = await _launch_task(
         request, task_id, task_dir, record.sources or ["text"], ctx["requirement"], template,

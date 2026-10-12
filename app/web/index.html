@@ -1168,7 +1168,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <label class="check"><input type="checkbox" id="dsConfirm" checked> 先审核测试点</label>
       <label class="check"><input type="checkbox" id="dsAsync" checked> 后台执行</label>
     </div>
-    <div class="hint" style="margin-top:8px">拆解/生成使用：需求原文 + 附件解析结果 + 人工补充 + 待确认事项的确认结论；任务将回挂本需求（追溯链）</div>
+    <div class="hint" style="margin-top:8px" id="dsHint">拆解/生成使用：需求原文 + 附件解析结果 + 人工补充 + 待确认事项的确认结论；任务将回挂本需求（追溯链）</div>
   </div>
   <div class="dlg-f">
     <button class="btn ghost" onclick="$('designDlg').close()">取消</button>
@@ -2488,7 +2488,7 @@ function renderOverview(t) {
           <div><dt>来源</dt><dd>${srcText_(t.sources)||'-'}</dd></div>
           <div><dt>创建人</dt><dd>${esc(t.created_by||'—')}</dd></div>
           <div><dt>项目</dt><dd>${esc(ctx.project||'—')}${!ctx.project&&curUser&&curUser.role==='admin'?` <button class="btn ghost sm" onclick="assignTaskProject(${jsq(t.task_id)})" title="存量迁移：归属后自动建需求实体并回填关联">归属项目</button>`:''}</dd></div>
-          <div><dt>来源需求</dt><dd>${ctx.requirement_id?(ctx.requirement_deleted?`<span class="hint">${esc(ctx.requirement_title||ctx.requirement_id)}（需求已删除）</span>`:`<a onclick="openRequirement(${jsq(ctx.requirement_id)})">${esc(ctx.requirement_title||ctx.requirement_id)}</a>`):'—'}</dd></div>
+          <div><dt>来源需求</dt><dd>${reqLinksHtml(ctx)}</dd></div>
           <div><dt>生成模型</dt><dd>${esc(ctx.model||'默认')}</dd></div>
           <div><dt>Prompt 版本</dt><dd>${Object.keys(t.prompt_versions||{}).length?Object.entries(t.prompt_versions).map(([k,v])=>`<code title="${esc(k)}">${esc(PROMPT_NAMES[k]||k)} v${v}</code>`).join(' '):'—'}${ctx.retry_count?`<div class="hint">已重试 ${ctx.retry_count} 次</div>`:''}</dd></div>
           <div><dt>模板</dt><dd>${esc(ctx.template_id||'—')}</dd></div>
@@ -4895,6 +4895,29 @@ async function archivePrompt(no) {
 
 /* ==================== 需求中心（M2） ==================== */
 let curReq = null, _reqDetail = null, _reqsCache = [], reqStatus = '', reqKw = '', reqTab = 'raw', reqDeleted = false, reqLine = '';
+let _reqSel = new Set();      // 需求列表勾选（合并发起测试设计）
+let _designReqIds = null;     // 设计对话框当前针对的需求：null = 详情页单需求（curReq），数组 = 列表多选
+function reqSelToggle(input) {
+  if (input.checked) _reqSel.add(input.dataset.rid); else _reqSel.delete(input.dataset.rid);
+  const btn = $('reqDesignBtn');
+  if (btn) { btn.disabled = !_reqSel.size; btn.textContent = `合并发起测试设计${_reqSel.size?`（${_reqSel.size}）`:''}`; }
+}
+function reqSelAll(on) {
+  document.querySelectorAll('.rqsel').forEach(c => { c.checked = on; if (on) _reqSel.add(c.dataset.rid); else _reqSel.delete(c.dataset.rid); });
+  const btn = $('reqDesignBtn');
+  if (btn) { btn.disabled = !_reqSel.size; btn.textContent = `合并发起测试设计${_reqSel.size?`（${_reqSel.size}）`:''}`; }
+}
+function reqMultiDesign() {
+  const picked = _reqsCache.filter(r => _reqSel.has(r.req_id));
+  if (!picked.length) return toast('请先勾选需求', 'warn');
+  const projects = [...new Set(picked.map(r => r.project))];
+  if (projects.length > 1) return toast(`所选需求须属于同一项目（当前涉及：${projects.join('、')}）`, 'warn');
+  const parsing = picked.filter(r => r.parsing);
+  if (parsing.length) return toast(`「${parsing[0].title}」的附件仍在解析中，解析完成后再发起`, 'warn');
+  const blocked = picked.filter(r => r.blocking_questions);
+  if (blocked.length) return toast(`「${blocked[0].title}」还有 ${blocked[0].blocking_questions} 项必须确认的事项，请先在需求详情中确认`, 'warn');
+  openDesignDlg(picked);
+}
 const REQ_ST_CLS = {draft:'pending', analyzed:'candidate', pending_confirm:'rejected', confirmed:'approved', designing:'candidate', done:'approved', archived:'pending'};
 const REQ_ST_LABEL = {draft:'草稿', analyzed:'已分析', pending_confirm:'待确认', confirmed:'已确认', designing:'设计中', done:'已完成', archived:'已归档'};
 function crumbForReqs() {
@@ -4918,7 +4941,12 @@ async function _renderRequirements__impl() {
   if (stale('reqs', _s)) return;
   _reqsCache = data.requirements;
   const canEdit = curProjectName ? can(curProjectName, 'requirement.edit') : (isSysAdmin() || (curUser.projects||[]).some(p => can(p.project, 'requirement.edit')));
+  const alive = new Set(data.requirements.filter(r => !r.deleted_at).map(r => r.req_id));
+  for (const id of [..._reqSel]) if (!alive.has(id)) _reqSel.delete(id);   // 列表变化后清掉不在当前列表的勾选
+  const selectable = r => !r.deleted_at && can(r.project, 'point.ai');
+  const anySel = data.requirements.some(selectable);
   const rows = data.requirements.map(r => `<tr class="${r.deleted_at?'':'rowlink'}" ${r.deleted_at?'':`onclick="openRequirement('${r.req_id}')"`}>
+    ${anySel?`<td onclick="event.stopPropagation()">${selectable(r)?`<input type="checkbox" class="rqsel" data-rid="${esc(r.req_id)}" ${_reqSel.has(r.req_id)?'checked':''} onchange="reqSelToggle(this)" title="勾选多条需求后可合并发起测试设计">`:''}</td>`:''}
     <td><b>${esc(r.title)}</b>${r.deleted_at?` <span class="tag" style="background:var(--danger-bg);color:var(--danger)">已删除</span>${r.merged_into?'<span class="hint"> 已合并</span>':''}${canEdit&&!r.merged_into?`<button class="btn ghost sm" style="margin-left:6px" onclick="restoreReq('${r.req_id}')">恢复</button>`:''}`:''}${r.description?`<div class="hint">${esc(r.description.slice(0,80))}</div>`:''}</td>
     <td class="hint">${esc(r.project)}${r.version_name?`<div>${esc(r.version_name)}</div>`:''}</td>
     <td class="hint">${esc(r.module_path||'—')}</td>
@@ -4937,10 +4965,11 @@ async function _renderRequirements__impl() {
         <select style="width:120px" onchange="reqStatus=this.value;renderRequirements()"><option value="">全部状态</option>
           ${Object.entries(data.statuses).map(([k,v])=>`<option value="${k}" ${reqStatus===k?'selected':''}>${v}</option>`).join('')}</select>
         <label class="check" title="回收站：已删除的需求可恢复"><input type="checkbox" ${reqDeleted?'checked':''} onchange="reqDeleted=this.checked;renderRequirements()"> 显示已删除</label>
+        ${anySel?`<button class="btn ghost" id="reqDesignBtn" ${_reqSel.size?'':'disabled'} title="勾选需求后合并为一个测试设计任务（须同一项目，且必须确认的事项已确认）" onclick="reqMultiDesign()">合并发起测试设计${_reqSel.size?`（${_reqSel.size}）`:''}</button>`:''}
         ${canEdit?`<button class="btn" onclick="openReqDlg()">＋ 新建需求</button>`:''}</div></div>
     <div class="card-b"><div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
-      <thead><tr><th>需求</th><th style="width:120px">项目 / 版本</th><th style="width:120px">模块</th><th style="width:110px">状态</th><th style="width:130px">来源</th><th style="width:90px">测试设计</th><th style="width:110px">创建</th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="7"><div class="empty">${curProjectName?`项目「${esc(curProjectName)}」`:''}暂无需求${canEdit?'，点击「新建需求」录入原文或上传文件':''}</div></td></tr>`}</tbody>
+      <thead><tr>${anySel?`<th style="width:30px"><input type="checkbox" title="全选本页可设计的需求" ${(() => { const ids = data.requirements.filter(selectable).map(r => r.req_id); return ids.length && ids.every(id => _reqSel.has(id)) ? 'checked' : ''; })()} onchange="reqSelAll(this.checked)"></th>`:''}<th>需求</th><th style="width:120px">项目 / 版本</th><th style="width:120px">模块</th><th style="width:110px">状态</th><th style="width:130px">来源</th><th style="width:90px">测试设计</th><th style="width:110px">创建</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="${anySel?8:7}"><div class="empty">${curProjectName?`项目「${esc(curProjectName)}」`:''}暂无需求${canEdit?'，点击「新建需求」录入原文或上传文件':''}</div></td></tr>`}</tbody>
     </table></div></div></div>`;
 }
 async function fillReqRefs(project) {
@@ -5167,18 +5196,36 @@ async function answerReqQuestion(qid, reopen) {
   try { await jpost(`/api/v1/requirements/${curReq}/questions/${qid}`, {answer, reopen: !!reopen}); renderRequirementDetail(); }
   catch (e) { toast(e.message, 'err'); }
 }
-function openDesignDlg() {
+function reqLinksHtml(ctx) {
+  // 单需求：一个链接；多需求合并的任务：逐条列出，已删除的需求单独标注
+  if (!ctx.requirement_id) return '—';
+  const ids = ctx.requirement_ids && ctx.requirement_ids.length ? ctx.requirement_ids : [ctx.requirement_id];
+  const titles = ctx.requirement_titles && ctx.requirement_titles.length === ids.length ? ctx.requirement_titles : [ctx.requirement_title || ctx.requirement_id];
+  const gone = new Set(ctx.deleted_requirement_ids || (ctx.requirement_deleted ? ids : []));
+  return ids.map((id, i) => gone.has(id)
+    ? `<span class="hint">${esc(titles[i] || id)}（需求已删除）</span>`
+    : `<a onclick="openRequirement(${jsq(id)})">${esc(titles[i] || id)}</a>`).join(ids.length > 1 ? '<br>' : '');
+}
+function openDesignDlg(reqs) {
   const copy = (from, to) => { $(to).innerHTML = $(from).innerHTML; $(to).value = $(from).value; };
   copy('modelSel', 'dsModel'); copy('reviewerSel', 'dsReviewer'); copy('templateSel', 'dsTemplate');
-  $('dsMeta').textContent = _reqDetail.title;
+  _designReqIds = reqs ? reqs.map(r => r.req_id) : null;
+  $('dsMeta').textContent = reqs ? `${reqs.length} 条需求合并：${reqs.map(r => r.title).join('、')}` : _reqDetail.title;
+  $('dsHint').textContent = reqs && reqs.length > 1
+    ? '多条需求合并为一份需求文本（逐条标注标题）走同一拆解 / 生成链路；任务将回挂全部所选需求（追溯链）'
+    : '拆解/生成使用：需求原文 + 附件解析结果 + 人工补充 + 待确认事项的确认结论；任务将回挂本需求（追溯链）';
   $('designDlg').showModal();
 }
 async function submitDesign() {
   const btn = $('dsGoBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 提交中';
+  const body = {model: $('dsModel').value || null, reviewer_model: $('dsReviewer').value || null,
+    template_id: $('dsTemplate').value, confirm_points: $('dsConfirm').checked, async_mode: $('dsAsync').checked};
   try {
-    const r = await jpost(`/api/v1/requirements/${curReq}/design`, {model: $('dsModel').value || null, reviewer_model: $('dsReviewer').value || null,
-      template_id: $('dsTemplate').value, confirm_points: $('dsConfirm').checked, async_mode: $('dsAsync').checked});
-    $('designDlg').close(); toast('测试设计任务已创建', 'ok');
+    const r = _designReqIds
+      ? await jpost('/api/v1/requirements/design', {...body, req_ids: _designReqIds})
+      : await jpost(`/api/v1/requirements/${curReq}/design`, body);
+    $('designDlg').close(); toast(_designReqIds && _designReqIds.length > 1 ? `已合并 ${_designReqIds.length} 条需求创建测试设计任务` : '测试设计任务已创建', 'ok');
+    _reqSel.clear(); _designReqIds = null;
     await refreshList(); openTaskFromProject(r.task_id);
   } catch (e) { toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '开始';

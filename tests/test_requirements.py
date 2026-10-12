@@ -386,3 +386,50 @@ async def test_待确认事项分级_必须项阻塞设计_建议项带假设继
     assert a["status"] == "confirmed"
     a = (await client.post(f"/api/v1/requirements/{rid}/questions", json={"question": "并发下注如何处理？"})).json()
     assert a["status"] == "pending_confirm" and a["blocking_questions"] == 1
+
+
+async def test_多需求合并发起测试设计_追溯与删除标记(client):
+    from tests.stubs import ANALYST_REPLY
+
+    a = await _req(client, title="登录需求")
+    b = await _req(client, title="注册需求", text="用户填写手机号与验证码完成注册。")
+    other = await _req(client, project="Q", title="其他项目需求")
+    # 跨项目 / 空选择拒绝
+    resp = await client.post("/api/v1/requirements/design", json={"req_ids": [a["req_id"], other["req_id"]]})
+    assert resp.status_code == 400 and "同一项目" in resp.json()["detail"]
+    assert (await client.post("/api/v1/requirements/design", json={"req_ids": []})).status_code == 400
+    # 其中一条有必须确认的事项 → 409 并点名
+    app.state.llm = StubLLM([ANALYSIS_REPLY])
+    await client.post(f"/api/v1/requirements/{b['req_id']}/analyze", json={})
+    resp = await client.post("/api/v1/requirements/design", json={"req_ids": [a["req_id"], b["req_id"]]})
+    assert resp.status_code == 409 and "注册需求" in resp.json()["detail"]
+    for q in (await client.get(f"/api/v1/requirements/{b['req_id']}")).json()["questions"]:
+        await client.post(f"/api/v1/requirements/{b['req_id']}/questions/{q['q_id']}", json={"answer": "按需求"})
+    # 合并设计：一个任务、上下文记录全部需求、两条需求都回挂
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+    resp = await client.post("/api/v1/requirements/design",
+                             json={"req_ids": [a["req_id"], b["req_id"], a["req_id"]], "confirm_points": False, "async_mode": False})
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["task_id"]
+    assert resp.json()["requirement_ids"] == [a["req_id"], b["req_id"]]
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    ctx = t["context"]
+    assert ctx["requirement_id"] == a["req_id"] and ctx["requirement_ids"] == [a["req_id"], b["req_id"]]
+    assert ctx["requirement_title"] == "登录需求 + 注册需求" and ctx["requirement_titles"] == ["登录需求", "注册需求"]
+    assert "【需求 1/2：登录需求】" in ctx["requirement"] and "【需求 2/2：注册需求】" in ctx["requirement"]
+    assert "手机号与验证码" in ctx["requirement"] and "密码错误 5 次" in ctx["requirement"]
+    for rid in (a["req_id"], b["req_id"]):
+        r = (await client.get(f"/api/v1/requirements/{rid}")).json()
+        assert r["status"] == "designing" and task_id in r["tasks"]
+    trace = (await client.get(f"/api/v1/requirements/{b['req_id']}")).json()["trace"]
+    assert any(x["task_id"] == task_id for x in trace["tasks"])
+    # 删除其中一条：任务仍保留另一条来源；两条都删才算失去来源；恢复后回来
+    assert (await client.delete(f"/api/v1/requirements/{a['req_id']}?force=true")).status_code == 200
+    ctx = (await client.get(f"/api/v1/tasks/{task_id}")).json()["context"]
+    assert ctx["deleted_requirement_ids"] == [a["req_id"]] and ctx["requirement_deleted"] is False
+    assert (await client.delete(f"/api/v1/requirements/{b['req_id']}?force=true")).status_code == 200
+    ctx = (await client.get(f"/api/v1/tasks/{task_id}")).json()["context"]
+    assert ctx["requirement_deleted"] is True
+    assert (await client.post(f"/api/v1/requirements/{a['req_id']}/restore")).status_code == 200
+    ctx = (await client.get(f"/api/v1/tasks/{task_id}")).json()["context"]
+    assert ctx["requirement_deleted"] is False and ctx["deleted_requirement_ids"] == [b["req_id"]]

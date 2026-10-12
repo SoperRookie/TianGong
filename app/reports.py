@@ -116,6 +116,7 @@ def project_cases(
             rows.append({
                 "task_id": r.task_id, "project": name,
                 "requirement_id": (r.context or {}).get("requirement_id"),
+                "requirement_ids": (r.context or {}).get("requirement_ids") or [],
                 "requirement_title": (r.context or {}).get("requirement_title"),
                 "point_ids": c.get("point_ids") or [],
                 "case_id": c.get("case_id"), "uid": uid,
