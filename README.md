@@ -111,6 +111,7 @@ open http://localhost:8000/
 | POST | `/api/v1/requirements/{id}/analyze` | AI 需求分析（11 项结构化输出，待确认事项进入确认流） |
 | POST | `/api/v1/requirements/{id}/questions[/{qid}]` | 待确认事项：人工补充 / 确认结论 / 重新打开 |
 | POST | `/api/v1/requirements/{id}/design` | 从需求发起测试设计（任务回挂需求/模块/版本；未确认事项未清则 409） |
+| POST | `/api/v1/requirements/design` | 多条需求合并发起测试设计（`req_ids`，须同一项目、最多 20 条；合并为一份需求文本走同一链路，任务回挂全部需求，上下文 `requirement_ids` / `requirement_titles`） |
 | GET | `/api/v1/ai/tasks` / `/ai/calls[/{id}]` / `/ai/stats` | AI 任务中心、调用日志（用途/模型/Prompt 版本/输入输出/发起人）、用量统计 |
 | GET/POST | `/api/v1/ai/prompts[/{key}/versions[/{n}/activate\|archive]]` | Prompt 版本化管理（管理员） |
 | POST | `/api/v1/tasks/{id}/retry` | 失败任务重试 |
