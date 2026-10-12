@@ -316,6 +316,19 @@ async def test_plan_run_flow_and_attachments(client, tmp_path):
     assert att["kind"] == "image" and att["item_id"] == item_id and att["by"] and att["at"]
     got = await client.get(f"/api/v1/plans/{pid}/attachments/{att['att_id']}")
     assert got.status_code == 200 and got.content == b"\x89PNG fake"
+    # 多文件一次上传：全部落盘并关联同一用例
+    resp = await client.post(
+        f"/api/v1/plans/{pid}/runs/{rid}/attachments",
+        files=[("files", ("a.log", b"log-a", "text/plain")), ("files", ("b.mp4", b"\x00mp4", "video/mp4"))],
+        data={"item_id": item_id},
+    )
+    assert resp.status_code == 200, resp.text
+    multi = resp.json()
+    assert multi["count"] == 2 and [x["filename"] for x in multi["attachments"]] == ["a.log", "b.mp4"]
+    assert all(x["item_id"] == item_id for x in multi["attachments"])
+    got = await client.get(f"/api/v1/plans/{pid}/attachments/{multi['attachments'][1]['att_id']}")
+    assert got.status_code == 200 and got.content == b"\x00mp4"
+    assert (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/attachments", data={"item_id": item_id})).status_code == 400
 
     # 有执行记录的用例不可移出计划；有轮次的计划不可删除
     assert (await client.delete(f"/api/v1/plans/{pid}/cases/{item_id}")).status_code == 409
