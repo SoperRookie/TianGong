@@ -20,6 +20,8 @@ PROMPT_DEFS: list[dict] = [
      "where": "任务创建 → 拆解测试点"},
     {"key": "requirement_outline", "name": "长需求模块大纲", "kind": "system", "default": P.REQUIREMENT_OUTLINE_SYSTEM,
      "where": "长需求分片拆解前 → 全文模块大纲"},
+    {"key": "page_outline", "name": "页面清单（逐页拆解）", "kind": "system", "default": P.PAGE_OUTLINE_SYSTEM,
+     "where": "任务创建 → 先列页面 / 功能点清单，再逐页拆解测试点"},
     {"key": "blind_spot_verify", "name": "分片盲区复核", "kind": "system", "default": P.BLIND_SPOT_VERIFY_SYSTEM,
      "where": "长需求分片拆解后 → 用其他分片原文复核盲区（已说明的不算盲区）"},
     {"key": "requirement_analysis", "name": "需求分析（11 项）", "kind": "system", "default": P.REQUIREMENT_ANALYSIS_SYSTEM,

@@ -22,6 +22,7 @@ os.environ["TIANGONG_OPEN_PROJECTS"] = "false"   # 测试默认成员制隔离�
 os.environ["TIANGONG_ADMIN_PASSWORD"] = "admin123"   # 测试固定初始口令（生产未配置时为随机口令）
 os.environ["TIANGONG_SINGLE_INSTANCE_LOCK"] = "false"
 os.environ["TIANGONG_LOG_RETENTION_DAYS"] = "0"
+os.environ["TIANGONG_ANALYSIS_BY_PAGE"] = "false"   # 测试默认整篇一次拆解（桩回复按顺序）；逐页拆解由专门用例显式开启
 
 # 数据库隔离：测试用临时 SQLite（持久化层同一套 SQLAlchemy 代码，生产为 MySQL）
 os.environ["TIANGONG_DB_URL"] = f"sqlite:///{_TEST_STORAGE / 'test.db'}"

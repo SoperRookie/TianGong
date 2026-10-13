@@ -2889,30 +2889,15 @@ async def list_blind_spots(request: Request, task_id: str) -> dict:
     return {"task_id": task_id, "blind_spots": blind_spot_entities(record)}
 
 
-@router.post("/api/v1/tasks/{task_id}/blind-spots/{bs_id}")
-async def act_blind_spot(request: Request, task_id: str, bs_id: str, body: BlindSpotActionBody) -> dict:
-    """盲区闭环处置：转需求待确认事项 / 转测试点 / 标记需求已说明 / 忽略 / 重开。
-
-    盲区本身只是 AI 的提示；是否真是盲区、该去哪里由人工决定并留痕：
-    - to_question：写入任务来源需求的待确认事项（must 级会阻塞该需求后续发起设计，suggest 级可带假设继续）；
-    - to_point：以待审核测试点追加到拆解结果（来源「盲区转入」），进入正常的测试点审核与生成；
-    - explain：需求其他地方已经说明，不是盲区（note 记原文出处）；ignore：与本次无关；reopen：撤回处置。
-    """
-    from app.tasks.blind_spots import ACTIONS, find_blind_spot, record_blind_spot_action
+def _apply_blind_spot_action(request: Request, record: TaskRecord, entity: dict, body: "BlindSpotActionBody",
+                             operator: str) -> tuple[dict, dict]:
+    """单条盲区处置（不落盘）：返回 (处置后的盲区实体, 附加信息)。校验失败抛 HTTPException。"""
+    from app.tasks.blind_spots import record_blind_spot_action
     from app.tasks.points import add_points
 
-    if body.action not in ACTIONS:
-        raise HTTPException(status_code=400, detail=f"不支持的处置动作: {body.action}")
-    perm = "point.edit" if body.action in ("to_point", "to_question") else "point.review"
-    store = request.app.state.tasks
-    record = _task(request, task_id, perm)
-    entity = find_blind_spot(record, bs_id)
-    if entity is None:
-        raise HTTPException(status_code=404, detail=f"盲区不存在: {bs_id}")
+    task_id = record.task_id
     if body.action != "reopen" and entity["status"] != "open" and not entity.get("ai_resolved"):
         raise HTTPException(status_code=409, detail=f"该盲区已处置（{entity['status']}），请先重开")
-    operator = _operator(request)
-    request.state.audit_detail = f"{body.action} {entity['text'][:40]}"
     target: dict | None = None
     extra: dict = {}
     if body.action == "to_question":
@@ -2959,8 +2944,70 @@ async def act_blind_spot(request: Request, task_id: str, bs_id: str, body: Blind
     if record.result and record.quality:  # 质量摘要里的「待确认问题」随处置实时变化
         from app.tasks.blind_spots import open_blind_spots
         record.quality = {**record.quality, "待确认问题": len(open_blind_spots(record))}
+    return updated, extra
+
+
+class BlindSpotBatchBody(BlindSpotActionBody):
+    ids: list[str]
+
+
+@router.post("/api/v1/tasks/{task_id}/blind-spots/batch")
+async def act_blind_spots_batch(request: Request, task_id: str, body: BlindSpotBatchBody) -> dict:
+    """批量处置盲区（全选后一键忽略 / 说明 / 转测试点 / 转待确认 / 重开）：逐条套用单条规则，
+    已处置或校验不通过的条目跳过并带原因返回，其余生效；一次落盘。"""
+    from app.tasks.blind_spots import ACTIONS, blind_spot_entities, find_blind_spot
+
+    if body.action not in ACTIONS:
+        raise HTTPException(status_code=400, detail=f"不支持的处置动作: {body.action}")
+    ids = list(dict.fromkeys(i for i in body.ids if i))
+    if not ids:
+        raise HTTPException(status_code=400, detail="请先勾选盲区")
+    perm = "point.edit" if body.action in ("to_point", "to_question") else "point.review"
+    store = request.app.state.tasks
+    record = _task(request, task_id, perm)
+    operator = _operator(request)
+    applied, skipped = [], []
+    # 转测试点时每条用自己的原文做测试点描述（point 字段只对单条有意义）
+    per_item = body.model_copy(update={"point": ""}) if body.action == "to_point" else body
+    for bs_id in ids:
+        entity = find_blind_spot(record, bs_id)
+        if entity is None:
+            skipped.append({"id": bs_id, "reason": "盲区不存在"})
+            continue
+        try:
+            updated, _ = _apply_blind_spot_action(request, record, entity, per_item, operator)
+        except HTTPException as e:
+            skipped.append({"id": bs_id, "text": entity["text"], "reason": str(e.detail)})
+            continue
+        applied.append(updated)
+    request.state.audit_detail = f"{body.action} 批量 {len(applied)} 条，跳过 {len(skipped)}"
+    if applied:
+        store.save(record)
+    return {"task_id": task_id, "applied": applied, "skipped": skipped, "blind_spots": blind_spot_entities(record)}
+
+
+@router.post("/api/v1/tasks/{task_id}/blind-spots/{bs_id}")
+async def act_blind_spot(request: Request, task_id: str, bs_id: str, body: BlindSpotActionBody) -> dict:
+    """盲区闭环处置：转需求待确认事项 / 转测试点 / 标记需求已说明 / 忽略 / 重开。
+
+    盲区本身只是 AI 的提示；是否真是盲区、该去哪里由人工决定并留痕：
+    - to_question：写入任务来源需求的待确认事项（must 级会阻塞该需求后续发起设计，suggest 级可带假设继续）；
+    - to_point：以待审核测试点追加到拆解结果（来源「盲区转入」），进入正常的测试点审核与生成；
+    - explain：需求其他地方已经说明，不是盲区（note 记原文出处）；ignore：与本次无关；reopen：撤回处置。
+    """
+    from app.tasks.blind_spots import ACTIONS, blind_spot_entities, find_blind_spot
+
+    if body.action not in ACTIONS:
+        raise HTTPException(status_code=400, detail=f"不支持的处置动作: {body.action}")
+    perm = "point.edit" if body.action in ("to_point", "to_question") else "point.review"
+    store = request.app.state.tasks
+    record = _task(request, task_id, perm)
+    entity = find_blind_spot(record, bs_id)
+    if entity is None:
+        raise HTTPException(status_code=404, detail=f"盲区不存在: {bs_id}")
+    request.state.audit_detail = f"{body.action} {entity['text'][:40]}"
+    updated, extra = _apply_blind_spot_action(request, record, entity, body, _operator(request))
     store.save(record)
-    from app.tasks.blind_spots import blind_spot_entities
     return {"task_id": task_id, "blind_spot": updated, "blind_spots": blind_spot_entities(record), **extra}
 
 
@@ -3033,6 +3080,41 @@ async def dup_check_points(request: Request, task_id: str) -> dict:
 class DupPairActionBody(BaseModel):
     action: str        # ignore（人工判定不重复 / 无需处理）/ reopen
     note: str = ""
+
+
+class DupPairBatchBody(DupPairActionBody):
+    keys: list[str]
+
+
+@router.post("/api/v1/tasks/{task_id}/points/dup-pairs/batch")
+async def act_dup_pairs_batch(request: Request, task_id: str, body: DupPairBatchBody) -> dict:
+    """批量忽略 / 重开疑似重复对：逐条套用单条规则，不满足的跳过并带原因返回；一次落盘。"""
+    from app.tasks.points import dup_pair_entities, record_dup_pair_action
+
+    keys = list(dict.fromkeys(k for k in body.keys if k))
+    if not keys:
+        raise HTTPException(status_code=400, detail="请先勾选重复对")
+    store = request.app.state.tasks
+    record = _task(request, task_id, "point.review")
+    by_key = {e["key"]: e for e in dup_pair_entities(record)}
+    applied, skipped = [], []
+    for key in keys:
+        entity = by_key.get(key)
+        if entity is None:
+            skipped.append({"key": key, "reason": "疑似重复对不存在"})
+        elif body.action == "ignore" and entity["status"] != "open":
+            skipped.append({"key": key, "reason": f"已处置（{entity['status']}）"})
+        elif body.action == "reopen" and entity["status"] == "resolved":
+            skipped.append({"key": key, "reason": "测试点已删除，无法重开"})
+        else:
+            try:
+                applied.append(record_dup_pair_action(record, key, body.action, _operator(request), body.note))
+            except ValueError as e:
+                skipped.append({"key": key, "reason": str(e)})
+    request.state.audit_detail = f"{body.action} 批量 {len(applied)} 组，跳过 {len(skipped)}"
+    if applied:
+        store.save(record)
+    return {"task_id": task_id, "applied": applied, "skipped": skipped, "dup_pairs": dup_pair_entities(record)}
 
 
 @router.post("/api/v1/tasks/{task_id}/points/dup-pairs/{key}")

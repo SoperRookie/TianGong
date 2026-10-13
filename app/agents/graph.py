@@ -224,6 +224,30 @@ async def outline_requirement(llm: LLMClient, requirement: str, model: str | Non
     return [str(m).strip() for m in data.get("modules", []) if str(m).strip()]
 
 
+async def outline_pages(llm: LLMClient, requirement: str, model: str | None) -> list[str]:
+    """按页面逐页拆解的第一步：全文页面 / 功能点清单（按文档顺序、命名与文档一致）。"""
+    data, _ = await _chat_json(
+        llm,
+        [
+            {"role": "system", "content": prompt_text("page_outline")},
+            {"role": "user", "content": wrap_data("需求原文", requirement)},
+        ],
+        model,
+        reasoning_effort="low",
+    )
+    raw = data.get("pages") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        raw = data.get("modules") if isinstance(data, dict) else None
+    out: list[str] = []
+    for item in raw or []:
+        if isinstance(item, dict):
+            item = next((v for k in ("page", "name", "title", "module") if isinstance((v := item.get(k)), str)), "")
+        text = str(item).strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
 def _blind_spots(data: dict) -> list[str]:
     """盲区列表：兼容键名别名与对象形态（{"description": ...}）。"""
     keys = ("blind_spots", "blindSpots", "blind_spot", "盲区", "需求盲区")
@@ -248,6 +272,7 @@ def _blind_spots(data: dict) -> list[str]:
 async def analyze_requirement(
     llm: LLMClient, requirement: str, model: str | None, knowledge_cases: str | None = None,
     outline: list[str] | None = None, chunk_no: int = 0, chunk_total: int = 0, allow_empty: bool = False,
+    page: str | None = None, pages: list[str] | None = None,
 ) -> dict:
     """需求分析 Agent：测试点拆解 + 盲区识别（拆解确认流程 F-3-3 亦单独调用）。
 
@@ -257,7 +282,12 @@ async def analyze_requirement(
     非分片模式下空结果先重试一次再报错（拆解是最贵的一步，偶发空输出不该直接让任务失败）。
     """
     user = wrap_data("需求原文", requirement)
-    if outline:
+    if page:
+        page_list = chr(10).join(f"{'→ ' if p == page else '  '}{p}" for p in (pages or [page]))
+        user = (f"本轮只拆解页面 / 功能点「{page}」：读完整篇需求后，只输出该页面涉及的全部测试点（模块名用「{page}」或"
+                f"「{page}-子功能」），其他页面由别的轮次输出，不要重复；该页面在需求中没有可测内容时输出空的 modules。\n"
+                f"{wrap_data('全文页面清单', page_list)}\n\n") + user
+    elif outline:
         user = (f"这是一份长需求的第 {chunk_no}/{chunk_total} 片。全文模块大纲如下（模块命名必须与大纲一致；"
                 f"只拆解本片实际包含的内容，本片未涉及的模块不要凭空生成）：\n{wrap_data('全文模块大纲', chr(10).join(outline))}\n\n") + user
     if knowledge_cases:

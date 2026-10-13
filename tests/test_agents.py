@@ -460,3 +460,53 @@ async def test_测试点带来源需求点_拆解到确认生成全程保留():
     assert out[0]["ref"] == "x" * 120 and "ref" not in out[1]
     # 生成 Agent 收到的测试点带 ref
     assert "3.2 登录失败处理" in llm.calls[1]["messages"][-1]["content"]
+
+
+async def test_按页面逐页拆解_先列页面清单再逐页输出按文档顺序合并():
+    import json
+    from app.config import get_settings
+
+    settings = get_settings()
+    settings.analysis_by_page = True
+    try:
+        outline = json.dumps({"pages": ["登录页", "注册页", "空页"]}, ensure_ascii=False)
+        def page_reply(page, pts):
+            return json.dumps({"modules": [{"module": page, "points": [{"point": p, "dimension": "正常流程", "ref": f"{page}-条目"} for p in pts]}],
+                               "blind_spots": [f"{page}盲区"] if pts else []}, ensure_ascii=False)
+        class RouteLLM(StubLLM):
+            """生成 / 评审按模块并行、调用顺序不定：按 system 提示词路由，其余（页面清单、逐页拆解）按顺序出队。"""
+            async def chat(self, messages, model=None, **kw):
+                system = messages[0]["content"]
+                if "Critic" in system:
+                    self.replies.insert(0, review_reply(True))
+                elif "用例字段规范" in system:
+                    self.replies.insert(0, generator_reply(_case()))
+                return await super().chat(messages, model=model, **kw)
+        llm = RouteLLM([outline, page_reply("登录页", ["正常登录", "密码错误"]), page_reply("注册页", ["正常注册", "正常登录"]),
+                        json.dumps({"modules": [], "blind_spots": []})])
+        result = await run_generation("登录与注册需求", llm=llm)
+        assert [m["module"] for m in result.test_points] == ["登录页", "注册页"]
+        assert [p["point"] for p in result.test_points[0]["points"]] == ["正常登录", "密码错误"]
+        assert [p["point"] for p in result.test_points[1]["points"]] == ["正常注册", "正常登录"]  # 不同页面同名测试点各自保留
+        assert result.blind_spots[:2] == ["登录页盲区", "注册页盲区"]
+        assert result.trace[0] == {"agent": "页面清单", "pages": ["登录页", "注册页", "空页"]}
+        pages_trace = [t for t in result.trace if t.get("page")]
+        assert [t["page"] for t in pages_trace] == ["登录页", "注册页", "空页"] and pages_trace[2].get("empty") is True
+        # 逐页请求：只拆解指定页面，并给出全文页面清单
+        user = llm.calls[1]["messages"][-1]["content"]
+        assert "只拆解页面 / 功能点「登录页」" in user and "→ 登录页" in user and "  注册页" in user
+        # 页面清单只有 1 项 → 退回整篇一次拆解
+        llm2 = StubLLM([json.dumps({"pages": ["登录页"]}), ANALYST_REPLY, generator_reply(_case()), review_reply(True)])  # 单模块：顺序固定
+        result2 = await run_generation("登录需求", llm=llm2)
+        assert result2.trace[0] == {"agent": "需求分析", "model": "stub"} and len(result2.cases) == 1
+        # 页面清单调用失败 → 退回整篇一次拆解，不影响出稿
+        class OutlineFails(StubLLM):
+            async def chat(self, messages, model=None, **kw):
+                if "页面" in messages[0]["content"] and "清单" in messages[0]["content"]:
+                    raise RuntimeError("模型超时")
+                return await super().chat(messages, model=model, **kw)
+        llm3 = OutlineFails([ANALYST_REPLY, generator_reply(_case()), review_reply(True)])
+        result3 = await run_generation("登录需求", llm=llm3)
+        assert len(result3.cases) == 1
+    finally:
+        settings.analysis_by_page = False
