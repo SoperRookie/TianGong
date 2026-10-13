@@ -3727,11 +3727,14 @@ async def list_plans(
     request: Request, project: str | None = None, mine: bool = False,
     task_id: str | None = None, keyword: str | None = None, status: str | None = None,
     owner: str | None = None, page: int = 0, page_size: int = 20, business_line: str = "",
+    run_state: str = "",
 ) -> dict:
     """计划列表（可按项目过滤）；mine=true 只看分配给我的；task_id 只看引用该任务快照的计划。
 
-    查询条件：keyword（名称 / 项目 / 负责人模糊）、status（计划状态）、owner（负责人精确）。
+    查询条件：keyword（名称 / 项目 / 负责人 / 创建人 / 轮次名模糊）、status（计划状态）、owner（负责人精确）、
+    run_state（最近执行：none 未执行 / running 执行中 / finished 已结束）。
     分页：page ≥ 1 时返回该页并附 total / pages，page=0（默认）返回全部（任务概览、项目概览等内部调用）。
+    status_counts 按筛选前范围（项目 / 业务线 / mine）统计供下拉。
     """
     from app.plans import PLAN_STATUSES, plan_summary
 
@@ -3740,9 +3743,12 @@ async def list_plans(
         _require_project(request, project, "plan.view")
     if status and status not in PLAN_STATUSES:
         raise HTTPException(status_code=400, detail=f"未知计划状态: {status}")
+    if run_state and run_state not in ("none", "running", "finished"):
+        raise HTTPException(status_code=400, detail="run_state 仅支持 none / running / finished")
     kw = (keyword or "").strip().lower()
     out = []
     owners: set[str] = set()
+    status_counts: dict[str, int] = {}
     line_projects = _line_projects(request, business_line)
     for plan in request.app.state.plans.list(project=project):
         if line_projects is not None and plan.get("project") not in line_projects:
@@ -3757,13 +3763,20 @@ async def list_plans(
             continue
         if plan.get("owner"):
             owners.add(plan["owner"])
+        status_counts[plan["status"]] = status_counts.get(plan["status"], 0) + 1
         if status and plan["status"] != status:
             continue
         if owner and plan.get("owner", "") != owner:
             continue
-        if kw and kw not in f"{plan['name']} {plan.get('project', '')} {plan.get('owner', '')}".lower():
-            continue
         latest = plan["runs"][-1] if plan["runs"] else None
+        state = "none" if latest is None else ("finished" if latest.get("finished_at") else "running")
+        if run_state and state != run_state:
+            continue
+        if kw:
+            hay = " ".join(str(x) for x in [plan["name"], plan.get("project", ""), plan.get("owner", ""),
+                                             plan.get("created_by", ""), *(r.get("name", "") for r in plan["runs"])] if x).lower()
+            if kw not in hay:
+                continue
         out.append({
             "task_cases": len(task_items),
             **{k: plan[k] for k in ("plan_id", "name", "project", "owner",
@@ -3780,7 +3793,8 @@ async def list_plans(
         })
     total = len(out)
     if page <= 0:
-        return {"plans": out, "total": total, "owners": sorted(owners)}
+        return {"plans": out, "total": total, "owners": sorted(owners), "status_counts": status_counts,
+                "statuses": PLAN_STATUSES}
     page_size = min(max(1, page_size), 200)
     pages = max(1, -(-total // page_size))
     page = min(max(1, page), pages)
@@ -3788,7 +3802,7 @@ async def list_plans(
     return {
         "plans": out[start:start + page_size], "total": total, "page": page,
         "page_size": page_size, "pages": pages, "owners": sorted(owners),
-        "statuses": PLAN_STATUSES,
+        "statuses": PLAN_STATUSES, "status_counts": status_counts,
     }
 
 
