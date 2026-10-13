@@ -86,14 +86,31 @@ def note_prompt(key: str, version_no: int, purpose: str, kind: str = "system") -
     used_prompts.set(cur)
 
 
+def _message_text(m: dict) -> str:
+    content = m.get("content")
+    if isinstance(content, list):  # 多模态：只保留文本片段
+        content = " ".join(str(c.get("text", "")) if isinstance(c, dict) and c.get("type") == "text"
+                           else "[图片]" for c in content)
+    return f"[{m.get('role', '')}] {content}"
+
+
 def _messages_text(messages: list[dict]) -> str:
+    return "\n".join(_message_text(m) for m in messages)
+
+
+def _input_preview(messages: list[dict], limit: int = PREVIEW_CHARS) -> str:
+    """输入预览：按消息平均分配预览额度，长 system 提示词不会把用户消息（需求原文）挤出预览。"""
+    texts = [_message_text(m) for m in messages]
+    if sum(len(t) for t in texts) <= limit:
+        return "\n".join(texts)
+    budget = max(200, limit // max(1, len(texts)))
+    spare = sum(max(0, budget - len(t)) for t in texts)  # 短消息用不完的额度让给长消息
     parts = []
-    for m in messages:
-        content = m.get("content")
-        if isinstance(content, list):  # 多模态：只保留文本片段
-            content = " ".join(str(c.get("text", "")) if isinstance(c, dict) and c.get("type") == "text"
-                               else "[图片]" for c in content)
-        parts.append(f"[{m.get('role', '')}] {content}")
+    for t in texts:
+        cap = budget + (spare if len(t) > budget else 0)
+        if len(t) > cap:
+            t, spare = t[:cap] + f"…（省略 {len(t) - cap} 字）", 0
+        parts.append(t)
     return "\n".join(parts)
 
 
@@ -123,7 +140,7 @@ def record_call(messages: list[dict], result: Any = None, error: Exception | Non
             "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
             "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
             "input_chars": len(text_in), "output_chars": len(content),
-            "input_preview": text_in[:PREVIEW_CHARS], "output_preview": content[:PREVIEW_CHARS],
+            "input_preview": _input_preview(messages), "output_preview": content[:PREVIEW_CHARS],
         }
         from app.db import persist_async
 

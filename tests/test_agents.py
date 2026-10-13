@@ -407,3 +407,32 @@ async def test_单片拆解不做盲区复核():
     llm = StubLLM([ANALYST_REPLY])
     result = await run_analysis("短需求", llm)
     assert len(llm.calls) == 1 and result.blind_spots == ["未说明锁定策略"]
+
+
+async def test_UI检查类用例不生成_兜底剔除并重编号():
+    from app.agents.graph import is_ui_check_case
+
+    ui = make_case("TC-登录-001", title="登录页按钮颜色与布局符合设计稿")
+    biz = make_case("TC-登录-002", title="密码错误 5 次后账号锁定 30 分钟")
+    ui2 = make_case("TC-登录-003", title="横竖屏切换后登录表单显示正常")
+    llm = StubLLM([ANALYST_REPLY, generator_reply(ui, biz, ui2), review_reply(True)])
+    result = await run_generation("登录需求", llm=llm)
+    assert [c.title for c in result.cases] == ["密码错误 5 次后账号锁定 30 分钟"]
+    assert result.cases[0].case_id == "TC-登录-001"  # 剔除后重编号保持连续
+    filt = [t for t in result.trace if t.get("agent") == "UI 检查过滤"]
+    assert filt and filt[0]["removed"] == 2 and "登录页按钮颜色与布局符合设计稿" in filt[0]["titles"]
+    # 常与业务结果同现的词不误判
+    for title in ["余额不足时下注按钮置灰不可点击", "首页展示当前余额 80 元", "提示文案为「账号已锁定」", "无权限用户看不到删除按钮"]:
+        assert not is_ui_check_case({"title": title}), title
+    for title in ["页面字体字号符合规范", "弹窗居中对齐且圆角 8px", "列表项间距一致", "UI 展示正常"]:
+        assert is_ui_check_case({"title": title}), title
+
+
+async def test_生成结果全部为UI检查类时报错():
+    import pytest as _pt
+    from app.agents.json_utils import LLMOutputError
+
+    ui = make_case("TC-登录-001", title="登录页整体样式与设计稿一致")
+    llm = StubLLM([ANALYST_REPLY, generator_reply(ui), review_reply(True)])
+    with _pt.raises(LLMOutputError, match="UI 检查类"):
+        await run_generation("登录需求", llm=llm)
