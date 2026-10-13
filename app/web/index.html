@@ -6764,7 +6764,7 @@ async function saveAccessMode(mode) {
     await reloadMe(); getProjects(true);
   } catch (e) { toast(e.message, 'err'); refreshUsers(); }
 }
-async function refreshUsers() { return (() => keepScroll('users', [usersPage, usersSize, usersKw, usersRole, usersStatus].join('|'), _refreshUsers__impl))(); }
+async function refreshUsers() { return (() => keepScroll('users', [usersPage, usersSize, usersKw, usersRole, usersStatus, usersProject, usersTotp].join('|'), _refreshUsers__impl))(); }
 async function _refreshUsers__impl() {
   try {
     window._authSettings = await api('/api/v1/auth/settings').catch(()=>window._authSettings);
@@ -6774,24 +6774,24 @@ async function _refreshUsers__impl() {
     if (usersKw.trim()) q.set('keyword', usersKw.trim());
     if (usersRole) q.set('role', usersRole);
     if (usersStatus) q.set('status', usersStatus);
+    if (usersProject) q.set('project', usersProject);
+    if (usersTotp) q.set('totp', usersTotp);
     const data = await api('/api/v1/auth/users?' + q);
     _usersCache = data.users;
-    usersPage = data.page;
+    usersPage = data.page;  // 后端已按总页数收敛
+    const rc = data.role_counts || {}, sc = data.status_counts || {};
+    const scopeTotal = Object.values(rc).reduce((a, b) => a + b, 0);
+    const filtering = usersKw.trim() || usersRole || usersStatus || usersProject || usersTotp;
     const fmt = t => esc(fmtTime(t));
-    const first = data.total ? (data.page - 1) * data.page_size + 1 : 0, last = Math.min(data.page * data.page_size, data.total);
-    const pager = `<div class="filters" style="justify-content:flex-end;align-items:center">
-      <span class="hint">共 ${data.total} 人 · 第 ${data.page}/${data.pages} 页（${first}-${last}）</span>
-      <label class="check">每页 <select style="width:70px" onchange="usersSet('size', parseInt(this.value))">${[10,20,50,100].map(s => `<option value="${s}" ${usersSize===s?'selected':''}>${s}</option>`).join('')}</select></label>
-      <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="usersSet('page', 1)">«</button>
-      <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="usersSet('page', ${data.page-1})">上一页</button>
-      <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="usersSet('page', ${data.page+1})">下一页</button>
-      <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="usersSet('page', ${data.pages})">»</button></div>`;
+    const opt = (v, l, cur) => `<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`;
+    const projects = [...new Set([...(data.projects||[]), ...(usersProject?[usersProject]:[])])];
     $('usersList').innerHTML = `<div class="filters" style="margin-bottom:8px">
-      <input type="text" placeholder="搜索用户名 / 姓名 / 邮箱 / 手机" value="${esc(usersKw)}" style="width:220px" onchange="usersSet('kw', this.value)">
-      <select style="width:110px" onchange="usersSet('role', this.value)"><option value="">全部角色</option><option value="admin" ${usersRole==='admin'?'selected':''}>admin</option><option value="member" ${usersRole==='member'?'selected':''}>member</option></select>
-      <select style="width:110px" onchange="usersSet('status', this.value)"><option value="">全部状态</option><option value="active" ${usersStatus==='active'?'selected':''}>正常</option><option value="disabled" ${usersStatus==='disabled'?'selected':''}>已禁用</option></select>
-      ${usersKw||usersRole||usersStatus?`<button class="btn ghost sm" onclick="usersKw='';usersRole='';usersStatus='';usersSet('page',1)">清除筛选</button>`:''}</div>
-    ${data.total ? '' : '<div class="empty">没有符合条件的用户</div>'}
+      <input type="search" placeholder="搜索用户名 / 姓名 / 邮箱 / 手机 / 所属项目" value="${esc(usersKw)}" style="width:250px" onchange="usersSet('kw', this.value)" onkeydown="if(event.key==='Enter'){usersSet('kw', this.value)}">
+      <select style="width:130px" onchange="usersSet('role', this.value)"><option value="">全部角色</option>${[['admin','系统管理员'],['member','普通成员']].map(([v,l])=>opt(v, `${l}（${rc[v]||0}）`, usersRole)).join('')}</select>
+      <select style="width:120px" onchange="usersSet('status', this.value)"><option value="">全部状态</option>${[['active','正常'],['disabled','已禁用']].map(([v,l])=>opt(v, `${l}（${sc[v]||0}）`, usersStatus)).join('')}</select>
+      ${projects.length?`<select style="width:140px" onchange="usersSet('project', this.value)"><option value="">所属项目</option>${projects.map(p=>opt(p, p, usersProject)).join('')}</select>`:''}
+      <select style="width:120px" onchange="usersSet('totp', this.value)"><option value="">两步验证</option>${[['on','已绑定'],['off','未绑定']].map(([v,l])=>opt(v, l, usersTotp)).join('')}</select>
+      ${filtering?`<span class="hint">筛选出 ${data.total} 人</span><button class="btn ghost sm" onclick="usersSet('reset')">清除筛选</button>`:`<span class="hint">共 ${scopeTotal} 人</span>`}</div>
     <div class="tbl-wrap" style="margin-top:0"><table>
       <tr><th>用户名</th><th>姓名</th><th>邮箱 / 手机</th><th>系统角色</th><th>状态</th><th>所属项目</th><th>两步验证</th><th>最后登录</th><th>创建时间</th><th style="width:110px">操作</th></tr>
       ${data.users.map(u => `<tr style="${u.status==='disabled'?'opacity:.6':''}">
@@ -6808,14 +6808,15 @@ async function _refreshUsers__impl() {
           <button class="ibtn" title="编辑资料 / 角色 / 状态 / 重置密码" onclick="openUserEdit(${jsq(u.username)})">${IC.edit}</button>
           ${curUser&&u.username===curUser.username?'':`<button class="ibtn ${u.status==='disabled'?'ok':''}" title="${u.status==='disabled'?'启用':'禁用'}" onclick="toggleUserStatus(${jsq(u.username)},'${u.status==='disabled'?'active':'disabled'}')">${u.status==='disabled'?IC.check:IC.x}</button>`}
           ${curUser&&u.username===curUser.username?'':`<button class="ibtn bad" title="删除" onclick="deleteUser(${jsq(u.username)})">${IC.trash}</button>`}
-        </div></td></tr>`).join('')}
-    </table></div>${pager}`;
+        </div></td></tr>`).join('') || `<tr><td colspan="10"><div class="empty">${filtering?'没有符合筛选条件的用户':'暂无用户'}</div></td></tr>`}
+    </table></div>${data.total > PT_PAGE_SIZES[0] || usersPage > 1 ? pagerHtml(data.total, usersPage, usersSize, 'usersSet', '人') : ''}`;
   } catch (e) { toast(e.message, 'err'); }
 }
-let _usersCache = [], usersPage = 1, usersSize = 20, usersKw = '', usersRole = '', usersStatus = '';
+let _usersCache = [], usersPage = 1, usersSize = 20, usersKw = '', usersRole = '', usersStatus = '', usersProject = '', usersTotp = '';
 function usersSet(field, value) {
   if (field === 'page') usersPage = value;
-  else { if (field === 'size') usersSize = value; else if (field === 'kw') usersKw = value; else if (field === 'role') usersRole = value; else if (field === 'status') usersStatus = value; usersPage = 1; }
+  else if (field === 'reset') { usersKw = ''; usersRole = ''; usersStatus = ''; usersProject = ''; usersTotp = ''; usersPage = 1; }
+  else { if (field === 'size') usersSize = value; else if (field === 'kw') usersKw = (value || '').trim(); else if (field === 'role') usersRole = value; else if (field === 'status') usersStatus = value; else if (field === 'project') usersProject = value; else if (field === 'totp') usersTotp = value; usersPage = 1; }
   refreshUsers();
 }
 function openUserDlg() {

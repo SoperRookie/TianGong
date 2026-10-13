@@ -452,35 +452,45 @@ class UserBody(BaseModel):
 
 @router.get("/api/v1/auth/users")
 async def auth_list_users(
-    request: Request, keyword: str = "", role: str = "", status: str = "", project: str = "",
+    request: Request, keyword: str = "", role: str = "", status: str = "", project: str = "", totp: str = "",
     page: int = 0, page_size: int = 20,
 ) -> dict:
     """用户列表（管理员）：含资料/状态/最后登录，并附所属项目与项目角色（3.1「查看所属项目」）。
 
-    keyword 匹配用户名 / 姓名 / 邮箱 / 手机；role / status / project 精确筛选；page 为 0 时返回全部（兼容内部调用）。
+    keyword 匹配用户名 / 姓名 / 邮箱 / 手机 / 所属项目；role / status / project 精确筛选；totp=on/off 按两步验证筛；
+    role_counts / status_counts / projects 按全集统计（不随筛选变化）；page 为 0 时返回全部（兼容内部调用）。
     """
     _require_admin(request)
+    if totp and totp not in ("on", "off"):
+        raise HTTPException(status_code=400, detail="totp 仅支持 on / off")
     pstore = request.app.state.projects
     users = request.app.state.auth.list_users()
     for u in users:
         u["projects"] = pstore.projects_of(u["username"])
+    role_counts = {r: sum(1 for u in users if u.get("role") == r) for r in ("admin", "member")}
+    status_counts = {st: sum(1 for u in users if u.get("status", "active") == st) for st in ("active", "disabled")}
+    projects = sorted({p["project"] for u in users for p in u["projects"]})
     kw = keyword.strip().lower()
     if kw:
-        users = [u for u in users if any(kw in str(u.get(k) or "").lower() for k in ("username", "name", "email", "phone"))]
+        users = [u for u in users if any(kw in str(u.get(k) or "").lower() for k in ("username", "name", "email", "phone"))
+                 or any(kw in p["project"].lower() for p in u["projects"])]
     if role:
         users = [u for u in users if u.get("role") == role]
     if status:
-        users = [u for u in users if u.get("status") == status]
+        users = [u for u in users if u.get("status", "active") == status]
     if project:
         users = [u for u in users if any(p["project"] == project for p in u["projects"])]
+    if totp:
+        users = [u for u in users if bool(u.get("totp_enabled")) == (totp == "on")]
     total = len(users)
+    meta = {"total": total, "role_counts": role_counts, "status_counts": status_counts, "projects": projects}
     if page <= 0:
-        return {"users": users, "total": total}
+        return {"users": users, **meta}
     page_size = min(max(1, page_size), 200)
     pages = max(1, -(-total // page_size))
     page = min(max(1, page), pages)
     start = (page - 1) * page_size
-    return {"users": users[start:start + page_size], "total": total, "page": page, "page_size": page_size, "pages": pages}
+    return {"users": users[start:start + page_size], **meta, "page": page, "page_size": page_size, "pages": pages}
 
 
 @router.get("/api/v1/auth/users/lookup")
