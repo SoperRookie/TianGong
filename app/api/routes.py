@@ -6507,7 +6507,7 @@ async def ai_tasks(request: Request, status: str = "", project: str = "", mine: 
 @router.get("/api/v1/ai/calls")
 async def ai_calls_list(
     request: Request, project: str = "", task_id: str = "", requirement_id: str = "", purpose: str = "",
-    model: str = "", status: str = "", by: str = "", days: int = 0, page: int = 1, page_size: int = 50,
+    model: str = "", status: str = "", by: str = "", keyword: str = "", days: int = 0, page: int = 1, page_size: int = 50,
 ) -> dict:
     from app.llm.calllog import list_calls
 
@@ -6519,7 +6519,8 @@ async def ai_calls_list(
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
     return list_calls(project=project or None, task_id=task_id or None, requirement_id=requirement_id or None,
                       purpose=purpose or None, model=model or None, status=status or None, by=by or None,
-                      since=since, visible=_visible_projects(request), page=max(1, page), page_size=min(200, max(1, page_size)))
+                      keyword=keyword.strip() or None, since=since, visible=_visible_projects(request),
+                      page=max(1, page), page_size=min(200, max(1, page_size)))
 
 
 @router.get("/api/v1/ai/calls/{call_id}")

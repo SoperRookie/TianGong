@@ -4721,7 +4721,20 @@ function renderOfflineDiff(o) {
 const PROMPT_NAMES = {analyst:'需求拆解', requirement_analysis:'需求分析', generator:'用例生成', reviewer:'用例评审', fix_instruction:'定点修正指令',
   gap_check:'覆盖查漏', dup_judge:'语义查重', point_fix:'测试点修改', case_fix:'用例修改', requirement_diff:'需求变更', learning:'修改习惯学习',
   point_supplement:'测试点补充', point_compare:'人工与 AI 测试点对比', vision_image:'图片理解', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
-let aiTab = 'tasks', aiStatus = '', aiMine = false, aiCallPage = 1, aiCallPurpose = '', aiCallStatus = '', aiCallModel = '', aiDays = 30;
+let aiTab = 'tasks', aiStatus = '', aiMine = false, aiCallPage = 1, aiCallSize = 50, aiCallPurpose = '', aiCallStatus = '', aiCallModel = '', aiCallBy = '', aiCallProject = '', aiCallKw = '', aiDays = 30;
+function acallSet(name, value) {
+  if (name === 'page') aiCallPage = value;
+  else if (name === 'size') { aiCallSize = value; aiCallPage = 1; }
+  else if (name === 'days') { aiDays = value; aiCallPage = 1; }
+  else if (name === 'purpose') { aiCallPurpose = value; aiCallPage = 1; }
+  else if (name === 'status') { aiCallStatus = value; aiCallPage = 1; }
+  else if (name === 'model') { aiCallModel = value; aiCallPage = 1; }
+  else if (name === 'by') { aiCallBy = value; aiCallPage = 1; }
+  else if (name === 'project') { aiCallProject = value; aiCallPage = 1; }
+  else if (name === 'kw') { aiCallKw = (value || '').trim(); aiCallPage = 1; }
+  else if (name === 'reset') { aiCallPurpose = ''; aiCallStatus = ''; aiCallModel = ''; aiCallBy = ''; aiCallProject = ''; aiCallKw = ''; aiCallPage = 1; }
+  renderAiCenter();
+}
 const ERROR_KIND_HINT = {
   quota: '模型欠费或配额用尽：请充值，或在「模型配置」切换默认模型后继续',
   auth: '模型密钥无效或未配置：请检查 .env 中的密钥后继续',
@@ -4792,16 +4805,26 @@ function promptVersionsCell(pv) {
   return `<details><summary class="hint" style="cursor:pointer;list-style:none">${ents.length} 个 Prompt${custom?`（${custom} 个定制版）`:'（均内置 v1）'} ▾</summary><div style="margin-top:4px">${codes.join(' ')}</div></details>`;
 }
 async function aiCallsHtml() {
-  const q = new URLSearchParams({page: aiCallPage, page_size: 50, days: aiDays});
-  if (curProjectName) q.set('project', curProjectName); if (aiCallPurpose) q.set('purpose', aiCallPurpose); if (aiCallStatus) q.set('status', aiCallStatus); if (aiCallModel) q.set('model', aiCallModel);
+  const q = new URLSearchParams({page: aiCallPage, page_size: aiCallSize, days: aiDays});
+  if (curProjectName) q.set('project', curProjectName); else if (aiCallProject) q.set('project', aiCallProject);
+  if (aiCallPurpose) q.set('purpose', aiCallPurpose); if (aiCallStatus) q.set('status', aiCallStatus); if (aiCallModel) q.set('model', aiCallModel);
+  if (aiCallBy) q.set('by', aiCallBy); if (aiCallKw) q.set('keyword', aiCallKw);
   const data = await api('/api/v1/ai/calls?' + q);
-  const pages = Math.max(1, Math.ceil(data.total / 50));
-  return `<div class="toolbar" style="margin-bottom:10px">
-      <select style="width:120px" onchange="aiDays=+this.value;aiCallPage=1;renderAiCenter()">${[[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${aiDays===v?'selected':''}>${l}</option>`).join('')}</select>
-      <select style="width:150px" onchange="aiCallPurpose=this.value;aiCallPage=1;renderAiCenter()"><option value="">全部用途</option>${Object.values(PROMPT_NAMES).filter(n=>!n.startsWith('注入')).map(n=>`<option ${aiCallPurpose===n?'selected':''}>${n}</option>`).join('')}<option ${aiCallPurpose==='模型连通性测试'?'selected':''}>模型连通性测试</option></select>
-      <select style="width:100px" onchange="aiCallStatus=this.value;aiCallPage=1;renderAiCenter()"><option value="">全部状态</option><option value="ok" ${aiCallStatus==='ok'?'selected':''}>成功</option><option value="error" ${aiCallStatus==='error'?'selected':''}>失败</option></select>
-      <input type="text" placeholder="模型名" value="${esc(aiCallModel)}" style="width:130px" onchange="aiCallModel=this.value;aiCallPage=1;renderAiCenter()">
-      <span class="hint">共 ${data.total} 次</span></div>
+  aiCallPage = data.page;  // 后端已按总页数收敛
+  const pc = data.purpose_counts || {}, sc = data.status_counts || {};
+  const scopeTotal = Object.values(pc).reduce((a, b) => a + b, 0);
+  const filtering = aiCallPurpose || aiCallStatus || aiCallModel || aiCallBy || aiCallKw || (!curProjectName && aiCallProject);
+  const withCur = (list, cur) => [...new Set([...(list || []), ...(cur ? [cur] : [])])];
+  const opt = (v, l, cur) => `<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`;
+  return `<div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap">
+      <select style="width:110px" onchange="acallSet('days', +this.value)">${[[1,'今天'],[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${aiDays===v?'selected':''}>${l}</option>`).join('')}</select>
+      <select style="width:160px" onchange="acallSet('purpose', this.value)"><option value="">全部用途</option>${withCur(Object.keys(pc).sort(), aiCallPurpose).map(n=>opt(n, `${n}（${pc[n]||0}）`, aiCallPurpose)).join('')}</select>
+      <select style="width:110px" onchange="acallSet('status', this.value)"><option value="">全部状态</option>${[['ok','成功'],['error','失败']].map(([v,l])=>opt(v, `${l}（${sc[v]||0}）`, aiCallStatus)).join('')}</select>
+      ${(data.models||[]).length>1||aiCallModel?`<select style="width:150px" onchange="acallSet('model', this.value)"><option value="">全部模型</option>${withCur(data.models, aiCallModel).map(m=>opt(m, m, aiCallModel)).join('')}</select>`:''}
+      ${(data.users||[]).length>1||aiCallBy?`<select style="width:110px" onchange="acallSet('by', this.value)"><option value="">发起人</option>${withCur(data.users, aiCallBy).map(u=>opt(u, u, aiCallBy)).join('')}</select>`:''}
+      ${!curProjectName&&((data.projects||[]).length>1||aiCallProject)?`<select style="width:130px" onchange="acallSet('project', this.value)"><option value="">全部项目</option>${withCur(data.projects, aiCallProject).map(p=>opt(p, p, aiCallProject)).join('')}</select>`:''}
+      <input type="search" placeholder="搜索用途 / 模型 / 项目 / 任务 / 需求 / 发起人 / 错误" value="${esc(aiCallKw)}" style="width:250px" onchange="acallSet('kw', this.value)" onkeydown="if(event.key==='Enter'){acallSet('kw', this.value)}">
+      ${filtering?`<span class="hint">筛选出 ${data.total} 次</span><button class="btn ghost sm" onclick="acallSet('reset')">清除筛选</button>`:`<span class="hint">共 ${scopeTotal} 次</span>`}</div>
     <div class="tbl-wrap" style="margin-top:0"><table>
       <thead><tr><th style="width:130px">时间</th><th style="width:120px">用途</th><th style="width:130px">模型</th><th>Prompt 版本</th><th style="width:90px">项目</th><th style="width:110px">任务 / 需求</th><th style="width:80px">发起人</th><th style="width:70px">耗时</th><th style="width:100px">Token 入/出</th><th style="width:80px">状态</th></tr></thead>
       <tbody>${data.items.map(c => `<tr class="rowlink" onclick="openAiCall(${c.id})">
@@ -4813,11 +4836,8 @@ async function aiCallsHtml() {
         <td class="hint">${esc(c.by||'')}</td><td class="hint">${c.elapsed_ms} ms${c.attempts>1?`<div>${c.attempts} 次尝试</div>`:''}</td>
         <td class="hint">${c.prompt_tokens||0} / ${c.completion_tokens||0}</td>
         <td>${c.status==='ok'?'<span class="st approved">成功</span>':`<span class="st rejected" title="${esc(c.error)}">失败</span>`}${c.finish_reason==='length'?'<div class="hint" style="color:var(--warn)">输出截断</div>':''}</td></tr>`).join('')
-        || '<tr><td colspan="10"><div class="empty">暂无调用记录</div></td></tr>'}</tbody></table></div>
-    <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
-      <button class="btn ghost sm" ${aiCallPage<=1?'disabled':''} onclick="aiCallPage--;renderAiCenter()">上一页</button>
-      <span class="hint">${aiCallPage} / ${pages}</span>
-      <button class="btn ghost sm" ${aiCallPage>=pages?'disabled':''} onclick="aiCallPage++;renderAiCenter()">下一页</button></div>`;
+        || `<tr><td colspan="10"><div class="empty">${filtering ? '没有符合筛选条件的调用记录' : (aiDays ? '该时间范围内暂无调用记录' : '暂无调用记录')}</div></td></tr>`}</tbody></table></div>
+    ${data.total > PT_PAGE_SIZES[0] || aiCallPage > 1 ? pagerHtml(data.total, aiCallPage, aiCallSize, 'acallSet', '次') : ''}`;
 }
 async function openAiCall(id) {
   let c; try { c = await api('/api/v1/ai/calls/' + id); } catch (e) { return toast(e.message, 'err'); }
