@@ -200,6 +200,27 @@ async def outline_requirement(llm: LLMClient, requirement: str, model: str | Non
     return [str(m).strip() for m in data.get("modules", []) if str(m).strip()]
 
 
+def _blind_spots(data: dict) -> list[str]:
+    """盲区列表：兼容键名别名与对象形态（{"description": ...}）。"""
+    keys = ("blind_spots", "blindSpots", "blind_spot", "盲区", "需求盲区")
+    raw = next((data[k] for k in keys if isinstance(data.get(k), list)), None)
+    if raw is None:  # 与模块列表一样兼容一层 result / data 包装
+        for w in ("result", "data", "output", "analysis", "response"):
+            inner = data.get(w)
+            if isinstance(inner, dict):
+                raw = next((inner[k] for k in keys if isinstance(inner.get(k), list)), None)
+                if raw is not None:
+                    break
+    out: list[str] = []
+    raw = raw or []
+    for b in raw:
+        if isinstance(b, dict):
+            b = next((v for k in ("description", "desc", "point", "text", "content", "question", "盲区") if isinstance((v := b.get(k)), str)), "")
+        if isinstance(b, (str, int, float)) and str(b).strip():
+            out.append(str(b).strip())
+    return out
+
+
 async def analyze_requirement(
     llm: LLMClient, requirement: str, model: str | None, knowledge_cases: str | None = None,
     outline: list[str] | None = None, chunk_no: int = 0, chunk_total: int = 0,
@@ -224,18 +245,25 @@ async def analyze_requirement(
         model,
         reasoning_effort="high",  # 拆解是理解需求的关键一步：推理型模型用最高强度
     )
-    from app.tasks.points import normalize_points
+    from app.tasks.points import extract_modules, normalize_points
 
-    modules = normalize_points(data.get("modules", []))
+    modules = [m for m in normalize_points(extract_modules(data)) if m["points"]]
     logger.info(
         "需求分析完成：{} 个模块 / {} 个测试点 / {} 条盲区",
         len(modules), sum(len(m.get("points", [])) for m in modules), len(data.get("blind_spots", [])),
     )
     if not modules:
-        raise LLMOutputError("需求拆解未输出任何测试点（模型返回结构异常）")
+        keys = "、".join(map(str, data.keys())) if isinstance(data, dict) else type(data).__name__
+        head = (result.content or "").strip().replace("\n", " ")[:300]
+        logger.error("需求拆解未解析出测试点：模型 {}，finish_reason={}，顶层键 [{}]，输出 {} 字：{}",
+                     result.model_name, getattr(result, "finish_reason", None), keys, len(result.content or ""), head)
+        raise LLMOutputError(
+            f"需求拆解未输出任何测试点（模型 {result.model_name} 返回结构异常：顶层键 [{keys}]，"
+            f"finish_reason={getattr(result, 'finish_reason', None)}；输出开头：{head[:120]}）"
+        )
     return {
         "test_points": modules,
-        "blind_spots": [str(b).strip() for b in (data.get("blind_spots") or []) if isinstance(b, (str, int, float)) and str(b).strip()],
+        "blind_spots": _blind_spots(data),
         "model_name": result.model_name,
     }
 

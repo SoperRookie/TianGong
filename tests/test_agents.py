@@ -223,3 +223,46 @@ async def test_长需求分片拆解_先出全文大纲再注入各片():
     assert "全文模块大纲" in first_user and "第 1/2 片" in first_user and "道具系统-背包" in first_user
     # 大纲用 low、拆解用 high
     assert llm.calls[0].get("reasoning_effort", None) in (None, "low")
+
+
+def test_normalize_points_兼容键名别名与顶层数组():
+    from app.agents.json_utils import extract_json
+    from app.tasks.points import extract_modules, normalize_points
+
+    # 模块名 / 测试点列表 / 测试点文本 / 维度 使用别名
+    mods = normalize_points([
+        {"name": "登录", "test_points": [{"description": "正常登录", "type": "正常流程"}, {"test_point": "密码错误"}, "字符串点"]},
+        {"模块": "注册", "测试点": [{"title": "验证码过期", "维度": "异常流程"}]},
+        {"module": "空模块", "points": [{"foo": "没有文本键"}]},
+    ])
+    assert mods[0]["module"] == "登录" and [p["point"] for p in mods[0]["points"]] == ["正常登录", "密码错误", "字符串点"]
+    assert mods[0]["points"][0]["dimension"] == "正常流程"
+    assert mods[1] == {"module": "注册", "points": [{"point": "验证码过期", "dimension": "异常流程"}]}
+    assert mods[2]["points"] == []
+    # 顶层数组 / 别名键 / result 包装 / 模块名→列表 的字典形态
+    assert extract_modules([{"module": "A", "points": ["x"]}])[0]["module"] == "A"
+    assert extract_modules({"test_points": [{"module": "A", "points": ["x"]}]})[0]["module"] == "A"
+    assert extract_modules({"result": {"modules": [{"module": "A", "points": ["x"]}]}})[0]["module"] == "A"
+    assert normalize_points(extract_modules({"modules": {"登录": ["正常登录"], "注册": ["正常注册"]}}))[1]["points"][0]["point"] == "正常注册"
+    assert extract_modules({"foo": "bar"}) == []
+    assert extract_json('[{"module": "A", "points": ["x"]}]') == {"modules": [{"module": "A", "points": ["x"]}]}
+
+
+async def test_拆解结果格式改写仍能解析_完全异常时报错带诊断():
+    import json
+
+    import pytest
+
+    from app.agents.graph import analyze_requirement
+    from app.agents.json_utils import LLMOutputError
+
+    reply = json.dumps({"result": {"test_points": [{"name": "登录", "items": [{"description": "正常登录", "type": "正常流程"}]}],
+                                   "blind_spots": [{"description": "未说明锁定策略"}]}}, ensure_ascii=False)
+    llm = StubLLM([reply])
+    a = await analyze_requirement(llm, "登录需求", None)
+    assert a["test_points"] == [{"module": "登录", "points": [{"point": "正常登录", "dimension": "正常流程"}]}]
+    assert a["blind_spots"] == ["未说明锁定策略"]  # 对象形态 + result 包装
+    llm = StubLLM([json.dumps({"summary": "无法拆解", "modules": []})])
+    with pytest.raises(LLMOutputError) as e:
+        await analyze_requirement(llm, "登录需求", None)
+    assert "顶层键 [summary、modules]" in str(e.value) and "stub" in str(e.value)

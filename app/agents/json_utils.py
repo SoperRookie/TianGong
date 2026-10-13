@@ -40,6 +40,11 @@ def extract_json(text: str) -> dict:
             continue
         if isinstance(data, dict):
             return data
+        if isinstance(data, list) and data and all(isinstance(x, dict) for x in data):
+            # 模型直接返回了顶层数组：按元素特征包成约定结构（用例列表 / 拆解模块列表）
+            if all("case_id" in x or "title" in x for x in data) and any("steps" in x for x in data):
+                return {"cases": data}
+            return {"modules": data}
 
     salvaged = _salvage(text)
     if salvaged is not None:
