@@ -436,3 +436,27 @@ async def test_生成结果全部为UI检查类时报错():
     llm = StubLLM([ANALYST_REPLY, generator_reply(ui), review_reply(True)])
     with _pt.raises(LLMOutputError, match="UI 检查类"):
         await run_generation("登录需求", llm=llm)
+
+
+async def test_测试点带来源需求点_拆解到确认生成全程保留():
+    import json
+    from app.tasks.points import add_points, confirmable_points, normalize_points
+
+    reply = json.dumps({"modules": [{"module": "登录页", "points": [
+        {"point": "密码错误 5 次锁定 30 分钟", "dimension": "异常流程", "ref": "3.2 登录失败处理"},
+        {"point": "正常登录", "dimension": "正常流程", "需求点": "3.1 登录"},
+        {"point": "没有来源的点", "dimension": "正常流程"}]}], "blind_spots": []}, ensure_ascii=False)
+    llm = StubLLM([reply, generator_reply(_case()), review_reply(True)])
+    result = await run_generation("登录需求", llm=llm)
+    pts = result.test_points[0]["points"]
+    assert pts[0]["ref"] == "3.2 登录失败处理" and pts[1]["ref"] == "3.1 登录" and "ref" not in pts[2]
+    # 实体化 / 修改 / 确认生成都保留；过长截断
+    mods = normalize_points([{"module": "登录页", "points": []}])
+    added = add_points(mods, [{"module": "登录页", "point": "新点", "ref": "x" * 200}, {"module": "登录页", "point": "无来源"}], source="gap")
+    assert len(added[0]["ref"]) == 120 and "ref" not in added[1]
+    for p in mods[0]["points"]:
+        p["status"] = "approved"
+    out = confirmable_points(mods)[0]["points"]
+    assert out[0]["ref"] == "x" * 120 and "ref" not in out[1]
+    # 生成 Agent 收到的测试点带 ref
+    assert "3.2 登录失败处理" in llm.calls[1]["messages"][-1]["content"]

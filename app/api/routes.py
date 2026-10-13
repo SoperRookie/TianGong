@@ -1042,7 +1042,7 @@ async def _run_point_quality_checks(app, task_id: str, requirement: str, model: 
         added = add_points(
             modules,
             [{"module": a.get("module", ""), "point": a.get("point", ""),
-              "dimension": a.get("dimension", "")} for a in gap["additions"]],
+              "dimension": a.get("dimension", ""), "ref": a.get("ref", "")} for a in gap["additions"]],
             source="gap", seq_floor=tp_seq_of(record.analysis),
         )
         bump_tp_seq(record.analysis)
@@ -1795,7 +1795,8 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
         test_points = [
             {"module": e["module"],
              "points": [{"point": p["point"], "dimension": p.get("dimension", ""),
-                         **({"tp_id": p["tp_id"]} if p.get("tp_id") else {})} for p in e["points"]]}
+                         **({"tp_id": p["tp_id"]} if p.get("tp_id") else {}),
+                         **({"ref": p["ref"]} if p.get("ref") else {})} for p in e["points"]]}
             for e in test_points if e.get("points")
         ]
     else:
@@ -1845,7 +1846,8 @@ def _points_pending_generation(record: TaskRecord) -> list[dict]:
     out: dict[str, list[dict]] = {}
     for entry, p in iter_points((record.analysis or {}).get("test_points") or []):
         if p.get("status") == "approved" and p.get("tp_id") and p["tp_id"] not in generated:
-            out.setdefault(entry["module"], []).append({"point": p["point"], "dimension": p.get("dimension", ""), "tp_id": p["tp_id"]})
+            out.setdefault(entry["module"], []).append({"point": p["point"], "dimension": p.get("dimension", ""), "tp_id": p["tp_id"],
+                                                       **({"ref": p["ref"]} if p.get("ref") else {})})
     return [{"module": m, "points": pts} for m, pts in out.items()]
 
 
@@ -2850,7 +2852,7 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
     added = add_points(
         modules,
         [{"module": a.get("module", ""), "point": a.get("point", ""),
-          "dimension": a.get("dimension", "")} for a in gap["additions"]],
+          "dimension": a.get("dimension", ""), "ref": a.get("ref", "")} for a in gap["additions"]],
         source="gap", seq_floor=tp_seq_of(record.analysis),
     )
     bump_tp_seq(record.analysis)
@@ -6582,8 +6584,15 @@ async def ai_stats(request: Request, days: int = 30, project: str = "") -> dict:
 
 
 @router.get("/api/v1/ai/prompts")
-async def list_prompts(request: Request) -> dict:
-    return {"prompts": request.app.state.prompts.list()}
+async def list_prompts(request: Request, kind: str = "", state: str = "", keyword: str = "",
+                       page: int = 1, page_size: int = 0) -> dict:
+    """Prompt 列表：kind=system/user/block，state=builtin/customized/draft；page_size=0 不分页。"""
+    store = request.app.state.prompts
+    if kind and kind not in ("system", "user", "block"):
+        raise HTTPException(status_code=400, detail="kind 仅支持 system / user / block")
+    if state and state not in store.STATES:
+        raise HTTPException(status_code=400, detail=f"state 仅支持 {' / '.join(store.STATES)}")
+    return store.query(kind=kind, state=state, keyword=keyword, page=max(1, page), page_size=min(200, max(0, page_size)))
 
 
 @router.get("/api/v1/ai/prompts/{key}")

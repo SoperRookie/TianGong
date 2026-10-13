@@ -120,10 +120,10 @@ async def test_测试点导出xlsx_全部与仅已通过(tmp_path):
             r = await client.get(f"/api/v1/tasks/{task_id}/points/export")
             assert r.status_code == 200
             rows = rows_of(r.content)
-            assert rows[0][:6] == ["编号", "模块", "测试点", "维度", "来源", "状态"] and len(rows) == 1 + len(pts)
+            assert rows[0][:7] == ["编号", "模块", "测试点", "维度", "来源需求点", "来源", "状态"] and len(rows) == 1 + len(pts)
             by_id = {row[0]: row for row in rows[1:]}
-            assert by_id[pts[0]["tp_id"]][5] == "已通过" and by_id[pts[0]["tp_id"]][4] == "AI 拆解" and by_id[pts[0]["tp_id"]][8] == "否"
-            assert any(row[4] == "查漏新增" for row in rows[1:])
+            assert by_id[pts[0]["tp_id"]][6] == "已通过" and by_id[pts[0]["tp_id"]][5] == "AI 拆解" and by_id[pts[0]["tp_id"]][9] == "否"
+            assert any(row[5] == "查漏新增" for row in rows[1:])
             r = await client.get(f"/api/v1/tasks/{task_id}/points/export?scope=approved")
             rows = rows_of(r.content)
             assert len(rows) == 2 and rows[1][0] == pts[0]["tp_id"]
