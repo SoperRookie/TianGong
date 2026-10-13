@@ -4495,33 +4495,67 @@ def _req_trace(request: Request, item: dict) -> dict:
 async def list_requirements(
     request: Request, project: str | None = None, status: str = "", keyword: str = "",
     module_id: str = "", version_id: str = "", include_deleted: bool = False, business_line: str = "",
+    source_type: str = "", created_by: str = "", page: int = 1, page_size: int = 0,
 ) -> dict:
-    from app.requirements import REQ_STATUSES
+    """需求列表：筛选（状态 / 模块 / 版本 / 来源类型 / 创建人 / 关键词）与分页。
 
+    关键词匹配标题、原文、人工补充、附件文件名与解析文本、待确认事项、模块路径；
+    page_size=0（默认）不分页返回全部（对话框等内部调用），列表页传 20 / 50 / 100 / 200；
+    status_counts / creators / source_types 按筛选前范围（项目 / 业务线 / 是否含已删除）统计供下拉。"""
+    from app.requirements import REQ_STATUSES, SOURCE_TYPES
+
+    if page_size and page_size not in CASE_PAGE_SIZES:
+        raise HTTPException(status_code=400, detail=f"page_size 仅支持 {'/'.join(map(str, CASE_PAGE_SIZES))} 或 0（不分页）")
     if project:
         _require_project(request, project, "requirement.view")
     kw = keyword.strip().lower()
     line_projects = _line_projects(request, business_line)
+    mstore = request.app.state.modules
+    scope = [item for item in request.app.state.requirements.list(project or None, include_deleted=include_deleted)
+             if _record_visible(request, item["project"]) and (line_projects is None or item["project"] in line_projects)]
+    status_counts: dict[str, int] = {}
+    for item in scope:
+        status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
+    creators = sorted({item["created_by"] for item in scope if item.get("created_by")})
+
+    def _haystack(item: dict) -> str:
+        parts = [item["title"], item["raw_text"], item.get("description", "")]
+        parts.extend(a.get("filename", "") for a in item.get("attachments", []))
+        parts.extend(a.get("text", "") or "" for a in item.get("attachments", []))
+        parts.extend(q.get("question", "") for q in item.get("questions", []))
+        if item.get("module_id") and mstore.get(item["module_id"]):
+            parts.append(mstore.path(item["module_id"]) or "")
+        return " ".join(str(x) for x in parts if x).lower()
+
     out = []
-    for item in request.app.state.requirements.list(project or None, include_deleted=include_deleted):
-        if not _record_visible(request, item["project"]):
-            continue
-        if line_projects is not None and item["project"] not in line_projects:
-            continue
+    for item in scope:
         if status and item["status"] != status:
             continue
         if module_id and item.get("module_id") != module_id:
             continue
         if version_id and item.get("version_id") != version_id:
             continue
-        if kw and kw not in item["title"].lower() and kw not in item["raw_text"].lower():
+        if source_type and item.get("source_type") != source_type:
+            continue
+        if created_by and item.get("created_by") != created_by:
+            continue
+        if kw and kw not in _haystack(item):
             continue
         v = _req_view(request, item)
         v.pop("raw_text", None)
         v.pop("analysis", None)
         v["questions"] = len(item["questions"])
         out.append(v)
-    return {"requirements": out, "statuses": REQ_STATUSES}
+    total = len(out)
+    if page_size:
+        pages = max(1, -(-total // page_size))
+        page = min(max(1, page), pages)
+        out = out[(page - 1) * page_size: page * page_size]
+    else:
+        pages, page = 1, 1
+    return {"requirements": out, "statuses": REQ_STATUSES, "source_types": SOURCE_TYPES,
+            "total": total, "page": page, "page_size": page_size or total, "pages": pages,
+            "status_counts": status_counts, "creators": creators}
 
 
 @router.post("/api/v1/requirements")

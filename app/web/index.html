@@ -5125,6 +5125,19 @@ async function archivePrompt(no) {
 
 /* ==================== 需求中心（M2） ==================== */
 let curReq = null, _reqDetail = null, _reqsCache = [], reqStatus = '', reqKw = '', reqTab = 'raw', reqDeleted = false, reqLine = '';
+let reqPage = 1, reqSize = 20, reqSource = '', reqCreator = '';
+function reqSet(name, value) {
+  if (name === 'page') reqPage = value;
+  else if (name === 'size') { reqSize = value; reqPage = 1; }
+  else if (name === 'status') { reqStatus = value; reqPage = 1; }
+  else if (name === 'kw') { reqKw = (value || '').trim(); reqPage = 1; }
+  else if (name === 'line') { reqLine = value; reqPage = 1; }
+  else if (name === 'source') { reqSource = value; reqPage = 1; }
+  else if (name === 'creator') { reqCreator = value; reqPage = 1; }
+  else if (name === 'deleted') { reqDeleted = !!value; reqPage = 1; }
+  else if (name === 'reset') { reqStatus = ''; reqKw = ''; reqSource = ''; reqCreator = ''; reqPage = 1; }
+  renderRequirements();
+}
 let _reqSel = new Set();      // 需求列表勾选（合并发起测试设计）
 let _designReqIds = null;     // 设计对话框当前针对的需求：null = 详情页单需求（curReq），数组 = 列表多选
 function reqSelToggle(input) {
@@ -5155,7 +5168,7 @@ function crumbForReqs() {
   else setCrumb('需求列表');
 }
 function openRequirement(id, tab) { curReq = id; reqTab = tab || 'raw'; switchView('requirements'); }
-async function renderRequirements() { return (() => keepScroll('reqs', ['reqs', curReq, reqStatus, reqKw, reqDeleted].join('|'), _renderRequirements__impl))(); }
+async function renderRequirements() { return (() => keepScroll('reqs', ['reqs', curReq, reqStatus, reqKw, reqDeleted, reqSource, reqCreator, reqPage, reqSize].join('|'), _renderRequirements__impl))(); }
 async function _renderRequirements__impl() {
   if (curReq) return renderRequirementDetail();
   crumbForReqs();
@@ -5166,10 +5179,15 @@ async function _renderRequirements__impl() {
   if (reqKw.trim()) q.set('keyword', reqKw.trim());
   if (reqDeleted) q.set('include_deleted', 'true');
   if (reqLine) q.set('business_line', reqLine);
+  if (reqSource) q.set('source_type', reqSource);
+  if (reqCreator) q.set('created_by', reqCreator);
+  q.set('page', reqPage); q.set('page_size', reqSize);
   let data;
   try { data = await api('/api/v1/requirements?' + q); } catch (e) { return toast(e.message, 'err'); }
   if (stale('reqs', _s)) return;
+  reqPage = data.page;  // 后端已按总页数收敛
   _reqsCache = data.requirements;
+  const filtering = reqStatus || reqKw || reqSource || reqCreator;
   const canEdit = curProjectName ? can(curProjectName, 'requirement.edit') : (isSysAdmin() || (curUser.projects||[]).some(p => can(p.project, 'requirement.edit')));
   const alive = new Set(data.requirements.filter(r => !r.deleted_at).map(r => r.req_id));
   for (const id of [..._reqSel]) if (!alive.has(id)) _reqSel.delete(id);   // 列表变化后清掉不在当前列表的勾选
@@ -5190,17 +5208,23 @@ async function _renderRequirements__impl() {
   $('reqArea').innerHTML = `<div class="card">
     <div class="card-h"><h3>需求列表</h3><span class="meta">原文永久保留 · AI 分析 11 项 · 待确认事项确认后才能开始测试设计 · 需求 → 测试点 → 用例 → 计划 → 执行 追溯</span>
       <div class="grow">
-        <input type="text" placeholder="搜索标题 / 原文" value="${esc(reqKw)}" style="width:180px" onchange="reqKw=this.value;renderRequirements()">
-        ${lineSelectHtml(reqLine, "reqLine=this.value;renderRequirements()")}
-        <select style="width:120px" onchange="reqStatus=this.value;renderRequirements()"><option value="">全部状态</option>
-          ${Object.entries(data.statuses).map(([k,v])=>`<option value="${k}" ${reqStatus===k?'selected':''}>${v}</option>`).join('')}</select>
-        <label class="check" title="回收站：已删除的需求可恢复"><input type="checkbox" ${reqDeleted?'checked':''} onchange="reqDeleted=this.checked;renderRequirements()"> 显示已删除</label>
+        <input type="search" placeholder="搜索标题 / 原文 / 附件 / 待确认事项" value="${esc(reqKw)}" style="width:210px"
+          onchange="reqSet('kw', this.value)" onkeydown="if(event.key==='Enter'){reqSet('kw', this.value)}">
+        ${lineSelectHtml(reqLine, "reqSet('line', this.value)")}
+        <select style="width:120px" onchange="reqSet('status', this.value)"><option value="">全部状态</option>
+          ${Object.entries(data.statuses).map(([k,v])=>`<option value="${k}" ${reqStatus===k?'selected':''}>${v}（${(data.status_counts||{})[k]||0}）</option>`).join('')}</select>
+        <select style="width:110px" onchange="reqSet('source', this.value)"><option value="">来源</option>
+          ${Object.entries(data.source_types||{}).map(([k,v])=>`<option value="${k}" ${reqSource===k?'selected':''}>${v}</option>`).join('')}</select>
+        ${(data.creators||[]).length>1?`<select style="width:110px" onchange="reqSet('creator', this.value)"><option value="">创建人</option>
+          ${data.creators.map(u=>`<option value="${esc(u)}" ${reqCreator===u?'selected':''}>${esc(u)}</option>`).join('')}</select>`:''}
+        <label class="check" title="回收站：已删除的需求可恢复"><input type="checkbox" ${reqDeleted?'checked':''} onchange="reqSet('deleted', this.checked)"> 显示已删除</label>
+        ${filtering?`<span class="hint">筛选出 ${data.total} 条</span><button class="btn ghost sm" onclick="reqSet('reset')">清除筛选</button>`:''}
         ${anySel?`<button class="btn ghost" id="reqDesignBtn" ${_reqSel.size?'':'disabled'} title="勾选需求后合并为一个测试设计任务（须同一项目，且必须确认的事项已确认）" onclick="reqMultiDesign()">合并发起测试设计${_reqSel.size?`（${_reqSel.size}）`:''}</button>`:''}
         ${canEdit?`<button class="btn" onclick="openReqDlg()">＋ 新建需求</button>`:''}</div></div>
     <div class="card-b"><div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
-      <thead><tr>${anySel?`<th style="width:30px"><input type="checkbox" title="全选本页可设计的需求" ${(() => { const ids = data.requirements.filter(selectable).map(r => r.req_id); return ids.length && ids.every(id => _reqSel.has(id)) ? 'checked' : ''; })()} onchange="reqSelAll(this.checked)"></th>`:''}<th>需求</th><th style="width:120px">项目 / 版本</th><th style="width:120px">模块</th><th style="width:110px">状态</th><th style="width:130px">来源</th><th style="width:90px">测试设计</th><th style="width:110px">创建</th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="${anySel?8:7}"><div class="empty">${curProjectName?`项目「${esc(curProjectName)}」`:''}暂无需求${canEdit?'，点击「新建需求」录入原文或上传文件':''}</div></td></tr>`}</tbody>
-    </table></div></div></div>`;
+      <thead><tr>${anySel?`<th style="width:30px"><input type="checkbox" title="全选本页可设计的需求（只选本页）" ${(() => { const ids = data.requirements.filter(selectable).map(r => r.req_id); return ids.length && ids.every(id => _reqSel.has(id)) ? 'checked' : ''; })()} onchange="reqSelAll(this.checked)"></th>`:''}<th>需求</th><th style="width:120px">项目 / 版本</th><th style="width:120px">模块</th><th style="width:110px">状态</th><th style="width:130px">来源</th><th style="width:90px">测试设计</th><th style="width:110px">创建</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="${anySel?8:7}"><div class="empty">${filtering ? '没有符合筛选条件的需求' : `${curProjectName?`项目「${esc(curProjectName)}」`:''}暂无需求${canEdit?'，点击「新建需求」录入原文或上传文件':''}`}</div></td></tr>`}</tbody>
+    </table></div>${data.total > PT_PAGE_SIZES[0] || reqPage > 1 ? pagerHtml(data.total, reqPage, reqSize, 'reqSet') : ''}</div></div>`;
 }
 async function fillReqRefs(project) {
   const vs = $('rqVersion'), ms = $('rqModule');
