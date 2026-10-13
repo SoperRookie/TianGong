@@ -778,3 +778,76 @@ async def test_手工新增相似测试点不再被静默跳过(client):
     same = data["test_points"][0]["points"][0]["point"]
     resp = await client.post(f"/api/v1/tasks/{task_id}/points/add", json={"points": [{"module": "登录", "point": same}]})
     assert resp.status_code == 200 and len(resp.json()["added"]) == 1 and resp.json()["skipped"] == []
+
+
+# ---- 需求盲区闭环：转测试点 / 需求已说明 / 忽略 / 重开，质量摘要只数待处置 ----
+
+ANALYST_REPLY_BLIND = json.dumps({
+    "modules": [{"module": "登录", "points": [{"point": "正确账号密码登录成功", "dimension": "正常流程"}]}],
+    "blind_spots": ["未说明锁定时长", "未说明找回密码入口", "未说明验证码有效期"],
+}, ensure_ascii=False)
+
+
+async def test_盲区闭环_处置状态与去向(client):
+    app.state.llm = StubLLM([ANALYST_REPLY_BLIND, GAP_REPLY])
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求", "confirm_points": "true"})
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["task_id"]
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    spots = t["blind_spots"]
+    assert [b["text"] for b in spots] == ["未说明锁定时长", "未说明找回密码入口", "未说明验证码有效期"]
+    assert all(b["status"] == "open" and b["bs_id"].startswith("bs") for b in spots)
+    a, b, c = (x["bs_id"] for x in spots)
+
+    # 转测试点：以待审核测试点追加，来源 blind_spot，去向记 tp_id
+    resp = await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{a}",
+                             json={"action": "to_point", "module": "登录", "dimension": "边界值"})
+    assert resp.status_code == 200, resp.text
+    added = resp.json()["added"][0]
+    assert added["source"] == "blind_spot" and added["module"] == "登录" and added["status"] == "pending"
+    assert added["point"] == "未说明锁定时长" and added["dimension"] == "边界值"
+    assert resp.json()["blind_spot"]["status"] == "point" and resp.json()["blind_spot"]["target"]["tp_id"] == added["tp_id"]
+    # 需求已说明：必须写明出处；已处置的不能再处置，重开后可以
+    assert (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{b}", json={"action": "explain"})).status_code == 400
+    resp = await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{b}", json={"action": "explain", "note": "第 3 节写了 30 分钟"})
+    assert resp.json()["blind_spot"]["status"] == "explained" and resp.json()["blind_spot"]["note"] == "第 3 节写了 30 分钟"
+    assert (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{b}", json={"action": "ignore"})).status_code == 409
+    resp = await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{b}", json={"action": "reopen"})
+    assert resp.json()["blind_spot"]["status"] == "open" and resp.json()["blind_spot"]["history"][0]["status"] == "explained"
+    # 未关联需求的任务不能转待确认事项；非法动作 / 不存在的盲区
+    resp = await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{c}", json={"action": "to_question"})
+    assert resp.status_code == 409 and "未关联需求" in resp.json()["detail"]
+    assert (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{c}", json={"action": "nope"})).status_code == 400
+    assert (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/bs00000000", json={"action": "ignore"})).status_code == 404
+    assert (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{c}", json={"action": "ignore"})).status_code == 200
+
+    # 列表接口：待处置在前
+    spots = (await client.get(f"/api/v1/tasks/{task_id}/blind-spots")).json()["blind_spots"]
+    assert [(x["bs_id"], x["status"]) for x in spots] == [(b, "open"), (a, "point"), (c, "ignored")]
+    # 确认生成后质量摘要「待确认问题」只数待处置的 1 条，处置记录保留
+    app.state.llm = StubLLM([generator_reply(make_case()), review_reply(True)])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={})
+    assert resp.status_code == 200, resp.text
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert t["quality"]["待确认问题"] == 1
+    assert {x["bs_id"]: x["status"] for x in t["blind_spots"]} == {a: "point", b: "open", c: "ignored"}
+    await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{b}", json={"action": "ignore"})
+    assert (await client.get(f"/api/v1/tasks/{task_id}")).json()["quality"]["待确认问题"] == 0
+
+
+def test_盲区实体_AI复核剔除项默认为需求已说明_人工可覆盖():
+    from app.tasks.blind_spots import blind_spot_entities, open_blind_spots, record_blind_spot_action
+    from app.tasks.store import TaskRecord
+
+    rec = TaskRecord(task_id="t1", analysis={
+        "test_points": [], "blind_spots": ["未说明找回密码入口"],
+        "resolved_blind_spots": [{"text": "未说明锁定时长", "evidence": "第 3 片：30 分钟", "chunk": 3}],
+    })
+    ents = blind_spot_entities(rec)
+    assert [(e["text"], e["status"], e.get("ai_resolved", False)) for e in ents] == [
+        ("未说明找回密码入口", "open", False), ("未说明锁定时长", "explained", True)]
+    assert "第 3 片已说明：第 3 片：30 分钟" in ents[1]["note"]
+    assert open_blind_spots(rec) == ["未说明找回密码入口"]
+    # 人工认为 AI 复核错了：重开 → 待处置
+    record_blind_spot_action(rec, ents[1], "reopen", "tester")
+    assert open_blind_spots(rec) == ["未说明找回密码入口", "未说明锁定时长"]

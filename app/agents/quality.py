@@ -83,6 +83,60 @@ async def run_gap_check(
     return {"coverage": coverage, "additions": additions, "model_name": result.model_name}
 
 
+# ---- 分片盲区复核：前面分片的盲区若被后面分片的需求章节说明，就不是盲区 ----
+
+
+async def run_blind_spot_verify(
+    llm: LLMClient, chunks: list[str], blind_spots: list[str], model: str | None
+) -> list[dict]:
+    """用各分片原文逐片复核盲区清单，返回已被原文说明的盲区 [{text, evidence, chunk}]。
+
+    分片拆解时每片只看到自己那段需求，A 片标出的「未说明锁定时长」可能在 C 片写得清清楚楚。
+    每片一次调用并行执行；任一片判定已说明即从盲区中剔除，并保留原文依据供人工核对。
+    LLM 故障时按「无法复核」处理（返回空列表，盲区原样保留），不阻塞拆解。
+    """
+    spots = [b for b in blind_spots if str(b).strip()]
+    if not spots or not chunks:
+        return []
+    listing = _dump([{"index": i, "blind_spot": b} for i, b in enumerate(spots, 1)])
+
+    async def _one(no: int, chunk: str) -> list[dict]:
+        try:
+            data, _ = await _chat_json(
+                llm,
+                [
+                    {"role": "system", "content": prompt_text("blind_spot_verify")},
+                    {"role": "user", "content": f"需求原文（第 {no}/{len(chunks)} 片）：\n{wrap_data('需求原文', chunk)}\n\n"
+                                                f"盲区清单：\n{wrap_data('盲区清单', listing)}"},
+                ],
+                model,
+            )
+        except Exception as e:  # noqa: BLE001 - 复核失败不阻塞拆解：盲区原样保留
+            logger.warning("盲区复核第 {} 片失败（盲区原样保留）：{}", no, e)
+            return []
+        out = []
+        for item in data.get("explained", []) if isinstance(data.get("explained"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                idx = int(item.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= idx <= len(spots):
+                out.append({"text": spots[idx - 1], "evidence": str(item.get("evidence", "")).strip(), "chunk": no})
+        return out
+
+    import asyncio
+
+    results = await asyncio.gather(*[_one(i, c) for i, c in enumerate(chunks, 1)])
+    explained: dict[str, dict] = {}
+    for item in (x for group in results for x in group):
+        explained.setdefault(item["text"], item)  # 多片都说明了：记第一处依据
+    if explained:
+        logger.info("盲区复核：{} 条盲区已被需求其他分片说明，不再视为盲区", len(explained))
+    return list(explained.values())
+
+
 # ---- 重复复核（需求十一~十三）----
 
 
