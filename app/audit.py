@@ -219,6 +219,9 @@ def list_logs(*, project: str | None = None, kind: str | None = None, user: str 
               page: int = 1, page_size: int = 50) -> dict:
     """查询日志。kind_counts / users / projects 按「范围」（项目、时间、安全 / 业务、可见性）统计，
     不随类型 / 操作人 / 关键词 / 只看失败 变化，供筛选下拉显示条数与候选。"""
+    from app.db import wait_persist
+
+    wait_persist()  # 日志走后台写入：刚完成的操作立即打开操作日志也要能看到
     scope = []
     if project:
         scope.append(audit_log.c.project == project)
