@@ -51,6 +51,7 @@ class TaskRecord(BaseModel):
     checkpoint: dict | None = Field(default=None, description="断点续跑检查点：已完成的拆解结果与各模块生成结果，任务完成后清空")
     exec_migrated_to: str | None = Field(default=None, description="M4 执行迁移去向：历史执行轮次搬入的测试计划 plan_id")
     pending_fix: dict | None = Field(default=None, description="待确认的 AI 修改提案（完整需求 7.3/9.4 确认流）：接受/拒绝前不落地")
+    blind_spot_reviews: dict[str, dict] = Field(default_factory=dict, description="需求盲区处置记录：bs_id -> {text, status, note, by, at, target}（转待确认事项 / 转测试点 / 需求已说明 / 忽略）")
     prompt_versions: dict[str, int] = Field(default_factory=dict, description="本任务用到的 Prompt 版本（核心规则 23）")
 
 

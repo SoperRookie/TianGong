@@ -65,6 +65,7 @@ class GenerationResult(BaseModel):
     review_rounds: int
     unresolved: list[dict] = Field(default_factory=list, description="超限强制出稿时的未解决问题")
     blind_spots: list[str] = Field(default_factory=list, description="疑似需求盲区")
+    resolved_blind_spots: list[dict] = Field(default_factory=list, description="分片盲区复核：已被需求其他分片说明而剔除的盲区 [{text, evidence, chunk}]")
     missing: list[str] = Field(default_factory=list, description="评审提示的遗漏场景")
     suggestions: list[str] = Field(default_factory=list, description="评审的非阻断优化建议")
     test_points: list[dict] = Field(default_factory=list)
@@ -76,7 +77,23 @@ class GenerationResult(BaseModel):
 class AnalysisResult(BaseModel):
     test_points: list[dict]
     blind_spots: list[str] = Field(default_factory=list)
+    resolved_blind_spots: list[dict] = Field(default_factory=list, description="分片盲区复核剔除项（含原文依据）")
     trace: list[dict] = Field(default_factory=list)
+
+
+async def _verify_chunk_blind_spots(
+    llm: LLMClient, chunks: list[str], blind_spots: list[str], model: str | None
+) -> tuple[list[str], list[dict], list[dict]]:
+    """分片模式下复核盲区：返回 (保留的盲区, 剔除项, 追加的 trace)。单片不复核（模型已看过全文）。"""
+    if len(chunks) <= 1 or not blind_spots:
+        return blind_spots, [], []
+    from app.agents.quality import run_blind_spot_verify
+
+    resolved = await run_blind_spot_verify(llm, chunks, blind_spots, model)
+    gone = {r["text"] for r in resolved}
+    kept = [b for b in blind_spots if b not in gone]
+    trace = [{"agent": "盲区复核", "checked": len(blind_spots), "removed": len(resolved)}]
+    return kept, resolved, trace
 
 
 async def run_analysis(
@@ -110,10 +127,12 @@ async def run_analysis(
             module_points.setdefault(str(tp.get("module", "")), []).extend(tp.get("points", []))
         blind_spots.extend(b for b in a["blind_spots"] if b not in blind_spots)
         trace.append({"chunk": i, "agent": "需求分析", "model": a["model_name"], **({"empty": True} if a.get("empty") else {})})
+    blind_spots, resolved, extra = await _verify_chunk_blind_spots(llm, chunks, blind_spots, model)
     return AnalysisResult(
         test_points=[{"module": m, "points": pts} for m, pts in module_points.items()],
         blind_spots=blind_spots,
-        trace=trace,
+        resolved_blind_spots=resolved,
+        trace=trace + extra,
     )
 
 
@@ -214,6 +233,9 @@ async def run_generation(
         from app.agents.json_utils import LLMOutputError
 
         raise LLMOutputError(f"需求拆解未输出任何测试点（{len(chunks)} 个分片均为空，请检查需求内容是否可读）")
+    merged.blind_spots, merged.resolved_blind_spots, extra = await _verify_chunk_blind_spots(
+        llm, chunks, merged.blind_spots, model)
+    merged.trace.extend(extra)
     return merged
 
 

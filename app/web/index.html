@@ -988,6 +988,25 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<!-- 盲区转需求待确认事项 -->
+<dialog id="bsqDlg">
+  <div class="dlg-h"><h3>转为需求待确认事项</h3><span class="meta" id="bsqMeta"></span></div>
+  <div class="dlg-b">
+    <label class="f">盲区</label>
+    <div class="hint" id="bsqText" style="white-space:pre-wrap;margin-bottom:10px"></div>
+    <label class="f" id="bsqReqWrap">转入需求</label>
+    <select id="bsqReq"></select>
+    <label class="f">等级</label>
+    <select id="bsqLevel"><option value="must">必须确认（未确认不能再对该需求发起测试设计）</option><option value="suggest">建议确认（可按假设继续）</option></select>
+    <label class="f">假设 / 备注（可选）</label>
+    <input type="text" id="bsqNote" placeholder="建议级：不确认时采用的假设">
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="resolveBsq(null)">取消</button>
+    <button class="btn" onclick="submitBsq()">转入</button>
+  </div>
+</dialog>
+
 <!-- 规则确认（范围） -->
 <dialog id="ruleDlg">
   <div class="dlg-h"><h3>确认规则生效</h3></div>
@@ -1646,6 +1665,19 @@ function submitInput() {
   resolveInput(v);
 }
 function resolveInput(v) { $('inputDlg').close(); const r=_inResolve; _inResolve=null; r && r(v); }
+let _bsqResolve = null;
+function askBlindQuestion(text, reqs) {
+  return new Promise(res => {
+    _bsqResolve = res;
+    $('bsqText').textContent = text; $('bsqMeta').textContent = '写入需求中心的待确认事项，由需求负责人确认结论';
+    $('bsqReq').innerHTML = reqs.map(r => `<option value="${esc(r.id)}">${esc(r.title||r.id)}</option>`).join('');
+    $('bsqReqWrap').style.display = $('bsqReq').style.display = reqs.length > 1 ? '' : 'none';
+    $('bsqLevel').value = 'must'; $('bsqNote').value = '';
+    $('bsqDlg').showModal();
+  });
+}
+function submitBsq() { resolveBsq({req_id: $('bsqReq').value, level: $('bsqLevel').value, note: $('bsqNote').value.trim()}); }
+function resolveBsq(v) { $('bsqDlg').close(); const r=_bsqResolve; _bsqResolve=null; r && r(v); }
 
 const IC = {
   check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>',
@@ -2457,6 +2489,8 @@ function renderOverview(t) {
     <button class="btn ghost sm" onclick="${fn}">${btn}</button></span>`);
   if (t.status==='awaiting_confirmation') act('warn','测试点拆解待确认','去确认',"setTab('points')");
   if (ptc.pending||ptc.rejected) act('warn',`${ptc.pending+ptc.rejected} 个测试点待处理`,'去审核',"setTab('points')");
+  const bsOpen = (t.blind_spots||[]).filter(b=>b.status==='open').length;
+  if (bsOpen && t.status!=='failed') act('warn',`${bsOpen} 条需求盲区待处置`,'去处置',"setTab('points')");
   if (t.pending_fix) act('warn',`AI 修改提案待确认（${t.pending_fix.kind==='cases'?'用例':'测试点'}）`,'去确认',
     t.pending_fix.kind==='cases'?"setTab('cases')":"setTab('points')");
   if (sc.rejected && !t.pending_fix) act('warn',`${sc.rejected} 条用例已驳回，可让 AI 定点修改`,'去处理',"setTab('cases')");
@@ -2471,8 +2505,8 @@ function renderOverview(t) {
     qi.push(`<div class="qi"><span class="tag" style="color:var(--warn)">评审</span><span><b>${esc(u.case_id)}</b> ${esc(u.problem)}</span></div>`));
   ((t.quality||{})['疑似重复用例对']||[]).forEach(p =>
     qi.push(`<div class="qi"><span class="tag">重复</span><span>${esc(p.a)}「${esc(p.a_title)}」≈ ${esc(p.b)}「${esc(p.b_title)}」（${p.similarity}）</span></div>`));
-  ((t.analysis||{}).blind_spots||[]).forEach(b =>
-    qi.push(`<div class="qi"><span class="tag" style="color:var(--purple)">盲区</span><span>${esc(b)}</span></div>`));
+  (t.blind_spots||[]).forEach(b =>
+    qi.push(`<div class="qi"><span class="tag" style="color:var(--purple)">盲区</span><span>${esc(b.text)}${b.status!=='open'?` <span class="tag">${esc(BS_STATUS[b.status]||b.status)}</span>`:''}</span></div>`));
   (t.memories||[]).forEach(m =>
     qi.push(`<div class="qi"><span class="tag">记忆</span><span>${esc(m.content)}</span></div>`));
   (t.rules||[]).forEach(x =>
@@ -2558,7 +2592,8 @@ function allPoints(t) {
   const modules = (t.analysis||{}).test_points || [];
   return modules.flatMap(m => (m.points||[]).map(p => ({...normPoint(p), module:m.module})));
 }
-const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增'};
+const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增', blind_spot:'盲区转入'};
+const BS_STATUS = {open:'待处置', question:'已转待确认事项', point:'已转测试点', explained:'需求已说明', ignored:'已忽略'};
 const srcChip = src => src === 'manual'
   ? '<span class="tag" style="background:var(--warn-bg,#fff4e0);color:var(--warn,#b36b00)">人工</span>'
   : `<span class="tag">AI</span><div class="hint">${esc(srcText[src]||src||'AI 拆解')}</div>`;
@@ -2619,6 +2654,7 @@ function renderPointWorkbench(t) {
         ${pts.length?`<button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export')}+(exportApprovedOnly?'?scope=approved':''), '测试点.xlsx')" title="导出测试点 Excel：编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例">导出 xlsx</button>
         <label class="check" title="勾选后只导出已通过的测试点"><input type="checkbox" ${exportApprovedOnly?'checked':''} onchange="exportApprovedOnly=this.checked"> 只导已通过</label>`:''}
       </div></div>
+    ${renderBlindSpots(t)}
     ${renderCoverage(t)}
     ${renderReuseHints(t)}
     ${renderDupReport(t)}
@@ -2686,6 +2722,75 @@ function pmAct(action) { const tp = pmNode(); if (tp) pointAct(tp, action); }
 function pmReject() { const tp = pmNode(); if (tp) pointReject(tp); }
 function pmModify() { const tp = pmNode(); if (tp) pointModify(tp); }
 function pmDelete() { const tp = pmNode(); if (tp) pointDelete(tp); }
+
+/* 需求盲区闭环：AI 标出的含糊 / 缺失处逐条处置——转待确认事项 / 转测试点 / 需求已说明 / 忽略 */
+let bsShowDone = false;
+function renderBlindSpots(t) {
+  const items = t.blind_spots || [];
+  if (!items.length) return '';
+  const open = items.filter(b=>b.status==='open');
+  const shown = bsShowDone ? items : open;
+  const project = (t.context||{}).project;
+  const canReview = can(project,'point.review'), canEdit = can(project,'point.edit');
+  const hasReq = !!((t.context||{}).requirement_id || ((t.context||{}).requirement_ids||[]).length);
+  const stCls = {open:'pending', question:'approved', point:'approved', explained:'approved', ignored:'rejected'};
+  const tgt = b => {
+    const g = b.target || {};
+    if (b.status==='point' && g.tp_id) return `<span class="hint">→ 测试点 <b class="cid">${esc(g.tp_id)}</b>${g.module?`（${esc(g.module)}）`:''}</span>`;
+    if (b.status==='question' && g.req_id) return `<span class="hint">→ 需求「<a onclick="openRequirement(${jsq(g.req_id)},'questions')">${esc(g.req_title||g.req_id)}</a>」待确认事项（${g.level==='suggest'?'建议确认':'必须确认'}）</span>`;
+    return '';
+  };
+  return `<div class="section-t" style="display:flex;align-items:center">需求盲区
+      <span class="hint" style="margin-left:8px">AI 标出的含糊 / 缺失处 · 待处置 <b style="color:${open.length?'var(--warn)':'var(--ok)'}">${open.length}</b> / 共 ${items.length}${items.filter(b=>b.ai_resolved).length?` · 其中 ${items.filter(b=>b.ai_resolved).length} 条经分片复核已被需求其他部分说明`:''}</span>
+      ${items.length>open.length?`<button class="btn ghost sm" style="margin-left:auto" onclick="bsShowDone=!bsShowDone;renderDetail()">${bsShowDone?'只看待处置':'查看已处置'}</button>`:''}</div>
+    ${shown.length ? shown.map(b => `<div class="box">
+      <span class="st ${stCls[b.status]||'pending'}">${esc(BS_STATUS[b.status]||b.status)}</span> ${esc(b.text)}${b.stale?' <span class="tag">已不在当前拆解结果</span>':''}
+      ${b.note?`<div class="hint">${esc(b.note)}</div>`:''}
+      ${tgt(b)}
+      ${b.by?`<div class="hint">${esc(b.by)}${b.at?' · '+esc(fmtTime(b.at)):''}</div>`:''}
+      <div class="toolbar" style="margin-top:8px">
+        ${b.status==='open' ? `
+          ${canEdit&&hasReq?`<button class="btn ghost sm" onclick="bsToQuestion(${jsq(b.bs_id)})" title="需求本身缺了这条规则：写入需求中心待确认事项，由需求负责人补充结论">转待确认事项</button>`:''}
+          ${canEdit?`<button class="btn ghost sm" onclick="bsToPoint(${jsq(b.bs_id)})" title="可以直接当测试点验证：以待审核测试点追加到拆解结果">转测试点</button>`:''}
+          ${canReview?`<button class="btn ghost sm" onclick="bsExplain(${jsq(b.bs_id)})" title="需求其他地方已经写明，不是盲区">需求已说明</button>
+          <button class="btn ghost sm" onclick="bsIgnore(${jsq(b.bs_id)})">忽略</button>`:''}`
+        : canReview?`<button class="btn ghost sm" onclick="bsAct(${jsq(b.bs_id)},'reopen')">重开</button>`:''}
+      </div></div>`).join('') : '<div class="hint" style="margin:4px 0 8px">全部盲区已处置</div>'}`;
+}
+async function bsAct(bsId, action, body={}) {
+  try {
+    const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/blind-spots/${bsId}`, {action, ...body});
+    await openTask(currentTask.task_id, true);
+    return r;
+  } catch (e) { toast('处置失败：' + e.message, 'err'); return null; }
+}
+const bsFind = id => (currentTask.blind_spots||[]).find(b=>b.bs_id===id) || {text:''};
+async function bsToQuestion(bsId) {
+  const ctx = currentTask.context || {};
+  const ids = ctx.requirement_ids && ctx.requirement_ids.length ? ctx.requirement_ids : [ctx.requirement_id];
+  const titles = ctx.requirement_titles || [ctx.requirement_title];
+  const v = await askBlindQuestion(bsFind(bsId).text, ids.filter(Boolean).map((id,i)=>({id, title: titles[i]||id})));
+  if (!v) return;
+  const r = await bsAct(bsId, 'to_question', v);
+  if (r) toast(`已写入需求「${(r.blind_spot.target||{}).req_title||''}」的待确认事项（${v.level==='suggest'?'建议确认':'必须确认'}）`, 'ok');
+}
+async function bsToPoint(bsId) {
+  const v = await askPoint('盲区转为测试点', {module:'需求盲区', point: bsFind(bsId).text});
+  if (!v) return;
+  const r = await bsAct(bsId, 'to_point', v);
+  if (r && r.added && r.added.length) toast(`已新增待审核测试点 ${r.added[0].tp_id}`, 'ok');
+}
+async function bsExplain(bsId) {
+  const note = await askInput('需求已说明', '需求哪里说明了（章节 / 原文片段）', '');
+  if (!note) return;
+  const r = await bsAct(bsId, 'explain', {note});
+  if (r) toast('已标记为需求已说明，不再视为盲区', 'ok');
+}
+async function bsIgnore(bsId) {
+  if (!await uiConfirm('忽略盲区', '与本次测试无关或无需处理？忽略后可在「查看已处置」里重开。')) return;
+  const r = await bsAct(bsId, 'ignore');
+  if (r) toast('已忽略', 'ok');
+}
 
 function renderCoverage(t) {
   if (!t.coverage) return '';

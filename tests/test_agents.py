@@ -352,3 +352,58 @@ async def test_分片拆解_单片为空跳过_全部为空才报错():
     assert llm.calls == 4  # 大纲 1 次 + 3 片各 1 次：分片模式下空结果不重试
     with pytest.raises(LLMOutputError, match="均为空"):
         await run_analysis(text, _ChunkLLM(empty_chunks={1, 2, 3}), chunk_max_chars=1200)
+
+
+class _BlindSpotChunkLLM:
+    """分片拆解 + 盲区复核路由桩：第 1 片标出两条盲区，第 3 片原文说明了其中一条。"""
+
+    def __init__(self, verify_fail=False):
+        self.verify_fail = verify_fail
+        self.verify_calls = 0
+
+    async def chat(self, messages, model=None, **kw):
+        import json
+        import re
+
+        from app.llm.client import ChatResult, UsageInfo
+
+        system, user = messages[0]["content"], messages[-1]["content"]
+        if "子系统清单" in system:
+            content = json.dumps({"modules": ["模块0", "模块1", "模块2"]}, ensure_ascii=False)
+        elif "盲区清单" in user:
+            self.verify_calls += 1
+            if self.verify_fail:
+                raise RuntimeError("模型不可用")
+            m = re.search(r"需求原文（第 (\d+)/\d+ 片）", user)
+            explained = [{"index": 1, "evidence": "第 3 片：锁定 30 分钟后自动解锁"}] if m and m.group(1) == "3" else []
+            content = json.dumps({"explained": explained}, ensure_ascii=False)
+        else:
+            m = re.search(r"第 (\d+)/\d+ 片", user)
+            no = int(m.group(1)) if m else 0
+            spots = ["未说明锁定时长", "未说明找回密码入口"] if no == 1 else []
+            content = json.dumps({"modules": [{"module": f"模块{no - 1}", "points": [f"第{no}片的测试点"]}],
+                                  "blind_spots": spots}, ensure_ascii=False)
+        return ChatResult(content=content, model_name="stub", provider="stub", usage=UsageInfo(), elapsed_ms=1)
+
+
+async def test_分片盲区复核_后面分片已说明的不算盲区():
+    from app.agents import run_analysis
+
+    text = "\n".join(f"# 模块{i}\n" + "规则。" * 300 for i in range(3))
+    llm = _BlindSpotChunkLLM()
+    result = await run_analysis(text, llm, chunk_max_chars=1200)
+    assert llm.verify_calls == 3  # 每片各复核一次
+    assert result.blind_spots == ["未说明找回密码入口"]
+    assert result.resolved_blind_spots == [{"text": "未说明锁定时长", "evidence": "第 3 片：锁定 30 分钟后自动解锁", "chunk": 3}]
+    assert result.trace[-1] == {"agent": "盲区复核", "checked": 2, "removed": 1}
+    # 复核失败：盲区原样保留，不阻塞拆解
+    result = await run_analysis(text, _BlindSpotChunkLLM(verify_fail=True), chunk_max_chars=1200)
+    assert result.blind_spots == ["未说明锁定时长", "未说明找回密码入口"] and result.resolved_blind_spots == []
+
+
+async def test_单片拆解不做盲区复核():
+    from app.agents import run_analysis
+
+    llm = StubLLM([ANALYST_REPLY])
+    result = await run_analysis("短需求", llm)
+    assert len(llm.calls) == 1 and result.blind_spots == ["未说明锁定策略"]
