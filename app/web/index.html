@@ -1466,7 +1466,7 @@ const $ = id => document.getElementById(id);
 const DIMENSIONS = ["正常流程","异常流程","输入校验","边界值","状态转换","权限","数据","重复操作","中断","网络"];
 let currentTask = null, editingCase = null, currentView = 'board';
 let detailTab = 'overview', caseTab = 'all', caseModule = '', caseView = 'table', pointView = 'table';
-let ptSub = 'points', ptPage = 1, ptSize = 20, ptModule = '', ptStatus = '', bsPage = 1, bsSize = 20, bsFilter = 'open', bsKw = '';
+let ptSub = 'blind', ptPage = 1, ptSize = 20, ptModule = '', ptStatus = '', bsPage = 1, bsSize = 20, bsFilter = 'open', bsKw = '';
 let dpPage = 1, dpSize = 20, dpFilter = 'open', dpKw = '';
 const bsSel = new Set(), dpSel = new Set();   // 盲区 / 重复对的勾选（跨页保留；切任务清空）
 function selToggle(set, id, checked, render) { if (checked) set.add(id); else set.delete(id); render(); }
@@ -2424,7 +2424,7 @@ async function openTask(id, keepLocal) {
   if (!keepLocal) {
     lastPointDiff = null; lastCaseDiff = null; lastHints = [];
     caseTab = 'all'; caseModule = ''; expandedSteps = new Set(); pointView = 'table';
-    ptSub = 'points'; ptPage = 1; ptModule = ''; ptStatus = ''; bsPage = 1; bsFilter = 'open'; bsKw = ''; dpPage = 1; dpFilter = 'open'; dpKw = '';
+    ptSub = 'blind'; ptPage = 1; ptModule = ''; ptStatus = ''; bsPage = 1; bsFilter = 'open'; bsKw = ''; dpPage = 1; dpFilter = 'open'; dpKw = '';
     bsSel.clear(); dpSel.clear();
     casePage = 1; casePrio = ''; caseKw = '';
     detailTab = currentTask.status === 'awaiting_confirmation' ? 'points'
@@ -2760,7 +2760,7 @@ function renderPointWorkbench(t) {
   const bsAll = t.blind_spots || [], bsOpen = bsAll.filter(b=>b.status==='open').length;
   const dpAll = t.dup_pairs || [], dpOpen = dpAll.filter(p=>p.status==='open').length;
 
-  // 子页签：测试点 / 需求盲区 / 疑似重复 三张独立列表，各自筛选与分页
+  // 子页签：需求盲区 / 疑似重复 / 测试点 三张独立列表，各自筛选与分页；打开任务默认落在需求盲区（先清盲区与重复，再审测试点）
   const sub = `<div class="seg" style="margin-bottom:10px">
     <button class="${ptSub==='blind'?'on':''}" onclick="ptSub='blind';renderDetail()">需求盲区 <span class="cnt ${bsOpen?'hot':''}">${bsOpen?bsOpen+' 待处置':bsAll.length}</span></button>
     <button class="${ptSub==='dup'?'on':''}" onclick="ptSub='dup';renderDetail()">疑似重复 <span class="cnt ${dpOpen?'hot':''}">${dpOpen?dpOpen+' 待处置':dpAll.length}</span></button>
