@@ -25,6 +25,7 @@ from app.tasks.points import (
     clear_reject_fields,
     coarse_warnings,
     find_point,
+    iter_points,
     new_uid,
 )
 from app.templates import CustomTemplate, TestCase, builtin_default_template
@@ -276,13 +277,17 @@ def build_point_proposals(modules: list[dict], data: dict, allowed: set[str]) ->
     return proposals
 
 
-def apply_point_proposals(modules: list[dict], accepted: list[dict]) -> dict:
-    """确认流落地：只应用被接受的提案（复用 apply_point_fixes 的确定性合并）。"""
+def apply_point_proposals(modules: list[dict], accepted: list[dict], seq_floor: int = 0) -> dict:
+    """确认流落地：只应用被接受的提案（复用 apply_point_fixes 的确定性合并）。
+
+    seq_floor 传任务持久化的最大编号：新增测试点不复用已删除的编号（版本历史与回收站按 tp_id 关联）。
+    """
     data = {
         "fixes": [p["raw"] for p in accepted if p.get("action") != "add"],
         "additions": [p["raw"] for p in accepted if p.get("action") == "add"],
     }
-    return apply_point_fixes(modules, data, allowed={p["tp_id"] for p in accepted if p.get("tp_id")})
+    return apply_point_fixes(modules, data, allowed={p["tp_id"] for p in accepted if p.get("tp_id")},
+                             seq_floor=seq_floor)
 
 
 def apply_point_fixes(modules: list[dict], data: dict, allowed: set[str], seq_floor: int = 0) -> dict:
@@ -313,11 +318,17 @@ def apply_point_fixes(modules: list[dict], data: dict, allowed: set[str], seq_fl
             if not split_into:
                 continue
             idx = entry["points"].index(point)
+            existing = {str(p.get("tp_id", "")) for _, p in iter_points(modules)}
             entry["points"].remove(point)
             new_points = []
+            n = 0
             for i, s in enumerate(split_into):
+                n += 1
+                while f"{tp_id}-{n:02d}" in existing:  # 同一点再次拆分 / 回收站恢复后再拆：编号不得撞车
+                    n += 1
+                existing.add(f"{tp_id}-{n:02d}")
                 new_points.append({
-                    "tp_id": f"{tp_id}-{i + 1:02d}",
+                    "tp_id": f"{tp_id}-{n:02d}",
                     "point": str(s["point"]).strip(),
                     "dimension": str(s.get("dimension", point.get("dimension", ""))).strip(),
                     "status": "pending", "locked": False, "comment": "",

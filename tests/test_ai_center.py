@@ -281,3 +281,30 @@ def test_内置默认Prompt随代码更新_自定义版本不受影响(tmp_path,
     item = store3._items["reviewer"]
     assert item["active_version"] == 2 and item["versions"][1]["content"] == "团队自定义评审规则"
     assert item["versions"][0]["content"] == next(d["default"] for d in PROMPT_DEFS if d["key"] == "reviewer")
+
+
+async def test_确认后生成被服务重启打断_继续完成不重新拆解不丢审核(client):
+    llm = _RoutingLLM()
+    app.state.llm = llm
+    resp = await client.post("/api/v1/tasks", data={"text": "登录与找回密码需求", "project": "P", "confirm_points": "true"})
+    assert resp.status_code == 200 and resp.json()["status"] == "awaiting_confirmation"
+    task_id = resp.json()["task_id"]
+    points = resp.json()["test_points"]
+    first = points[0]["points"][0]["tp_id"]
+    assert (await client.post(f"/api/v1/tasks/{task_id}/points/review",
+                              json={"items": [{"tp_id": first, "action": "approve"}]})).status_code == 200
+    # 模拟：确认后生成进行中服务重启 → 启动时任务被标为失败（没有 resume_stage 标记）
+    rec = app.state.tasks.get(task_id)
+    rec.status, rec.error, rec.progress = "failed", "服务重启导致任务中断", None
+    rec.context = {k: v for k, v in rec.context.items() if k != "resume_stage"}
+    app.state.tasks.save(rec)
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert t["resume"]["mode"] == "resume" and t["resume"]["analysis_kept"]
+    analyst_calls = llm.calls["analyst"]
+    r = (await client.post(f"/api/v1/tasks/{task_id}/retry")).json()
+    assert r["mode"] == "resume"
+    t = await _wait_done(client, task_id)
+    assert t["status"] == "completed" and llm.calls["analyst"] == analyst_calls
+    approved = [p for m in t["analysis"]["test_points"] for p in m["points"] if p["status"] == "approved"]
+    assert [p["tp_id"] for p in approved] == [first]  # 审核记录未被新拆解覆盖
+    assert [c["module"] for c in t["result"]["cases"]] == [points[0]["module"]]  # 只为已通过的点生成

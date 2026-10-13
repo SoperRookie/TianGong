@@ -94,7 +94,7 @@ open http://localhost:8000/
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/v1/tasks` | 创建生成任务（文件/文本，支持异步与拆解确认） |
-| POST | `/api/v1/tasks/{id}/confirm` | 确认测试点，继续生成 |
+| POST | `/api/v1/tasks/{id}/confirm` | 确认测试点，继续生成（`async_mode: true` 投入后台队列并立即返回，页面轮询，可取消；确认后的失败一律从已确认测试点续跑，不重新拆解） |
 | POST | `/api/v1/tasks/{id}/revise` | 对话式多轮修订 |
 | POST | `/api/v1/tasks/{id}/review` | 在线评审：逐条采纳/修改/删除留痕 |
 | POST | `/api/v1/tasks/{id}/final` | 离线终稿回传，计算差异与采纳率 |

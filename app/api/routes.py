@@ -928,6 +928,14 @@ def _knowledge_spaces(app, space: str | None) -> str | list[str] | None:
     return [space, *siblings] if siblings else space
 
 
+def _knowledge_query(requirement: str, limit: int = 1500) -> str:
+    """检索 query：需求开头 + 全文标题行。只取开头会让长需求后半部分的模块检索不到相关知识。"""
+    head = requirement[: limit // 2]
+    heads = [ln.strip().lstrip("#").strip() for ln in requirement.splitlines() if ln.lstrip().startswith("#")]
+    titles = "\n".join(dict.fromkeys(h for h in heads if h))
+    return f"{head}\n{titles}"[:limit] if titles else requirement[:limit]
+
+
 async def _gather_knowledge(
     app, requirement: str, stages: tuple[str, ...], space: str | None
 ) -> tuple[dict, list[dict]]:
@@ -945,7 +953,7 @@ async def _gather_knowledge(
         if not service.store.list_docs():
             return out, snapshot
         steward = KnowledgeSteward(service, budget_chars=get_settings().knowledge_budget_chars)
-        query = requirement[:1500]
+        query = _knowledge_query(requirement)
         space = _knowledge_spaces(app, space)
         if "analysis" in stages:
             bundle = await steward.for_analysis(query, space=space)
@@ -969,7 +977,7 @@ def _gather_memories(app, requirement: str, project: str | None) -> tuple[str | 
     """记忆检索注入（F-8-7）：用户偏好 + 当前项目记忆，独立预算，故障降级不阻塞主链路。"""
     try:
         notes, snapshot = app.state.memory.retrieve(
-            requirement[:1500], project=project, budget_chars=get_settings().memory_budget_chars
+            _knowledge_query(requirement), project=project, budget_chars=get_settings().memory_budget_chars
         )
         if snapshot:
             logger.info("记忆注入：{} 条（项目={}）", len(snapshot), project or "-")
@@ -1002,7 +1010,7 @@ async def _reuse_hints(app, requirement: str, space: str | None) -> list[dict]:
         if not any(service.store.list_docs(s, "test_cases") for s in scope):
             return []
         hits = await service.search(
-            requirement[:1500], top_k=5, category="test_cases", space=spaces, mode="vector"
+            _knowledge_query(requirement), top_k=5, category="test_cases", space=spaces, mode="vector"
         )
         threshold = get_settings().reuse_hint_score
         return [
@@ -1609,8 +1617,10 @@ def _resume_info(record: TaskRecord) -> dict:
     failed = list(((record.result or {}).get("failed_modules") or []))
     if record.status == "failed":
         resumable = bool((ctx.get("requirement") or "").strip())
-        return {"resumable": resumable, "mode": "resume" if (done or ck.get("analysis") or ctx.get("resume_stage") == "confirmed") else "retry",
-                "kept_modules": done, "analysis_kept": bool(ck.get("analysis") or ctx.get("resume_stage") == "confirmed"),
+        confirmed = (ctx.get("resume_stage") == "confirmed" or bool(ctx.get("confirm_points"))) \
+            and bool((record.analysis or {}).get("test_points"))
+        return {"resumable": resumable, "mode": "resume" if (done or ck.get("analysis") or confirmed) else "retry",
+                "kept_modules": done, "analysis_kept": bool(ck.get("analysis") or confirmed),
                 "failed_modules": []}
     if record.status == "completed" and failed:
         return {"resumable": True, "mode": "fill", "kept_modules": [], "analysis_kept": True, "failed_modules": failed}
@@ -1750,6 +1760,7 @@ def _quality_report(record: TaskRecord, result) -> dict:
 
 class ConfirmBody(BaseModel):
     test_points: list[dict] | None = None  # 缺省沿用拆解草稿；传入则以用户修改后的为准
+    async_mode: bool = False               # True：后台生成并立即返回（页面轮询），可取消、不受代理超时影响
 
 
 @router.post("/api/v1/tasks/{task_id}/confirm")
@@ -1758,6 +1769,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     store = request.app.state.tasks
     record = _task(request, task_id, "point.review")
     _ai_ctx(request, record)
+    async_mode = bool(body and body.async_mode)
     if record.status == "completed":
         # 分批审核、分批生成：第一批生成后又审核通过了新的测试点 → 只为这些点增量生成，并入现有用例
         pending = _points_pending_generation(record)
@@ -1766,7 +1778,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
         store.set_progress(task_id, status="running", progress="generating_reviewing")
         record.checkpoint = None
         store.save(record)
-        return await _generate_confirmed(request, task_id, pending, merge_existing=True)
+        return await _run_confirmed(request, store, task_id, pending, async_mode, merge_existing=True)
     if record.status != "awaiting_confirmation":
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无待确认的拆解结果")
     if record.progress == "quality_check":
@@ -1776,11 +1788,12 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
 
     ctx = record.context or {}
     if body and body.test_points:
-        # 用户直接提交修改后的测试点（兼容 JSON 编辑路径）
+        # 用户直接提交修改后的测试点（兼容 JSON 编辑路径）；带 tp_id 的保留，用例 point_ids 与分批生成记录才有依据
         test_points = normalize_points(body.test_points)
         test_points = [
             {"module": e["module"],
-             "points": [{"point": p["point"], "dimension": p.get("dimension", "")} for p in e["points"]]}
+             "points": [{"point": p["point"], "dimension": p.get("dimension", ""),
+                         **({"tp_id": p["tp_id"]} if p.get("tp_id") else {})} for p in e["points"]]}
             for e in test_points if e.get("points")
         ]
     else:
@@ -1791,8 +1804,32 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     # 确认即锁定：状态先置 running（重复点击/重复请求直接 409，避免并行重复生成）
     store.set_progress(task_id, status="running", progress="generating_reviewing")
     record.checkpoint = None  # 全新确认：不沿用旧检查点
+    # 确认后的失败（含服务重启）一律从已确认测试点续跑，不重新拆解（否则审核记录会被新拆解覆盖）
+    record.context = {**ctx, "resume_stage": "confirmed"}
     store.save(record)
-    return await _generate_confirmed(request, task_id, test_points)
+    return await _run_confirmed(request, store, task_id, test_points, async_mode)
+
+
+async def _run_confirmed(request: Request, store, task_id: str, test_points: list[dict], async_mode: bool,
+                         merge_existing: bool = False) -> dict:
+    """确认后的生成：同步在请求内完成，或投入后台队列（可取消、不受网关超时影响，页面轮询进度）。"""
+    if not async_mode:
+        return await _generate_confirmed(request, task_id, test_points, merge_existing=merge_existing)
+
+    async def _job() -> None:
+        store.set_progress(task_id, status="running", progress="generating_reviewing")
+        try:
+            await _generate_confirmed(request, task_id, test_points, merge_existing=merge_existing)
+        except HTTPException as e:
+            # _generate_confirmed 已按故障类型恢复状态（待确认 / 失败）；后台没有响应体，把原因留在任务上
+            rec = store.get(task_id)
+            if rec is not None:
+                rec.error = str(e.detail)[:1000]
+                store.save(rec)
+            logger.warning("任务 {} 确认生成失败：{}", task_id, e.detail)
+
+    store.submit(task_id, _job)
+    return {"task_id": task_id, "status": "queued", "poll_url": f"/api/v1/tasks/{task_id}"}
 
 
 def _points_pending_generation(record: TaskRecord) -> list[dict]:
@@ -2755,15 +2792,19 @@ async def add_task_points(request: Request, task_id: str, body: PointAddBody) ->
     _ai_ctx(request, record)
     skipped: list = []
     if body.points:
-        added = add_points(modules, body.points, source="manual", seq_floor=tp_seq_of(record.analysis), skipped=skipped)
+        # 人工明确要加的点不做相似度拦截（重复由查重环节提示），避免"点了新增却没反应"
+        added = add_points(modules, body.points, source="manual", seq_floor=tp_seq_of(record.analysis),
+                           skipped=skipped, skip_similar=False)
     elif body.instruction and body.instruction.strip():
+        from app.agents.prompts import wrap_data
+
         ctx = record.context or {}
         import json as _json
 
         prompt = (
-            f"需求内容：\n{ctx.get('requirement', '')}\n\n"
-            f"已有测试点：\n{_json.dumps(_points_view(modules), ensure_ascii=False, indent=1)}\n\n"
-            f"用户补充要求：{body.instruction.strip()}\n\n"
+            f"需求内容：\n{wrap_data('需求原文', ctx.get('requirement', ''))}\n\n"
+            f"已有测试点：\n{wrap_data('测试点', _json.dumps(_points_view(modules), ensure_ascii=False, indent=1))}\n\n"
+            f"用户补充要求：{wrap_data('补充要求', body.instruction.strip())}\n\n"
             "只生成满足补充要求的**新增**测试点，不要复述或修改已有测试点。"
             '只输出 JSON：{"additions": [{"module": "模块名", "point": "测试点描述", "dimension": "维度"}]}'
         )
@@ -2997,7 +3038,8 @@ async def _apply_fix_confirm(request, store, record, task_id, pf, accepted, reje
                     add_to_bin(task_id, "point", p["tp_id"], str(found[1].get("point", "")),
                                {"point": dict(found[1]), "module": found[0].get("module", "")},
                                by=operator)
-        outcome = apply_point_proposals(modules, accepted)
+        outcome = apply_point_proposals(modules, accepted, seq_floor=tp_seq_of(record.analysis))
+        bump_tp_seq(record.analysis)
         # 版本历史：接受的修改记 ai_fix；拆分/新增的新点以 ai_fix 入册首版
         for d in outcome["diff"]:
             if d.get("action") == "modify":
@@ -5993,8 +6035,9 @@ async def retry_task(request: Request, task_id: str) -> dict:
         return {"task_id": task_id, "status": "queued", "mode": "fill", "failed_modules": info["failed_modules"],
                 "poll_url": f"/api/v1/tasks/{task_id}"}
 
-    # 情形 B：确认测试点之后失败 → 直接从已确认的测试点续生成，不重新拆解
-    if ctx.get("resume_stage") == "confirmed" and (record.analysis or {}).get("test_points"):
+    # 情形 B：确认测试点之后失败（含服务重启打断）→ 直接从已确认的测试点续生成，不重新拆解；
+    # 拆解确认模式的任务只要已有拆解结果就走这里，避免重新拆解覆盖人工审核记录
+    if (ctx.get("resume_stage") == "confirmed" or ctx.get("confirm_points")) and (record.analysis or {}).get("test_points"):
         points = confirmable_points(record.analysis["test_points"])
         if not points:
             raise HTTPException(status_code=409, detail="没有已通过的测试点，无法继续")
