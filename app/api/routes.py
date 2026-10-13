@@ -2672,6 +2672,7 @@ class PointReviewItem(BaseModel):
     action: str  # approve / reject / modify / delete / unlock
     point: str | None = None       # modify 时的新描述
     dimension: str | None = None
+    ref: str | None = None         # modify 时的设计需求页来源（页面或章节 › 需求点），None 表示不改
     comment: str = ""              # reject 时的驳回原因
     # 结构化驳回（完整需求 6.4）
     reject_types: list[str] = []   # 驳回类型，多选必填
@@ -6219,9 +6220,16 @@ async def upload_final_cases(
 async def list_tasks(
     request: Request, status: str | None = None, project: str | None = None,
     created_by: str | None = None, limit: int = 50, business_line: str = "",
+    include_deleted: bool = False,
 ) -> dict:
-    """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人/业务线过滤。"""
-    records = request.app.state.tasks.list(status=status, limit=100000, projects=_visible_projects(request))
+    """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人/业务线过滤。
+
+    include_deleted=true 连已删除的任务一起返回（带 deleted_at / deleted_by，供「已删除」筛选与恢复），仅有删除权限者可用。
+    """
+    if include_deleted:
+        _require_delete(request)
+    records = request.app.state.tasks.list(status=status, limit=100000, projects=_visible_projects(request),
+                                           deleted=None if include_deleted else False)
     if project is not None:
         records = [r for r in records if (r.context or {}).get("project") == project]
     line_projects = _line_projects(request, business_line)
@@ -6248,10 +6256,63 @@ async def list_tasks(
                                       if isinstance(p, dict) and p.get("status") == "approved"),
                 "revision_count": len(r.revisions),
                 "error": r.error,
+                **({"deleted_at": r.deleted_at, "deleted_by": r.deleted_by} if r.deleted_at else {}),
             }
             for r in records
         ]
     }
+
+
+def _delete_task(request: Request, task_id: str) -> TaskRecord:
+    """删除任务的统一校验：存在且可见 → 项目内 case.edit → 删除权限（仅管理员）→ 不在执行中。"""
+    record = _task(request, task_id, "case.edit")
+    _require_delete(request)
+    if record.status in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="任务正在执行中，请先取消再删除")
+    deleted = request.app.state.tasks.delete(task_id, by=_operator(request))
+    if deleted is None:
+        raise HTTPException(status_code=409, detail="任务当前不可删除")
+    return deleted
+
+
+class TaskBatchDeleteBody(BaseModel):
+    ids: list[str]
+
+
+@router.post("/api/v1/tasks/batch-delete")
+async def batch_delete_tasks(request: Request, body: TaskBatchDeleteBody) -> dict:
+    """任务列表批量删除：逐个套用单条规则，不存在 / 无权限 / 执行中的跳过并带原因返回，其余逻辑删除（可恢复）。"""
+    deleted: list[str] = []
+    skipped: list[dict] = []
+    for task_id in dict.fromkeys(body.ids):
+        try:
+            _delete_task(request, task_id)
+            deleted.append(task_id)
+        except HTTPException as e:
+            skipped.append({"task_id": task_id, "reason": str(e.detail)})
+    request.state.audit_detail = f"删除 {len(deleted)} 个，跳过 {len(skipped)} 个"
+    return {"deleted": deleted, "skipped": skipped}
+
+
+@router.delete("/api/v1/tasks/{task_id}")
+async def delete_task(request: Request, task_id: str) -> dict:
+    """逻辑删除任务（任务列表「删除」）：任务及其测试点 / 用例从列表与详情隐藏，不再进入用例中心、报表与知识统计；
+    版本历史、回收站与审计留档保留；有删除权限者可在任务列表「已删除」里恢复。测试计划里的用例快照独立于任务，不受影响。"""
+    record = _delete_task(request, task_id)
+    return {"task_id": task_id, "deleted": True, "deleted_at": record.deleted_at}
+
+
+@router.post("/api/v1/tasks/{task_id}/restore")
+async def restore_task(request: Request, task_id: str) -> dict:
+    """恢复已删除的任务：回到列表与详情，用例重新计入用例中心与统计。"""
+    store = request.app.state.tasks
+    record = store.get(task_id, include_deleted=True)
+    if record is None or not record.deleted_at:
+        raise HTTPException(status_code=404, detail=f"已删除的任务不存在: {task_id}")
+    _require_project(request, (record.context or {}).get("project"), "case.edit")
+    _require_delete(request)
+    store.restore(task_id)
+    return {"task_id": task_id, "deleted": False}
 
 
 @router.post("/api/v1/tasks/{task_id}/cancel")

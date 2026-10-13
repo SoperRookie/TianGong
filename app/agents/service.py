@@ -10,7 +10,7 @@ import re
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app.agents.graph import analyze_requirement, build_graph, outline_pages, outline_requirement
+from app.agents.graph import analyze_requirement, build_graph, outline_requirement
 from app.agents.state import MAX_REVIEW_ROUNDS
 from app.agents.prompts import wrap_data
 from app.config import get_settings
@@ -59,63 +59,6 @@ async def _outline_for(llm: LLMClient, requirement: str, chunks: list[str], mode
         return []
 
 
-async def _analyze_by_page(llm: LLMClient, requirement: str, model: str | None,
-                           knowledge_cases: str | None) -> dict | None:
-    """按页面逐页拆解：先列页面清单，再每页一次调用（并行），按文档顺序合并；清单不可用时返回 None 走整篇拆解。"""
-    settings = get_settings()
-    try:
-        pages = await outline_pages(llm, requirement, model)
-    except Exception as e:
-        logger.warning("页面清单生成失败，退回整篇拆解：{}", e)
-        return None
-    if len(pages) < 2:
-        logger.info("页面清单只有 {} 项，退回整篇拆解", len(pages))
-        return None
-    if len(pages) > settings.analysis_max_pages:
-        logger.warning("页面清单 {} 项超过上限 {}，退回整篇拆解", len(pages), settings.analysis_max_pages)
-        return None
-    logger.info("按页面逐页拆解：{} 个页面 / 功能点", len(pages))
-    analyses = await gather_or_cancel(
-        [analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases, page=page, pages=pages,
-                             allow_empty=True) for page in pages]
-    )
-    module_points: dict[str, list[dict]] = {}
-    seen: set[tuple[str, str]] = set()
-    blind_spots: list[str] = []
-    trace: list[dict] = [{"agent": "页面清单", "pages": pages}]
-    model_name = ""
-    for page, a in zip(pages, analyses):
-        model_name = a.get("model_name") or model_name
-        trace.append({"agent": "需求分析", "page": page, "model": a.get("model_name", ""),
-                      "points": sum(len(m.get("points", [])) for m in a["test_points"]),
-                      **({"empty": True} if a.get("empty") else {})})
-        for tp in a["test_points"]:
-            module = str(tp.get("module", "")) or page
-            for point in tp.get("points", []):
-                key = (module, str(point.get("point", "")).strip())
-                if key in seen:  # 不同页面轮次重复输出同一测试点：只保留先出现的
-                    continue
-                seen.add(key)
-                module_points.setdefault(module, []).append(point)
-        blind_spots.extend(b for b in a["blind_spots"] if b not in blind_spots)
-    if not module_points:
-        return None
-    return {"test_points": [{"module": m, "points": pts} for m, pts in module_points.items()],
-            "blind_spots": blind_spots, "model_name": model_name, "pages": pages, "trace": trace}
-
-
-async def analyze_whole(llm: LLMClient, requirement: str, model: str | None,
-                        knowledge_cases: str | None = None) -> dict:
-    """整篇需求的拆解入口：开启逐页模式时先按页面逐页输出，不可用再整篇一次拆解。"""
-    if get_settings().analysis_by_page:
-        by_page = await _analyze_by_page(llm, requirement, model, knowledge_cases)
-        if by_page is not None:
-            return by_page
-    analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
-    analysis["trace"] = [{"agent": "需求分析", "model": analysis["model_name"]}]
-    return analysis
-
-
 class GenerationResult(BaseModel):
     cases: list[TestCase]
     passed: bool
@@ -135,7 +78,6 @@ class AnalysisResult(BaseModel):
     test_points: list[dict]
     blind_spots: list[str] = Field(default_factory=list)
     resolved_blind_spots: list[dict] = Field(default_factory=list, description="分片盲区复核剔除项（含原文依据）")
-    pages: list[str] = Field(default_factory=list, description="逐页拆解时的页面 / 功能点清单（按文档顺序）")
     trace: list[dict] = Field(default_factory=list)
 
 
@@ -168,9 +110,9 @@ async def run_analysis(
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     chunks = split_text(requirement, chunk_max_chars)
     if len(chunks) == 1:
-        a = await analyze_whole(llm, requirement, model, knowledge_cases=knowledge_cases)
-        return AnalysisResult(test_points=a["test_points"], blind_spots=a["blind_spots"], trace=a["trace"],
-                              pages=a.get("pages") or [])
+        a = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
+        return AnalysisResult(test_points=a["test_points"], blind_spots=a["blind_spots"],
+                              trace=[{"agent": "需求分析", "model": a["model_name"]}])
     outline = await _outline_for(llm, requirement, chunks, model)
     analyses = await gather_or_cancel(
         [analyze_requirement(llm, chunk, model, knowledge_cases=knowledge_cases, outline=outline,
@@ -336,13 +278,13 @@ async def _analyze_then_generate(
                                                  outline=outline, chunk_no=chunk_no, chunk_total=chunk_total,
                                                  allow_empty=True)
         else:
-            analysis = await analyze_whole(llm, requirement, model, knowledge_cases=knowledge_cases)
+            analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
         if not analysis["test_points"]:  # 分片不含可测内容：本片无产出，不进生成
             return GenerationResult(cases=[], passed=True, review_rounds=0, blind_spots=analysis["blind_spots"],
                                     trace=[{"agent": "需求分析", "model": analysis["model_name"], "empty": True}])
         if on_analysis:
             on_analysis({"test_points": analysis["test_points"], "blind_spots": analysis["blind_spots"],
-                         "model_name": analysis.get("model_name", ""), "pages": analysis.get("pages") or []})
+                         "model_name": analysis.get("model_name", "")})
     if on_analyzed:
         on_analyzed()
     result = await _run_from_points(

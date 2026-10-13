@@ -318,6 +318,9 @@ tr.rowlink td { transition:background .1s; }
 .warnline { color:var(--warn); font-size:12.5px; background:var(--warn-bg);
   border:1px solid #f0dfc0; border-radius:var(--radius-s); padding:8px 12px; margin-top:10px; }
 .hint { color:var(--ink-3); font-size:12px; }
+.ref { font-size:12px; color:var(--ink-2); line-height:1.5; word-break:break-all; }
+.ref b { font-weight:600; color:var(--ink); }
+.ref .sep { margin:0 4px; color:var(--ink-3); }
 .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; }
 .filters { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; }
 .filters select { width:auto; }
@@ -928,6 +931,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <textarea id="pdText" rows="3"></textarea>
     <label class="f">测试维度</label>
     <select id="pdDim"></select>
+    <label class="f">需求来源<span class="hint">（设计需求页 › 需求点，如「3.2 登录失败处理 › 密码错误 5 次锁定」，供确认 / 评审时回到需求核对）</span></label>
+    <input type="text" id="pdRef" placeholder="页面或章节 › 条目编号或原文摘录">
   </div>
   <div class="dlg-f">
     <button class="btn ghost" onclick="resolvePoint(null)">取消</button>
@@ -1641,7 +1646,7 @@ function rejectInfoLine(s) {
   return `<div class="hint" style="color:var(--danger)">${types} 原因：${esc(s.comment)}${extra?' · '+extra:''}</div>`;
 }
 let _pdResolve = null;
-function askPoint(title, {module=null, point='', dimension=''}={}) {
+function askPoint(title, {module=null, point='', dimension='', ref=''}={}) {
   return new Promise(res => {
     _pdResolve = res;
     $('pdTitle').textContent = title;
@@ -1650,6 +1655,7 @@ function askPoint(title, {module=null, point='', dimension=''}={}) {
     $('pdText').value = point;
     $('pdDim').innerHTML = '<option value="">（未指定）</option>' + DIMENSIONS.map(d=>`<option>${d}</option>`).join('');
     $('pdDim').value = dimension || '';
+    $('pdRef').value = ref || '';
     $('pointDlg').showModal();
   });
 }
@@ -1659,7 +1665,7 @@ function submitPoint() {
   const needModule = $('pdModuleWrap').style.display !== 'none';
   const module = $('pdModule').value.trim();
   if (needModule && !module) return toast('请填写模块名', 'warn');
-  resolvePoint({module, point, dimension: $('pdDim').value});
+  resolvePoint({module, point, dimension: $('pdDim').value, ref: $('pdRef').value.trim()});
 }
 function resolvePoint(v) { $('pointDlg').close(); const r=_pdResolve; _pdResolve=null; r && r(v); }
 let _inResolve = null;
@@ -2210,7 +2216,7 @@ async function refreshList() {
   if (!curUser || _listInflight) return;  // 未登录暂停轮询；上一轮未返回则跳过（不叠加请求）
   _listInflight = true;
   let data;
-  try { data = await api('/api/v1/tasks?limit=5000'); } catch (e) { return; } finally { _listInflight = false; }  // 列表页本地筛选 + 分页，不受默认 50 条截断
+  try { data = await api('/api/v1/tasks?limit=5000' + (canDelete() ? '&include_deleted=true' : '')); } catch (e) { return; } finally { _listInflight = false; }  // 列表页本地筛选 + 分页，不受默认 50 条截断；有删除权限时连已删除一起拉（「已删除」筛选与恢复）
   const sig = JSON.stringify(data.tasks);
   const changed = sig !== _tasksSig;
   _tasksSig = sig; _tasksCache = data.tasks;
@@ -2232,7 +2238,9 @@ const LIST_FILTERS = [
   ['', '全部'], ['active', '进行中'], ['awaiting_confirmation', '待审核'],
   ['completed', '完成'], ['failed', '失败'],
 ];
-const matchStatus = (t, f) => !f || (f === 'active' ? ['queued','running'].includes(t.status) : t.status === f);
+const listFilters = () => canDelete() ? [...LIST_FILTERS, ['deleted', '已删除']] : LIST_FILTERS;  // 已删除任务只对有删除权限者可见（可恢复）
+const matchStatus = (t, f) => f === 'deleted' ? !!t.deleted_at
+  : !t.deleted_at && (!f || (f === 'active' ? ['queued','running'].includes(t.status) : t.status === f));
 const matchProject = (t, p) => !p || (p === '__none__' ? !t.project : t.project === p);
 let listLine = '';
 const matchLine = (t, l) => !l || (!!t.project && projLineOf(t.project) === l);
@@ -2267,18 +2275,19 @@ function renderTaskListPage() {
         </div></div>
       <div class="card-b">
         <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
-          <thead><tr><th style="width:110px">状态</th><th style="width:130px">任务 ID</th><th style="width:140px">项目</th><th>来源</th>
-          <th style="width:100px">创建人</th><th style="width:80px">测试点</th><th style="width:80px">用例数</th><th style="width:60px">修订</th><th style="width:100px">创建时间</th></tr></thead>
+          <thead><tr>${canDelete()?`<th style="width:30px">${allCheckedHtml('tkck', 'tkPage', '全选本页可删除的任务')}</th>`:''}<th style="width:110px">状态</th><th style="width:130px">任务 ID</th><th style="width:140px">项目</th><th>来源</th>
+          <th style="width:100px">创建人</th><th style="width:80px">测试点</th><th style="width:80px">用例数</th><th style="width:60px">修订</th><th style="width:100px">创建时间</th>${canDelete()?'<th style="width:60px">操作</th>':''}</tr></thead>
           <tbody id="taskTbody"></tbody>
         </table></div>
         <div id="taskPager"></div>
+        <div class="toolbar" id="taskBatch" style="display:none"></div>
       </div></div>`;
   }
   renderTaskListRows();
 }
 function renderTaskListRows() {
   const tasks = filteredTasks();
-  $('listSeg').innerHTML = LIST_FILTERS.map(([v, label]) => {
+  $('listSeg').innerHTML = listFilters().map(([v, label]) => {
     const n = _tasksCache.filter(t => matchStatus(t, v) && matchProject(t, listProject) && matchLine(t, listLine)).length;
     return `<button class="${listStatus===v?'on':''}" onclick="listSet('status','${v}')">${label} ${n}</button>`;
   }).join('');
@@ -2292,7 +2301,8 @@ function renderTaskListRows() {
   const creators = [...new Set(_tasksCache.map(t => t.created_by).filter(Boolean))].sort();
   $('creatorSel').innerHTML = `<option value="">全部创建人</option>`
     + creators.map(c => `<option value="${esc(c)}" ${listCreator===c?'selected':''}>${esc(c)}${curUser&&c===curUser.username?'（我）':''}</option>`).join('');
-  $('taskTotal').textContent = `共 ${_tasksCache.length} 个任务`;
+  const alive = _tasksCache.filter(t => !t.deleted_at).length, gone = _tasksCache.length - alive;
+  $('taskTotal').textContent = `共 ${alive} 个任务${gone?`（另有 ${gone} 个已删除）`:''}`;
   const filtering = !!(listQuery.trim() || listStatus || listProject || listLine || listCreator);
   $('listHint').style.display = filtering ? '' : 'none'; $('listHint').textContent = filtering ? `筛选出 ${tasks.length} 个` : '';
   $('listReset').style.display = filtering ? '' : 'none';
@@ -2300,9 +2310,13 @@ function renderTaskListRows() {
   if (listPage > pages) listPage = pages;
   const pageTasks = tasks.slice((listPage - 1) * listSize, listPage * listSize);
   $('taskPager').innerHTML = tasks.length > PT_PAGE_SIZES[0] || listPage > 1 ? pagerHtml(tasks.length, listPage, listSize, 'listSet', '个') : '';
+  const del = canDelete();
+  for (const id of tkSel) if (!_tasksCache.some(t => t.task_id === id && !t.deleted_at)) tkSel.delete(id);  // 已删除 / 不存在的从勾选集合剔除
+  const deletable = t => del && !t.deleted_at && !['queued','running'].includes(t.status);
   $('taskTbody').innerHTML = pageTasks.map(t => `
-    <tr class="rowlink" onclick="openTask('${t.task_id}')">
-      <td><span class="pill ${t.status}">${statusText(t.status)}</span>
+    <tr class="${t.deleted_at?'':'rowlink'}" ${t.deleted_at?'':`onclick="openTask('${t.task_id}')"`}>
+      ${del?`<td onclick="event.stopPropagation()">${deletable(t)?`<input type="checkbox" class="tkck" data-tid="${t.task_id}" ${tkSel.has(t.task_id)?'checked':''} onchange="tkToggle('${t.task_id}', this.checked)">`:''}</td>`:''}
+      <td>${t.deleted_at?`<span class="pill failed">已删除</span><div class="hint" style="white-space:nowrap" title="${esc(t.deleted_at)}">${esc(t.deleted_by||'')} ${relTime(t.deleted_at)}</div>`:`<span class="pill ${t.status}">${statusText(t.status)}</span>`}
         ${t.progress?`<div class="hint">${progressText(t.progress)} <span class="spin"></span></div>`:''}</td>
       <td><span class="tid-cell">${t.task_id}</span></td>
       <td>${t.project?`<span class="tag">${esc(t.project)}</span>`:'<span class="hint">—</span>'}</td>
@@ -2313,8 +2327,45 @@ function renderTaskListRows() {
       <td>${t.case_count ? `<b>${t.case_count}</b> 条` : '<span class="hint">—</span>'}</td>
       <td>${t.revision_count ? t.revision_count + ' 轮' : '<span class="hint">—</span>'}</td>
       <td class="hint" title="${esc(t.created_at||'')}">${relTime(t.created_at)}</td>
-    </tr>`).join('') || `<tr><td colspan="9"><div class="empty" style="display:flex;flex-direction:column;align-items:center;gap:10px;padding:34px 0">
-      ${owlSvg('idle', 64)}${_tasksCache.length ? '没有符合筛选条件的任务' : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
+      ${del?`<td onclick="event.stopPropagation()"><div class="rowops">
+        ${t.deleted_at?`<button class="btn ghost sm" title="恢复任务：回到列表与详情，用例重新计入统计" onclick="restoreTask('${t.task_id}')">恢复</button>`
+          :deletable(t)?`<button class="ibtn bad" title="删除任务（可在「已删除」里恢复）" onclick="deleteTask('${t.task_id}')">${IC.trash}</button>`
+          :'<span class="hint" title="执行中的任务请先取消再删除">—</span>'}</div></td>`:''}
+    </tr>`).join('') || `<tr><td colspan="${del?11:9}"><div class="empty" style="display:flex;flex-direction:column;align-items:center;gap:10px;padding:34px 0">
+      ${owlSvg('idle', 64)}${_tasksCache.length ? (listStatus==='deleted' ? '没有已删除的任务' : '没有符合筛选条件的任务') : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
+  renderTaskBatch();
+}
+/* 任务列表删除：勾选跨页保留（Set），表头全选本页；单条 / 批量删除都是逻辑删除，「已删除」筛选里可恢复 */
+const tkSel = new Set();
+function tkToggle(id, on) { on ? tkSel.add(id) : tkSel.delete(id); renderTaskBatch(); }
+function tkPage() { document.querySelectorAll('.tkck').forEach(c => tkToggle(c.dataset.tid, c.checked)); }
+function renderTaskBatch() {
+  const bar = $('taskBatch'); if (!bar) return;
+  bar.style.display = tkSel.size ? '' : 'none';
+  bar.innerHTML = tkSel.size ? `<span class="hint">已勾选 <b>${tkSel.size}</b> 个任务</span>
+    <button class="btn danger sm" onclick="batchDeleteTasks()">批量删除</button>
+    <button class="btn ghost sm" onclick="tkSel.clear(); renderTaskListRows()">取消全选</button>` : '';
+}
+const TASK_DELETE_NOTE = '任务及其测试点 / 用例将从列表与详情隐藏，不再计入用例中心与统计；版本历史与审计留档保留，可在「已删除」筛选里恢复。测试计划里的用例快照不受影响。';
+async function deleteTask(id) {
+  if (!await uiConfirm('删除任务', `删除任务 ${id}？${TASK_DELETE_NOTE}`, true)) return;
+  try { await api(`/api/v1/tasks/${id}`, {method:'DELETE'}); tkSel.delete(id); toast('任务已删除，可在「已删除」里恢复', 'ok'); await refreshList(); if (!$('taskTbody')) return; renderTaskListRows(); }
+  catch (e) { toast('删除失败：' + e.message, 'err'); }
+}
+async function batchDeleteTasks() {
+  const ids = [...tkSel];
+  if (!ids.length) return toast('请先勾选任务', 'warn');
+  if (!await uiConfirm('批量删除任务', `删除选中的 ${ids.length} 个任务？${TASK_DELETE_NOTE}`, true)) return;
+  try {
+    const r = await jpost('/api/v1/tasks/batch-delete', {ids});
+    tkSel.clear();
+    toast(`已删除 ${r.deleted.length} 个` + (r.skipped.length ? `，${r.skipped.length} 个跳过：${[...new Set(r.skipped.map(x => x.reason))].join('；')}` : ''), r.skipped.length ? 'warn' : 'ok');
+    await refreshList(); if ($('taskTbody')) renderTaskListRows();
+  } catch (e) { toast('批量删除失败：' + e.message, 'err'); }
+}
+async function restoreTask(id) {
+  try { await jpost(`/api/v1/tasks/${id}/restore`, {}); toast('任务已恢复', 'ok'); await refreshList(); if ($('taskTbody')) renderTaskListRows(); }
+  catch (e) { toast('恢复失败：' + e.message, 'err'); }
 }
 function backToList() {
   currentTask = null;
@@ -2626,6 +2677,13 @@ async function loadOvPlans(taskId) {
 
 /* ==================== 测试点审核 ==================== */
 const normPoint = p => typeof p === 'string' ? {point:p, tp_id:'', status:'pending', legacy:true} : p;
+/* 设计需求页来源（ref）：「页面或章节 › 需求点」，页面段加粗便于按页核对；旧数据没有分隔符时整段展示 */
+function refHtml(ref, empty='<span class="hint" title="该测试点没有记录需求来源，可通过「修改」补上">—</span>') {
+  if (!ref) return empty;
+  const i = ref.indexOf('›');
+  const page = i > 0 ? ref.slice(0, i).trim() : '', item = i > 0 ? ref.slice(i + 1).trim() : ref.trim();
+  return `<span class="ref" title="${esc(ref)}">${page?`<b>${esc(page)}</b><span class="sep">›</span>`:''}${esc(item)}</span>`;
+}
 function allPoints(t) {
   const modules = (t.analysis||{}).test_points || [];
   return modules.flatMap(m => (m.points||[]).map(p => ({...normPoint(p), module:m.module})));
@@ -2704,9 +2762,9 @@ function renderPointWorkbench(t) {
 
   // 子页签：测试点 / 需求盲区 / 疑似重复 三张独立列表，各自筛选与分页
   const sub = `<div class="seg" style="margin-bottom:10px">
-    <button class="${ptSub==='points'?'on':''}" onclick="ptSub='points';renderDetail()">测试点 <span class="cnt">${pts.length}</span></button>
     <button class="${ptSub==='blind'?'on':''}" onclick="ptSub='blind';renderDetail()">需求盲区 <span class="cnt ${bsOpen?'hot':''}">${bsOpen?bsOpen+' 待处置':bsAll.length}</span></button>
     <button class="${ptSub==='dup'?'on':''}" onclick="ptSub='dup';renderDetail()">疑似重复 <span class="cnt ${dpOpen?'hot':''}">${dpOpen?dpOpen+' 待处置':dpAll.length}</span></button>
+    <button class="${ptSub==='points'?'on':''}" onclick="ptSub='points';renderDetail()">测试点 <span class="cnt">${pts.length}</span></button>
   </div>`;
   if (ptSub === 'blind') return sub + renderBlindSpots(t);
   if (ptSub === 'dup') return sub + renderDupPairs(t, confirmable);
@@ -2721,10 +2779,10 @@ function renderPointWorkbench(t) {
         <td style="width:30px">${p.legacy?'':`<input type="checkbox" class="ptck" data-tp="${esc(p.tp_id)}" data-mod="${esc(p.module)}">`}</td>
         <td style="width:70px"><span class="cid">${esc(p.tp_id)}</span></td>
         <td>${esc(p.point)}
-          ${p.ref?`<div class="hint" title="来源需求点（需求文档中的页面 / 条目）">需求点：${esc(p.ref)}</div>`:''}
           ${(p.warnings||[]).map(w=>`<div class="hint" style="color:var(--warn)">⚠ ${esc(w)}</div>`).join('')}
           ${editingHint('point', p.tp_id)}
           ${rejectInfoLine(p)}</td>
+        <td style="width:170px">${refHtml(p.ref)}</td>
         <td style="width:84px">${p.dimension?`<span class="tag">${esc(p.dimension)}</span>`:'<span class="hint">—</span>'}</td>
         <td style="width:76px">${p.legacy?'':srcChip(p.source||'ai')}</td>
         <td style="width:92px"><span class="st ${p.status}">${pStatusText[p.status]||p.status}</span>
@@ -2745,7 +2803,7 @@ function renderPointWorkbench(t) {
       lastMod = p.module;
       const m = modules.find(x => x.module === p.module) || {points: []};
       const onPage = pageItems.filter(x => x.module === p.module).length;
-      rows += `<tr class="module-head"><td colspan="7">
+      rows += `<tr class="module-head"><td colspan="8">
         <label class="check"><input type="checkbox" onclick="toggleModule(${jsq(p.module)},this.checked)">
         ${esc(p.module)}　<span class="hint">${(m.points||[]).length} 条${onPage<(m.points||[]).length?` · 本页 ${onPage} 条`:''}</span></label></td></tr>`;
     }
@@ -2780,8 +2838,8 @@ function renderPointWorkbench(t) {
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
     ${pts.length && pts.every(p=>p.legacy) ? '<div class="hint" style="margin:6px 0">项目化之前的旧版任务：测试点为只读留档，不支持审核操作</div>' : ''}
     ${pointView==='mind' ? renderPointMind(t, modules, confirmable) : filters + `<div class="tbl-wrap"><table>
-      <tr><th>${pts.some(p=>!p.legacy)?allCheckedHtml('ptck', 'renderBatchBar', '全选本页测试点（批量通过 / 驳回）'):''}</th><th>编号</th><th>测试点</th><th>维度</th><th>来源</th><th>状态</th><th>操作</th></tr>
-      ${rows || `<tr><td colspan="7"><div class="empty">${pts.length?'没有符合筛选条件的测试点':'暂无测试点'}</div></td></tr>`}
+      <tr><th>${pts.some(p=>!p.legacy)?allCheckedHtml('ptck', 'renderBatchBar', '全选本页测试点（批量通过 / 驳回）'):''}</th><th>编号</th><th>测试点</th><th title="设计需求页来源：页面或章节 › 需求点，用于确认与评审时回到需求核对逻辑">需求来源</th><th>维度</th><th>来源</th><th>状态</th><th>操作</th></tr>
+      ${rows || `<tr><td colspan="8"><div class="empty">${pts.length?'没有符合筛选条件的测试点':'暂无测试点'}</div></td></tr>`}
     </table></div>` + (filtered.length > PT_PAGE_SIZES[0] || ptPage > 1 ? pagerHtml(filtered.length, ptPage, ptSize, 'ptSet') : '')}
     ${t.pending_fix&&t.pending_fix.kind==='points'?renderFixProposals(t.pending_fix)
       :rejected&&confirmable?`<div class="toolbar"><button class="btn soft sm" onclick="fixPoints()" id="fixPtBtn">AI 修改驳回项（${rejected}）</button>
@@ -2805,6 +2863,7 @@ function buildPointMinderJson(t, modules) {
       children: (m.points||[]).map(normPoint).map(p => ({
         data: {text: p.point, kind: 'point', tpId: p.tp_id, resource: [p.tp_id, ...(p.dimension ? [p.dimension] : []), label[p.status] || p.status]},
         children: [
+          ...(p.ref ? [{data: {text: `来源：${p.ref}`, kind: 'note', resource: ['需求来源']}}] : []),
           ...(p.status === 'rejected' && (p.comment || p.fix_request) ? [{data: {text: `驳回：${p.comment || ''}${p.fix_request ? '｜要求：' + p.fix_request : ''}`, kind: 'note', resource: ['驳回意见']}}] : []),
           ...((p.warnings||[]).map(w => ({data: {text: w, kind: 'note', resource: ['提示']}}))),
         ],
@@ -2828,7 +2887,7 @@ function renderPointMind(t, modules, confirmable) {
       <button class="btn ghost sm" onclick="mExpand()">展开全部</button>
     </div>
     <div class="minder-box" id="pointMinder"></div>
-    <div class="hint" style="margin-top:8px">结构：需求 → 模块 → 测试点（编号 / 维度 / 状态）→ 驳回意见与提示。${confirmable ? '选中节点后用上方按钮审核，双击节点直接修改；通过即锁定为正式测试点。' : '该任务已完成生成，脑图为留档视图。'}</div>`;
+    <div class="hint" style="margin-top:8px">结构：需求 → 模块 → 测试点（编号 / 维度 / 状态）→ 需求来源、驳回意见与提示。${confirmable ? '选中节点后用上方按钮审核，双击节点直接修改；通过即锁定为正式测试点。' : '该任务已完成生成，脑图为留档视图。'}</div>`;
 }
 function pmNode() {
   const n = _minder && _minder.getSelectedNode();
@@ -3160,9 +3219,9 @@ async function pointModify(tp) {
   jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'start'})
     .then(d => { if (d.holder) toast(`${d.holder.by} 正在编辑此测试点，注意保存冲突`, 'warn'); })
     .catch(()=>{});
-  const v = await askPoint('修改测试点 ' + tp, {point: p?p.point:'', dimension: p?p.dimension:''});
+  const v = await askPoint('修改测试点 ' + tp, {point: p?p.point:'', dimension: p?p.dimension:'', ref: p?p.ref:''});
   jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'stop'}).catch(()=>{});
-  if (v) pointsReview([{tp_id:tp, action:'modify', point:v.point, dimension:v.dimension,
+  if (v) pointsReview([{tp_id:tp, action:'modify', point:v.point, dimension:v.dimension, ref:v.ref,
                         base_version: (p&&p.version)||1}]);
 }
 function toggleModule(mod, checked) {
@@ -3249,8 +3308,10 @@ function renderCases(t) {
   const canEditCases = can((t.context||{}).project, 'case.edit') && t.status === 'completed';
   const canReview = can((t.context||{}).project, 'case.review');
   const modules = [...new Set(r.cases.map(c=>c.module))];
+  const ptMap = new Map(allPoints(t).map(p => [p.tp_id, p]));  // 用例的来源测试点 → 设计需求页来源，评审时回到需求核对
+  const refsOf = c => [...new Set((c.point_ids||[]).map(x => (ptMap.get(x)||{}).ref).filter(Boolean))];
   const kw = caseKw.toLowerCase();
-  const hit = c => !kw || [c.case_id, c.title, c.module, c.keywords, c.precondition, c.remark, ...(c.point_ids||[]),
+  const hit = c => !kw || [c.case_id, c.title, c.module, c.keywords, c.precondition, c.remark, ...(c.point_ids||[]), ...refsOf(c),
     ...(c.steps||[]).flatMap(st=>[st.action, st.expected])].some(x => String(x||'').toLowerCase().includes(kw));
   const visible = r.cases.filter(c =>
     (caseTab==='all' || caseState(t, c).status===caseTab) &&
@@ -3269,7 +3330,8 @@ function renderCases(t) {
       <td style="width:80px">${esc(c.module)}</td>
       <td style="min-width:180px">${esc(c.title)}
         ${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}
-        ${(c.point_ids||[]).length?`<div class="hint" title="来源测试点">${c.point_ids.map(x=>`<code>${esc(x)}</code>`).join(' ')}</div>`:''}
+        ${(c.point_ids||[]).length?`<div class="hint" title="来源测试点">${c.point_ids.map(x=>`<code title="${esc((ptMap.get(x)||{}).point||'')}">${esc(x)}</code>`).join(' ')}</div>
+        ${refsOf(c).length?`<div class="hint">需求来源：${refsOf(c).map(x=>refHtml(x)).join('<span class="hint">；</span>')}</div>`:''}`:''}
         ${editingHint('case', c.uid)}
         ${rejectInfoLine(s)}</td>
       <td style="width:44px"><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>

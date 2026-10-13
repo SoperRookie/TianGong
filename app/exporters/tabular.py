@@ -135,7 +135,7 @@ def export_csv(
 
 # ---- 测试点导出（xlsx）----
 
-_POINT_HEADERS = ["编号", "模块", "测试点", "维度", "来源需求点", "来源", "状态", "审核意见", "驳回类型", "已生成用例", "覆盖用例编号"]
+_POINT_HEADERS = ["编号", "模块", "测试点", "维度", "需求来源", "来源", "状态", "审核意见", "驳回类型", "已生成用例", "覆盖用例编号"]
 _POINT_SOURCE = {"ai": "AI 拆解", "gap": "查漏新增", "supplement": "AI 补充", "manual": "人工", "ai_fix": "修改新增", "blind_spot": "盲区转入"}
 _POINT_STATUS = {"pending": "待审核", "approved": "已通过", "rejected": "已驳回"}
 
