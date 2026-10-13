@@ -433,3 +433,28 @@ async def test_多需求合并发起测试设计_追溯与删除标记(client):
     assert (await client.post(f"/api/v1/requirements/{a['req_id']}/restore")).status_code == 200
     ctx = (await client.get(f"/api/v1/tasks/{task_id}")).json()["context"]
     assert ctx["requirement_deleted"] is False and ctx["deleted_requirement_ids"] == [b["req_id"]]
+
+
+async def test_盲区转需求待确认事项_多需求任务可选需求(client):
+    a = await _req(client, title="登录需求")
+    b = await _req(client, title="注册需求", text="用户填写手机号与验证码完成注册。")
+    analyst = json.dumps({"modules": [{"module": "登录", "points": ["正常登录"]}],
+                          "blind_spots": ["未说明验证码有效期"]}, ensure_ascii=False)
+    gap = json.dumps({"coverage": {}, "additions": []})
+    app.state.llm = StubLLM([analyst, gap])
+    resp = await client.post("/api/v1/requirements/design",
+                             json={"req_ids": [a["req_id"], b["req_id"]], "confirm_points": True, "async_mode": False})
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["task_id"]
+    spot = (await client.get(f"/api/v1/tasks/{task_id}")).json()["blind_spots"][0]
+    assert (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{spot['bs_id']}",
+                              json={"action": "to_question", "req_id": "nope"})).status_code == 400
+    resp = await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{spot['bs_id']}",
+                             json={"action": "to_question", "req_id": b["req_id"], "level": "suggest", "note": "按 5 分钟"})
+    assert resp.status_code == 200, resp.text
+    tgt = resp.json()["blind_spot"]["target"]
+    assert tgt["req_id"] == b["req_id"] and tgt["req_title"] == "注册需求" and tgt["level"] == "suggest"
+    r = (await client.get(f"/api/v1/requirements/{b['req_id']}")).json()
+    q = next(x for x in r["questions"] if x["q_id"] == tgt["q_id"])
+    assert q["question"] == "未说明验证码有效期" and q["level"] == "suggest" and q["assumption"] == "按 5 分钟" and q["source"] == "manual"
+    assert all(x["question"] != "未说明验证码有效期" for x in (await client.get(f"/api/v1/requirements/{a['req_id']}")).json()["questions"])

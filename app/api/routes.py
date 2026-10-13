@@ -1730,6 +1730,7 @@ def _finalize_task(
 
 def _quality_report(record: TaskRecord, result) -> dict:
     """AI 自检评分（需求五十八）：由确定性信号汇总，仅作参考，不作为自动通过依据。"""
+    from app.tasks.blind_spots import open_blind_spots
     from app.tasks.points import case_duplicate_candidates
 
     coverage = record.coverage or {}
@@ -1749,7 +1750,8 @@ def _quality_report(record: TaskRecord, result) -> dict:
         "测试维度覆盖度": coverage_score,
         "重复风险": dup_risk,
         "疑似重复用例对": dup_pairs[:10],
-        "待确认问题": len(result.blind_spots),
+        "待确认问题": len(open_blind_spots(record, list(dict.fromkeys(
+            [*((record.analysis or {}).get("blind_spots") or []), *result.blind_spots])))),
         "未解决评审问题": len(result.unresolved),
         "历史用例参考": sum(1 for k in record.knowledge if k.get("category") == "test_cases"),
         "评审轮次": result.review_rounds,
@@ -1913,6 +1915,7 @@ async def _generate_confirmed(request: Request, task_id: str, test_points: list[
             review_rounds=max(int(old.get("review_rounds", 0) or 0), result.review_rounds),
             unresolved=[u for u in old.get("unresolved") or [] if u.get("module") not in new_modules] + result.unresolved,
             blind_spots=list(dict.fromkeys([*(old.get("blind_spots") or []), *result.blind_spots])),
+            resolved_blind_spots=[*(old.get("resolved_blind_spots") or []), *result.resolved_blind_spots],
             missing=list(dict.fromkeys([*(old.get("missing") or []), *result.missing])),
             suggestions=list(dict.fromkeys([*(old.get("suggestions") or []), *result.suggestions])),
             test_points=_merge_module_points(old.get("test_points") or [], result.test_points),
@@ -2853,6 +2856,100 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
     bump_tp_seq(record.analysis)
     store.save(record)
     return {"task_id": task_id, "coverage": gap["coverage"], "added": added, "test_points": modules}
+
+
+class BlindSpotActionBody(BaseModel):
+    action: str                    # to_question / to_point / explain / ignore / reopen
+    note: str = ""                 # 处置说明（需求已说明：写原文出处；忽略：写理由）
+    level: str = "must"            # to_question：待确认事项等级 must / suggest
+    req_id: str | None = None      # to_question：多需求任务指定转入哪条需求（默认主需求）
+    module: str = ""               # to_point：模块名（默认「需求盲区」）
+    point: str = ""                # to_point：测试点描述（默认沿用盲区原文）
+    dimension: str = ""            # to_point：维度
+
+
+@router.get("/api/v1/tasks/{task_id}/blind-spots")
+async def list_blind_spots(request: Request, task_id: str) -> dict:
+    """需求盲区条目（状态 / 去向 / 处置人），待处置在前。"""
+    from app.tasks.blind_spots import blind_spot_entities
+
+    record = _task(request, task_id, "point.view")
+    return {"task_id": task_id, "blind_spots": blind_spot_entities(record)}
+
+
+@router.post("/api/v1/tasks/{task_id}/blind-spots/{bs_id}")
+async def act_blind_spot(request: Request, task_id: str, bs_id: str, body: BlindSpotActionBody) -> dict:
+    """盲区闭环处置：转需求待确认事项 / 转测试点 / 标记需求已说明 / 忽略 / 重开。
+
+    盲区本身只是 AI 的提示；是否真是盲区、该去哪里由人工决定并留痕：
+    - to_question：写入任务来源需求的待确认事项（must 级会阻塞该需求后续发起设计，suggest 级可带假设继续）；
+    - to_point：以待审核测试点追加到拆解结果（来源「盲区转入」），进入正常的测试点审核与生成；
+    - explain：需求其他地方已经说明，不是盲区（note 记原文出处）；ignore：与本次无关；reopen：撤回处置。
+    """
+    from app.tasks.blind_spots import ACTIONS, find_blind_spot, record_blind_spot_action
+    from app.tasks.points import add_points
+
+    if body.action not in ACTIONS:
+        raise HTTPException(status_code=400, detail=f"不支持的处置动作: {body.action}")
+    perm = "point.edit" if body.action in ("to_point", "to_question") else "point.review"
+    store = request.app.state.tasks
+    record = _task(request, task_id, perm)
+    entity = find_blind_spot(record, bs_id)
+    if entity is None:
+        raise HTTPException(status_code=404, detail=f"盲区不存在: {bs_id}")
+    if body.action != "reopen" and entity["status"] != "open" and not entity.get("ai_resolved"):
+        raise HTTPException(status_code=409, detail=f"该盲区已处置（{entity['status']}），请先重开")
+    operator = _operator(request)
+    request.state.audit_detail = f"{body.action} {entity['text'][:40]}"
+    target: dict | None = None
+    extra: dict = {}
+    if body.action == "to_question":
+        from app.requirements import RequirementError
+
+        ctx = record.context or {}
+        req_ids = [r for r in (ctx.get("requirement_ids") or [ctx.get("requirement_id")]) if r]
+        if not req_ids:
+            raise HTTPException(status_code=409, detail="任务未关联需求，无法转为待确认事项；可转为测试点或在需求中心手工添加")
+        req_id = body.req_id or req_ids[0]
+        if req_id not in req_ids:
+            raise HTTPException(status_code=400, detail="req_id 不是本任务的来源需求")
+        _req(request, req_id, "requirement.edit")
+        try:
+            item = request.app.state.requirements.add_question(
+                req_id, entity["text"], operator=operator,
+                level=body.level if body.level in ("must", "suggest") else "must", assumption=body.note)
+        except RequirementError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        q = item["questions"][-1]
+        target = {"req_id": req_id, "req_title": item.get("title", ""), "q_id": q["q_id"], "level": q["level"]}
+        extra["question"] = q
+    elif body.action == "to_point":
+        modules = (record.analysis or {}).get("test_points")
+        if modules is None:
+            record.analysis = {**(record.analysis or {}), "test_points": []}
+            modules = record.analysis["test_points"]
+        added = add_points(
+            modules,
+            [{"module": body.module.strip() or "需求盲区", "point": body.point.strip() or entity["text"],
+              "dimension": body.dimension.strip()}],
+            source="blind_spot", seq_floor=tp_seq_of(record.analysis), skip_similar=False,
+        )
+        bump_tp_seq(record.analysis)
+        if not added:
+            raise HTTPException(status_code=400, detail="测试点描述不能为空")
+        from app.versions import ensure_versions, point_entities
+        ensure_versions(task_id, "point", point_entities(modules), by=operator)
+        target = {"tp_id": added[0]["tp_id"], "module": added[0]["module"]}
+        extra["added"] = added
+    elif body.action == "explain" and not body.note.strip():
+        raise HTTPException(status_code=400, detail="请写明需求哪里已经说明（章节 / 原文片段），便于追溯")
+    updated = record_blind_spot_action(record, entity, body.action, operator, note=body.note, target=target)
+    if record.result and record.quality:  # 质量摘要里的「待确认问题」随处置实时变化
+        from app.tasks.blind_spots import open_blind_spots
+        record.quality = {**record.quality, "待确认问题": len(open_blind_spots(record))}
+    store.save(record)
+    from app.tasks.blind_spots import blind_spot_entities
+    return {"task_id": task_id, "blind_spot": updated, "blind_spots": blind_spot_entities(record), **extra}
 
 
 class ManualPointsBody(BaseModel):
@@ -6446,10 +6543,13 @@ async def archive_prompt_version(request: Request, key: str, version_no: int) ->
 
 @router.get("/api/v1/tasks/{task_id}")
 async def get_task(request: Request, task_id: str) -> dict:
+    from app.tasks.blind_spots import blind_spot_entities
+
     record = _task(request, task_id, "case.view")
     pending = _points_pending_generation(record) if record.status == "completed" else []
     return {**record.model_dump(exclude={"checkpoint"}), "editing": _active_editing(request.app, task_id),
             "error_kind": _error_kind(record.error), "resume": _resume_info(record),
+            "blind_spots": blind_spot_entities(record),
             "points_pending_generation": [p["tp_id"] for tp in pending for p in tp["points"]]}
 
 
