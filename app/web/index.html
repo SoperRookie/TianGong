@@ -1461,7 +1461,7 @@ const $ = id => document.getElementById(id);
 const DIMENSIONS = ["正常流程","异常流程","输入校验","边界值","状态转换","权限","数据","重复操作","中断","网络"];
 let currentTask = null, editingCase = null, currentView = 'board';
 let detailTab = 'overview', caseTab = 'all', caseModule = '', caseView = 'table', pointView = 'table';
-let ptSub = 'points', ptPage = 1, ptSize = 20, ptModule = '', ptStatus = '', bsPage = 1, bsSize = 20, bsFilter = 'open';
+let ptSub = 'points', ptPage = 1, ptSize = 20, ptModule = '', ptStatus = '', bsPage = 1, bsSize = 20, bsFilter = 'open', bsKw = '';
 let casePage = 1, caseSize = 20, casePrio = '', caseKw = '';
 const PT_PAGE_SIZES = [20, 50, 100, 200];
 let hiddenDupPairs = new Set(), lastPointDiff = null, lastCaseDiff = null, lastHints = [];
@@ -2347,7 +2347,7 @@ async function openTask(id, keepLocal) {
   if (!keepLocal) {
     hiddenDupPairs = new Set(); lastPointDiff = null; lastCaseDiff = null; lastHints = [];
     caseTab = 'all'; caseModule = ''; expandedSteps = new Set(); pointView = 'table';
-    ptSub = 'points'; ptPage = 1; ptModule = ''; ptStatus = ''; bsPage = 1; bsFilter = 'open';
+    ptSub = 'points'; ptPage = 1; ptModule = ''; ptStatus = ''; bsPage = 1; bsFilter = 'open'; bsKw = '';
     casePage = 1; casePrio = ''; caseKw = '';
     detailTab = currentTask.status === 'awaiting_confirmation' ? 'points'
       : ((currentTask.result && currentTask.result.cases && currentTask.result.cases.length) || ((currentTask.context||{}).manual && currentTask.status==='completed')) ? 'cases' : 'overview';
@@ -2641,6 +2641,7 @@ function bsSet(name, value) {
   if (name === 'page') bsPage = value;
   else if (name === 'size') { bsSize = value; bsPage = 1; }
   else if (name === 'filter') { bsFilter = value; bsPage = 1; }
+  else if (name === 'kw') { bsKw = (value || '').trim(); bsPage = 1; }
   renderDetail();
 }
 
@@ -2803,7 +2804,10 @@ function renderBlindSpots(t) {
   const stCls = {open:'pending', question:'approved', point:'approved', explained:'approved', ignored:'rejected'};
   const aiResolved = items.filter(b=>b.ai_resolved).length;
   const counts = {}; items.forEach(b => counts[b.status] = (counts[b.status]||0) + 1);
-  const filtered = bsFilter === 'all' ? items : items.filter(b => b.status === bsFilter);
+  const kw = bsKw.toLowerCase();
+  const hit = b => !kw || [b.text, b.note, b.by, (b.target||{}).tp_id, (b.target||{}).req_title, (b.target||{}).module]
+    .some(x => String(x||'').toLowerCase().includes(kw));
+  const filtered = (bsFilter === 'all' ? items : items.filter(b => b.status === bsFilter)).filter(hit);
   const pages = Math.max(1, Math.ceil(filtered.length / bsSize));
   if (bsPage > pages) bsPage = pages;
   const pageItems = filtered.slice((bsPage - 1) * bsSize, bsPage * bsSize);
@@ -2829,15 +2833,19 @@ function renderBlindSpots(t) {
     </tr>`).join('');
   return `<div class="toolbar" style="margin-top:0">
       <span class="hint">AI 标出的需求含糊 / 缺失处 · 共 ${items.length} 条 · 待处置 <b style="color:${open.length?'var(--warn)':'var(--ok)'}">${open.length}</b>${aiResolved?` · ${aiResolved} 条经分片复核已被需求其他部分说明`:''}</span>
-      <div class="seg" style="margin-left:auto">
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="search" placeholder="搜索盲区 / 处置说明 / 去向" value="${esc(bsKw)}" style="width:200px"
+          onchange="bsSet('kw', this.value)" onkeydown="if(event.key==='Enter'){bsSet('kw', this.value)}">
+        ${kw?`<span class="hint">命中 ${filtered.length} 条</span>`:''}
+        <div class="seg">
         ${[['open','待处置'],['all','全部'],['question','已转待确认事项'],['point','已转测试点'],['explained','需求已说明'],['ignored','已忽略']]
           .filter(([k]) => k==='open' || k==='all' || counts[k])
           .map(([k,v])=>`<button class="${bsFilter===k?'on':''}" onclick="bsSet('filter',${jsq(k)})">${v}${k==='all'?'':` ${counts[k]||0}`}</button>`).join('')}
-      </div></div>
+        </div></div></div>
     <div class="hint" style="margin:0 0 8px">处置去向：<b>转待确认事项</b> = 需求本身缺规则，交需求负责人补结论；<b>转测试点</b> = 可直接验证，进入测试点审核；<b>需求已说明</b> = 其他章节已写明，不是盲区（写出处）；<b>忽略</b> = 与本次无关。处置后可重开。</div>
     <div class="tbl-wrap"><table>
       <tr><th>#</th><th>盲区</th><th>状态</th><th>处置人</th><th>操作</th></tr>
-      ${rows || `<tr><td colspan="5"><div class="empty">${items.length ? (bsFilter==='open' ? '全部盲区已处置' : '该状态下没有盲区') : '本次拆解没有标出需求盲区'}</div></td></tr>`}
+      ${rows || `<tr><td colspan="5"><div class="empty">${!items.length ? '本次拆解没有标出需求盲区' : kw ? '没有符合搜索条件的盲区' : bsFilter==='open' ? '全部盲区已处置' : '该状态下没有盲区'}</div></td></tr>`}
     </table></div>
     ${filtered.length > PT_PAGE_SIZES[0] || bsPage > 1 ? pagerHtml(filtered.length, bsPage, bsSize, 'bsSet') : ''}`;
 }
