@@ -3014,7 +3014,36 @@ async def dup_check_points(request: Request, task_id: str) -> dict:
         raise HTTPException(status_code=502, detail=str(e))
     record.dup_report = {"points": judged, "resolved": (record.dup_report or {}).get("resolved", [])}
     store.save(record)
-    return {"task_id": task_id, "duplicates": judged}
+    from app.tasks.points import dup_pair_entities
+    return {"task_id": task_id, "duplicates": judged, "dup_pairs": dup_pair_entities(record)}
+
+
+class DupPairActionBody(BaseModel):
+    action: str        # ignore（人工判定不重复 / 无需处理）/ reopen
+    note: str = ""
+
+
+@router.post("/api/v1/tasks/{task_id}/points/dup-pairs/{key}")
+async def act_dup_pair(request: Request, task_id: str, key: str, body: DupPairActionBody) -> dict:
+    """疑似重复测试点对的处置留痕：忽略 / 重开（删除某一条走测试点删除，删除后该对自动变为已处置）。"""
+    from app.tasks.points import dup_pair_entities, record_dup_pair_action
+
+    store = request.app.state.tasks
+    record = _task(request, task_id, "point.review")
+    entity = next((e for e in dup_pair_entities(record) if e["key"] == key), None)
+    if entity is None:
+        raise HTTPException(status_code=404, detail=f"疑似重复对不存在: {key}")
+    if body.action == "ignore" and entity["status"] != "open":
+        raise HTTPException(status_code=409, detail=f"该重复对已处置（{entity['status']}）")
+    if body.action == "reopen" and entity["status"] == "resolved":
+        raise HTTPException(status_code=409, detail="测试点已删除，该重复对无法重开")
+    try:
+        updated = record_dup_pair_action(record, key, body.action, _operator(request), body.note)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    request.state.audit_detail = f"{body.action} {entity['a']} ≈ {entity['b']}"
+    store.save(record)
+    return {"task_id": task_id, "dup_pair": updated, "dup_pairs": dup_pair_entities(record)}
 
 
 # ---- 用例定点修改（需求三十~三十四/五十五）----
@@ -6601,12 +6630,13 @@ async def archive_prompt_version(request: Request, key: str, version_no: int) ->
 @router.get("/api/v1/tasks/{task_id}")
 async def get_task(request: Request, task_id: str) -> dict:
     from app.tasks.blind_spots import blind_spot_entities
+    from app.tasks.points import dup_pair_entities
 
     record = _task(request, task_id, "case.view")
     pending = _points_pending_generation(record) if record.status == "completed" else []
     return {**record.model_dump(exclude={"checkpoint"}), "editing": _active_editing(request.app, task_id),
             "error_kind": _error_kind(record.error), "resume": _resume_info(record),
-            "blind_spots": blind_spot_entities(record),
+            "blind_spots": blind_spot_entities(record), "dup_pairs": dup_pair_entities(record),
             "points_pending_generation": [p["tp_id"] for tp in pending for p in tp["points"]]}
 
 

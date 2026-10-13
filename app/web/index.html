@@ -1462,9 +1462,10 @@ const DIMENSIONS = ["正常流程","异常流程","输入校验","边界值","�
 let currentTask = null, editingCase = null, currentView = 'board';
 let detailTab = 'overview', caseTab = 'all', caseModule = '', caseView = 'table', pointView = 'table';
 let ptSub = 'points', ptPage = 1, ptSize = 20, ptModule = '', ptStatus = '', bsPage = 1, bsSize = 20, bsFilter = 'open', bsKw = '';
+let dpPage = 1, dpSize = 20, dpFilter = 'open', dpKw = '';
 let casePage = 1, caseSize = 20, casePrio = '', caseKw = '';
 const PT_PAGE_SIZES = [20, 50, 100, 200];
-let hiddenDupPairs = new Set(), lastPointDiff = null, lastCaseDiff = null, lastHints = [];
+let lastPointDiff = null, lastCaseDiff = null, lastHints = [];
 let expandedSteps = new Set();
 
 /* ---------- 基础设施 ---------- */
@@ -2345,9 +2346,9 @@ async function openTask(id, keepLocal) {
   if (stale('opentask', _s)) return;  // 连续打开多个任务时只保留最后一个
   currentTask = t;
   if (!keepLocal) {
-    hiddenDupPairs = new Set(); lastPointDiff = null; lastCaseDiff = null; lastHints = [];
+    lastPointDiff = null; lastCaseDiff = null; lastHints = [];
     caseTab = 'all'; caseModule = ''; expandedSteps = new Set(); pointView = 'table';
-    ptSub = 'points'; ptPage = 1; ptModule = ''; ptStatus = ''; bsPage = 1; bsFilter = 'open'; bsKw = '';
+    ptSub = 'points'; ptPage = 1; ptModule = ''; ptStatus = ''; bsPage = 1; bsFilter = 'open'; bsKw = ''; dpPage = 1; dpFilter = 'open'; dpKw = '';
     casePage = 1; casePrio = ''; caseKw = '';
     detailTab = currentTask.status === 'awaiting_confirmation' ? 'points'
       : ((currentTask.result && currentTask.result.cases && currentTask.result.cases.length) || ((currentTask.context||{}).manual && currentTask.status==='completed')) ? 'cases' : 'overview';
@@ -2500,6 +2501,8 @@ function renderOverview(t) {
   if (ptc.pending||ptc.rejected) act('warn',`${ptc.pending+ptc.rejected} 个测试点待处理`,'去审核',"setTab('points')");
   const bsOpen = (t.blind_spots||[]).filter(b=>b.status==='open').length;
   if (bsOpen && t.status!=='failed') act('warn',`${bsOpen} 条需求盲区待处置`,'去处置',"ptSub='blind';setTab('points')");
+  const dpOpenN = (t.dup_pairs||[]).filter(p=>p.status==='open').length;
+  if (dpOpenN && t.status!=='failed') act('warn',`${dpOpenN} 组疑似重复测试点待处置`,'去处置',"ptSub='dup';setTab('points')");
   if (t.pending_fix) act('warn',`AI 修改提案待确认（${t.pending_fix.kind==='cases'?'用例':'测试点'}）`,'去确认',
     t.pending_fix.kind==='cases'?"setTab('cases')":"setTab('points')");
   if (sc.rejected && !t.pending_fix) act('warn',`${sc.rejected} 条用例已驳回，可让 AI 定点修改`,'去处理',"setTab('cases')");
@@ -2637,6 +2640,13 @@ function caseSet(name, value) {
   else if (name === 'kw') { caseKw = (value || '').trim(); casePage = 1; }
   renderDetail();
 }
+function dpSet(name, value) {
+  if (name === 'page') dpPage = value;
+  else if (name === 'size') { dpSize = value; dpPage = 1; }
+  else if (name === 'filter') { dpFilter = value; dpPage = 1; }
+  else if (name === 'kw') { dpKw = (value || '').trim(); dpPage = 1; }
+  renderDetail();
+}
 function bsSet(name, value) {
   if (name === 'page') bsPage = value;
   else if (name === 'size') { bsSize = value; bsPage = 1; }
@@ -2656,13 +2666,16 @@ function renderPointWorkbench(t) {
   const generatedIds = new Set((t.context||{}).generated_tp_ids || []);
   const canReviewPt = can((t.context||{}).project, 'point.review'), canEditPt = can((t.context||{}).project, 'point.edit');
   const bsAll = t.blind_spots || [], bsOpen = bsAll.filter(b=>b.status==='open').length;
+  const dpAll = t.dup_pairs || [], dpOpen = dpAll.filter(p=>p.status==='open').length;
 
-  // 子页签：测试点与需求盲区分开两张列表，各自分页
+  // 子页签：测试点 / 需求盲区 / 疑似重复 三张独立列表，各自筛选与分页
   const sub = `<div class="seg" style="margin-bottom:10px">
     <button class="${ptSub==='points'?'on':''}" onclick="ptSub='points';renderDetail()">测试点 <span class="cnt">${pts.length}</span></button>
     <button class="${ptSub==='blind'?'on':''}" onclick="ptSub='blind';renderDetail()">需求盲区 <span class="cnt ${bsOpen?'hot':''}">${bsOpen?bsOpen+' 待处置':bsAll.length}</span></button>
+    <button class="${ptSub==='dup'?'on':''}" onclick="ptSub='dup';renderDetail()">疑似重复 <span class="cnt ${dpOpen?'hot':''}">${dpOpen?dpOpen+' 待处置':dpAll.length}</span></button>
   </div>`;
   if (ptSub === 'blind') return sub + renderBlindSpots(t);
+  if (ptSub === 'dup') return sub + renderDupPairs(t, confirmable);
 
   // 测试点列表：按模块 / 状态筛选后分页，页内保留模块分组行
   const filtered = pts.filter(p => (!ptModule || p.module === ptModule) && (!ptStatus || p.status === ptStatus));
@@ -2728,7 +2741,6 @@ function renderPointWorkbench(t) {
       </div></div>
     ${renderCoverage(t)}
     ${renderReuseHints(t)}
-    ${renderDupReport(t)}
     ${renderPointCompare(t)}
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
     ${pts.length && pts.every(p=>p.legacy) ? '<div class="hint" style="margin:6px 0">项目化之前的旧版任务：测试点为只读留档，不支持审核操作</div>' : ''}
@@ -2742,7 +2754,7 @@ function renderPointWorkbench(t) {
     ${lastPointDiff?renderPointDiff(lastPointDiff):''}
     ${confirmable?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
       <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">确认并生成用例${approved?`（仅已通过的 ${approved} 条）`:'（全部未驳回项）'}</button>
-      <span class="hint">通过 = 锁定为正式测试点；驳回项修改后需再审核，不进入生成${bsOpen?`；还有 <b style="color:var(--warn)">${bsOpen}</b> 条需求盲区待处置`:''}</span>
+      <span class="hint">通过 = 锁定为正式测试点；驳回项修改后需再审核，不进入生成${bsOpen?`；还有 <b style="color:var(--warn)">${bsOpen}</b> 条需求盲区待处置`:''}${dpOpen?`；<b style="color:var(--warn)">${dpOpen}</b> 组疑似重复待处置`:''}</span>
     </div>`:t.status==='completed'?(pendingGen.length?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
       <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">为新通过的 ${pendingGen.length} 条测试点生成用例</button>
       <span class="hint">分批审核、分批生成：只为这些测试点生成，并入现有用例，已有用例与审核状态不变</span>
@@ -2897,20 +2909,69 @@ function renderReuseHints(t) {
     <div class="box accent">历史正式用例与当前需求高度相关（相似度 ${h.score} · 来源 ${esc(h.source)}${h.from_project?` · <span class="tag">同业务线项目「${esc(h.from_project)}」</span>`:''}）
       <div class="hint" style="white-space:pre-wrap;margin-top:4px">${esc(h.text)}</div></div>`).join('')}`;
 }
-function renderDupReport(t) {
-  const pairs = ((t.dup_report||{}).points||[]).filter(p=>!hiddenDupPairs.has(p.a+'|'+p.b));
-  if (!pairs.length) return '';
-  return `<div class="section-t">疑似重复测试点<span class="hint">（AI 不删除，请人工处置）</span></div>${pairs.map(p=>`
-    <div class="box">
-      <b class="cid">${esc(p.a)}</b>「${esc(p.a_point)}」 与 <b class="cid">${esc(p.b)}</b>「${esc(p.b_point)}」
-      <span class="tag">相似度 ${p.similarity}</span>${p.verdict?` <span class="tag">${esc(p.verdict)}</span>`:''}
-      ${p.reason?`<div class="hint">原因：${esc(p.reason)}</div>`:''}
-      ${p.suggestion?`<div class="hint">建议：${esc(p.suggestion)}</div>`:''}
-      <div class="toolbar" style="margin-top:8px">
-        ${canDelete()?`<button class="btn ghost sm" onclick="pointDelete(${jsq(p.a)})">删除 ${esc(p.a)}</button>
-        <button class="btn ghost sm" onclick="pointDelete(${jsq(p.b)})">删除 ${esc(p.b)}</button>`:''}
-        <button class="btn ghost sm" onclick="hiddenDupPairs.add(${jsq(p.a+'|'+p.b)});renderDetail()">忽略</button>
-      </div></div>`).join('')}`;
+/* 疑似重复测试点：独立列表——AI 不删除，人工删一条 / 忽略（判定不重复）/ 重开；删除后自动变为已处置；状态筛选 + 关键词 + 分页 */
+const DP_STATUS = {open:'待处置', ignored:'已忽略', resolved:'已处置'};
+function renderDupPairs(t, confirmable) {
+  const items = t.dup_pairs || [];
+  const open = items.filter(p=>p.status==='open');
+  const project = (t.context||{}).project;
+  const canReview = can(project,'point.review'), canDel = can(project,'point.edit') && canDelete();
+  const counts = {}; items.forEach(p => counts[p.status] = (counts[p.status]||0) + 1);
+  const kw = dpKw.toLowerCase();
+  const hit = p => !kw || [p.a, p.b, p.a_point, p.b_point, p.reason, p.suggestion, p.verdict, p.note, p.by]
+    .some(x => String(x||'').toLowerCase().includes(kw));
+  const filtered = (dpFilter === 'all' ? items : items.filter(p => p.status === dpFilter)).filter(hit);
+  const pages = Math.max(1, Math.ceil(filtered.length / dpSize));
+  if (dpPage > pages) dpPage = pages;
+  const pageItems = filtered.slice((dpPage - 1) * dpSize, dpPage * dpSize);
+  const stCls = {open:'pending', ignored:'rejected', resolved:'approved'};
+  const side = (id, text, p) => `<b class="cid">${esc(id)}</b>${(p.deleted||[]).includes(id)?' <span class="tag">已删除</span>':''}<div>${esc(text)}</div>`;
+  const rows = pageItems.map((p, i) => `<tr>
+      <td style="width:40px" class="hint">${(dpPage - 1) * dpSize + i + 1}</td>
+      <td>${side(p.a, p.a_point, p)}</td>
+      <td>${side(p.b, p.b_point, p)}</td>
+      <td style="width:150px"><span class="tag">相似度 ${p.similarity}</span>${p.verdict?`<div><span class="tag" style="${p.verdict==='重复'?'background:var(--danger-bg);color:var(--danger)':''}">${esc(p.verdict)}</span></div>`:''}</td>
+      <td style="width:220px" class="hint">${p.reason?`原因：${esc(p.reason)}`:''}${p.suggestion?`<div>建议：${esc(p.suggestion)}</div>`:''}</td>
+      <td style="width:110px"><span class="st ${stCls[p.status]||'pending'}">${esc(DP_STATUS[p.status]||p.status)}</span>
+        ${p.note?`<div class="hint">${esc(p.note)}</div>`:''}${p.by?`<div class="hint">${esc(p.by)}${p.at?' · '+esc(fmtTime(p.at)):''}</div>`:''}</td>
+      <td style="width:230px"><div class="rowops" style="flex-wrap:wrap;gap:4px">
+        ${p.status==='open' ? `
+          ${canDel&&confirmable?`<button class="btn ghost sm" onclick="pointDelete(${jsq(p.a)})">删除 ${esc(p.a)}</button>
+          <button class="btn ghost sm" onclick="pointDelete(${jsq(p.b)})">删除 ${esc(p.b)}</button>`:''}
+          ${canReview?`<button class="btn ghost sm" onclick="dpIgnore(${jsq(p.key)})" title="人工判定不重复或无需处理">忽略</button>`:''}`
+        : p.status==='ignored' && canReview ? `<button class="btn ghost sm" onclick="dpAct(${jsq(p.key)},'reopen')">重开</button>` : ''}
+      </div></td>
+    </tr>`).join('');
+  return `<div class="toolbar" style="margin-top:0">
+      <span class="hint">文字初筛 + AI 语义复核 · 共 ${items.length} 组 · 待处置 <b style="color:${open.length?'var(--warn)':'var(--ok)'}">${open.length}</b> · AI 不删除，由人工处置</span>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        ${confirmable?`<button class="btn ghost sm" onclick="dupCheck()">重新检查</button>`:''}
+        <input type="search" placeholder="搜索编号 / 测试点 / 原因" value="${esc(dpKw)}" style="width:190px"
+          onchange="dpSet('kw', this.value)" onkeydown="if(event.key==='Enter'){dpSet('kw', this.value)}">
+        ${kw?`<span class="hint">命中 ${filtered.length} 组</span>`:''}
+        <div class="seg">
+        ${[['open','待处置'],['all','全部'],['ignored','已忽略'],['resolved','已处置']]
+          .filter(([k]) => k==='open' || k==='all' || counts[k])
+          .map(([k,v])=>`<button class="${dpFilter===k?'on':''}" onclick="dpSet('filter',${jsq(k)})">${v}${k==='all'?'':` ${counts[k]||0}`}</button>`).join('')}
+        </div></div></div>
+    <div class="hint" style="margin:0 0 8px">处置去向：<b>删除其中一条</b>（进回收站，可恢复，该组自动变为已处置）；<b>忽略</b> = 人工判定不重复或都需保留；修改测试点文本后点「重新检查」刷新。</div>
+    <div class="tbl-wrap"><table>
+      <tr><th>#</th><th>测试点 A</th><th>测试点 B</th><th>相似度 / 判定</th><th>原因 / 建议</th><th>状态</th><th>操作</th></tr>
+      ${rows || `<tr><td colspan="7"><div class="empty">${!items.length ? (t.dup_report ? '重复检查未发现疑似重复测试点' : '尚未执行重复检查') : kw ? '没有符合搜索条件的重复对' : dpFilter==='open' ? '全部疑似重复已处置' : '该状态下没有重复对'}</div></td></tr>`}
+    </table></div>
+    ${filtered.length > PT_PAGE_SIZES[0] || dpPage > 1 ? pagerHtml(filtered.length, dpPage, dpSize, 'dpSet', '组') : ''}`;
+}
+async function dpAct(key, action, body={}) {
+  try {
+    const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/points/dup-pairs/${encodeURIComponent(key)}`, {action, ...body});
+    await openTask(currentTask.task_id, true);
+    return r;
+  } catch (e) { toast('处置失败：' + e.message, 'err'); return null; }
+}
+async function dpIgnore(key) {
+  if (!await uiConfirm('忽略疑似重复', '人工判定这两条不重复或都需保留？忽略后可在「已忽略」里重开。')) return;
+  const r = await dpAct(key, 'ignore');
+  if (r) toast('已忽略，可在「已忽略」里重开', 'ok');
 }
 let compareHidden = false, exportApprovedOnly = false, exportCompactMind = false;
 function renderPointCompare(t) {
@@ -3024,9 +3085,10 @@ async function dupCheck() {
   toast('重复检查执行中…');
   try {
     const data = await api(`/api/v1/tasks/${currentTask.task_id}/points/dup-check`, {method:'POST'});
-    hiddenDupPairs = new Set();
+    const open = (data.dup_pairs||[]).filter(p=>p.status==='open').length;
+    if (open) { ptSub = 'dup'; dpFilter = 'open'; dpPage = 1; }
     await openTask(currentTask.task_id, true);
-    toast(data.duplicates.length ? `发现 ${data.duplicates.length} 组疑似重复，请人工处置` : '未发现疑似重复测试点', data.duplicates.length?'warn':'ok');
+    toast(open ? `发现 ${open} 组疑似重复，请人工处置` : data.duplicates.length ? `${data.duplicates.length} 组疑似重复均已处置过` : '未发现疑似重复测试点', open?'warn':'ok');
   } catch (e) { toast('重复检查失败：' + e.message, 'err'); }
 }
 async function supplementPoints() {
