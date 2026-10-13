@@ -2190,13 +2190,24 @@ function relTime(iso) {
   return Math.floor(s/86400) + ' 天前';
 }
 let _tasksCache = [];
-let listQuery = '', listStatus = '', listProject = '', listCreator = '';
+let listQuery = '', listStatus = '', listProject = '', listCreator = '', listPage = 1, listSize = 20;
+function listSet(name, value) {
+  if (name === 'page') listPage = value;
+  else if (name === 'size') { listSize = value; listPage = 1; }
+  else if (name === 'status') { listStatus = value; listPage = 1; }
+  else if (name === 'project') { listProject = value; listPage = 1; }
+  else if (name === 'line') { listLine = value; listProject = ''; listPage = 1; }
+  else if (name === 'creator') { listCreator = value; listPage = 1; }
+  else if (name === 'kw') { listQuery = value; listPage = 1; }
+  else if (name === 'reset') { listQuery = ''; listStatus = ''; listProject = ''; listLine = ''; listCreator = ''; listPage = 1; const i = $('taskSearch'); if (i) i.value = ''; }
+  renderTaskListRows();
+}
 let _listInflight = false, _tasksSig = '';
 async function refreshList() {
   if (!curUser || _listInflight) return;  // 未登录暂停轮询；上一轮未返回则跳过（不叠加请求）
   _listInflight = true;
   let data;
-  try { data = await api('/api/v1/tasks'); } catch (e) { return; } finally { _listInflight = false; }
+  try { data = await api('/api/v1/tasks?limit=5000'); } catch (e) { return; } finally { _listInflight = false; }  // 列表页本地筛选 + 分页，不受默认 50 条截断
   const sig = JSON.stringify(data.tasks);
   const changed = sig !== _tasksSig;
   _tasksSig = sig; _tasksCache = data.tasks;
@@ -2228,7 +2239,8 @@ function filteredTasks() {
   return _tasksCache.filter(t => matchStatus(t, listStatus) && matchProject(t, listProject) && matchLine(t, listLine) &&
     matchCreator(t, listCreator) &&
     (!q || t.task_id.includes(q) || (t.project||'').toLowerCase().includes(q) ||
-      (t.created_by||'').toLowerCase().includes(q) ||
+      (t.created_by||'').toLowerCase().includes(q) || (t.requirement_title||'').toLowerCase().includes(q) ||
+      (t.error||'').toLowerCase().includes(q) || statusText(t.status).toLowerCase().includes(q) ||
       (t.sources||[]).some(s => s.toLowerCase().includes(q))));
 }
 function renderTaskListPage() {
@@ -2237,14 +2249,16 @@ function renderTaskListPage() {
       <div class="card-h"><h3>任务列表</h3><span class="meta" id="taskTotal"></span>
         <div class="grow">
           <div class="seg" id="listSeg"></div>
-          <select id="lineSel" style="width:120px" onchange="listLine=this.value;listProject='';renderTaskListRows()" title="按业务线筛选"></select>
-          <select id="projectSel" style="width:140px" onchange="listProject=this.value;renderTaskListRows()"></select>
-          <select id="creatorSel" style="width:120px" onchange="listCreator=this.value;renderTaskListRows()"></select>
-          <div class="search" style="width:210px">
+          <select id="lineSel" style="width:120px" onchange="listSet('line', this.value)" title="按业务线筛选"></select>
+          <select id="projectSel" style="width:140px" onchange="listSet('project', this.value)"></select>
+          <select id="creatorSel" style="width:120px" onchange="listSet('creator', this.value)"></select>
+          <div class="search" style="width:230px">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            <input type="text" id="taskSearch" placeholder="搜索任务 / 项目 / 来源…" value="${esc(listQuery)}"
-              oninput="listQuery=this.value;renderTaskListRows()">
+            <input type="search" id="taskSearch" placeholder="搜索任务 / 项目 / 来源 / 需求 / 错误…" value="${esc(listQuery)}"
+              oninput="listSet('kw', this.value)">
           </div>
+          <span class="hint" id="listHint" style="display:none"></span>
+          <button class="btn ghost sm" id="listReset" style="display:none" onclick="listSet('reset')">清除筛选</button>
           ${curProjectName&&can(curProjectName,'case.edit')?`<button class="btn ghost" onclick="createManualTask(curProjectName)" title="不经 AI，直接人工新增或 Excel 导入用例">＋ 人工用例集</button>`:''}
           <button class="btn" onclick="openDrawer()">＋ 新建任务</button>
         </div></div>
@@ -2254,6 +2268,7 @@ function renderTaskListPage() {
           <th style="width:100px">创建人</th><th style="width:80px">测试点</th><th style="width:80px">用例数</th><th style="width:60px">修订</th><th style="width:100px">创建时间</th></tr></thead>
           <tbody id="taskTbody"></tbody>
         </table></div>
+        <div id="taskPager"></div>
       </div></div>`;
   }
   renderTaskListRows();
@@ -2262,7 +2277,7 @@ function renderTaskListRows() {
   const tasks = filteredTasks();
   $('listSeg').innerHTML = LIST_FILTERS.map(([v, label]) => {
     const n = _tasksCache.filter(t => matchStatus(t, v) && matchProject(t, listProject) && matchLine(t, listLine)).length;
-    return `<button class="${listStatus===v?'on':''}" onclick="listStatus='${v}';renderTaskListRows()">${label} ${n}</button>`;
+    return `<button class="${listStatus===v?'on':''}" onclick="listSet('status','${v}')">${label} ${n}</button>`;
   }).join('');
   // 项目过滤下拉：由当前任务集合聚合（保持已选值，轮询不打断）
   if ($('lineSel')) $('lineSel').innerHTML = `<option value="">全部业务线</option>` + (_businessLines||[]).map(l => `<option value="${esc(l)}" ${listLine===l?'selected':''}>${esc(l)}</option>`).join('');
@@ -2275,7 +2290,14 @@ function renderTaskListRows() {
   $('creatorSel').innerHTML = `<option value="">全部创建人</option>`
     + creators.map(c => `<option value="${esc(c)}" ${listCreator===c?'selected':''}>${esc(c)}${curUser&&c===curUser.username?'（我）':''}</option>`).join('');
   $('taskTotal').textContent = `共 ${_tasksCache.length} 个任务`;
-  $('taskTbody').innerHTML = tasks.map(t => `
+  const filtering = !!(listQuery.trim() || listStatus || listProject || listLine || listCreator);
+  $('listHint').style.display = filtering ? '' : 'none'; $('listHint').textContent = filtering ? `筛选出 ${tasks.length} 个` : '';
+  $('listReset').style.display = filtering ? '' : 'none';
+  const pages = Math.max(1, Math.ceil(tasks.length / listSize));
+  if (listPage > pages) listPage = pages;
+  const pageTasks = tasks.slice((listPage - 1) * listSize, listPage * listSize);
+  $('taskPager').innerHTML = tasks.length > PT_PAGE_SIZES[0] || listPage > 1 ? pagerHtml(tasks.length, listPage, listSize, 'listSet', '个') : '';
+  $('taskTbody').innerHTML = pageTasks.map(t => `
     <tr class="rowlink" onclick="openTask('${t.task_id}')">
       <td><span class="pill ${t.status}">${statusText(t.status)}</span>
         ${t.progress?`<div class="hint">${progressText(t.progress)} <span class="spin"></span></div>`:''}</td>
@@ -2289,7 +2311,7 @@ function renderTaskListRows() {
       <td>${t.revision_count ? t.revision_count + ' 轮' : '<span class="hint">—</span>'}</td>
       <td class="hint" title="${esc(t.created_at||'')}">${relTime(t.created_at)}</td>
     </tr>`).join('') || `<tr><td colspan="9"><div class="empty" style="display:flex;flex-direction:column;align-items:center;gap:10px;padding:34px 0">
-      ${owlSvg('idle', 64)}${_tasksCache.length ? '当前筛选下无任务' : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
+      ${owlSvg('idle', 64)}${_tasksCache.length ? '没有符合筛选条件的任务' : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
 }
 function backToList() {
   currentTask = null;
