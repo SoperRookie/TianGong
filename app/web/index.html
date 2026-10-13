@@ -2347,10 +2347,14 @@ function renderTaskBatch() {
     <button class="btn ghost sm" onclick="tkSel.clear(); renderTaskListRows()">取消全选</button>` : '';
 }
 const TASK_DELETE_NOTE = '任务及其测试点 / 用例将从列表与详情隐藏，不再计入用例中心与统计；版本历史与审计留档保留，可在「已删除」筛选里恢复。测试计划里的用例快照不受影响。';
-async function deleteTask(id) {
+async function deleteTask(id, fromDetail = false) {
   if (!await uiConfirm('删除任务', `删除任务 ${id}？${TASK_DELETE_NOTE}`, true)) return;
-  try { await api(`/api/v1/tasks/${id}`, {method:'DELETE'}); tkSel.delete(id); toast('任务已删除，可在「已删除」里恢复', 'ok'); await refreshList(); if (!$('taskTbody')) return; renderTaskListRows(); }
-  catch (e) { toast('删除失败：' + e.message, 'err'); }
+  try {
+    await api(`/api/v1/tasks/${id}`, {method:'DELETE'}); tkSel.delete(id);
+    toast('任务已删除，可在任务列表「已删除」里恢复', 'ok');
+    if (fromDetail && currentTask && currentTask.task_id === id) { await refreshList(); backToList(); return; }  // 详情页删除：回到列表 / 来源页
+    await refreshList(); if ($('taskTbody')) renderTaskListRows();
+  } catch (e) { toast('删除失败：' + e.message, 'err'); }
 }
 async function batchDeleteTasks() {
   const ids = [...tkSel];
@@ -2467,6 +2471,7 @@ function _renderDetail__impl() {
       ${t.progress?'<span class="hint">'+progressText(t.progress)+' <span class="spin"></span></span>':''}
       <div class="grow">
         ${running?'<button class="btn ghost sm" onclick="cancelTask()">取消任务</button>':''}
+        ${!running&&canDelete()?`<button class="btn ghost sm" style="color:var(--danger)" onclick="deleteTask(${jsq(t.task_id)}, true)" title="删除任务（可在任务列表「已删除」里恢复）">删除任务</button>`:''}
         <span class="hint">${t.created_by?esc(t.created_by)+' · ':''}${(t.context||{}).requirement_title?esc(t.context.requirement_title):(srcText_(t.sources)||'-')} · ${relTime(t.created_at)}</span></div>
     </div>
     ${t.error?`<div class="card-b" style="color:var(--danger);padding-top:0;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>${esc(t.error)}</span>${resumeHint(t)}${t.resume&&t.resume.resumable?`<button class="btn sm" onclick="retryTask()">${resumeLabel(t)}</button>`:''}</div>`:''}
