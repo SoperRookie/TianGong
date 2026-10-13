@@ -2839,15 +2839,17 @@ async function supplementPoints() {
   try {
     const data = await jpost(`/api/v1/tasks/${currentTask.task_id}/points/add`, {instruction});
     await openTask(currentTask.task_id, true);
-    toast(`AI 补充了 ${data.added.length} 条待审核测试点`, 'ok');
+    const skipped = (data.skipped || []).length;
+    toast(`AI 补充了 ${data.added.length} 条待审核测试点${skipped ? `，${skipped} 条与已有测试点高度相似已跳过` : ''}`, data.added.length ? 'ok' : 'warn');
   } catch (e) { toast('补充失败：' + e.message, 'err'); }
 }
 async function manualAddPoint() {
   const v = await askPoint('手工新增测试点', {module:''});
   if (!v) return;
   try {
-    await jpost(`/api/v1/tasks/${currentTask.task_id}/points/add`, {points:[v]});
+    const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/points/add`, {points:[v]});
     await openTask(currentTask.task_id, true);
+    toast(r.added && r.added.length ? `已新增 ${r.added.map(p => p.tp_id).join('、')}` : '未新增测试点', r.added && r.added.length ? 'ok' : 'warn');
   } catch (e) { toast('新增失败：' + e.message, 'err'); }
 }
 let confirming = false;
@@ -2858,7 +2860,8 @@ async function confirmPointsGo() {
   currentTask.status = 'running'; currentTask.progress = 'generating_reviewing';
   renderDetail();
   try {
-    await jpost(`/api/v1/tasks/${currentTask.task_id}/confirm`, {});
+    // 后台生成：立即返回，页面按运行中任务轮询；可取消、不受网关超时影响
+    await jpost(`/api/v1/tasks/${currentTask.task_id}/confirm`, {async_mode: true});
     await openTask(currentTask.task_id);
   } catch (e) {
     toast('生成失败：' + e.message, 'err');

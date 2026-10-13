@@ -262,7 +262,93 @@ async def test_拆解结果格式改写仍能解析_完全异常时报错带诊�
     a = await analyze_requirement(llm, "登录需求", None)
     assert a["test_points"] == [{"module": "登录", "points": [{"point": "正常登录", "dimension": "正常流程"}]}]
     assert a["blind_spots"] == ["未说明锁定策略"]  # 对象形态 + result 包装
-    llm = StubLLM([json.dumps({"summary": "无法拆解", "modules": []})])
+    empty = json.dumps({"summary": "无法拆解", "modules": []})
+    llm = StubLLM([empty, empty])  # 空结果先重试一次，两次都空才报错
     with pytest.raises(LLMOutputError) as e:
         await analyze_requirement(llm, "登录需求", None)
+    assert len(llm.calls) == 2
     assert "顶层键 [summary、modules]" in str(e.value) and "stub" in str(e.value)
+    # 第一次空、第二次正常 → 成功
+    llm = StubLLM([empty, ANALYST_REPLY])
+    a = await analyze_requirement(llm, "登录需求", None)
+    assert a["test_points"][0]["module"] == "登录"
+
+
+async def test_分片拆解一片失败立即取消其余分片_不再继续调用模型():
+    import asyncio
+
+    import pytest
+
+    from app.agents import run_analysis
+    from app.agents.json_utils import LLMOutputError
+    from app.llm.client import ChatResult, UsageInfo
+
+    class SlowLLM:
+        """第一片两次（含重试）都返回垃圾 → 失败；其余分片的调用在睡眠中应被取消，不得跑到完成。"""
+        started = 0
+        finished = 0
+        cancelled = 0
+
+        async def chat(self, messages, model=None, **kw):
+            if "子系统清单" in messages[0]["content"]:  # 全文大纲调用：即时返回
+                return ChatResult(content='{"modules": ["模块0"]}', model_name="stub", provider="stub", usage=UsageInfo(), elapsed_ms=1)
+            SlowLLM.started += 1
+            user = messages[-1]["content"]
+            if "第 1/" in user:
+                content = "不是 JSON"
+            else:
+                try:
+                    await asyncio.sleep(1.0)
+                except asyncio.CancelledError:
+                    SlowLLM.cancelled += 1
+                    raise
+                SlowLLM.finished += 1
+                content = ANALYST_REPLY
+            return ChatResult(content=content, model_name="stub", provider="stub", usage=UsageInfo(), elapsed_ms=1)
+
+    text = "\n".join(f"# 模块{i}\n" + "规则。" * 300 for i in range(4))
+    with pytest.raises(LLMOutputError):
+        await run_analysis(text, SlowLLM(), chunk_max_chars=1200)
+    await asyncio.sleep(0.05)
+    assert SlowLLM.started >= 3 and SlowLLM.finished == 0 and SlowLLM.cancelled >= 1
+
+
+class _ChunkLLM:
+    """分片拆解路由：按「第 N/M 片」决定返回内容；empty_chunks 中的分片返回空模块。"""
+
+    def __init__(self, empty_chunks=()):
+        self.empty = set(empty_chunks)
+        self.calls = 0
+
+    async def chat(self, messages, model=None, **kw):
+        import json
+        import re
+
+        from app.llm.client import ChatResult, UsageInfo
+
+        self.calls += 1
+        if "子系统清单" in messages[0]["content"]:
+            content = json.dumps({"modules": ["模块0", "模块1", "模块2"]}, ensure_ascii=False)
+        else:
+            m = re.search(r"第 (\d+)/\d+ 片", messages[-1]["content"])
+            no = int(m.group(1)) if m else 0
+            content = json.dumps({"modules": [] if no in self.empty else
+                                  [{"module": f"模块{no - 1}", "points": [f"第{no}片的测试点"]}], "blind_spots": []},
+                                 ensure_ascii=False)
+        return ChatResult(content=content, model_name="stub", provider="stub", usage=UsageInfo(), elapsed_ms=1)
+
+
+async def test_分片拆解_单片为空跳过_全部为空才报错():
+    import pytest
+
+    from app.agents import run_analysis
+    from app.agents.json_utils import LLMOutputError
+
+    text = "\n".join(f"# 模块{i}\n" + "规则。" * 300 for i in range(3))
+    llm = _ChunkLLM(empty_chunks={2})
+    result = await run_analysis(text, llm, chunk_max_chars=1200)
+    assert {tp["module"] for tp in result.test_points} == {"模块0", "模块2"}
+    assert [t.get("empty") for t in result.trace] == [None, True, None]
+    assert llm.calls == 4  # 大纲 1 次 + 3 片各 1 次：分片模式下空结果不重试
+    with pytest.raises(LLMOutputError, match="均为空"):
+        await run_analysis(text, _ChunkLLM(empty_chunks={1, 2, 3}), chunk_max_chars=1200)

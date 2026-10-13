@@ -19,6 +19,46 @@ from app.parsers.chunking import split_text
 from app.templates import CustomTemplate, TestCase
 
 
+async def gather_or_cancel(coros):
+    """并行执行，任一失败立即取消其余协程后再抛出。
+
+    asyncio.gather 默认不取消兄弟协程：一片拆解失败后任务已标记失败，其余分片却仍在后台继续调用模型
+    （前端已提示失败、后台还在消耗 token）。这里改为失败即取消，等取消完成后再向上抛。
+    """
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        pending = [t for t in tasks if not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        raise
+
+
+# 全文大纲一次送模型的上限：超过则改用各分片开头拼接（私有化小上下文模型也能出大纲）
+OUTLINE_MAX_CHARS = 120_000
+
+
+def _outline_source(requirement: str, chunks: list[str]) -> str:
+    if len(requirement) <= OUTLINE_MAX_CHARS:
+        return requirement
+    head = max(1500, OUTLINE_MAX_CHARS // max(len(chunks), 1))
+    return "\n\n……\n\n".join(c[:head] for c in chunks)
+
+
+async def _outline_for(llm: LLMClient, requirement: str, chunks: list[str], model: str | None) -> list[str]:
+    """长需求：先用全文出模块大纲，再分片拆解并注入大纲，避免各片各自命名、漏掉跨片的模块；大纲失败不阻塞。"""
+    if len(chunks) <= 1:
+        return []
+    try:
+        return await outline_requirement(llm, _outline_source(requirement, chunks), model)
+    except Exception as e:
+        logger.warning("需求大纲生成失败，分片拆解不注入大纲：{}", e)
+        return []
+
+
 class GenerationResult(BaseModel):
     cases: list[TestCase]
     passed: bool
@@ -52,17 +92,16 @@ async def run_analysis(
     """
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     chunks = split_text(requirement, chunk_max_chars)
-    outline: list[str] = []
-    if len(chunks) > 1:
-        # 长需求：先用全文出模块大纲，再分片拆解并注入大纲，避免各片各自命名、漏掉跨片的模块
-        try:
-            outline = await outline_requirement(llm, requirement, model)
-        except Exception as e:  # 大纲失败不阻塞拆解
-            logger.warning("需求大纲生成失败，分片拆解不注入大纲：{}", e)
-    analyses = await asyncio.gather(
-        *[analyze_requirement(llm, chunk, model, knowledge_cases=knowledge_cases, outline=outline,
-                              chunk_no=i, chunk_total=len(chunks)) for i, chunk in enumerate(chunks, 1)]
+    outline = await _outline_for(llm, requirement, chunks, model)
+    analyses = await gather_or_cancel(
+        [analyze_requirement(llm, chunk, model, knowledge_cases=knowledge_cases, outline=outline,
+                             chunk_no=i, chunk_total=len(chunks), allow_empty=len(chunks) > 1)
+         for i, chunk in enumerate(chunks, 1)]
     )
+    if all(not a["test_points"] for a in analyses):
+        from app.agents.json_utils import LLMOutputError
+
+        raise LLMOutputError(f"需求拆解未输出任何测试点（{len(chunks)} 个分片均为空，请检查需求内容是否可读）")
     module_points: dict[str, list[str]] = {}
     blind_spots: list[str] = []
     trace: list[dict] = []
@@ -70,7 +109,7 @@ async def run_analysis(
         for tp in a["test_points"]:
             module_points.setdefault(str(tp.get("module", "")), []).extend(tp.get("points", []))
         blind_spots.extend(b for b in a["blind_spots"] if b not in blind_spots)
-        trace.append({"chunk": i, "agent": "需求分析", "model": a["model_name"]})
+        trace.append({"chunk": i, "agent": "需求分析", "model": a["model_name"], **({"empty": True} if a.get("empty") else {})})
     return AnalysisResult(
         test_points=[{"module": m, "points": pts} for m, pts in module_points.items()],
         blind_spots=blind_spots,
@@ -87,7 +126,7 @@ async def run_requirement_analysis(
     from app.prompts import prompt_text
 
     chunks = split_text(text, get_settings().chunk_max_chars)
-    outputs = await asyncio.gather(*[
+    outputs = await gather_or_cancel([
         _chat_json(llm, [{"role": "system", "content": prompt_text("requirement_analysis")},
                          {"role": "user", "content": f"需求原文：\n{wrap_data('需求原文', chunk)}"}], model)
         for chunk in chunks
@@ -161,14 +200,21 @@ async def run_generation(
         )
 
     logger.info("需求 {} 字超过分片阈值，切分为 {} 片并行处理", len(requirement), len(chunks))
+    outline = await _outline_for(llm, requirement, chunks, model)
     outcomes = await asyncio.gather(
         *[
-            _analyze_then_generate(chunk, llm, model, reviewer_model, template, on_analyzed=on_analyzed, **kw)
-            for chunk in chunks
+            _analyze_then_generate(chunk, llm, model, reviewer_model, template, on_analyzed=on_analyzed,
+                                   outline=outline, chunk_no=i, chunk_total=len(chunks), **kw)
+            for i, chunk in enumerate(chunks, 1)
         ],
         return_exceptions=True,
     )
-    return _merge(outcomes)
+    merged = _merge(outcomes)
+    if not merged.cases and not merged.unresolved:
+        from app.agents.json_utils import LLMOutputError
+
+        raise LLMOutputError(f"需求拆解未输出任何测试点（{len(chunks)} 个分片均为空，请检查需求内容是否可读）")
+    return merged
 
 
 async def _analyze_then_generate(
@@ -185,6 +231,9 @@ async def _analyze_then_generate(
     checkpoint: dict | None = None,
     on_module_done=None,
     on_analysis=None,
+    outline: list[str] | None = None,
+    chunk_no: int = 0,
+    chunk_total: int = 0,
 ) -> GenerationResult:
     """先拆解，再按模块并行生成（PRD 4.1a 生成 Agent 多实例）。
 
@@ -198,7 +247,12 @@ async def _analyze_then_generate(
                     "model_name": saved.get("model_name", "")}
         logger.info("断点续跑：复用已保存的拆解结果（{} 个模块）", len(analysis["test_points"]))
     else:
-        analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
+        analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases,
+                                             outline=outline, chunk_no=chunk_no, chunk_total=chunk_total,
+                                             allow_empty=chunk_total > 1)
+        if not analysis["test_points"]:  # 分片不含可测内容：本片无产出，不进生成
+            return GenerationResult(cases=[], passed=True, review_rounds=0, blind_spots=analysis["blind_spots"],
+                                    trace=[{"agent": "需求分析", "model": analysis["model_name"], "empty": True}])
         if on_analysis:
             on_analysis({"test_points": analysis["test_points"], "blind_spots": analysis["blind_spots"],
                          "model_name": analysis.get("model_name", "")})

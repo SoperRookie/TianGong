@@ -717,3 +717,64 @@ async def test_分批审核分批生成_完成后为新通过的测试点增量�
     assert [c["case_id"] for c in t["result"]["cases"]] == ["TC-登录-001", "TC-登录-002"]
     assert set(t["context"]["generated_tp_ids"]) == {first["tp_id"], second["tp_id"]} and t["points_pending_generation"] == []
     assert any(x.get("action") == "增量生成" for x in t["result"]["trace"])
+
+
+async def _wait_task(client, task_id):
+    import asyncio
+    for _ in range(100):
+        await asyncio.sleep(0.03)
+        t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+        if t["status"] in ("completed", "failed", "awaiting_confirmation"):
+            return t
+    raise AssertionError(f"任务未结束: {t['status']}")
+
+
+async def test_确认生成可后台执行并轮询(client):
+    data = await _create_confirm_task(client)
+    task_id = data["task_id"]
+    app.state.llm = StubLLM([generator_reply(make_case()), review_reply(True)])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={"async_mode": True})
+    assert resp.status_code == 200 and resp.json()["status"] == "queued" and resp.json()["poll_url"]
+    t = await _wait_task(client, task_id)
+    assert t["status"] == "completed" and len(t["result"]["cases"]) == 1
+    assert t["analysis"]["test_points"] and t["context"]["generated_tp_ids"]  # 拆解留痕与分批生成记录都在
+    assert "resume_stage" not in t["context"]
+    # 后台失败（如模型返回异常）：状态恢复待确认并把原因留在任务上，可再次确认
+    data2 = await _create_confirm_task(client)
+    app.state.llm = StubLLM(["不是 JSON", "还不是 JSON"])
+    assert (await client.post(f"/api/v1/tasks/{data2['task_id']}/confirm", json={"async_mode": True})).json()["status"] == "queued"
+    t2 = await _wait_task(client, data2["task_id"])
+    assert t2["status"] == "awaiting_confirmation" and t2["error"]
+
+
+async def test_提案新增测试点不复用已删除编号_删空模块自动移除(client):
+    data = await _create_confirm_task(client)  # TP001 TP002 TP003（TP003 为查漏新增）
+    task_id = data["task_id"]
+    resp = await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [
+        {"tp_id": "TP003", "action": "delete"},
+        {"tp_id": "TP002", "action": "reject", "comment": "缺少锁定场景", "reject_types": ["场景遗漏"]},
+    ]})
+    assert resp.status_code == 200
+    app.state.llm = StubLLM([json.dumps({"fixes": [], "additions": [{"module": "登录", "point": "连续错误5次锁定"}]},
+                                        ensure_ascii=False)])
+    assert (await client.post(f"/api/v1/tasks/{task_id}/points/fix")).status_code == 200
+    resp = await client.post(f"/api/v1/tasks/{task_id}/fix/confirm", json={"accept_all": True})
+    assert resp.status_code == 200
+    ids = [p["tp_id"] for m in resp.json()["test_points"] for p in m["points"]]
+    assert "TP003" not in ids and "TP004" in ids  # 删除的编号不复用
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert t["analysis"]["tp_seq"] == 4
+    # 删掉模块里最后一个点：空模块不再保留
+    resp = await client.post(f"/api/v1/tasks/{task_id}/points/add", json={"points": [{"module": "独立模块", "point": "独立点"}]})
+    tp = resp.json()["added"][0]["tp_id"]
+    assert any(m["module"] == "独立模块" for m in resp.json()["test_points"])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [{"tp_id": tp, "action": "delete"}]})
+    assert not any(m["module"] == "独立模块" for m in resp.json()["test_points"])
+
+
+async def test_手工新增相似测试点不再被静默跳过(client):
+    data = await _create_confirm_task(client)
+    task_id = data["task_id"]
+    same = data["test_points"][0]["points"][0]["point"]
+    resp = await client.post(f"/api/v1/tasks/{task_id}/points/add", json={"points": [{"module": "登录", "point": same}]})
+    assert resp.status_code == 200 and len(resp.json()["added"]) == 1 and resp.json()["skipped"] == []
