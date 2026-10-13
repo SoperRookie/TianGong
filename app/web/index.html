@@ -4896,6 +4896,19 @@ async function runSearch(q) {
 
 /* ---- 知识库（16 章三层） ---- */
 let kbLevelFilter = '', kbCatFilter = '', _kbMeta = null, kbQuery = '', _kbAutoSearch = false;
+let kbPage = 1, kbSize = 20, kbSpace = '', kbModule = '', kbUploader = '', kbKw = '';
+function kbSet(name, value) {
+  if (name === 'page') { kbPage = value; renderKnowledge(); return; }
+  if (name === 'size') kbSize = value;
+  else if (name === 'level') kbLevelFilter = value;
+  else if (name === 'cat') kbCatFilter = value;
+  else if (name === 'space') { kbSpace = value; kbModule = ''; }
+  else if (name === 'module') kbModule = value;
+  else if (name === 'uploader') kbUploader = value;
+  else if (name === 'kw') kbKw = (value || '').trim();
+  else if (name === 'reset') { kbLevelFilter = ''; kbCatFilter = ''; kbSpace = ''; kbModule = ''; kbUploader = ''; kbKw = ''; }
+  kbPage = 1; renderKnowledge();
+}
 let kbMode = 'docs', depKind = 'requirement', depModule = '', depFocus = null, _depGraph = null;
 async function renderKnowledge() { return (() => keepScroll('kb', 'kb', _renderKnowledge__impl))(); }
 async function _renderKnowledge__impl() {
@@ -4910,29 +4923,53 @@ async function _renderKnowledge__impl() {
   if (curProjectName) {  // 当前项目视角：本项目 + 公共
     try { const pub = (await api('/api/v1/knowledge/docs?level=public')).documents; const ids = new Set(docs.map(d=>d.doc_id)); docs = docs.concat(pub.filter(d=>!ids.has(d.doc_id))); } catch (e) {}
   }
-  if (kbLevelFilter) docs = docs.filter(d => d.level === kbLevelFilter);
-  if (kbCatFilter) docs = docs.filter(d => d.category === kbCatFilter);
+  const all = docs;  // 筛选前范围（台账全集）：各下拉的条数按它统计
+  const countBy = f => { const c = {}; for (const d of all) { const k = f(d); if (k) c[k] = (c[k]||0) + 1; } return c; };
+  const levelN = countBy(d => d.level), catN = countBy(d => d.category);
+  const spaces = Object.keys(countBy(d => d.level === 'public' ? '' : d.space)).sort();
+  const modules = [...new Set(all.filter(d => !kbSpace || d.space === kbSpace).map(d => d.module).filter(Boolean))].sort();
+  const uploaders = [...new Set(all.map(d => d.created_by).filter(Boolean))].sort();
+  const kw = kbKw.toLowerCase();
+  const hit = d => !kw || [d.source, d.doc_id, d.space, d.module, meta.categories[d.category]||d.category, d.level_label, d.created_by, d.embedding_model]
+    .some(x => String(x||'').toLowerCase().includes(kw));
+  docs = docs.filter(d => (!kbLevelFilter || d.level === kbLevelFilter) && (!kbCatFilter || d.category === kbCatFilter) &&
+    (!kbSpace || d.space === kbSpace) && (!kbModule || d.module === kbModule) && (!kbUploader || d.created_by === kbUploader) && hit(d));
+  const filtering = !!(kbLevelFilter || kbCatFilter || kbSpace || kbModule || kbUploader || kw);
+  const pages = Math.max(1, Math.ceil(docs.length / kbSize));
+  if (kbPage > pages) kbPage = pages;
+  const pageDocs = docs.slice((kbPage - 1) * kbSize, kbPage * kbSize);
   const canUpload = isSysAdmin() || (curUser.projects||[]).some(p => can(p.project, 'knowledge.manage'));
   const LV = {public:'approved', project:'candidate', module:'pending'};
   $('knowledgeArea').innerHTML = `<div class="card">
-    <div class="card-h"><h3>知识库</h3>${kbModeSeg()}<span class="meta">公共知识库可跨项目使用（须显式标记，仅管理员维护）；项目 / 模块知识只在本项目检索，禁止跨项目污染</span>
+    <div class="card-h"><h3>知识库<span class="cnt" style="margin-left:6px">${all.length}</span></h3>${kbModeSeg()}<span class="meta">公共知识库可跨项目使用（须显式标记，仅管理员维护）；项目 / 模块知识只在本项目检索，禁止跨项目污染</span>
       <div class="grow">
-        <select style="width:120px" onchange="kbLevelFilter=this.value;renderKnowledge()"><option value="">全部层级</option>${Object.entries(meta.levels).map(([k,v])=>`<option value="${k}" ${kbLevelFilter===k?'selected':''}>${v}</option>`).join('')}</select>
-        <select style="width:130px" onchange="kbCatFilter=this.value;renderKnowledge()"><option value="">全部分类</option>${Object.entries(meta.categories).map(([k,v])=>`<option value="${k}" ${kbCatFilter===k?'selected':''}>${v}</option>`).join('')}</select>
         ${canUpload?`<button class="btn" onclick="openKbDlg()">＋ 上传知识</button>`:''}</div></div>
     <div class="card-b">
       <div class="toolbar" style="margin-bottom:10px"><input type="text" id="kbQ" placeholder="检索测试：输入关键词看命中切片（范围 = ${curProjectName?esc(curProjectName)+' + 公共':'公共'}）" value="${esc(kbQuery)}" style="flex:1" onkeydown="if(event.key==='Enter')kbSearch()"><button class="btn ghost sm" onclick="kbSearch()">检索</button></div>
       <div id="kbHits"></div>
+      <div class="filters" style="margin:0 0 10px">
+        <select style="width:120px" onchange="kbSet('level', this.value)"><option value="">全部层级</option>${Object.entries(meta.levels).map(([k,v])=>`<option value="${k}" ${kbLevelFilter===k?'selected':''}>${v}（${levelN[k]||0}）</option>`).join('')}</select>
+        <select style="width:140px" onchange="kbSet('cat', this.value)"><option value="">全部分类</option>${Object.entries(meta.categories).map(([k,v])=>`<option value="${k}" ${kbCatFilter===k?'selected':''}>${v}（${catN[k]||0}）</option>`).join('')}</select>
+        ${!curProjectName && spaces.length ? `<select style="width:140px" onchange="kbSet('space', this.value)"><option value="">全部项目</option>${spaces.map(x=>`<option value="${esc(x)}" ${kbSpace===x?'selected':''}>${esc(x)}</option>`).join('')}</select>` : ''}
+        ${modules.length ? `<select style="width:130px" onchange="kbSet('module', this.value)"><option value="">全部模块</option>${modules.map(x=>`<option value="${esc(x)}" ${kbModule===x?'selected':''}>${esc(x)}</option>`).join('')}</select>` : ''}
+        ${uploaders.length > 1 ? `<select style="width:110px" onchange="kbSet('uploader', this.value)"><option value="">上传人</option>${uploaders.map(x=>`<option value="${esc(x)}" ${kbUploader===x?'selected':''}>${esc(x)}</option>`).join('')}</select>` : ''}
+        <div class="search" style="width:220px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="search" placeholder="筛选台账：来源 / 编号 / 项目 / 模块…" value="${esc(kbKw)}" onchange="kbSet('kw', this.value)" onkeydown="if(event.key==='Enter')kbSet('kw', this.value)">
+        </div>
+        ${filtering?`<span class="hint">筛选出 ${docs.length} 篇</span><button class="btn ghost sm" onclick="kbSet('reset')">清除筛选</button>`:''}
+      </div>
       <div class="tbl-wrap" style="margin-top:0"><table>
         <thead><tr><th>来源</th><th style="width:110px">层级</th><th style="width:130px">项目 / 模块</th><th style="width:120px">分类</th><th style="width:70px">切片</th><th style="width:120px">Embedding</th><th style="width:90px">上传人</th><th style="width:110px">时间</th><th style="width:50px"></th></tr></thead>
-        <tbody>${docs.map(d=>`<tr>
+        <tbody>${pageDocs.map(d=>`<tr>
           <td><b>${esc(d.source)}</b><div class="hint"><code>${d.doc_id}</code></div></td>
           <td><span class="st ${LV[d.level]||'pending'}">${esc(d.level_label||d.level)}</span></td>
           <td class="hint">${d.level==='public'?'—':esc(d.space)}${d.module?`<div>${esc(d.module)}</div>`:''}</td>
           <td>${esc(meta.categories[d.category]||d.category)}</td><td>${d.chunk_count}</td>
           <td class="hint">${esc(d.embedding_model)}</td><td class="hint">${esc(d.created_by||'')}</td><td class="hint">${relTime(d.created_at)}</td>
           <td>${(d.level==='public'?isSysAdmin():(can(d.space,'knowledge.manage')&&canDelete()))?`<button class="ibtn bad" title="删除" onclick="deleteKb('${d.doc_id}',${jsq(d.source)})">${IC.trash}</button>`:''}</td></tr>`).join('')
-          || '<tr><td colspan="9"><div class="empty">暂无知识文档</div></td></tr>'}</tbody></table></div></div></div>`;
+          || `<tr><td colspan="9"><div class="empty">${all.length ? '没有符合筛选条件的知识文档' : '暂无知识文档'}</div></td></tr>`}</tbody></table></div>
+      ${docs.length > PT_PAGE_SIZES[0] || kbPage > 1 ? pagerHtml(docs.length, kbPage, kbSize, 'kbSet', '篇') : ''}</div></div>`;
   if (_kbAutoSearch) { _kbAutoSearch = false; if (kbQuery) kbSearch(); }  // 从全局搜索跳入：直接展示命中切片
 }
 function kbModeSeg() {
