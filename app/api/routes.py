@@ -3014,7 +3014,36 @@ async def dup_check_points(request: Request, task_id: str) -> dict:
         raise HTTPException(status_code=502, detail=str(e))
     record.dup_report = {"points": judged, "resolved": (record.dup_report or {}).get("resolved", [])}
     store.save(record)
-    return {"task_id": task_id, "duplicates": judged}
+    from app.tasks.points import dup_pair_entities
+    return {"task_id": task_id, "duplicates": judged, "dup_pairs": dup_pair_entities(record)}
+
+
+class DupPairActionBody(BaseModel):
+    action: str        # ignore（人工判定不重复 / 无需处理）/ reopen
+    note: str = ""
+
+
+@router.post("/api/v1/tasks/{task_id}/points/dup-pairs/{key}")
+async def act_dup_pair(request: Request, task_id: str, key: str, body: DupPairActionBody) -> dict:
+    """疑似重复测试点对的处置留痕：忽略 / 重开（删除某一条走测试点删除，删除后该对自动变为已处置）。"""
+    from app.tasks.points import dup_pair_entities, record_dup_pair_action
+
+    store = request.app.state.tasks
+    record = _task(request, task_id, "point.review")
+    entity = next((e for e in dup_pair_entities(record) if e["key"] == key), None)
+    if entity is None:
+        raise HTTPException(status_code=404, detail=f"疑似重复对不存在: {key}")
+    if body.action == "ignore" and entity["status"] != "open":
+        raise HTTPException(status_code=409, detail=f"该重复对已处置（{entity['status']}）")
+    if body.action == "reopen" and entity["status"] == "resolved":
+        raise HTTPException(status_code=409, detail="测试点已删除，该重复对无法重开")
+    try:
+        updated = record_dup_pair_action(record, key, body.action, _operator(request), body.note)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    request.state.audit_detail = f"{body.action} {entity['a']} ≈ {entity['b']}"
+    store.save(record)
+    return {"task_id": task_id, "dup_pair": updated, "dup_pairs": dup_pair_entities(record)}
 
 
 # ---- 用例定点修改（需求三十~三十四/五十五）----
@@ -4495,33 +4524,67 @@ def _req_trace(request: Request, item: dict) -> dict:
 async def list_requirements(
     request: Request, project: str | None = None, status: str = "", keyword: str = "",
     module_id: str = "", version_id: str = "", include_deleted: bool = False, business_line: str = "",
+    source_type: str = "", created_by: str = "", page: int = 1, page_size: int = 0,
 ) -> dict:
-    from app.requirements import REQ_STATUSES
+    """需求列表：筛选（状态 / 模块 / 版本 / 来源类型 / 创建人 / 关键词）与分页。
 
+    关键词匹配标题、原文、人工补充、附件文件名与解析文本、待确认事项、模块路径；
+    page_size=0（默认）不分页返回全部（对话框等内部调用），列表页传 20 / 50 / 100 / 200；
+    status_counts / creators / source_types 按筛选前范围（项目 / 业务线 / 是否含已删除）统计供下拉。"""
+    from app.requirements import REQ_STATUSES, SOURCE_TYPES
+
+    if page_size and page_size not in CASE_PAGE_SIZES:
+        raise HTTPException(status_code=400, detail=f"page_size 仅支持 {'/'.join(map(str, CASE_PAGE_SIZES))} 或 0（不分页）")
     if project:
         _require_project(request, project, "requirement.view")
     kw = keyword.strip().lower()
     line_projects = _line_projects(request, business_line)
+    mstore = request.app.state.modules
+    scope = [item for item in request.app.state.requirements.list(project or None, include_deleted=include_deleted)
+             if _record_visible(request, item["project"]) and (line_projects is None or item["project"] in line_projects)]
+    status_counts: dict[str, int] = {}
+    for item in scope:
+        status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
+    creators = sorted({item["created_by"] for item in scope if item.get("created_by")})
+
+    def _haystack(item: dict) -> str:
+        parts = [item["title"], item["raw_text"], item.get("description", "")]
+        parts.extend(a.get("filename", "") for a in item.get("attachments", []))
+        parts.extend(a.get("text", "") or "" for a in item.get("attachments", []))
+        parts.extend(q.get("question", "") for q in item.get("questions", []))
+        if item.get("module_id") and mstore.get(item["module_id"]):
+            parts.append(mstore.path(item["module_id"]) or "")
+        return " ".join(str(x) for x in parts if x).lower()
+
     out = []
-    for item in request.app.state.requirements.list(project or None, include_deleted=include_deleted):
-        if not _record_visible(request, item["project"]):
-            continue
-        if line_projects is not None and item["project"] not in line_projects:
-            continue
+    for item in scope:
         if status and item["status"] != status:
             continue
         if module_id and item.get("module_id") != module_id:
             continue
         if version_id and item.get("version_id") != version_id:
             continue
-        if kw and kw not in item["title"].lower() and kw not in item["raw_text"].lower():
+        if source_type and item.get("source_type") != source_type:
+            continue
+        if created_by and item.get("created_by") != created_by:
+            continue
+        if kw and kw not in _haystack(item):
             continue
         v = _req_view(request, item)
         v.pop("raw_text", None)
         v.pop("analysis", None)
         v["questions"] = len(item["questions"])
         out.append(v)
-    return {"requirements": out, "statuses": REQ_STATUSES}
+    total = len(out)
+    if page_size:
+        pages = max(1, -(-total // page_size))
+        page = min(max(1, page), pages)
+        out = out[(page - 1) * page_size: page * page_size]
+    else:
+        pages, page = 1, 1
+    return {"requirements": out, "statuses": REQ_STATUSES, "source_types": SOURCE_TYPES,
+            "total": total, "page": page, "page_size": page_size or total, "pages": pages,
+            "status_counts": status_counts, "creators": creators}
 
 
 @router.post("/api/v1/requirements")
@@ -6567,12 +6630,13 @@ async def archive_prompt_version(request: Request, key: str, version_no: int) ->
 @router.get("/api/v1/tasks/{task_id}")
 async def get_task(request: Request, task_id: str) -> dict:
     from app.tasks.blind_spots import blind_spot_entities
+    from app.tasks.points import dup_pair_entities
 
     record = _task(request, task_id, "case.view")
     pending = _points_pending_generation(record) if record.status == "completed" else []
     return {**record.model_dump(exclude={"checkpoint"}), "editing": _active_editing(request.app, task_id),
             "error_kind": _error_kind(record.error), "resume": _resume_info(record),
-            "blind_spots": blind_spot_entities(record),
+            "blind_spots": blind_spot_entities(record), "dup_pairs": dup_pair_entities(record),
             "points_pending_generation": [p["tp_id"] for tp in pending for p in tp["points"]]}
 
 

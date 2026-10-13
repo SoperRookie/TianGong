@@ -1461,10 +1461,11 @@ const $ = id => document.getElementById(id);
 const DIMENSIONS = ["正常流程","异常流程","输入校验","边界值","状态转换","权限","数据","重复操作","中断","网络"];
 let currentTask = null, editingCase = null, currentView = 'board';
 let detailTab = 'overview', caseTab = 'all', caseModule = '', caseView = 'table', pointView = 'table';
-let ptSub = 'points', ptPage = 1, ptSize = 20, ptModule = '', ptStatus = '', bsPage = 1, bsSize = 20, bsFilter = 'open';
+let ptSub = 'points', ptPage = 1, ptSize = 20, ptModule = '', ptStatus = '', bsPage = 1, bsSize = 20, bsFilter = 'open', bsKw = '';
+let dpPage = 1, dpSize = 20, dpFilter = 'open', dpKw = '';
 let casePage = 1, caseSize = 20, casePrio = '', caseKw = '';
 const PT_PAGE_SIZES = [20, 50, 100, 200];
-let hiddenDupPairs = new Set(), lastPointDiff = null, lastCaseDiff = null, lastHints = [];
+let lastPointDiff = null, lastCaseDiff = null, lastHints = [];
 let expandedSteps = new Set();
 
 /* ---------- 基础设施 ---------- */
@@ -2345,9 +2346,9 @@ async function openTask(id, keepLocal) {
   if (stale('opentask', _s)) return;  // 连续打开多个任务时只保留最后一个
   currentTask = t;
   if (!keepLocal) {
-    hiddenDupPairs = new Set(); lastPointDiff = null; lastCaseDiff = null; lastHints = [];
+    lastPointDiff = null; lastCaseDiff = null; lastHints = [];
     caseTab = 'all'; caseModule = ''; expandedSteps = new Set(); pointView = 'table';
-    ptSub = 'points'; ptPage = 1; ptModule = ''; ptStatus = ''; bsPage = 1; bsFilter = 'open';
+    ptSub = 'points'; ptPage = 1; ptModule = ''; ptStatus = ''; bsPage = 1; bsFilter = 'open'; bsKw = ''; dpPage = 1; dpFilter = 'open'; dpKw = '';
     casePage = 1; casePrio = ''; caseKw = '';
     detailTab = currentTask.status === 'awaiting_confirmation' ? 'points'
       : ((currentTask.result && currentTask.result.cases && currentTask.result.cases.length) || ((currentTask.context||{}).manual && currentTask.status==='completed')) ? 'cases' : 'overview';
@@ -2500,6 +2501,8 @@ function renderOverview(t) {
   if (ptc.pending||ptc.rejected) act('warn',`${ptc.pending+ptc.rejected} 个测试点待处理`,'去审核',"setTab('points')");
   const bsOpen = (t.blind_spots||[]).filter(b=>b.status==='open').length;
   if (bsOpen && t.status!=='failed') act('warn',`${bsOpen} 条需求盲区待处置`,'去处置',"ptSub='blind';setTab('points')");
+  const dpOpenN = (t.dup_pairs||[]).filter(p=>p.status==='open').length;
+  if (dpOpenN && t.status!=='failed') act('warn',`${dpOpenN} 组疑似重复测试点待处置`,'去处置',"ptSub='dup';setTab('points')");
   if (t.pending_fix) act('warn',`AI 修改提案待确认（${t.pending_fix.kind==='cases'?'用例':'测试点'}）`,'去确认',
     t.pending_fix.kind==='cases'?"setTab('cases')":"setTab('points')");
   if (sc.rejected && !t.pending_fix) act('warn',`${sc.rejected} 条用例已驳回，可让 AI 定点修改`,'去处理',"setTab('cases')");
@@ -2637,10 +2640,18 @@ function caseSet(name, value) {
   else if (name === 'kw') { caseKw = (value || '').trim(); casePage = 1; }
   renderDetail();
 }
+function dpSet(name, value) {
+  if (name === 'page') dpPage = value;
+  else if (name === 'size') { dpSize = value; dpPage = 1; }
+  else if (name === 'filter') { dpFilter = value; dpPage = 1; }
+  else if (name === 'kw') { dpKw = (value || '').trim(); dpPage = 1; }
+  renderDetail();
+}
 function bsSet(name, value) {
   if (name === 'page') bsPage = value;
   else if (name === 'size') { bsSize = value; bsPage = 1; }
   else if (name === 'filter') { bsFilter = value; bsPage = 1; }
+  else if (name === 'kw') { bsKw = (value || '').trim(); bsPage = 1; }
   renderDetail();
 }
 
@@ -2655,13 +2666,16 @@ function renderPointWorkbench(t) {
   const generatedIds = new Set((t.context||{}).generated_tp_ids || []);
   const canReviewPt = can((t.context||{}).project, 'point.review'), canEditPt = can((t.context||{}).project, 'point.edit');
   const bsAll = t.blind_spots || [], bsOpen = bsAll.filter(b=>b.status==='open').length;
+  const dpAll = t.dup_pairs || [], dpOpen = dpAll.filter(p=>p.status==='open').length;
 
-  // 子页签：测试点与需求盲区分开两张列表，各自分页
+  // 子页签：测试点 / 需求盲区 / 疑似重复 三张独立列表，各自筛选与分页
   const sub = `<div class="seg" style="margin-bottom:10px">
     <button class="${ptSub==='points'?'on':''}" onclick="ptSub='points';renderDetail()">测试点 <span class="cnt">${pts.length}</span></button>
     <button class="${ptSub==='blind'?'on':''}" onclick="ptSub='blind';renderDetail()">需求盲区 <span class="cnt ${bsOpen?'hot':''}">${bsOpen?bsOpen+' 待处置':bsAll.length}</span></button>
+    <button class="${ptSub==='dup'?'on':''}" onclick="ptSub='dup';renderDetail()">疑似重复 <span class="cnt ${dpOpen?'hot':''}">${dpOpen?dpOpen+' 待处置':dpAll.length}</span></button>
   </div>`;
   if (ptSub === 'blind') return sub + renderBlindSpots(t);
+  if (ptSub === 'dup') return sub + renderDupPairs(t, confirmable);
 
   // 测试点列表：按模块 / 状态筛选后分页，页内保留模块分组行
   const filtered = pts.filter(p => (!ptModule || p.module === ptModule) && (!ptStatus || p.status === ptStatus));
@@ -2727,7 +2741,6 @@ function renderPointWorkbench(t) {
       </div></div>
     ${renderCoverage(t)}
     ${renderReuseHints(t)}
-    ${renderDupReport(t)}
     ${renderPointCompare(t)}
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
     ${pts.length && pts.every(p=>p.legacy) ? '<div class="hint" style="margin:6px 0">项目化之前的旧版任务：测试点为只读留档，不支持审核操作</div>' : ''}
@@ -2741,7 +2754,7 @@ function renderPointWorkbench(t) {
     ${lastPointDiff?renderPointDiff(lastPointDiff):''}
     ${confirmable?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
       <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">确认并生成用例${approved?`（仅已通过的 ${approved} 条）`:'（全部未驳回项）'}</button>
-      <span class="hint">通过 = 锁定为正式测试点；驳回项修改后需再审核，不进入生成${bsOpen?`；还有 <b style="color:var(--warn)">${bsOpen}</b> 条需求盲区待处置`:''}</span>
+      <span class="hint">通过 = 锁定为正式测试点；驳回项修改后需再审核，不进入生成${bsOpen?`；还有 <b style="color:var(--warn)">${bsOpen}</b> 条需求盲区待处置`:''}${dpOpen?`；<b style="color:var(--warn)">${dpOpen}</b> 组疑似重复待处置`:''}</span>
     </div>`:t.status==='completed'?(pendingGen.length?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
       <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">为新通过的 ${pendingGen.length} 条测试点生成用例</button>
       <span class="hint">分批审核、分批生成：只为这些测试点生成，并入现有用例，已有用例与审核状态不变</span>
@@ -2803,7 +2816,10 @@ function renderBlindSpots(t) {
   const stCls = {open:'pending', question:'approved', point:'approved', explained:'approved', ignored:'rejected'};
   const aiResolved = items.filter(b=>b.ai_resolved).length;
   const counts = {}; items.forEach(b => counts[b.status] = (counts[b.status]||0) + 1);
-  const filtered = bsFilter === 'all' ? items : items.filter(b => b.status === bsFilter);
+  const kw = bsKw.toLowerCase();
+  const hit = b => !kw || [b.text, b.note, b.by, (b.target||{}).tp_id, (b.target||{}).req_title, (b.target||{}).module]
+    .some(x => String(x||'').toLowerCase().includes(kw));
+  const filtered = (bsFilter === 'all' ? items : items.filter(b => b.status === bsFilter)).filter(hit);
   const pages = Math.max(1, Math.ceil(filtered.length / bsSize));
   if (bsPage > pages) bsPage = pages;
   const pageItems = filtered.slice((bsPage - 1) * bsSize, bsPage * bsSize);
@@ -2829,15 +2845,19 @@ function renderBlindSpots(t) {
     </tr>`).join('');
   return `<div class="toolbar" style="margin-top:0">
       <span class="hint">AI 标出的需求含糊 / 缺失处 · 共 ${items.length} 条 · 待处置 <b style="color:${open.length?'var(--warn)':'var(--ok)'}">${open.length}</b>${aiResolved?` · ${aiResolved} 条经分片复核已被需求其他部分说明`:''}</span>
-      <div class="seg" style="margin-left:auto">
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="search" placeholder="搜索盲区 / 处置说明 / 去向" value="${esc(bsKw)}" style="width:200px"
+          onchange="bsSet('kw', this.value)" onkeydown="if(event.key==='Enter'){bsSet('kw', this.value)}">
+        ${kw?`<span class="hint">命中 ${filtered.length} 条</span>`:''}
+        <div class="seg">
         ${[['open','待处置'],['all','全部'],['question','已转待确认事项'],['point','已转测试点'],['explained','需求已说明'],['ignored','已忽略']]
           .filter(([k]) => k==='open' || k==='all' || counts[k])
           .map(([k,v])=>`<button class="${bsFilter===k?'on':''}" onclick="bsSet('filter',${jsq(k)})">${v}${k==='all'?'':` ${counts[k]||0}`}</button>`).join('')}
-      </div></div>
+        </div></div></div>
     <div class="hint" style="margin:0 0 8px">处置去向：<b>转待确认事项</b> = 需求本身缺规则，交需求负责人补结论；<b>转测试点</b> = 可直接验证，进入测试点审核；<b>需求已说明</b> = 其他章节已写明，不是盲区（写出处）；<b>忽略</b> = 与本次无关。处置后可重开。</div>
     <div class="tbl-wrap"><table>
       <tr><th>#</th><th>盲区</th><th>状态</th><th>处置人</th><th>操作</th></tr>
-      ${rows || `<tr><td colspan="5"><div class="empty">${items.length ? (bsFilter==='open' ? '全部盲区已处置' : '该状态下没有盲区') : '本次拆解没有标出需求盲区'}</div></td></tr>`}
+      ${rows || `<tr><td colspan="5"><div class="empty">${!items.length ? '本次拆解没有标出需求盲区' : kw ? '没有符合搜索条件的盲区' : bsFilter==='open' ? '全部盲区已处置' : '该状态下没有盲区'}</div></td></tr>`}
     </table></div>
     ${filtered.length > PT_PAGE_SIZES[0] || bsPage > 1 ? pagerHtml(filtered.length, bsPage, bsSize, 'bsSet') : ''}`;
 }
@@ -2889,20 +2909,69 @@ function renderReuseHints(t) {
     <div class="box accent">历史正式用例与当前需求高度相关（相似度 ${h.score} · 来源 ${esc(h.source)}${h.from_project?` · <span class="tag">同业务线项目「${esc(h.from_project)}」</span>`:''}）
       <div class="hint" style="white-space:pre-wrap;margin-top:4px">${esc(h.text)}</div></div>`).join('')}`;
 }
-function renderDupReport(t) {
-  const pairs = ((t.dup_report||{}).points||[]).filter(p=>!hiddenDupPairs.has(p.a+'|'+p.b));
-  if (!pairs.length) return '';
-  return `<div class="section-t">疑似重复测试点<span class="hint">（AI 不删除，请人工处置）</span></div>${pairs.map(p=>`
-    <div class="box">
-      <b class="cid">${esc(p.a)}</b>「${esc(p.a_point)}」 与 <b class="cid">${esc(p.b)}</b>「${esc(p.b_point)}」
-      <span class="tag">相似度 ${p.similarity}</span>${p.verdict?` <span class="tag">${esc(p.verdict)}</span>`:''}
-      ${p.reason?`<div class="hint">原因：${esc(p.reason)}</div>`:''}
-      ${p.suggestion?`<div class="hint">建议：${esc(p.suggestion)}</div>`:''}
-      <div class="toolbar" style="margin-top:8px">
-        ${canDelete()?`<button class="btn ghost sm" onclick="pointDelete(${jsq(p.a)})">删除 ${esc(p.a)}</button>
-        <button class="btn ghost sm" onclick="pointDelete(${jsq(p.b)})">删除 ${esc(p.b)}</button>`:''}
-        <button class="btn ghost sm" onclick="hiddenDupPairs.add(${jsq(p.a+'|'+p.b)});renderDetail()">忽略</button>
-      </div></div>`).join('')}`;
+/* 疑似重复测试点：独立列表——AI 不删除，人工删一条 / 忽略（判定不重复）/ 重开；删除后自动变为已处置；状态筛选 + 关键词 + 分页 */
+const DP_STATUS = {open:'待处置', ignored:'已忽略', resolved:'已处置'};
+function renderDupPairs(t, confirmable) {
+  const items = t.dup_pairs || [];
+  const open = items.filter(p=>p.status==='open');
+  const project = (t.context||{}).project;
+  const canReview = can(project,'point.review'), canDel = can(project,'point.edit') && canDelete();
+  const counts = {}; items.forEach(p => counts[p.status] = (counts[p.status]||0) + 1);
+  const kw = dpKw.toLowerCase();
+  const hit = p => !kw || [p.a, p.b, p.a_point, p.b_point, p.reason, p.suggestion, p.verdict, p.note, p.by]
+    .some(x => String(x||'').toLowerCase().includes(kw));
+  const filtered = (dpFilter === 'all' ? items : items.filter(p => p.status === dpFilter)).filter(hit);
+  const pages = Math.max(1, Math.ceil(filtered.length / dpSize));
+  if (dpPage > pages) dpPage = pages;
+  const pageItems = filtered.slice((dpPage - 1) * dpSize, dpPage * dpSize);
+  const stCls = {open:'pending', ignored:'rejected', resolved:'approved'};
+  const side = (id, text, p) => `<b class="cid">${esc(id)}</b>${(p.deleted||[]).includes(id)?' <span class="tag">已删除</span>':''}<div>${esc(text)}</div>`;
+  const rows = pageItems.map((p, i) => `<tr>
+      <td style="width:40px" class="hint">${(dpPage - 1) * dpSize + i + 1}</td>
+      <td>${side(p.a, p.a_point, p)}</td>
+      <td>${side(p.b, p.b_point, p)}</td>
+      <td style="width:150px"><span class="tag">相似度 ${p.similarity}</span>${p.verdict?`<div><span class="tag" style="${p.verdict==='重复'?'background:var(--danger-bg);color:var(--danger)':''}">${esc(p.verdict)}</span></div>`:''}</td>
+      <td style="width:220px" class="hint">${p.reason?`原因：${esc(p.reason)}`:''}${p.suggestion?`<div>建议：${esc(p.suggestion)}</div>`:''}</td>
+      <td style="width:110px"><span class="st ${stCls[p.status]||'pending'}">${esc(DP_STATUS[p.status]||p.status)}</span>
+        ${p.note?`<div class="hint">${esc(p.note)}</div>`:''}${p.by?`<div class="hint">${esc(p.by)}${p.at?' · '+esc(fmtTime(p.at)):''}</div>`:''}</td>
+      <td style="width:230px"><div class="rowops" style="flex-wrap:wrap;gap:4px">
+        ${p.status==='open' ? `
+          ${canDel&&confirmable?`<button class="btn ghost sm" onclick="pointDelete(${jsq(p.a)})">删除 ${esc(p.a)}</button>
+          <button class="btn ghost sm" onclick="pointDelete(${jsq(p.b)})">删除 ${esc(p.b)}</button>`:''}
+          ${canReview?`<button class="btn ghost sm" onclick="dpIgnore(${jsq(p.key)})" title="人工判定不重复或无需处理">忽略</button>`:''}`
+        : p.status==='ignored' && canReview ? `<button class="btn ghost sm" onclick="dpAct(${jsq(p.key)},'reopen')">重开</button>` : ''}
+      </div></td>
+    </tr>`).join('');
+  return `<div class="toolbar" style="margin-top:0">
+      <span class="hint">文字初筛 + AI 语义复核 · 共 ${items.length} 组 · 待处置 <b style="color:${open.length?'var(--warn)':'var(--ok)'}">${open.length}</b> · AI 不删除，由人工处置</span>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        ${confirmable?`<button class="btn ghost sm" onclick="dupCheck()">重新检查</button>`:''}
+        <input type="search" placeholder="搜索编号 / 测试点 / 原因" value="${esc(dpKw)}" style="width:190px"
+          onchange="dpSet('kw', this.value)" onkeydown="if(event.key==='Enter'){dpSet('kw', this.value)}">
+        ${kw?`<span class="hint">命中 ${filtered.length} 组</span>`:''}
+        <div class="seg">
+        ${[['open','待处置'],['all','全部'],['ignored','已忽略'],['resolved','已处置']]
+          .filter(([k]) => k==='open' || k==='all' || counts[k])
+          .map(([k,v])=>`<button class="${dpFilter===k?'on':''}" onclick="dpSet('filter',${jsq(k)})">${v}${k==='all'?'':` ${counts[k]||0}`}</button>`).join('')}
+        </div></div></div>
+    <div class="hint" style="margin:0 0 8px">处置去向：<b>删除其中一条</b>（进回收站，可恢复，该组自动变为已处置）；<b>忽略</b> = 人工判定不重复或都需保留；修改测试点文本后点「重新检查」刷新。</div>
+    <div class="tbl-wrap"><table>
+      <tr><th>#</th><th>测试点 A</th><th>测试点 B</th><th>相似度 / 判定</th><th>原因 / 建议</th><th>状态</th><th>操作</th></tr>
+      ${rows || `<tr><td colspan="7"><div class="empty">${!items.length ? (t.dup_report ? '重复检查未发现疑似重复测试点' : '尚未执行重复检查') : kw ? '没有符合搜索条件的重复对' : dpFilter==='open' ? '全部疑似重复已处置' : '该状态下没有重复对'}</div></td></tr>`}
+    </table></div>
+    ${filtered.length > PT_PAGE_SIZES[0] || dpPage > 1 ? pagerHtml(filtered.length, dpPage, dpSize, 'dpSet', '组') : ''}`;
+}
+async function dpAct(key, action, body={}) {
+  try {
+    const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/points/dup-pairs/${encodeURIComponent(key)}`, {action, ...body});
+    await openTask(currentTask.task_id, true);
+    return r;
+  } catch (e) { toast('处置失败：' + e.message, 'err'); return null; }
+}
+async function dpIgnore(key) {
+  if (!await uiConfirm('忽略疑似重复', '人工判定这两条不重复或都需保留？忽略后可在「已忽略」里重开。')) return;
+  const r = await dpAct(key, 'ignore');
+  if (r) toast('已忽略，可在「已忽略」里重开', 'ok');
 }
 let compareHidden = false, exportApprovedOnly = false, exportCompactMind = false;
 function renderPointCompare(t) {
@@ -3016,9 +3085,10 @@ async function dupCheck() {
   toast('重复检查执行中…');
   try {
     const data = await api(`/api/v1/tasks/${currentTask.task_id}/points/dup-check`, {method:'POST'});
-    hiddenDupPairs = new Set();
+    const open = (data.dup_pairs||[]).filter(p=>p.status==='open').length;
+    if (open) { ptSub = 'dup'; dpFilter = 'open'; dpPage = 1; }
     await openTask(currentTask.task_id, true);
-    toast(data.duplicates.length ? `发现 ${data.duplicates.length} 组疑似重复，请人工处置` : '未发现疑似重复测试点', data.duplicates.length?'warn':'ok');
+    toast(open ? `发现 ${open} 组疑似重复，请人工处置` : data.duplicates.length ? `${data.duplicates.length} 组疑似重复均已处置过` : '未发现疑似重复测试点', open?'warn':'ok');
   } catch (e) { toast('重复检查失败：' + e.message, 'err'); }
 }
 async function supplementPoints() {
@@ -5117,6 +5187,19 @@ async function archivePrompt(no) {
 
 /* ==================== 需求中心（M2） ==================== */
 let curReq = null, _reqDetail = null, _reqsCache = [], reqStatus = '', reqKw = '', reqTab = 'raw', reqDeleted = false, reqLine = '';
+let reqPage = 1, reqSize = 20, reqSource = '', reqCreator = '';
+function reqSet(name, value) {
+  if (name === 'page') reqPage = value;
+  else if (name === 'size') { reqSize = value; reqPage = 1; }
+  else if (name === 'status') { reqStatus = value; reqPage = 1; }
+  else if (name === 'kw') { reqKw = (value || '').trim(); reqPage = 1; }
+  else if (name === 'line') { reqLine = value; reqPage = 1; }
+  else if (name === 'source') { reqSource = value; reqPage = 1; }
+  else if (name === 'creator') { reqCreator = value; reqPage = 1; }
+  else if (name === 'deleted') { reqDeleted = !!value; reqPage = 1; }
+  else if (name === 'reset') { reqStatus = ''; reqKw = ''; reqSource = ''; reqCreator = ''; reqPage = 1; }
+  renderRequirements();
+}
 let _reqSel = new Set();      // 需求列表勾选（合并发起测试设计）
 let _designReqIds = null;     // 设计对话框当前针对的需求：null = 详情页单需求（curReq），数组 = 列表多选
 function reqSelToggle(input) {
@@ -5147,7 +5230,7 @@ function crumbForReqs() {
   else setCrumb('需求列表');
 }
 function openRequirement(id, tab) { curReq = id; reqTab = tab || 'raw'; switchView('requirements'); }
-async function renderRequirements() { return (() => keepScroll('reqs', ['reqs', curReq, reqStatus, reqKw, reqDeleted].join('|'), _renderRequirements__impl))(); }
+async function renderRequirements() { return (() => keepScroll('reqs', ['reqs', curReq, reqStatus, reqKw, reqDeleted, reqSource, reqCreator, reqPage, reqSize].join('|'), _renderRequirements__impl))(); }
 async function _renderRequirements__impl() {
   if (curReq) return renderRequirementDetail();
   crumbForReqs();
@@ -5158,10 +5241,15 @@ async function _renderRequirements__impl() {
   if (reqKw.trim()) q.set('keyword', reqKw.trim());
   if (reqDeleted) q.set('include_deleted', 'true');
   if (reqLine) q.set('business_line', reqLine);
+  if (reqSource) q.set('source_type', reqSource);
+  if (reqCreator) q.set('created_by', reqCreator);
+  q.set('page', reqPage); q.set('page_size', reqSize);
   let data;
   try { data = await api('/api/v1/requirements?' + q); } catch (e) { return toast(e.message, 'err'); }
   if (stale('reqs', _s)) return;
+  reqPage = data.page;  // 后端已按总页数收敛
   _reqsCache = data.requirements;
+  const filtering = reqStatus || reqKw || reqSource || reqCreator;
   const canEdit = curProjectName ? can(curProjectName, 'requirement.edit') : (isSysAdmin() || (curUser.projects||[]).some(p => can(p.project, 'requirement.edit')));
   const alive = new Set(data.requirements.filter(r => !r.deleted_at).map(r => r.req_id));
   for (const id of [..._reqSel]) if (!alive.has(id)) _reqSel.delete(id);   // 列表变化后清掉不在当前列表的勾选
@@ -5182,17 +5270,23 @@ async function _renderRequirements__impl() {
   $('reqArea').innerHTML = `<div class="card">
     <div class="card-h"><h3>需求列表</h3><span class="meta">原文永久保留 · AI 分析 11 项 · 待确认事项确认后才能开始测试设计 · 需求 → 测试点 → 用例 → 计划 → 执行 追溯</span>
       <div class="grow">
-        <input type="text" placeholder="搜索标题 / 原文" value="${esc(reqKw)}" style="width:180px" onchange="reqKw=this.value;renderRequirements()">
-        ${lineSelectHtml(reqLine, "reqLine=this.value;renderRequirements()")}
-        <select style="width:120px" onchange="reqStatus=this.value;renderRequirements()"><option value="">全部状态</option>
-          ${Object.entries(data.statuses).map(([k,v])=>`<option value="${k}" ${reqStatus===k?'selected':''}>${v}</option>`).join('')}</select>
-        <label class="check" title="回收站：已删除的需求可恢复"><input type="checkbox" ${reqDeleted?'checked':''} onchange="reqDeleted=this.checked;renderRequirements()"> 显示已删除</label>
+        <input type="search" placeholder="搜索标题 / 原文 / 附件 / 待确认事项" value="${esc(reqKw)}" style="width:210px"
+          onchange="reqSet('kw', this.value)" onkeydown="if(event.key==='Enter'){reqSet('kw', this.value)}">
+        ${lineSelectHtml(reqLine, "reqSet('line', this.value)")}
+        <select style="width:120px" onchange="reqSet('status', this.value)"><option value="">全部状态</option>
+          ${Object.entries(data.statuses).map(([k,v])=>`<option value="${k}" ${reqStatus===k?'selected':''}>${v}（${(data.status_counts||{})[k]||0}）</option>`).join('')}</select>
+        <select style="width:110px" onchange="reqSet('source', this.value)"><option value="">来源</option>
+          ${Object.entries(data.source_types||{}).map(([k,v])=>`<option value="${k}" ${reqSource===k?'selected':''}>${v}</option>`).join('')}</select>
+        ${(data.creators||[]).length>1?`<select style="width:110px" onchange="reqSet('creator', this.value)"><option value="">创建人</option>
+          ${data.creators.map(u=>`<option value="${esc(u)}" ${reqCreator===u?'selected':''}>${esc(u)}</option>`).join('')}</select>`:''}
+        <label class="check" title="回收站：已删除的需求可恢复"><input type="checkbox" ${reqDeleted?'checked':''} onchange="reqSet('deleted', this.checked)"> 显示已删除</label>
+        ${filtering?`<span class="hint">筛选出 ${data.total} 条</span><button class="btn ghost sm" onclick="reqSet('reset')">清除筛选</button>`:''}
         ${anySel?`<button class="btn ghost" id="reqDesignBtn" ${_reqSel.size?'':'disabled'} title="勾选需求后合并为一个测试设计任务（须同一项目，且必须确认的事项已确认）" onclick="reqMultiDesign()">合并发起测试设计${_reqSel.size?`（${_reqSel.size}）`:''}</button>`:''}
         ${canEdit?`<button class="btn" onclick="openReqDlg()">＋ 新建需求</button>`:''}</div></div>
     <div class="card-b"><div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
-      <thead><tr>${anySel?`<th style="width:30px"><input type="checkbox" title="全选本页可设计的需求" ${(() => { const ids = data.requirements.filter(selectable).map(r => r.req_id); return ids.length && ids.every(id => _reqSel.has(id)) ? 'checked' : ''; })()} onchange="reqSelAll(this.checked)"></th>`:''}<th>需求</th><th style="width:120px">项目 / 版本</th><th style="width:120px">模块</th><th style="width:110px">状态</th><th style="width:130px">来源</th><th style="width:90px">测试设计</th><th style="width:110px">创建</th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="${anySel?8:7}"><div class="empty">${curProjectName?`项目「${esc(curProjectName)}」`:''}暂无需求${canEdit?'，点击「新建需求」录入原文或上传文件':''}</div></td></tr>`}</tbody>
-    </table></div></div></div>`;
+      <thead><tr>${anySel?`<th style="width:30px"><input type="checkbox" title="全选本页可设计的需求（只选本页）" ${(() => { const ids = data.requirements.filter(selectable).map(r => r.req_id); return ids.length && ids.every(id => _reqSel.has(id)) ? 'checked' : ''; })()} onchange="reqSelAll(this.checked)"></th>`:''}<th>需求</th><th style="width:120px">项目 / 版本</th><th style="width:120px">模块</th><th style="width:110px">状态</th><th style="width:130px">来源</th><th style="width:90px">测试设计</th><th style="width:110px">创建</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="${anySel?8:7}"><div class="empty">${filtering ? '没有符合筛选条件的需求' : `${curProjectName?`项目「${esc(curProjectName)}」`:''}暂无需求${canEdit?'，点击「新建需求」录入原文或上传文件':''}`}</div></td></tr>`}</tbody>
+    </table></div>${data.total > PT_PAGE_SIZES[0] || reqPage > 1 ? pagerHtml(data.total, reqPage, reqSize, 'reqSet') : ''}</div></div>`;
 }
 async function fillReqRefs(project) {
   const vs = $('rqVersion'), ms = $('rqModule');

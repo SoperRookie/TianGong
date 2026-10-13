@@ -851,3 +851,38 @@ def test_盲区实体_AI复核剔除项默认为需求已说明_人工可覆盖(
     # 人工认为 AI 复核错了：重开 → 待处置
     record_blind_spot_action(rec, ents[1], "reopen", "tester")
     assert open_blind_spots(rec) == ["未说明找回密码入口", "未说明锁定时长"]
+
+
+async def test_疑似重复对_忽略重开留痕_删除后自动已处置(client):
+    analyst = json.dumps({"modules": [{"module": "登录", "points": [
+        {"point": "正确账号密码登录成功", "dimension": "正常流程"},
+        {"point": "正确账号密码登录成功后进入首页", "dimension": "正常流程"},
+        {"point": "密码错误提示", "dimension": "异常流程"},
+    ]}], "blind_spots": []}, ensure_ascii=False)
+    dup = json.dumps({"duplicates": [{"a": "TP001", "b": "TP002", "verdict": "重复", "reason": "同一目标", "suggestion": "保留一条"}]}, ensure_ascii=False)
+    app.state.llm = StubLLM([analyst, GAP_REPLY, dup])
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求", "confirm_points": "true"})
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["task_id"]
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    pairs = t["dup_pairs"]
+    assert len(pairs) >= 1 and pairs[0]["status"] == "open" and pairs[0]["key"] == "TP001|TP002"
+    key = pairs[0]["key"]
+    # 忽略 → 已忽略（带处置人）；重复忽略 409；重开 → 待处置
+    r = (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/{key}", json={"action": "ignore", "note": "都要保留"})).json()
+    assert r["dup_pair"]["status"] == "ignored" and r["dup_pair"]["note"] == "都要保留" and r["dup_pair"]["by"] == "anonymous"
+    assert (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/{key}", json={"action": "ignore"})).status_code == 409
+    assert (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/{key}", json={"action": "nope"})).status_code == 400
+    assert (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/none", json={"action": "ignore"})).status_code == 404
+    r = (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/{key}", json={"action": "reopen"})).json()
+    assert r["dup_pair"]["status"] == "open"
+    # 重新检查后忽略记录保留；删除其中一条后自动已处置且不可重开
+    await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/{key}", json={"action": "ignore"})
+    app.state.llm = StubLLM([dup])
+    r = (await client.post(f"/api/v1/tasks/{task_id}/points/dup-check")).json()
+    assert next(p for p in r["dup_pairs"] if p["key"] == key)["status"] == "ignored"
+    await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [{"tp_id": "TP002", "action": "delete"}]})
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    p = next(p for p in t["dup_pairs"] if p["key"] == key)
+    assert p["status"] == "resolved" and p["deleted"] == ["TP002"]
+    assert (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/{key}", json={"action": "reopen"})).status_code == 409

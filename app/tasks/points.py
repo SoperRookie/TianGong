@@ -9,6 +9,7 @@
 """
 
 import re
+from datetime import datetime, timezone
 import uuid
 
 # 测试维度枚举（覆盖矩阵 · 需求八）；覆盖状态：已覆盖/未覆盖/不适用/待确认（需求九）
@@ -397,6 +398,50 @@ def _jaccard(ga: set[str], gb: set[str]) -> float:
     if not ga or not gb:
         return 0.0
     return len(ga & gb) / len(ga | gb)
+
+
+DUP_PAIR_STATUS_TEXT = {"open": "待处置", "ignored": "已忽略", "resolved": "已处置"}
+
+
+def _pair_key(a: str, b: str) -> str:
+    return "|".join(sorted((str(a), str(b))))
+
+
+def dup_pair_entities(record) -> list[dict]:
+    """疑似重复测试点对的条目视图：状态 open / ignored（人工判定非重复）/ resolved（其中一条已删除或改写后不再重复）。
+
+    dup_report.points 为最近一次重复检查的结果；resolved 记录人工处置（忽略 / 重开留痕）。
+    测试点被删除后自动视为已处置，不需要再手工点；文本已修改的用重新检查刷新。
+    """
+    report = record.dup_report or {}
+    pairs = report.get("points") or []
+    reviews = {r["key"]: r for r in (report.get("resolved") or []) if isinstance(r, dict) and r.get("key")}
+    modules = (record.analysis or {}).get("test_points") or []
+    alive = {p.get("tp_id") for _, p in iter_points(modules)}
+    out: list[dict] = []
+    for p in pairs:
+        key = _pair_key(p.get("a", ""), p.get("b", ""))
+        rv = reviews.get(key) or {}
+        gone = [x for x in (p.get("a"), p.get("b")) if x not in alive]
+        status = "resolved" if gone else (rv.get("status") or "open")
+        out.append({**p, "key": key, "status": status, "deleted": gone,
+                    "note": rv.get("note", ""), "by": rv.get("by"), "at": rv.get("at")})
+    order = {"open": 0, "ignored": 1, "resolved": 2}
+    out.sort(key=lambda e: (order.get(e["status"], 9), -float(e.get("similarity") or 0)))
+    return out
+
+
+def record_dup_pair_action(record, key: str, action: str, by: str | None, note: str = "") -> dict:
+    """忽略 / 重开一对疑似重复（持久化，刷新与重新检查后保留）。"""
+    if action not in ("ignore", "reopen"):
+        raise ValueError(f"不支持的处置动作: {action}")
+    report = record.dup_report or {"points": [], "resolved": []}
+    resolved = [r for r in (report.get("resolved") or []) if isinstance(r, dict) and r.get("key") != key]
+    if action == "ignore":
+        resolved.append({"key": key, "status": "ignored", "note": (note or "").strip(), "by": by,
+                         "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    record.dup_report = {**report, "resolved": resolved}
+    return next((e for e in dup_pair_entities(record) if e["key"] == key), {"key": key, "status": "open"})
 
 
 def duplicate_candidates(modules: list[dict], threshold: float = 0.45) -> list[dict]:

@@ -458,3 +458,29 @@ async def test_盲区转需求待确认事项_多需求任务可选需求(client
     q = next(x for x in r["questions"] if x["q_id"] == tgt["q_id"])
     assert q["question"] == "未说明验证码有效期" and q["level"] == "suggest" and q["assumption"] == "按 5 分钟" and q["source"] == "manual"
     assert all(x["question"] != "未说明验证码有效期" for x in (await client.get(f"/api/v1/requirements/{a['req_id']}")).json()["questions"])
+
+
+async def test_需求列表_筛选与分页(client):
+    for i in range(1, 24):
+        await _req(client, title=f"需求 {i:02d}", text=f"第 {i} 条需求原文" + ("，含支付流程" if i % 5 == 0 else ""))
+    other = await _req(client, title="带附件说明", text="原文")
+    await client.put(f"/api/v1/requirements/{other['req_id']}", json={"description": "人工补充：需要验证码有效期"})
+    await client.post(f"/api/v1/requirements/{other['req_id']}/questions", json={"question": "锁定时长是多少？"})
+    # 不传 page_size：不分页返回全部（内部调用兼容）
+    data = (await client.get("/api/v1/requirements", params={"project": "P"})).json()
+    assert data["total"] == 24 and len(data["requirements"]) == 24 and data["pages"] == 1
+    assert data["status_counts"] == {"draft": 24} and data["creators"] == ["anonymous"] and "manual" in data["source_types"]
+    # 分页：每页 20，第 2 页 4 条；越界页收敛；非法页大小 400
+    data = (await client.get("/api/v1/requirements", params={"project": "P", "page_size": 20, "page": 2})).json()
+    assert (data["total"], data["pages"], data["page"], len(data["requirements"])) == (24, 2, 2, 4)
+    assert (await client.get("/api/v1/requirements", params={"project": "P", "page_size": 20, "page": 9})).json()["page"] == 2
+    assert (await client.get("/api/v1/requirements", params={"project": "P", "page_size": 7})).status_code == 400
+    # 关键词覆盖原文 / 人工补充 / 待确认事项；状态 / 来源 / 创建人筛选；status_counts 不随筛选变化
+    assert (await client.get("/api/v1/requirements", params={"project": "P", "keyword": "支付流程"})).json()["total"] == 4
+    assert (await client.get("/api/v1/requirements", params={"project": "P", "keyword": "验证码有效期"})).json()["total"] == 1
+    assert (await client.get("/api/v1/requirements", params={"project": "P", "keyword": "锁定时长"})).json()["total"] == 1
+    r = (await client.get("/api/v1/requirements", params={"project": "P", "status": "analyzed"})).json()
+    assert r["total"] == 0 and r["status_counts"] == {"draft": 24}
+    assert (await client.get("/api/v1/requirements", params={"project": "P", "source_type": "manual"})).json()["total"] == 24
+    assert (await client.get("/api/v1/requirements", params={"project": "P", "source_type": "file"})).json()["total"] == 0
+    assert (await client.get("/api/v1/requirements", params={"project": "P", "created_by": "nobody"})).json()["total"] == 0
