@@ -5931,7 +5931,19 @@ async function deleteProject(name) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-let projListStatus = '', projListKw = '';
+let projListStatus = '', projListKw = '', projListOwner = '', projListRole = '', projListPage = 1, projListSize = 20;
+function projListSet(name, value) {
+  if (name === 'page') projListPage = value;
+  else if (name === 'size') { projListSize = value; projListPage = 1; }
+  else if (name === 'kw') { projListKw = (value || '').trim(); projListPage = 1; }
+  else if (name === 'status') { projListStatus = value; projListPage = 1; }
+  else if (name === 'line') { projListLine = value; projListPage = 1; }
+  else if (name === 'owner') { projListOwner = value; projListPage = 1; }
+  else if (name === 'role') { projListRole = value; projListPage = 1; }
+  else if (name === 'group') { projGroupByLine = !!value; projListPage = 1; }
+  else if (name === 'reset') { projListKw = ''; projListStatus = ''; projListLine = ''; projListOwner = ''; projListRole = ''; projListPage = 1; }
+  renderProjects();
+}
 function crumbForProjects() {
   if (curProject) {
     setCrumb(`<a onclick="backToProjects()">项目管理</a><span class="sep">/</span>${esc(curProject)}`);
@@ -5952,8 +5964,17 @@ async function renderProjects() {
   try { _projectsCache = await getProjects(true); } catch (e) { return toast(e.message, 'err'); }
   if (stale('projects', _s)) return;
   const kw = projListKw.trim().toLowerCase();
-  const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus) && (!projListLine || p.business_line === projListLine)
-    && (!kw || p.project.toLowerCase().includes(kw) || (p.code||'').toLowerCase().includes(kw) || (p.owner||'').toLowerCase().includes(kw)));
+  const real = _projectsCache.filter(p => !p.builtin);
+  const countBy = f => real.reduce((m, p) => { const k = f(p) || ''; m[k] = (m[k] || 0) + 1; return m; }, {});
+  const statusCounts = countBy(p => p.status), lineCounts = countBy(p => p.business_line), roleCounts = countBy(p => p.my_role);
+  const owners = [...new Set(real.map(p => p.owner).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh'));
+  const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus) && (!projListLine || (p.business_line||'') === projListLine)
+    && (!projListOwner || p.owner === projListOwner) && (!projListRole || p.my_role === projListRole)
+    && (!kw || [p.project, p.code, p.owner, p.description, p.business_line, p.created_by].some(x => (x||'').toLowerCase().includes(kw))));
+  const filtering = kw || projListStatus || projListLine || projListOwner || projListRole;
+  const pages = Math.max(1, Math.ceil(shown.length / projListSize));
+  if (projListPage > pages) projListPage = pages;
+  const pageItems = shown.slice((projListPage - 1) * projListSize, projListPage * projListSize);
   const STATUS_CLS = {active:'approved', paused:'candidate', archived:'pending'};
   const rowOf = p => {
     const reviewed = p.approved + p.rejected + p.pending;
@@ -5985,7 +6006,7 @@ async function renderProjects() {
   if (projGroupByLine) {
     // 业务线维度：同一业务线的项目归在一起，未分业务线的排最后；组头显示项目数与任务 / 用例合计
     const groups = new Map();
-    for (const p of shown) { const k = p.builtin ? '' : (p.business_line || ''); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); }
+    for (const p of pageItems) { const k = p.builtin ? '' : (p.business_line || ''); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); }
     const keys = [...groups.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, 'zh'));
     const canRename = isSysAdmin() || openProjects();
     rows = keys.map(k => {
@@ -5997,18 +6018,21 @@ async function renderProjects() {
         ${!k && canRename && ps.some(p=>!p.builtin) ? '<span class="hint" style="margin-left:10px">在「编辑项目」里填写业务线即可归入</span>' : ''}</td></tr>`;
       return head + ps.map(rowOf).join('');
     }).join('');
-  } else rows = shown.map(rowOf).join('');
+  } else rows = pageItems.map(rowOf).join('');
+  const opt = (v, l, cur) => `<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`;
+  const lines = [...new Set([...(_businessLines||[]), ...Object.keys(lineCounts).filter(Boolean), ...(projListLine?[projListLine]:[])])];
   $('projArea').innerHTML = `<div class="card">
-    <div class="card-h"><h3>项目管理</h3><span class="meta">共 ${_projectsCache.filter(p=>!p.builtin).length} 个 · 收藏置顶 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
-      <div class="grow">
-        <input type="text" placeholder="搜索名称 / 编码 / 负责人（回车）" value="${esc(projListKw)}" style="width:190px" onchange="projListKw=this.value;renderProjects()">
-        <label class="check" title="按业务线分组展示"><input type="checkbox" ${projGroupByLine?'checked':''} onchange="projGroupByLine=this.checked;renderProjects()"> 按业务线分组</label>
-        <select style="width:120px" onchange="projListLine=this.value;renderProjects()" title="按业务线筛选"><option value="">全部业务线</option>
-          ${(_businessLines||[]).map(l=>`<option value="${esc(l)}" ${projListLine===l?'selected':''}>${esc(l)}</option>`).join('')}</select>
-        <select style="width:120px" onchange="projListStatus=this.value;renderProjects()">
-          <option value="">全部状态</option>
-          ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>`<option value="${v}" ${projListStatus===v?'selected':''}>${l}</option>`).join('')}
-        </select>
+    <div class="card-h"><h3>项目管理 <span class="hint" style="font-weight:normal">${real.length} 个</span></h3><span class="meta">收藏置顶 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
+      <div class="grow" style="flex-wrap:wrap">
+        <input type="search" placeholder="搜索名称 / 编码 / 描述 / 负责人 / 业务线" value="${esc(projListKw)}" style="width:220px" onchange="projListSet('kw', this.value)" onkeydown="if(event.key==='Enter'){projListSet('kw', this.value)}">
+        <label class="check" title="按业务线分组展示"><input type="checkbox" ${projGroupByLine?'checked':''} onchange="projListSet('group', this.checked)"> 按业务线分组</label>
+        <select style="width:130px" onchange="projListSet('line', this.value)" title="按业务线筛选"><option value="">全部业务线</option>
+          ${lines.map(l=>opt(l, `${l}（${lineCounts[l]||0}）`, projListLine)).join('')}</select>
+        <select style="width:120px" onchange="projListSet('status', this.value)"><option value="">全部状态</option>
+          ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>opt(v, `${l}（${statusCounts[v]||0}）`, projListStatus)).join('')}</select>
+        ${owners.length>1||projListOwner?`<select style="width:110px" onchange="projListSet('owner', this.value)"><option value="">负责人</option>${[...new Set([...owners, ...(projListOwner?[projListOwner]:[])])].map(o=>opt(o, o, projListOwner)).join('')}</select>`:''}
+        ${Object.keys(roleCounts).filter(Boolean).length>1||projListRole?`<select style="width:120px" onchange="projListSet('role', this.value)"><option value="">我的角色</option>${Object.entries(PROJECT_ROLES).filter(([k])=>roleCounts[k]||projListRole===k).map(([k,l])=>opt(k, `${l}（${roleCounts[k]||0}）`, projListRole)).join('')}</select>`:''}
+        ${filtering?`<span class="hint">筛选出 ${shown.filter(p=>!p.builtin).length} 个</span><button class="btn ghost sm" onclick="projListSet('reset')">清除筛选</button>`:''}
         ${isSysAdmin()||openProjects()?`<button class="btn ghost sm" onclick="openLineDlg()">业务线管理</button><button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>`:''}
         <button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
     <div class="card-b">
@@ -6016,8 +6040,9 @@ async function renderProjects() {
         <thead><tr><th style="width:26px"></th><th>项目</th><th style="width:90px">业务线</th><th style="width:90px">负责人</th><th style="width:70px">状态</th><th style="width:110px">我的角色</th>
         <th style="width:56px">任务</th><th style="width:80px">用例</th>
         <th>用例生命周期</th><th style="width:110px">执行</th><th style="width:90px">最近活动</th><th style="width:90px">操作</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="12"><div class="empty">${_projectsCache.length?'没有符合筛选的项目':(isSysAdmin()||openProjects()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="12"><div class="empty">${filtering?'没有符合筛选条件的项目':(isSysAdmin()||openProjects()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
       </table></div>
+      ${shown.length > PT_PAGE_SIZES[0] || projListPage > 1 ? pagerHtml(shown.length, projListPage, projListSize, 'projListSet', '个') : ''}
     </div></div>`;
 }
 
