@@ -5572,9 +5572,14 @@ async def get_project(request: Request, name: str) -> dict:
 async def list_all_cases(
     request: Request, project: str | None = None, module: str = "", priority: str = "",
     review: str = "", keyword: str = "", page: int = 1, page_size: int = 20, business_line: str = "",
+    exec_status: str = "", created_by: str = "",
 ) -> dict:
     """全库用例列表（测试用例页）：只收录审核通过的正式用例——待审核 / 已驳回 / 草稿用例留在各自任务的用例审核页，
-    不进入用例中心；跨项目/任务聚合，支持筛选与分页（20/50/100/200，默认 20）。"""
+    不进入用例中心；跨项目/任务聚合，支持筛选与分页（20/50/100/200，默认 20）。
+
+    筛选：模块 / 优先级 / 最新执行状态（exec_status=none 未执行，pass / fail / blocked / skipped）/ 创建人 /
+    关键词（编号、标题、模块、关键词、前置条件、备注、来源测试点、步骤与预期）。
+    返回 module_counts（当前项目范围各模块正式用例数）与 creators 供下拉。"""
     from app.reports import project_cases
 
     if page_size not in CASE_PAGE_SIZES:
@@ -5591,19 +5596,37 @@ async def list_all_cases(
         records = [r for r in records if (r.context or {}).get("project") in line_projects]
     rows = [r for r in project_cases(records, project or None, plans=request.app.state.plans.list())
             if r["review"] == "approved"]
-    modules = sorted({r["module"] for r in rows if r["module"]})
+    module_counts: dict[str, int] = {}
+    for r in rows:
+        if r["module"]:
+            module_counts[r["module"]] = module_counts.get(r["module"], 0) + 1
+    modules = sorted(module_counts)
+    creators = sorted({r["created_by"] for r in rows if r.get("created_by")})
     if module:
         rows = [r for r in rows if r["module"] == module]
     if priority:
         rows = [r for r in rows if r["priority"] == priority]
     if review and review != "approved":  # 用例中心只有正式用例，其他阶段一律为空
         rows = []
+    if exec_status:
+        if exec_status == "none":
+            rows = [r for r in rows if not r.get("exec")]
+        else:
+            rows = [r for r in rows if (r.get("exec") or {}).get("status") == exec_status]
+    if created_by:
+        rows = [r for r in rows if r.get("created_by") == created_by]
     if keyword:
         kw = keyword.lower()
-        rows = [
-            r for r in rows
-            if kw in f"{r['title']} {r['case_id']} {r['keywords']} {r['module']}".lower()
-        ]
+
+        def _haystack(r: dict) -> str:
+            parts = [r["title"], r["case_id"], r["keywords"], r["module"], r.get("precondition", ""), r.get("remark", ""),
+                     *(r.get("point_ids") or [])]
+            for st in r.get("steps") or []:
+                if isinstance(st, dict):
+                    parts.extend([st.get("action", ""), st.get("expected", "")])
+            return " ".join(str(x) for x in parts if x).lower()
+
+        rows = [r for r in rows if kw in _haystack(r)]
     total = len(rows)
     pages = max(1, -(-total // page_size))
     page = min(max(1, page), pages)
@@ -5611,7 +5634,7 @@ async def list_all_cases(
     return {
         "cases": rows[start:start + page_size],
         "total": total, "page": page, "page_size": page_size, "pages": pages,
-        "modules": modules,
+        "modules": modules, "module_counts": module_counts, "creators": creators,
     }
 
 

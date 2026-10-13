@@ -124,6 +124,7 @@ def project_cases(
                 "steps": c.get("steps") or [],
                 "module": c.get("module", ""), "title": c.get("title", ""),
                 "priority": c.get("priority", ""), "keywords": c.get("keywords", ""),
+                "precondition": c.get("precondition", ""), "remark": c.get("remark", ""),
                 "review": state.get("status", "pending"),
                 "locked": bool(state.get("locked")),
                 "review_comment": state.get("comment", ""),
