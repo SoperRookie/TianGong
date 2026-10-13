@@ -101,27 +101,85 @@ def coarse_warnings(point_text: str) -> list[str]:
     return []
 
 
+# 模型输出键名别名（提示词规定 module / points / point / dimension，但不同模型偶发改写）
+_MODULE_KEYS = ("module", "module_name", "name", "title", "模块", "模块名", "功能模块")
+_POINTS_KEYS = ("points", "test_points", "testPoints", "items", "children", "测试点", "测试点列表")
+_POINT_KEYS = ("point", "test_point", "testPoint", "description", "desc", "content", "text", "title", "name",
+               "测试点", "描述")
+_DIMENSION_KEYS = ("dimension", "dim", "type", "category", "维度", "测试维度")
+
+
+def _first(d: dict, keys: tuple[str, ...]):
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return None
+
+
 def normalize_points(modules: list[dict]) -> list[dict]:
-    """归一化拆解结果：兼容模型输出的字符串测试点与对象测试点两种形态。
+    """归一化拆解结果：兼容模型输出的字符串测试点与对象测试点两种形态，以及常见键名别名。
 
     输入 [{module, points: ["文本" | {point, dimension}]}]，输出统一为对象形态。
+    模块名 / 测试点列表 / 测试点文本 / 维度的键名若与提示词规定不一致（如 name / test_points / description），
+    按别名表识别，避免模型小幅改写格式就导致「没有测试点」。
     """
     normalized: list[dict] = []
-    for entry in modules:
+    for entry in modules or []:
+        if not isinstance(entry, dict):
+            continue
         points = []
-        for p in entry.get("points", []):
+        raw_points = _first(entry, _POINTS_KEYS)
+        if isinstance(raw_points, str):
+            raw_points = [raw_points]
+        for p in raw_points if isinstance(raw_points, list) else []:
             if isinstance(p, str):
-                points.append({"point": p, "dimension": ""})
-            elif isinstance(p, dict) and str(p.get("point", "")).strip():
-                item = {"point": str(p["point"]).strip(), "dimension": str(p.get("dimension", "")).strip()}
+                if p.strip():
+                    points.append({"point": p.strip(), "dimension": ""})
+            elif isinstance(p, dict):
+                text = _first(p, _POINT_KEYS)
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                dim = _first(p, _DIMENSION_KEYS)
+                item = {"point": text.strip(), "dimension": str(dim).strip() if isinstance(dim, (str, int, float)) else ""}
                 # 保留实体字段（已实体化的测试点二次归一化时不丢状态）
                 for key in ("tp_id", "status", "locked", "comment", "reject_count", "source", "warnings",
                             "version", *REJECT_FIELDS):
                     if key in p:
                         item[key] = p[key]
                 points.append(item)
-        normalized.append({"module": str(entry.get("module", "")), "points": points})
+        module = _first(entry, _MODULE_KEYS)
+        normalized.append({"module": str(module).strip() if isinstance(module, (str, int, float)) else "", "points": points})
     return normalized
+
+
+_MODULES_KEYS = ("modules", "test_points", "testPoints", "module_list", "模块", "测试点", "拆解结果")
+_WRAPPER_KEYS = ("result", "data", "output", "analysis", "response")
+
+
+def extract_modules(data) -> list[dict]:
+    """从模型返回的任意结构中找出「模块列表」：
+    顶层数组 / modules 及其别名 / 再往下一层 result|data 包装 / 任意一个元素形如模块的数组。
+    找不到返回空列表，由调用方报错。"""
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if not isinstance(data, dict):
+        return []
+    found = _first(data, _MODULES_KEYS)
+    if isinstance(found, list):
+        return [x for x in found if isinstance(x, dict)]
+    if isinstance(found, dict):  # {"模块A": ["点1", ...], "模块B": [...]} 形态
+        return [{"module": k, "points": v} for k, v in found.items() if isinstance(v, list)]
+    for k in _WRAPPER_KEYS:
+        inner = data.get(k)
+        if isinstance(inner, (dict, list)):
+            got = extract_modules(inner)
+            if got:
+                return got
+    for v in data.values():  # 兜底：任意值是「含模块名与测试点列表」的对象数组
+        if isinstance(v, list) and v and all(isinstance(x, dict) for x in v) \
+                and all(_first(x, _POINTS_KEYS) is not None for x in v):
+            return v
+    return []
 
 
 def assign_entities(modules: list[dict], seq_floor: int = 0) -> list[dict]:
