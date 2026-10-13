@@ -152,3 +152,44 @@ async def test_Excel导入多文件合并预览(client, tmp_path):
     assert resp.status_code == 200 and resp.json()["imported"] == 3 and resp.json()["skipped"] == 1
     # 一个文件都没选 → 400
     assert (await client.post(f"/api/v1/tasks/{tid}/cases/import/preview")).status_code == 400
+
+
+async def test_用例中心筛选_执行状态_创建人_关键词覆盖步骤(client):
+    tid = await _manual_task(client)
+    mk = lambda module, title, action, **kw: {"module": module, "title": title, "priority": kw.get("priority", "P1"),
+                                               "steps": [{"action": action, "expected": kw.get("expected", "成功")}], **{k: v for k, v in kw.items() if k in ("keywords", "remark", "precondition")}}
+    cases = []
+    for body in (mk("登录", "正常登录", "输入正确账号密码", keywords="登录"),
+                 mk("登录", "锁定", "连续错误 5 次", priority="P0", remark="注意锁定时长"),
+                 mk("注册", "注册成功", "填写手机号与验证码", precondition="手机号未注册")):
+        c = (await client.post(f"/api/v1/tasks/{tid}/cases", json=body)).json()["case"]
+        await client.post(f"/api/v1/tasks/{tid}/review", json={"items": [{"case_id": c["case_id"], "action": "submit"}]})
+        await client.post(f"/api/v1/tasks/{tid}/review", json={"items": [{"case_id": c["case_id"], "action": "approve"}]})
+        cases.append(c)
+    lib = (await client.get("/api/v1/cases", params={"project": "P"})).json()
+    assert lib["total"] == 3 and lib["module_counts"] == {"登录": 2, "注册": 1} and lib["creators"] == ["anonymous"]
+    # 关键词覆盖步骤 / 备注 / 前置条件
+    assert (await client.get("/api/v1/cases", params={"project": "P", "keyword": "验证码"})).json()["total"] == 1
+    assert (await client.get("/api/v1/cases", params={"project": "P", "keyword": "锁定时长"})).json()["total"] == 1
+    assert (await client.get("/api/v1/cases", params={"project": "P", "keyword": "未注册"})).json()["total"] == 1
+    assert (await client.get("/api/v1/cases", params={"project": "P", "keyword": "不存在"})).json()["total"] == 0
+    # 模块筛选不影响 module_counts（下拉始终显示全量条数）
+    r = (await client.get("/api/v1/cases", params={"project": "P", "module": "注册"})).json()
+    assert r["total"] == 1 and r["module_counts"] == {"登录": 2, "注册": 1}
+    # 执行状态：未执行 3 条；在计划里执行一条后按状态筛
+    assert (await client.get("/api/v1/cases", params={"project": "P", "exec_status": "none"})).json()["total"] == 3
+    assert (await client.get("/api/v1/cases", params={"project": "P", "exec_status": "fail"})).json()["total"] == 0
+    plan = (await client.post("/api/v1/plans", json={"project": "P", "name": "冒烟"})).json()
+    pid = plan["plan_id"]
+    assert (await client.post(f"/api/v1/plans/{pid}/cases", json={"task_id": tid})).status_code == 200
+    run = (await client.post(f"/api/v1/plans/{pid}/runs", json={"name": "第 1 轮"})).json()
+    items = (await client.get(f"/api/v1/plans/{pid}")).json()["items"]
+    item_id = next(i["item_id"] for i in items if i["uid"] == cases[1]["uid"])
+    resp = await client.post(f"/api/v1/plans/{pid}/runs/{run['run_id']}/results",
+                             json={"items": [{"item_id": item_id, "status": "fail", "note": "锁定未生效", "reason": "系统缺陷"}]})
+    assert resp.status_code == 200, resp.text
+    assert [x["title"] for x in (await client.get("/api/v1/cases", params={"project": "P", "exec_status": "fail"})).json()["cases"]] == ["锁定"]
+    assert (await client.get("/api/v1/cases", params={"project": "P", "exec_status": "none"})).json()["total"] == 2
+    # 创建人
+    assert (await client.get("/api/v1/cases", params={"project": "P", "created_by": "anonymous"})).json()["total"] == 3
+    assert (await client.get("/api/v1/cases", params={"project": "P", "created_by": "nobody"})).json()["total"] == 0

@@ -4272,7 +4272,7 @@ function mindFromRows(rows, rootLabel, withProject) {
 
 /* ---------- 测试用例视图：全库用例分页浏览（20/50/100/200，默认 20） ---------- */
 const CASE_PAGE_SIZES = [20, 50, 100, 200];
-let acPage = 1, acSize = 20, acProject = '', acModule = '', acPriority = '', acReview = '', acKeyword = '', acView = 'table', acLine = '';
+let acPage = 1, acSize = 20, acProject = '', acModule = '', acPriority = '', acReview = '', acKeyword = '', acView = 'table', acLine = '', acExec = '', acCreator = '';
 
 function acSet(field, value) {
   if (field === 'acSize') acSize = value;
@@ -4281,7 +4281,10 @@ function acSet(field, value) {
   else if (field === 'acModule') acModule = value;
   else if (field === 'acPriority') acPriority = value;
   else if (field === 'acReview') acReview = value;
-  else if (field === 'acKeyword') acKeyword = value;
+  else if (field === 'acKeyword') acKeyword = (value || '').trim();
+  else if (field === 'acExec') acExec = value;
+  else if (field === 'acCreator') acCreator = value;
+  else if (field === 'acReset') { acModule = ''; acPriority = ''; acKeyword = ''; acExec = ''; acCreator = ''; }
   acPage = 1;  // 任何筛选/页大小变化回到第一页
   renderAllCases();
 }
@@ -4308,7 +4311,7 @@ async function acDelete(entries, caseId) {
   if (ok) toast(`已删除 ${ok} 条用例${fail?`，${fail} 条失败`:''}`, fail ? 'warn' : 'ok');
   renderAllCases();
 }
-async function renderAllCases() { return (() => keepScroll('cases', ['cases', acPage, acSize, acProject, acModule, acPriority, acKeyword, acView].join('|'), _renderAllCases__impl))(); }
+async function renderAllCases() { return (() => keepScroll('cases', ['cases', acPage, acSize, acProject, acModule, acPriority, acKeyword, acExec, acCreator, acView].join('|'), _renderAllCases__impl))(); }
 async function _renderAllCases__impl() {
   const q = new URLSearchParams({page: acPage, page_size: acSize});
   if (acProject) q.set('project', acProject);
@@ -4317,6 +4320,8 @@ async function _renderAllCases__impl() {
   if (acPriority) q.set('priority', acPriority);
   if (acReview) q.set('review', acReview);
   if (acKeyword) q.set('keyword', acKeyword);
+  if (acExec) q.set('exec_status', acExec);
+  if (acCreator) q.set('created_by', acCreator);
   let data;
   try { data = await api('/api/v1/cases?' + q); }
   catch (e) { return toast(e.message, 'err'); }
@@ -4375,19 +4380,29 @@ async function _renderAllCases__impl() {
           <option value="">全部项目</option>
           ${projects.filter(p => !acLine || p.business_line === acLine).map(p => `<option value="${esc(p.project)}" ${acProject===p.project?'selected':''}>${esc(p.project)}</option>`).join('')}
         </select>
-        <select style="width:130px" onchange="acSet('acModule', this.value)">
+        <select style="width:150px" onchange="acSet('acModule', this.value)">
           <option value="">全部模块</option>
-          ${data.modules.map(m => `<option value="${esc(m)}" ${acModule===m?'selected':''}>${esc(m)}</option>`).join('')}
+          ${data.modules.map(m => `<option value="${esc(m)}" ${acModule===m?'selected':''}>${esc(m)}（${(data.module_counts||{})[m]||0}）</option>`).join('')}
         </select>
-        <select style="width:100px" onchange="acSet('acPriority', this.value)">
-          <option value="">全部优先级</option>
+        <select style="width:90px" onchange="acSet('acPriority', this.value)">
+          <option value="">优先级</option>
           ${['P0','P1','P2','P3'].map(p => `<option ${acPriority===p?'selected':''}>${p}</option>`).join('')}
         </select>
-        <div class="search" style="width:190px">
+        <select style="width:110px" onchange="acSet('acExec', this.value)" title="最新执行结果">
+          <option value="">执行状态</option>
+          <option value="none" ${acExec==='none'?'selected':''}>未执行</option>
+          ${Object.entries(EXEC_LABEL).map(([k,v]) => `<option value="${k}" ${acExec===k?'selected':''}>${v}</option>`).join('')}
+        </select>
+        ${(data.creators||[]).length>1?`<select style="width:110px" onchange="acSet('acCreator', this.value)">
+          <option value="">创建人</option>
+          ${data.creators.map(u => `<option value="${esc(u)}" ${acCreator===u?'selected':''}>${esc(u)}</option>`).join('')}
+        </select>`:''}
+        <div class="search" style="width:210px">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-          <input type="text" placeholder="搜索标题/编号/标签…" value="${esc(acKeyword)}"
-            oninput="acKeyword=this.value" onchange="acSet('acKeyword', this.value)">
+          <input type="search" placeholder="搜索编号 / 标题 / 标签 / 步骤…" value="${esc(acKeyword)}"
+            onchange="acSet('acKeyword', this.value)" onkeydown="if(event.key==='Enter'){acSet('acKeyword', this.value)}">
         </div>
+        ${acModule||acPriority||acKeyword||acExec||acCreator?`<span class="hint">筛选出 ${data.total} 条</span><button class="btn ghost sm" onclick="acSet('acReset')">清除筛选</button>`:''}
         <div class="seg">
           <button class="${acView==='table'?'on':''}" onclick="acView='table';renderAllCases()">表格</button>
           <button class="${acView==='mind'?'on':''}" onclick="acView='mind';renderAllCases()">脑图</button>
@@ -4399,7 +4414,7 @@ async function _renderAllCases__impl() {
         <th>标题</th><th>操作步骤</th><th>预期结果</th><th style="width:110px">标签</th><th style="width:44px">优先级</th><th style="width:80px">生命周期</th>
         <th style="width:90px">最新执行</th><th style="width:70px">执行次数</th><th style="width:80px">创建人</th><th style="width:90px">创建时间</th>${anyEdit?'<th style="width:40px"></th>':''}</tr></thead>
         <tbody>${rows}</tbody></table></div>${pager}` : ''}
-      ${data.total ? '' : '<div class="empty">没有符合条件的正式用例（用例须在任务的用例审核页通过后才会进入用例中心）</div>'}
+      ${data.total ? '' : `<div class="empty">${acModule||acPriority||acKeyword||acExec||acCreator ? '没有符合筛选条件的正式用例' : '没有正式用例（用例须在任务的用例审核页通过后才会进入用例中心）'}</div>`}
     </div></div>`;
 }
 
