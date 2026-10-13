@@ -223,12 +223,14 @@ def _blind_spots(data: dict) -> list[str]:
 
 async def analyze_requirement(
     llm: LLMClient, requirement: str, model: str | None, knowledge_cases: str | None = None,
-    outline: list[str] | None = None, chunk_no: int = 0, chunk_total: int = 0,
+    outline: list[str] | None = None, chunk_no: int = 0, chunk_total: int = 0, allow_empty: bool = False,
 ) -> dict:
     """需求分析 Agent：测试点拆解 + 盲区识别（拆解确认流程 F-3-3 亦单独调用）。
 
     knowledge_cases：测试用例库检索结果，拆解阶段注入做覆盖度查漏（PRD 检索时机约束）。
     outline / chunk_no：长需求分片拆解时注入全文模块大纲与分片序号，模块命名与大纲一致、只拆本片内容。
+    allow_empty：分片模式下允许本片为空（目录 / 修订记录 / 术语表等不含可测内容），返回空测试点而不报错；
+    非分片模式下空结果先重试一次再报错（拆解是最贵的一步，偶发空输出不该直接让任务失败）。
     """
     user = wrap_data("需求原文", requirement)
     if outline:
@@ -236,22 +238,27 @@ async def analyze_requirement(
                 f"只拆解本片实际包含的内容，本片未涉及的模块不要凭空生成）：\n{wrap_data('全文模块大纲', chr(10).join(outline))}\n\n") + user
     if knowledge_cases:
         user += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))
-    data, result = await _chat_json(
-        llm,
-        [
-            {"role": "system", "content": prompt_text("analyst")},
-            {"role": "user", "content": user},
-        ],
-        model,
-        reasoning_effort="high",  # 拆解是理解需求的关键一步：推理型模型用最高强度
-    )
     from app.tasks.points import extract_modules, normalize_points
 
-    modules = [m for m in normalize_points(extract_modules(data)) if m["points"]]
+    messages = [
+        {"role": "system", "content": prompt_text("analyst")},
+        {"role": "user", "content": user},
+    ]
+    modules: list[dict] = []
+    for attempt in range(2):
+        # 拆解是理解需求的关键一步：推理型模型用最高强度
+        data, result = await _chat_json(llm, messages, model, reasoning_effort="high")
+        modules = [m for m in normalize_points(extract_modules(data)) if m["points"]]
+        if modules or allow_empty or attempt:
+            break
+        logger.warning("需求拆解返回空结果（{}），重试一次", result.model_name)
     logger.info(
         "需求分析完成：{} 个模块 / {} 个测试点 / {} 条盲区",
         len(modules), sum(len(m.get("points", [])) for m in modules), len(data.get("blind_spots", [])),
     )
+    if not modules and allow_empty:
+        logger.warning("分片 {}/{} 未拆出测试点（可能不含可测内容），跳过该片", chunk_no, chunk_total)
+        return {"test_points": [], "blind_spots": _blind_spots(data), "model_name": result.model_name, "empty": True}
     if not modules:
         keys = "、".join(map(str, data.keys())) if isinstance(data, dict) else type(data).__name__
         head = (result.content or "").strip().replace("\n", " ")[:300]

@@ -44,7 +44,8 @@ class RoutingStubLLM:
         self.duplicate_title = duplicate_title
 
     def _marker(self, user: str) -> str:
-        return "功能A" if "功能A" in user else "功能B"
+        seg = user.split("<<<数据:需求原文>>>", 1)[-1]  # 只看需求原文数据块：大纲注入文本里会同时出现两个模块名
+        return "功能A" if "功能A" in seg else "功能B"
 
     async def chat(self, messages, model=None, **kw):
         system, user = messages[0]["content"], messages[1]["content"]
@@ -105,3 +106,11 @@ async def test_分片部分失败不阻塞整体():
     assert any("分片处理失败" in u["problem"] for u in result.unresolved)
     # 成功分片的用例正常产出
     assert {c.module for c in result.cases} == {"功能A"}
+
+
+def test_标题行不会被单独切成碎片():
+    # 单章节超限按行再切时，标题行会落单；碎片送模型拆不出测试点 → 并入后一片
+    text = "# A\n" + "y" * 150 + "\n# B\nshort"
+    chunks = split_text(text, 100)
+    assert chunks[0].startswith("# A\ny") and all(len(c) >= 5 for c in chunks)
+    assert "".join(chunks).count("y") == 150 and any("# B" in c for c in chunks)

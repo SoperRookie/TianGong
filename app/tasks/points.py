@@ -301,6 +301,8 @@ def apply_point_review(modules: list[dict], items: list[dict]) -> dict:
             record["before"] = dict(point)
             record["module"] = entry["module"]  # 回收站恢复所需上下文
             entry["points"].remove(point)
+            if not entry["points"]:  # 模块内最后一个点删掉后不留空模块（审核页 / 导出不出现空分组）
+                modules.remove(entry)
         elif action == "unlock":
             point["status"], point["locked"] = "pending", False
         else:
