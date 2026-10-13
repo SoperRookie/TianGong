@@ -98,6 +98,7 @@ open http://localhost:8000/
 |---|---|---|
 | POST | `/api/v1/tasks` | 创建生成任务（文件/文本，支持异步与拆解确认） |
 | POST | `/api/v1/tasks/{id}/confirm` | 确认测试点，继续生成（`async_mode: true` 投入后台队列并立即返回，页面轮询，可取消；确认后的失败一律从已确认测试点续跑，不重新拆解） |
+| POST | `/api/v1/tasks/{id}/blind-spots/batch`、`/api/v1/tasks/{id}/points/dup-pairs/batch` | 盲区 / 疑似重复对批量处置（全选后一键忽略 / 说明 / 转测试点 / 重开，不满足条件的跳过并带原因） |
 | GET/POST | `/api/v1/tasks/{id}/blind-spots[/{bs_id}]` | 需求盲区闭环：条目（状态 / 去向 / 处置人）与处置（`to_question` 转来源需求待确认事项、`to_point` 转待审核测试点、`explain` 需求已说明、`ignore`、`reopen`） |
 | POST | `/api/v1/tasks/{id}/revise` | 对话式多轮修订 |
 | POST | `/api/v1/tasks/{id}/review` | 在线评审：逐条采纳/修改/删除留痕 |
