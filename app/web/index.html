@@ -3759,6 +3759,19 @@ const EXEC_CLS = {pass:'approved', fail:'rejected', blocked:'candidate', skipped
 /* ---------- 测试计划视图（M4：计划实体 + 快照 + 分配 + 计划执行与附件） ---------- */
 let curPlan = null, planRunId = null, plansMine = false, plansProject = '', plansLine = '', planExecFilter = '';
 let plansKw = '', plansStatus = '', plansOwner = '', plansPage = 1, plansSize = 20, plansRun = '';
+let myPage = 1, mySize = 20, myProject = '', myPlan = '', myModule = '', myPrio = '', myStatus = '', myKw = '';
+function mySet(name, value) {
+  if (name === 'page') { myPage = value; renderPlans(); return; }
+  if (name === 'size') mySize = value;
+  else if (name === 'project') { myProject = value; myPlan = ''; }
+  else if (name === 'plan') myPlan = value;
+  else if (name === 'module') myModule = value;
+  else if (name === 'prio') myPrio = value;
+  else if (name === 'status') myStatus = value;
+  else if (name === 'kw') myKw = value;
+  else if (name === 'reset') { myProject = ''; myPlan = ''; myModule = ''; myPrio = ''; myStatus = ''; myKw = ''; }
+  myPage = 1; renderPlans();
+}
 function plansSet(field, value) {  // 任何筛选/页大小变化回到第一页
   if (field === 'plansKw') plansKw = value;
   else if (field === 'plansStatus') plansStatus = value;
@@ -3821,15 +3834,43 @@ async function _renderPlans__impl() {
   if (plansMine) {
     try {
       const mine = await api('/api/v1/plans/my-items' + (myShowDone ? '?include_done=true' : ''));
+      // 本地筛选 + 分页：项目 / 计划 / 模块 / 优先级 / 执行状态 / 关键词；页内仍按计划分组
+      const kw = myKw.trim().toLowerCase();
+      const hit = it => !kw || [it.case_id, it.title, it.module, it.plan_name, it.project, it.run_name,
+        ...(((it.snapshot||{}).steps)||[]).flatMap(st=>[st.action, st.expected])].some(x => String(x||'').toLowerCase().includes(kw));
+      const items = mine.items.filter(it =>
+        (!myProject || it.project === myProject) && (!myPlan || it.plan_id === myPlan) &&
+        (!myModule || it.module === myModule) && (!myPrio || it.priority === myPrio) &&
+        (!myStatus || (myStatus === 'pending' ? !it.result : (it.result||{}).status === myStatus)) && hit(it));
+      const filtering = !!(kw || myProject || myPlan || myModule || myPrio || myStatus);
+      const pages = Math.max(1, Math.ceil(items.length / mySize));
+      if (myPage > pages) myPage = pages;
+      const pageItems = items.slice((myPage - 1) * mySize, myPage * mySize);
+      const opts = (list, cur) => list.map(([v, l]) => `<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`).join('');
+      const uniq = f => [...new Set(mine.items.map(f).filter(Boolean))].sort();
+      const planOpts = [...new Map(mine.items.map(it => [it.plan_id, it.plan_name])).entries()];
       const byPlan = {};
-      for (const it of mine.items) (byPlan[it.plan_id] = byPlan[it.plan_id] || {name: it.plan_name, project: it.project, run: it.run_name, active: it.run_active, items: []}).items.push(it);
+      for (const it of pageItems) (byPlan[it.plan_id] = byPlan[it.plan_id] || {name: it.plan_name, project: it.project, run: it.run_name, active: it.run_active, items: []}).items.push(it);
       myCard = `<div class="card" style="margin-bottom:14px"><div class="card-h">
         <h3>我的待执行用例<span class="cnt" style="margin-left:6px">${mine.pending}</span></h3>
         <span class="meta">分配给我、本轮尚未执行的用例，可在此直接打结果${myShowDone ? ` · 本轮已执行 ${mine.executed}` : ''}</span>
         <div class="grow">
           ${stepsToggleHtml()}
-          <label class="check">显示本轮已执行 <input type="checkbox" ${myShowDone?'checked':''} onchange="myShowDone=this.checked;renderPlans()"></label></div></div>
-        <div class="card-b">${mine.items.length ? Object.entries(byPlan).map(([pid, g]) => `
+          <label class="check">显示本轮已执行 <input type="checkbox" ${myShowDone?'checked':''} onchange="myShowDone=this.checked;mySet('status','')"></label></div></div>
+        <div class="card-b">
+          <div class="filters" style="margin:0 0 10px">
+            <select style="width:130px" onchange="mySet('project', this.value)"><option value="">全部项目</option>${opts(uniq(it=>it.project).map(x=>[x,x]), myProject)}</select>
+            <select style="width:150px" onchange="mySet('plan', this.value)"><option value="">全部计划</option>${opts(planOpts, myPlan)}</select>
+            <select style="width:120px" onchange="mySet('module', this.value)"><option value="">全部模块</option>${opts(uniq(it=>it.module).map(x=>[x,x]), myModule)}</select>
+            <select style="width:90px" onchange="mySet('prio', this.value)"><option value="">优先级</option>${opts(['P0','P1','P2','P3'].map(x=>[x,x]), myPrio)}</select>
+            ${myShowDone?`<select style="width:110px" onchange="mySet('status', this.value)"><option value="">执行状态</option>${opts([['pending','待执行'],...Object.entries(EXEC_LABEL)], myStatus)}</select>`:''}
+            <div class="search" style="width:220px">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+              <input type="search" placeholder="搜索编号 / 标题 / 计划 / 步骤…" value="${esc(myKw)}" onchange="mySet('kw', this.value)" onkeydown="if(event.key==='Enter')mySet('kw', this.value)">
+            </div>
+            ${filtering?`<span class="hint">筛选出 ${items.length} 条</span><button class="btn ghost sm" onclick="mySet('reset')">清除筛选</button>`:''}
+          </div>
+          ${pageItems.length ? Object.entries(byPlan).map(([pid, g]) => `
           <div class="section-t" style="display:flex;align-items:center;gap:8px"><a onclick="openPlan('${pid}','__me')">${esc(g.name)}</a><span class="hint">${esc(g.project)} · ${g.run ? esc(g.run) : '尚未开始执行轮次'}${g.active ? '' : (can(g.project,'plan.manage') ? ` · <button class="btn ghost sm" onclick="myStartRun('${pid}')">开始新一轮执行</button>` : ' · <span style="color:var(--warn)">轮次未开始或已结束，需负责人新建轮次后才能执行</span>')}</span></div>
           <div class="tbl-wrap" style="margin:4px 0 12px"><table>
             <tr><th style="width:104px">编号 / 版本</th><th>标题</th><th style="width:90px">模块</th><th style="width:44px">优先级</th><th>操作步骤</th><th>预期结果</th><th style="width:110px">执行状态</th><th style="width:150px">操作</th></tr>
@@ -3844,7 +3885,8 @@ async function _renderPlans__impl() {
                 <button class="btn ghost sm" onclick="myExecAct('${pid}','${it.run_id}','${it.item_id}','blocked')">阻塞</button>
                 <button class="btn ghost sm" onclick="myExecAct('${pid}','${it.run_id}','${it.item_id}','skipped')">跳过</button>` : ''}
                 <button class="btn ghost sm" onclick="openPlan('${pid}','__me')">进计划</button></div></td></tr>`; }).join('')}
-          </table></div>`).join('') : '<div class="empty">当前没有分配给我的待执行用例</div>'}</div></div>`;
+          </table></div>`).join('') : `<div class="empty">${mine.items.length ? '没有符合筛选条件的用例' : '当前没有分配给我的待执行用例'}</div>`}
+          ${items.length > PT_PAGE_SIZES[0] || myPage > 1 ? pagerHtml(items.length, myPage, mySize, 'mySet') : ''}</div></div>`;
     } catch (e) { myCard = `<div class="card" style="margin-bottom:14px"><div class="card-b"><div class="empty">加载执行任务失败：${esc(e.message)}</div></div></div>`; }
   }
   $('plansArea').innerHTML = myCard + `<div class="card">
