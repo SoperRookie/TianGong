@@ -74,7 +74,7 @@ open http://localhost:8000/
 - **OpenAPI 文档**默认关闭（`TIANGONG_EXPOSE_DOCS=true` 开启）；登录接口有失败锁定（5 次 / 15 分钟）。
 - **模型密钥**只能通过形如 `XXX_API_KEY` 的环境变量引用，配置样例见 `.env.example`。
 - 上传限制：单文件 `TIANGONG_MAX_UPLOAD_SIZE_MB`（默认 100）、执行附件 200MB、PDF 300 页、zip 类文档解压后 300MB（压缩包内文件数不限）。所有上传入口（需求文件 / 附件、知识库、用例导入、执行附件、终稿回传）均支持一次选择多个文件。
-- 上传格式不限。可自动读取：Word / Excel / PowerPoint 全系（含 doc / xls / ppt 老版、docm / xlsm / pptm 等宏与模板格式）、WPS（wps / et / dps）、OpenDocument、RTF、PDF、Markdown / TXT / JSON / XML / YAML / 日志等文本、网页、图片（png / jpg / webp / gif / bmp / tiff / ico / heic / avif / psd / svg / emf / wmf，走 Vision）、压缩包（zip / tar / gz / bz2 / xz / 7z / rar，递归解析内含文件）、邮件（eml / msg，正文与附件）。视频、字体等保留可下载但不参与解析。老版 Office / WPS / 矢量图需服务器安装 LibreOffice（Docker 镜像已内置）。
+- 上传格式不限。可自动读取：Word / Excel / PowerPoint 全系（含 doc / xls / ppt 老版、docm / xlsm / pptm 等宏与模板格式）、WPS（wps / et / dps）、OpenDocument、RTF、PDF、Markdown / TXT / JSON / XML / YAML / 日志等文本、网页、图片（png / jpg / webp / gif / bmp / tiff / ico / heic / avif / psd / svg / emf / wmf，走 Vision）、压缩包（zip / tar / gz / bz2 / xz / 7z / rar，递归解析内含文件；包内 js / css 等脚本样式资源不参与解析）、Axure 原型导出包（zip，按站点地图顺序逐页提取页面文字与说明备注）、邮件（eml / msg，正文与附件）。视频、字体等保留可下载但不参与解析。老版 Office / WPS / 矢量图需服务器安装 LibreOffice（Docker 镜像已内置）。
 - 日志留存：AI 调用日志与操作日志默认保留 180 天（`TIANGONG_LOG_RETENTION_DAYS`）。
 
 ## 演示路径（约 10 分钟）
