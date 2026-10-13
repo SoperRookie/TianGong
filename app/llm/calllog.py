@@ -142,6 +142,9 @@ def list_calls(project: str | None = None, task_id: str | None = None, requireme
                purpose: str | None = None, model: str | None = None, status: str | None = None,
                by: str | None = None, since: str | None = None, visible: set[str] | None = None,
                page: int = 1, page_size: int = 50) -> dict:
+    from app.db import wait_persist
+
+    wait_persist()  # 调用日志走后台写入：刚失败的调用立即查询也要能看到
     conds = []
     if project:
         conds.append(ai_calls.c.project == project)
