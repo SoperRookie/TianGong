@@ -251,3 +251,53 @@ def test_压缩包不限文件数(tmp_path):
     doc = parse_file(z)
     text = doc.full_text
     assert "文件：docs/需求001.txt" in text and "文件：docs/需求601.txt" in text and "第 601 条需求" in text
+
+
+def test_Axure原型导出包_按站点地图逐页提取文字与说明_跳过脚本(tmp_path):
+    import json
+    import zipfile
+
+    sitemap = {"configuration": {}, "sitemap": {"rootNodes": [
+        {"pageName": "首页", "type": "Wireframe", "url": "首页.html", "children": [
+            {"pageName": "登录", "type": "Wireframe", "url": "登录.html"}]},
+        {"pageName": "设置", "type": "Folder", "children": [{"pageName": "账号安全", "type": "Wireframe", "url": "账号安全.html"}]},
+    ]}}
+    page = lambda title, *texts: ("<!DOCTYPE html><html><head><title>%s</title><script src='resources/scripts/axure/axQuery.js'></script></head>"
+                                  "<body><div id='base'>%s</div><script>$axure.loadCurrentPage((function(){}))</script></body></html>"
+                                  % (title, "".join(f"<div id='u{i}' class='ax_default label'><div id='u{i}_div'></div>"
+                                                    f"<div id='u{i}_text' class='text'><p><span>{t}</span></p></div></div>" for i, t in enumerate(texts))))
+    z = tmp_path / "原型.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("原型/index.html", "<html><body><iframe src='start.html'></iframe></body></html>")
+        zf.writestr("原型/start.html", "<html><body>player</body></html>")
+        zf.writestr("原型/data/document.js", "$axure.loadDocument(" + json.dumps(sitemap, ensure_ascii=False) + ");")
+        zf.writestr("原型/首页.html", page("首页", "欢迎使用", "登录按钮", "登录按钮"))
+        zf.writestr("原型/登录.html", page("登录", "请输入手机号", "密码错误 5 次锁定"))
+        zf.writestr("原型/账号安全.html", page("账号安全", "修改密码"))
+        zf.writestr("原型/files/登录/data.js", '$axure.loadCurrentPage((function() { var _ = function(){}, a="url", b="登录.html", '
+                                             'c="<p><span>点击登录后跳转首页</span></p>", d="<p>请输入手机号</p>"; return _(a,b,c,d); })());')
+        zf.writestr("原型/resources/scripts/axure/axure.js", "var $axure = {};")
+        zf.writestr("原型/resources/css/axure_rp_page.css", "body{}")
+        zf.writestr("原型/images/首页/u0.png", _png_bytes())
+    doc = parse_file(z)
+    text = doc.full_text
+    assert doc.doc_type == "zip" and "共 3 个页面" in text
+    assert text.index("页面：首页") < text.index("页面：首页 / 登录") < text.index("页面：设置 / 账号安全")
+    assert "欢迎使用" in text and "密码错误 5 次锁定" in text and "修改密码" in text
+    assert text.count("登录按钮") == 1  # 同页重复文字去重
+    assert "点击登录后跳转首页" in text and "【说明 / 备注】" in text
+    assert text.count("请输入手机号") == 1  # data.js 中与页面正文相同的文字不重复
+    assert "$axure" not in text and "axQuery" not in text and "player" not in text and "u0.png" not in text
+
+
+def test_普通压缩包内脚本样式资源只汇总不解析(tmp_path):
+    import zipfile
+
+    z = tmp_path / "包.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("需求.md", "# 登录\n账号密码登录")
+        zf.writestr("app.js", "function login() { return 1; }")
+        zf.writestr("style.css", "body { color: red }")
+    text = parse_file(z).full_text
+    assert "账号密码登录" in text and "function login" not in text and "color: red" not in text
+    assert "2 个脚本 / 样式资源文件不参与解析" in text and "app.js" in text

@@ -104,16 +104,33 @@ def _extract(path: Path, dest: Path) -> list[Path]:
     return sorted(p for p in out if p.is_file())
 
 
+# 网页 / 原型导出包里的脚本、样式、字体映射等资源：当文本读进去只会污染需求（模型看到的是代码），统一跳过
+ASSET_SUFFIXES = (".js", ".mjs", ".cjs", ".css", ".scss", ".less", ".map", ".ts", ".tsx", ".jsx", ".vue")
+
+
 def parse_members(files: list[tuple[str, Path]], source: str, depth: int) -> ParsedDocument:
-    """把一组成员文件合成一份文档：每个文件一节；图片转为内嵌图片占位；不可读的只记名称。"""
+    """把一组成员文件合成一份文档：每个文件一节；图片转为内嵌图片占位；不可读的只记名称。
+
+    Axure 原型导出包整体识别后按页面提取（见 parsers.axure）；其余包内的脚本 / 样式资源只汇总数量不解析。
+    """
+    from app.parsers.axure import axure_root, parse_axure_export
     from app.parsers.base import parse_file
     from app.parsers.image import IMAGE_SUFFIXES, load_image_bytes
 
+    root = axure_root(files)
+    if root is not None:
+        return parse_axure_export(files, source, root)
     sections: list[Section] = []
     images: list[EmbeddedImage] = []
     tables: list[list[list[str]]] = []
+    assets = [name for name, p in files if p.suffix.lower() in ASSET_SUFFIXES]
+    if assets:
+        sections.append(Section(level=0, content=f"（{len(assets)} 个脚本 / 样式资源文件不参与解析：{'、'.join(assets[:5])}"
+                                                 f"{' 等' if len(assets) > 5 else ''}）"))
     for name, p in files:
         suffix = p.suffix.lower()
+        if suffix in ASSET_SUFFIXES:
+            continue
         sections.append(Section(level=1, title=f"文件：{name}"))
         try:
             if suffix in IMAGE_SUFFIXES:
