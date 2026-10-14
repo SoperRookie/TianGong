@@ -219,6 +219,28 @@ class KnowledgeStore:
         )
         return len(docs)
 
+    def doc_chunks(self, doc_id: str) -> list[SearchHit]:
+        """某篇文档的全部切片（按 chunk_index 升序），台账详情查看用。"""
+        hits: list[SearchHit] = []
+        offset = None
+        while True:
+            points, offset = self._client.scroll(
+                collection_name=_COLLECTION,
+                scroll_filter=Filter(must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]),
+                limit=256, offset=offset, with_payload=True, with_vectors=False,
+            )
+            hits.extend(
+                SearchHit(
+                    text=p.payload["text"], score=0.0, doc_id=p.payload["doc_id"], source=p.payload["source"],
+                    category=p.payload["category"], space=p.payload["space"], level=p.payload.get("level", "project"),
+                    module=p.payload.get("module", ""), chunk_index=p.payload["chunk_index"],
+                )
+                for p in points
+            )
+            if offset is None:
+                break
+        return sorted(hits, key=lambda h: h.chunk_index)
+
     def delete_doc(self, doc_id: str) -> bool:
         if doc_id not in self._docs:
             return False

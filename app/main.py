@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
+from app import __version__
 from app.api.routes import router
 from app.auth import AuthStore
 from app.config import BASE_DIR, get_settings
@@ -68,6 +69,11 @@ async def lifespan(app: FastAPI):
     app.state.user_prefs = UserPrefStore()
     app.state.versions = VersionStore()
     app.state.modules = ModuleStore()
+    from app.knowledge.accumulate import KnowledgeAccumulator
+    from app.knowledge.profile import ProfileStore
+
+    app.state.profiles = ProfileStore()          # 项目画像（AI 提炼 → 管理员确认 → 全链路注入）
+    app.state.accumulator = KnowledgeAccumulator(app)  # 知识自动沉淀
     from app.plans import PlanStore, migrate_task_executions
 
     app.state.plans = PlanStore()
@@ -172,7 +178,7 @@ def _purge_logs(settings) -> None:
 
 _settings_boot = get_settings()
 app = FastAPI(
-    title="TestCase Agent", version="0.1.0", lifespan=lifespan,
+    title="天工 TianGong", version=__version__, lifespan=lifespan,
     docs_url="/docs" if _settings_boot.expose_docs else None,
     redoc_url=None,
     openapi_url="/openapi.json" if _settings_boot.expose_docs else None,

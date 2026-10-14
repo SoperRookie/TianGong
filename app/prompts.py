@@ -59,6 +59,10 @@ PROMPT_DEFS: list[dict] = [
      "where": "生成阶段注入", "placeholders": ["rules"]},
     {"key": "memory_block", "name": "注入块：偏好记忆", "kind": "block", "default": P.MEMORY_BLOCK,
      "where": "生成阶段注入", "placeholders": ["memories"]},
+    {"key": "profile_block", "name": "注入块：项目画像", "kind": "block", "default": P.PROFILE_BLOCK,
+     "where": "拆解 / 生成 / 评审 / 查漏 / 补充测试点 / 需求分析全链路注入（项目画像确认生效后）", "placeholders": ["profile"]},
+    {"key": "profile_extract", "name": "项目画像提炼", "kind": "system", "default": P.PROFILE_EXTRACT_SYSTEM,
+     "where": "项目 → 项目画像 → AI 提炼（自动 / 手动），草稿经管理员确认后生效"},
 ]
 
 

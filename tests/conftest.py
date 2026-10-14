@@ -22,6 +22,10 @@ os.environ["TIANGONG_OPEN_PROJECTS"] = "false"   # 测试默认成员制隔离�
 os.environ["TIANGONG_ADMIN_PASSWORD"] = "admin123"   # 测试固定初始口令（生产未配置时为随机口令）
 os.environ["TIANGONG_SINGLE_INSTANCE_LOCK"] = "false"
 os.environ["TIANGONG_LOG_RETENTION_DAYS"] = "0"
+# 知识自动沉淀 / 项目画像自动提炼默认关闭：避免桩 LLM 的预置回复被后台提炼消耗、避免真实 Embedding 请求；
+# 专项测试（test_accumulate.py）显式开启
+os.environ["TIANGONG_KNOWLEDGE_AUTO_INGEST"] = "false"
+os.environ["TIANGONG_PROFILE_AUTO_EXTRACT"] = "false"
 
 # 数据库隔离：测试用临时 SQLite（持久化层同一套 SQLAlchemy 代码，生产为 MySQL）
 os.environ["TIANGONG_DB_URL"] = f"sqlite:///{_TEST_STORAGE / 'test.db'}"

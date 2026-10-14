@@ -12,6 +12,7 @@ from loguru import logger
 from pydantic import ValidationError
 
 from app.agents.json_utils import LLMOutputError, extract_json
+from app.agents.context import profile_block
 from app.agents.prompts import DATA_GUARD, wrap_data
 from app.prompts import prompt_text
 from app.agents.state import MAX_REVIEW_ROUNDS, OrchestrationState
@@ -260,6 +261,7 @@ async def analyze_requirement(
     if outline:
         user = (f"这是一份长需求的第 {chunk_no}/{chunk_total} 片。全文模块大纲如下（模块命名必须与大纲一致；"
                 f"只拆解本片实际包含的内容，本片未涉及的模块不要凭空生成）：\n{wrap_data('全文模块大纲', chr(10).join(outline))}\n\n") + user
+    user += profile_block()  # 项目画像：统一术语与模块命名，带着既有业务认知拆解
     if knowledge_cases:
         user += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))
     from app.tasks.points import extract_modules, normalize_points
@@ -340,6 +342,7 @@ def build_graph(
             if knowledge_refs:
                 user += prompt_text("knowledge_refs_block").format(knowledge=wrap_data("需求/规则知识", knowledge_refs))
             action = "全量生成"
+        user += profile_block()
         if memory_notes:
             user += prompt_text("memory_block").format(memories=wrap_data("偏好记忆", memory_notes))
         if rule_notes:
@@ -384,6 +387,7 @@ def build_graph(
         prior = ""
         if state.get("issues"):
             prior = f"\n\n上一轮评审问题（本轮重点核对是否已修复）：\n{_dump(state['issues'])}"
+        prior += profile_block()
         if knowledge_cases:
             # 历史用例注入评审 Agent 辅助覆盖度把关（PRD：用例库进评审与拆解，不进生成）
             prior += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))

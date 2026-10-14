@@ -15,6 +15,7 @@ from loguru import logger
 from pydantic import ValidationError
 
 from app.agents.graph import _chat_json
+from app.agents.context import profile_block
 from app.agents.prompts import wrap_data
 from app.prompts import prompt_text
 from app.llm.client import LLMClient
@@ -62,7 +63,8 @@ async def run_gap_check(
             {"role": "system", "content": prompt_text("gap_check")},
             {
                 "role": "user",
-                "content": f"需求内容：\n{wrap_data('需求原文', requirement)}\n\n已有测试点：\n{wrap_data('测试点', _dump(_points_view(modules)))}",
+                "content": f"需求内容：\n{wrap_data('需求原文', requirement)}\n\n已有测试点：\n{wrap_data('测试点', _dump(_points_view(modules)))}"
+                           + profile_block(),
             },
         ],
         model,

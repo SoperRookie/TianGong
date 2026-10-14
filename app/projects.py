@@ -79,6 +79,7 @@ class ProjectStore:
         p.setdefault("description", "")
         p.setdefault("owner", p.get("created_by") or "")
         p.setdefault("status", "active")
+        p.setdefault("knowledge_auto", True)  # 自动沉淀：需求 / 确认测试点 / 评审通过用例进知识库，定期生成画像草稿
         p.setdefault("members", {})
         if p.get("created_by") and p["created_by"] not in p["members"]:
             p["members"][p["created_by"]] = "project_admin"
@@ -186,6 +187,7 @@ class ProjectStore:
         self, name: str, new_name: str | None = None, description: str | None = None,
         code: str | None = None, owner: str | None = None, status: str | None = None,
         operator: str | None = None, business_line: str | None = None,
+        knowledge_auto: bool | None = None,
     ) -> dict:
         project = self._projects.get(name)
         if project is None:
@@ -216,6 +218,8 @@ class ProjectStore:
             project["status"] = status
         if business_line is not None:
             project["business_line"] = business_line.strip()[:100]
+        if knowledge_auto is not None:
+            project["knowledge_auto"] = bool(knowledge_auto)
         project["updated_at"] = _now()
         project["updated_by"] = operator
         self._persist(project["name"], removed=removed)
