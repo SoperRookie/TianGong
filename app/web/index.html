@@ -318,6 +318,15 @@ tr.rowlink td { transition:background .1s; }
 .warnline { color:var(--warn); font-size:12.5px; background:var(--warn-bg);
   border:1px solid #f0dfc0; border-radius:var(--radius-s); padding:8px 12px; margin-top:10px; }
 .hint { color:var(--ink-3); font-size:12px; }
+/* 多文件选择：已选列表（多次选择累加、可逐个移除、可拖拽） */
+.mf-list { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:6px; }
+.mf-list.drag { outline:2px dashed var(--p1); outline-offset:4px; border-radius:6px; }
+.mf-chip { display:inline-flex; align-items:center; gap:6px; max-width:100%; padding:3px 6px 3px 10px; border:1px solid var(--line);
+  border-radius:999px; background:var(--well); font-size:12px; color:var(--ink-2); }
+.mf-chip .mf-n { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mf-chip .mf-x { cursor:pointer; color:var(--ink-3); padding:0 4px; border-radius:50%; line-height:1; }
+.mf-chip .mf-x:hover { color:var(--danger); background:var(--line-2); }
+input[type=file].mf.drag { outline:2px dashed var(--p1); outline-offset:2px; border-radius:6px; }
 .ref { font-size:12px; color:var(--ink-2); line-height:1.5; word-break:break-all; }
 .ref b { font-weight:600; color:var(--ink); }
 .ref .sep { margin:0 4px; color:var(--ink-3); }
@@ -645,8 +654,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div style="flex:1"><label class="f">项目</label><select id="kbProject" onchange="fillKbModules(this.value)"></select></div>
       <div style="flex:1" id="kbModuleWrap"><label class="f">模块</label><select id="kbModule"><option value="">—</option></select></div>
     </div>
-    <label class="f">文件<span class="hint">（普通文档：Word / PDF / Markdown / TXT；历史用例：Excel / CSV / XMind；历史缺陷：禅道 / Jira 导出的 Excel / CSV）</span></label>
-    <input type="file" id="kbFiles" multiple>
+    <label class="f">文件<span class="hint">（可多选、分批追加或拖入；普通文档：Word / PDF / Markdown / TXT；历史用例：Excel / CSV / XMind；历史缺陷：禅道 / Jira 导出的 Excel / CSV）</span></label>
+    <input type="file" id="kbFiles" class="mf" multiple>
     <label class="f">或粘贴文本</label><textarea id="kbText" rows="5" placeholder="规则 / 需求 / 术语…"></textarea>
     <label class="f">文本来源名<span class="hint">（可选）</span></label><input type="text" id="kbSource" placeholder="如 赔率规则.md">
     <label class="f" style="margin-top:8px">文件类型</label>
@@ -814,8 +823,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="d-b">
     <label class="f">需求文本<span class="hint">（可与文件混合提交）</span></label>
     <textarea id="reqText" rows="5" placeholder="粘贴需求内容…"></textarea>
-    <label class="f">需求文件<span class="hint">（不限格式，可多选：Office / WPS 全系、PDF、图片、文本、网页、压缩包、邮件均可自动读取，视频等保留可下载）</span></label>
-    <input type="file" id="reqFiles" multiple>
+    <label class="f">需求文件<span class="hint">（不限格式，可多选、分批追加或拖入：Office / WPS 全系、PDF、图片、文本、网页、压缩包、邮件均可自动读取，视频等保留可下载）</span></label>
+    <input type="file" id="reqFiles" class="mf" multiple>
     <label class="f">生成模型 / 评审模型</label>
     <div style="display:flex;gap:8px">
       <select id="modelSel"></select><select id="reviewerSel"></select>
@@ -1172,8 +1181,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     </div>
     <label class="f">需求原文<span class="hint">（粘贴文本，永久保留；可与文件混合）</span></label>
     <textarea id="rqText" rows="6" placeholder="粘贴需求原文…"></textarea>
-    <label class="f">需求文件<span class="hint">（不限格式，可多选：Office / WPS 全系、PDF、图片、文本、网页、压缩包、邮件均可自动读取，视频等保留可下载；读取失败逐文件提示）</span></label>
-    <input type="file" id="rqFiles" multiple>
+    <label class="f">需求文件<span class="hint">（不限格式，可多选、分批追加或拖入：Office / WPS 全系、PDF、图片、文本、网页、压缩包、邮件均可自动读取，视频等保留可下载；读取失败逐文件提示）</span></label>
+    <input type="file" id="rqFiles" class="mf" multiple>
     <label class="f">需求链接<span class="hint">（每行一个：网页、图片、PDF / Word 直链；原文里出现的链接也会自动抓取，最多 10 个）</span></label>
     <textarea id="rqUrls" rows="2" placeholder="https://…/需求页面&#10;https://…/原型图.png"></textarea>
     <label class="f">人工补充<span class="hint">（可选，独立于原文保存）</span></label>
@@ -1516,6 +1525,53 @@ function fmtTime(iso, withSeconds) {
 const esc = s => String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // 放进内联事件属性里的 JS 字符串字面量：先 JSON 转义（引号/反斜杠/控制字符），再 HTML 转义整体
 const jsq = s => esc(JSON.stringify(String(s??'')));
+
+/* ---------- 多文件选择增强（class="mf" 的 file input）：一次可选多个；再次选择 / 拖拽为追加而非覆盖，
+   可跨文件夹分批添加；已选文件逐个移除；业务代码照常读 input.files ---------- */
+const _mfFiles = new WeakMap();
+const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? (n / 1024).toFixed(1) + ' KB' : (n || 0) + ' B';
+const mfKey = f => `${f.name}|${f.size}|${f.lastModified}`;
+function mfBox(input) {
+  let box = input.nextElementSibling;
+  if (box && box.classList.contains('mf-list')) return box;
+  box = document.createElement('div'); box.className = 'mf-list'; box.style.display = 'none';
+  input.insertAdjacentElement('afterend', box);
+  return box;
+}
+function mfSet(input, files) {
+  const dt = new DataTransfer(); files.forEach(f => dt.items.add(f));
+  try { input.files = dt.files; } catch (e) {}
+  _mfFiles.set(input, files);
+  const box = mfBox(input), total = files.reduce((a, f) => a + (f.size || 0), 0);
+  box.style.display = files.length ? '' : 'none';
+  box.innerHTML = files.map((f, i) => `<span class="mf-chip" title="${esc(f.name)}"><span class="mf-n">${esc(f.name)}</span><span class="hint">${fmtSize(f.size)}</span><a class="mf-x" onclick="mfRemove(this, ${i})" title="移除">✕</a></span>`).join('')
+    + `<span class="hint">共 ${files.length} 个 · ${fmtSize(total)}，可继续选择或拖入追加${files.length > 1 ? `　<a onclick="mfReset(this.closest('.mf-list').previousElementSibling)">清空</a>` : ''}</span>`;
+}
+function mfAdd(input, list) {
+  const files = (_mfFiles.get(input) || []).slice(), seen = new Set(files.map(mfKey));
+  for (const f of Array.from(list || [])) if (!seen.has(mfKey(f))) { seen.add(mfKey(f)); files.push(f); }
+  mfSet(input, files);
+}
+function mfRemove(el, i) {
+  const input = el.closest('.mf-list').previousElementSibling, files = (_mfFiles.get(input) || []).slice();
+  files.splice(i, 1); mfSet(input, files);
+}
+function mfReset(input) { if (!input) return; input.value = ''; _mfFiles.delete(input); mfSet(input, []); }
+document.addEventListener('change', e => {
+  const input = e.target;
+  if (!(input instanceof HTMLInputElement) || input.type !== 'file' || !input.classList.contains('mf')) return;
+  // 浏览器每次选择都会覆盖 files，这里把本次选择并入之前累积的列表
+  mfAdd(input, input.files);
+}, true);
+for (const ev of ['dragenter', 'dragover', 'dragleave', 'drop']) document.addEventListener(ev, e => {
+  const t = e.target instanceof Element ? e.target : null; if (!t) return;
+  const input = t.matches('input[type=file].mf') ? t : t.closest('.mf-list') ? t.closest('.mf-list').previousElementSibling : null;
+  if (!input || !input.classList.contains('mf')) return;
+  e.preventDefault();
+  input.classList.toggle('drag', ev === 'dragenter' || ev === 'dragover');
+  mfBox(input).classList.toggle('drag', ev === 'dragenter' || ev === 'dragover');
+  if (ev === 'drop') mfAdd(input, e.dataTransfer && e.dataTransfer.files);
+});
 
 function toast(msg, type='') {
   const el = document.createElement('div');
@@ -2404,7 +2460,7 @@ async function createTask() {
     ${stepperHtml(-1)}</div></div>`;
   try {
     const data = await api('/api/v1/tasks', {method:'POST', body:fd});
-    $('reqText').value = ''; $('reqFiles').value = '';
+    $('reqText').value = ''; mfReset($('reqFiles'));
     closeDrawer();
     refreshMemories();
     await refreshList(); openTask(data.task_id);
@@ -3421,8 +3477,8 @@ function openImportDlg() {
   _importPreview = null;
   $('imMeta').textContent = '第 1 步 · 上传文件（Excel / CSV / XMind / 禅道导出）';
   $('imBody').innerHTML = `<div class="hint" style="margin-bottom:10px">按模板列头准备文件：用例编号、模块、用例标题、优先级、前置条件、操作步骤（每行一步）、预期结果（与步骤逐行对应）、关键词、备注。<a onclick="downloadFile('/api/v1/cases/import-template','用例导入模板.xlsx')">下载导入模板</a><br>禅道「导出用例」的 xlsx / csv / xls 可直接导入：优先级 1–4 对应 P0–P3，模块路径「/父/子」自动去掉斜杠，步骤与预期按行配对。</div>
-    <input type="file" id="imFile" accept=".xlsx,.csv,.xmind,.xls,.html" multiple>
-    <div class="hint" style="margin-top:4px">可一次选择多个文件，解析后合并预览；标题重复校验跨文件生效。</div>
+    <input type="file" id="imFile" class="mf" accept=".xlsx,.csv,.xmind,.xls,.html" multiple>
+    <div class="hint" style="margin-top:4px">可一次选择多个文件，也可分批追加或直接拖入，解析后合并预览；标题重复校验跨文件生效。</div>
     <div class="hint" style="margin-top:8px">解析后逐行校验：标题与步骤必填（预期结果可为空，历史简化用例按空导入后可补）、优先级须为 P0–P3、标题不得与任务内或文件内重复；有错误的行不会被静默导入。</div>`;
   $('imFoot').innerHTML = `<button class="btn ghost" onclick="$('importDlg').close()">取消</button><button class="btn" id="imNext" onclick="importPreview()">解析并预览</button>`;
   $('importDlg').showModal();
@@ -4837,7 +4893,7 @@ function renderHistory(t) {
     </div>
     <div class="section-t">离线终稿回传</div>
     <div class="toolbar" style="margin-top:4px">
-      <input type="file" id="finalFile" accept=".xlsx,.csv,.xmind" multiple style="width:auto;flex:1" title="可选多个文件，合并后作为一份终稿对比">
+      <input type="file" id="finalFile" class="mf" accept=".xlsx,.csv,.xmind" multiple style="width:auto;flex:1" title="可选多个文件（可分批追加），合并后作为一份终稿对比">
       <button class="btn ghost sm" onclick="uploadFinal()">上传并对比</button>
     </div>
     ${t.offline_review ? renderOfflineDiff(t.offline_review) : '<div class="hint" style="margin-top:6px">下载导出文件离线评审后，回传定稿自动计算差异，作为学习语料（「学习规则」页可提炼规则）</div>'}
@@ -5333,7 +5389,7 @@ async function openKbDlg() {
   $('kbProject').innerHTML = projects.map(p=>`<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
   if (curProjectName && projects.some(p=>p.project===curProjectName)) $('kbProject').value = curProjectName;
   await fillKbModules($('kbProject').value);
-  $('kbFiles').value = ''; $('kbText').value = ''; $('kbSource').value = ''; $('kbFileKind').value = 'doc';
+  mfReset($('kbFiles')); $('kbText').value = ''; $('kbSource').value = ''; $('kbFileKind').value = 'doc';
   kbLevelChanged(); $('kbDlg').showModal();
 }
 async function saveKb() {
@@ -5613,7 +5669,7 @@ async function openReqDlg() {
   if (!projects.length) return toast('没有可录入需求的项目（需要测试人员及以上项目角色）', 'warn');
   $('rqProject').innerHTML = projects.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
   if (curProjectName && projects.some(p => p.project === curProjectName)) $('rqProject').value = curProjectName;
-  $('rqTitle').value = ''; $('rqText').value = ''; $('rqDesc').value = ''; $('rqFiles').value = ''; $('rqUrls').value = '';
+  $('rqTitle').value = ''; $('rqText').value = ''; $('rqDesc').value = ''; mfReset($('rqFiles')); $('rqUrls').value = '';
   await fillReqRefs($('rqProject').value);
   $('reqDlg').showModal();
 }
