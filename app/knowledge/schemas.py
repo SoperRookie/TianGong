@@ -14,6 +14,8 @@ CATEGORIES: dict[str, str] = {
 DEFAULT_SPACE = "default"   # 历史空间：视同公共知识（迁移期兼容）
 PUBLIC_SPACE = "public"     # 公共知识库（完整需求 16 章 / 核心规则 24）：显式标记方可跨项目使用
 LEVELS = {"public": "公共知识库", "project": "项目知识库", "module": "模块知识库"}
+# 来源方式：手动上传 / 任务过程自动沉淀（需求原文、审核通过测试点、评审通过用例、离线终稿）/ 需求中心自动沉淀
+ORIGINS = {"manual": "手动上传", "task": "任务沉淀", "requirement": "需求沉淀"}
 
 
 class InvalidCategoryError(ValueError):
@@ -34,6 +36,8 @@ class KnowledgeDoc(BaseModel):
     chunk_count: int
     embedding_model: str = Field(description="入库时使用的 Embedding 模型标识，换模型需重建向量")
     created_at: str
+    origin: str = Field(default="manual", description="来源方式：manual 手动上传 / task 任务沉淀 / requirement 需求沉淀")
+    origin_ref: str = Field(default="", description="沉淀来源标识：任务 task_id 或需求 req_id（删除来源时联动清理）")
 
 
 class SearchHit(BaseModel):

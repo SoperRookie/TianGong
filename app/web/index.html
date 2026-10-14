@@ -318,6 +318,15 @@ tr.rowlink td { transition:background .1s; }
 .warnline { color:var(--warn); font-size:12.5px; background:var(--warn-bg);
   border:1px solid #f0dfc0; border-radius:var(--radius-s); padding:8px 12px; margin-top:10px; }
 .hint { color:var(--ink-3); font-size:12px; }
+/* 多文件选择：已选列表（多次选择累加、可逐个移除、可拖拽） */
+.mf-list { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:6px; }
+.mf-list.drag { outline:2px dashed var(--p1); outline-offset:4px; border-radius:6px; }
+.mf-chip { display:inline-flex; align-items:center; gap:6px; max-width:100%; padding:3px 6px 3px 10px; border:1px solid var(--line);
+  border-radius:999px; background:var(--well); font-size:12px; color:var(--ink-2); }
+.mf-chip .mf-n { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mf-chip .mf-x { cursor:pointer; color:var(--ink-3); padding:0 4px; border-radius:50%; line-height:1; }
+.mf-chip .mf-x:hover { color:var(--danger); background:var(--line-2); }
+input[type=file].mf.drag { outline:2px dashed var(--p1); outline-offset:2px; border-radius:6px; }
 .ref { font-size:12px; color:var(--ink-2); line-height:1.5; word-break:break-all; }
 .ref b { font-weight:600; color:var(--ink); }
 .ref .sep { margin:0 4px; color:var(--ink-3); }
@@ -582,7 +591,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </nav>
   <div class="s-foot">
     <div id="userBox" style="margin-bottom:8px"></div>
-    生成质量核心闭环版<br><span id="barInfo"></span></div>
+    <span id="appVer"></span>生成质量核心闭环版<br><span id="barInfo"></span></div>
 </aside>
 
 <div class="content">
@@ -633,6 +642,11 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 </dialog>
 
 <!-- 知识库上传 -->
+<dialog id="kbDocDlg" style="width:820px">
+  <div class="dlg-h"><h3 id="kbDocTitle">知识文档</h3><span class="meta" id="kbDocMeta"></span></div>
+  <div class="dlg-b" id="kbDocBody" style="max-height:66vh;overflow:auto"></div>
+  <div class="dlg-f"><span id="kbDocOps" style="margin-right:auto"></span><button class="btn ghost" onclick="$('kbDocDlg').close()">关闭</button></div>
+</dialog>
 <dialog id="kbDlg" style="width:640px">
   <div class="dlg-h"><h3>上传知识</h3></div>
   <div class="dlg-b">
@@ -645,8 +659,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div style="flex:1"><label class="f">项目</label><select id="kbProject" onchange="fillKbModules(this.value)"></select></div>
       <div style="flex:1" id="kbModuleWrap"><label class="f">模块</label><select id="kbModule"><option value="">—</option></select></div>
     </div>
-    <label class="f">文件<span class="hint">（普通文档：Word / PDF / Markdown / TXT；历史用例：Excel / CSV / XMind；历史缺陷：禅道 / Jira 导出的 Excel / CSV）</span></label>
-    <input type="file" id="kbFiles" multiple>
+    <label class="f">文件<span class="hint">（可多选、分批追加或拖入；普通文档：Word / PDF / Markdown / TXT；历史用例：Excel / CSV / XMind；历史缺陷：禅道 / Jira 导出的 Excel / CSV）</span></label>
+    <input type="file" id="kbFiles" class="mf" multiple>
     <label class="f">或粘贴文本</label><textarea id="kbText" rows="5" placeholder="规则 / 需求 / 术语…"></textarea>
     <label class="f">文本来源名<span class="hint">（可选）</span></label><input type="text" id="kbSource" placeholder="如 赔率规则.md">
     <label class="f" style="margin-top:8px">文件类型</label>
@@ -814,8 +828,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="d-b">
     <label class="f">需求文本<span class="hint">（可与文件混合提交）</span></label>
     <textarea id="reqText" rows="5" placeholder="粘贴需求内容…"></textarea>
-    <label class="f">需求文件<span class="hint">（不限格式，可多选：Office / WPS 全系、PDF、图片、文本、网页、压缩包、邮件均可自动读取，视频等保留可下载）</span></label>
-    <input type="file" id="reqFiles" multiple>
+    <label class="f">需求文件<span class="hint">（不限格式，可多选、分批追加或拖入：Office / WPS 全系、PDF、图片、文本、网页、压缩包、邮件均可自动读取，视频等保留可下载）</span></label>
+    <input type="file" id="reqFiles" class="mf" multiple>
     <label class="f">生成模型 / 评审模型</label>
     <div style="display:flex;gap:8px">
       <select id="modelSel"></select><select id="reviewerSel"></select>
@@ -1082,8 +1096,10 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
         <select id="pjStatus"><option value="active">进行中</option><option value="paused">暂停</option><option value="archived">已归档</option></select></div>
     </div>
     <datalist id="userNames"></datalist>
-    <label class="f">描述<span class="hint">（可选）</span></label>
+    <label class="f">描述<span class="hint">（可选；会作为项目背景注入 AI 拆解 / 生成上下文）</span></label>
     <textarea id="pjDesc" rows="3" placeholder="项目背景 / 范围说明"></textarea>
+    <label style="display:flex;align-items:flex-start;gap:8px;margin-top:10px;cursor:pointer"><input type="checkbox" id="pjAuto" style="margin-top:3px">
+      <span>自动沉淀项目知识<span class="hint" style="display:block">需求原文与附件、审核通过的测试点、评审通过的用例自动进入本项目知识库；每新增几个任务自动提炼一版「项目画像」草稿等管理员确认。关闭后只保留手动上传</span></span></label>
     <div class="hint" id="pjRenameHint" style="display:none;margin-top:8px">改名将联动更新该项目下所有任务、计划、版本与模块的归属</div>
   </div>
   <div class="dlg-f">
@@ -1172,8 +1188,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     </div>
     <label class="f">需求原文<span class="hint">（粘贴文本，永久保留；可与文件混合）</span></label>
     <textarea id="rqText" rows="6" placeholder="粘贴需求原文…"></textarea>
-    <label class="f">需求文件<span class="hint">（不限格式，可多选：Office / WPS 全系、PDF、图片、文本、网页、压缩包、邮件均可自动读取，视频等保留可下载；读取失败逐文件提示）</span></label>
-    <input type="file" id="rqFiles" multiple>
+    <label class="f">需求文件<span class="hint">（不限格式，可多选、分批追加或拖入：Office / WPS 全系、PDF、图片、文本、网页、压缩包、邮件均可自动读取，视频等保留可下载；读取失败逐文件提示）</span></label>
+    <input type="file" id="rqFiles" class="mf" multiple>
     <label class="f">需求链接<span class="hint">（每行一个：网页、图片、PDF / Word 直链；原文里出现的链接也会自动抓取，最多 10 个）</span></label>
     <textarea id="rqUrls" rows="2" placeholder="https://…/需求页面&#10;https://…/原型图.png"></textarea>
     <label class="f">人工补充<span class="hint">（可选，独立于原文保存）</span></label>
@@ -1516,6 +1532,53 @@ function fmtTime(iso, withSeconds) {
 const esc = s => String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // 放进内联事件属性里的 JS 字符串字面量：先 JSON 转义（引号/反斜杠/控制字符），再 HTML 转义整体
 const jsq = s => esc(JSON.stringify(String(s??'')));
+
+/* ---------- 多文件选择增强（class="mf" 的 file input）：一次可选多个；再次选择 / 拖拽为追加而非覆盖，
+   可跨文件夹分批添加；已选文件逐个移除；业务代码照常读 input.files ---------- */
+const _mfFiles = new WeakMap();
+const fmtSize = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? (n / 1024).toFixed(1) + ' KB' : (n || 0) + ' B';
+const mfKey = f => `${f.name}|${f.size}|${f.lastModified}`;
+function mfBox(input) {
+  let box = input.nextElementSibling;
+  if (box && box.classList.contains('mf-list')) return box;
+  box = document.createElement('div'); box.className = 'mf-list'; box.style.display = 'none';
+  input.insertAdjacentElement('afterend', box);
+  return box;
+}
+function mfSet(input, files) {
+  const dt = new DataTransfer(); files.forEach(f => dt.items.add(f));
+  try { input.files = dt.files; } catch (e) {}
+  _mfFiles.set(input, files);
+  const box = mfBox(input), total = files.reduce((a, f) => a + (f.size || 0), 0);
+  box.style.display = files.length ? '' : 'none';
+  box.innerHTML = files.map((f, i) => `<span class="mf-chip" title="${esc(f.name)}"><span class="mf-n">${esc(f.name)}</span><span class="hint">${fmtSize(f.size)}</span><a class="mf-x" onclick="mfRemove(this, ${i})" title="移除">✕</a></span>`).join('')
+    + `<span class="hint">共 ${files.length} 个 · ${fmtSize(total)}，可继续选择或拖入追加${files.length > 1 ? `　<a onclick="mfReset(this.closest('.mf-list').previousElementSibling)">清空</a>` : ''}</span>`;
+}
+function mfAdd(input, list) {
+  const files = (_mfFiles.get(input) || []).slice(), seen = new Set(files.map(mfKey));
+  for (const f of Array.from(list || [])) if (!seen.has(mfKey(f))) { seen.add(mfKey(f)); files.push(f); }
+  mfSet(input, files);
+}
+function mfRemove(el, i) {
+  const input = el.closest('.mf-list').previousElementSibling, files = (_mfFiles.get(input) || []).slice();
+  files.splice(i, 1); mfSet(input, files);
+}
+function mfReset(input) { if (!input) return; input.value = ''; _mfFiles.delete(input); mfSet(input, []); }
+document.addEventListener('change', e => {
+  const input = e.target;
+  if (!(input instanceof HTMLInputElement) || input.type !== 'file' || !input.classList.contains('mf')) return;
+  // 浏览器每次选择都会覆盖 files，这里把本次选择并入之前累积的列表
+  mfAdd(input, input.files);
+}, true);
+for (const ev of ['dragenter', 'dragover', 'dragleave', 'drop']) document.addEventListener(ev, e => {
+  const t = e.target instanceof Element ? e.target : null; if (!t) return;
+  const input = t.matches('input[type=file].mf') ? t : t.closest('.mf-list') ? t.closest('.mf-list').previousElementSibling : null;
+  if (!input || !input.classList.contains('mf')) return;
+  e.preventDefault();
+  input.classList.toggle('drag', ev === 'dragenter' || ev === 'dragover');
+  mfBox(input).classList.toggle('drag', ev === 'dragenter' || ev === 'dragover');
+  if (ev === 'drop') mfAdd(input, e.dataTransfer && e.dataTransfer.files);
+});
 
 function toast(msg, type='') {
   const el = document.createElement('div');
@@ -2038,6 +2101,7 @@ async function init() {
     m.models.forEach(x => sel.add(new Option(x.name, x.name)));
   }
   $('barInfo').textContent = m.default_model ? '默认模型 ' + m.default_model : '尚未配置模型（系统设置 → 模型配置）';
+  fetch('/health').then(r => r.json()).then(h => { if (h.version) $('appVer').textContent = `v${h.version} · `; }).catch(() => {});
   const t = await api('/api/v1/templates');
   $('templateSel').innerHTML = '';
   t.templates.forEach(x => $('templateSel').add(
@@ -2404,7 +2468,7 @@ async function createTask() {
     ${stepperHtml(-1)}</div></div>`;
   try {
     const data = await api('/api/v1/tasks', {method:'POST', body:fd});
-    $('reqText').value = ''; $('reqFiles').value = '';
+    $('reqText').value = ''; mfReset($('reqFiles'));
     closeDrawer();
     refreshMemories();
     await refreshList(); openTask(data.task_id);
@@ -3421,8 +3485,8 @@ function openImportDlg() {
   _importPreview = null;
   $('imMeta').textContent = '第 1 步 · 上传文件（Excel / CSV / XMind / 禅道导出）';
   $('imBody').innerHTML = `<div class="hint" style="margin-bottom:10px">按模板列头准备文件：用例编号、模块、用例标题、优先级、前置条件、操作步骤（每行一步）、预期结果（与步骤逐行对应）、关键词、备注。<a onclick="downloadFile('/api/v1/cases/import-template','用例导入模板.xlsx')">下载导入模板</a><br>禅道「导出用例」的 xlsx / csv / xls 可直接导入：优先级 1–4 对应 P0–P3，模块路径「/父/子」自动去掉斜杠，步骤与预期按行配对。</div>
-    <input type="file" id="imFile" accept=".xlsx,.csv,.xmind,.xls,.html" multiple>
-    <div class="hint" style="margin-top:4px">可一次选择多个文件，解析后合并预览；标题重复校验跨文件生效。</div>
+    <input type="file" id="imFile" class="mf" accept=".xlsx,.csv,.xmind,.xls,.html" multiple>
+    <div class="hint" style="margin-top:4px">可一次选择多个文件，也可分批追加或直接拖入，解析后合并预览；标题重复校验跨文件生效。</div>
     <div class="hint" style="margin-top:8px">解析后逐行校验：标题与步骤必填（预期结果可为空，历史简化用例按空导入后可补）、优先级须为 P0–P3、标题不得与任务内或文件内重复；有错误的行不会被静默导入。</div>`;
   $('imFoot').innerHTML = `<button class="btn ghost" onclick="$('importDlg').close()">取消</button><button class="btn" id="imNext" onclick="importPreview()">解析并预览</button>`;
   $('importDlg').showModal();
@@ -4837,7 +4901,7 @@ function renderHistory(t) {
     </div>
     <div class="section-t">离线终稿回传</div>
     <div class="toolbar" style="margin-top:4px">
-      <input type="file" id="finalFile" accept=".xlsx,.csv,.xmind" multiple style="width:auto;flex:1" title="可选多个文件，合并后作为一份终稿对比">
+      <input type="file" id="finalFile" class="mf" accept=".xlsx,.csv,.xmind" multiple style="width:auto;flex:1" title="可选多个文件（可分批追加），合并后作为一份终稿对比">
       <button class="btn ghost sm" onclick="uploadFinal()">上传并对比</button>
     </div>
     ${t.offline_review ? renderOfflineDiff(t.offline_review) : '<div class="hint" style="margin-top:6px">下载导出文件离线评审后，回传定稿自动计算差异，作为学习语料（「学习规则」页可提炼规则）</div>'}
@@ -5066,7 +5130,7 @@ async function runSearch(q) {
 
 /* ---- 知识库（16 章三层） ---- */
 let kbLevelFilter = '', kbCatFilter = '', _kbMeta = null, kbQuery = '', _kbAutoSearch = false;
-let kbPage = 1, kbSize = 20, kbSpace = '', kbModule = '', kbUploader = '', kbKw = '';
+let kbPage = 1, kbSize = 20, kbSpace = '', kbModule = '', kbUploader = '', kbKw = '', kbOrigin = '';
 function kbSet(name, value) {
   if (name === 'page') { kbPage = value; renderKnowledge(); return; }
   if (name === 'size') kbSize = value;
@@ -5075,12 +5139,22 @@ function kbSet(name, value) {
   else if (name === 'space') { kbSpace = value; kbModule = ''; }
   else if (name === 'module') kbModule = value;
   else if (name === 'uploader') kbUploader = value;
+  else if (name === 'origin') kbOrigin = value;
   else if (name === 'kw') kbKw = (value || '').trim();
-  else if (name === 'reset') { kbLevelFilter = ''; kbCatFilter = ''; kbSpace = ''; kbModule = ''; kbUploader = ''; kbKw = ''; }
+  else if (name === 'reset') { kbLevelFilter = ''; kbCatFilter = ''; kbSpace = ''; kbModule = ''; kbUploader = ''; kbKw = ''; kbOrigin = ''; }
   kbPage = 1; renderKnowledge();
 }
 let kbMode = 'docs', depKind = 'requirement', depModule = '', depFocus = null, _depGraph = null;
 async function renderKnowledge() { return (() => keepScroll('kb', 'kb', _renderKnowledge__impl))(); }
+async function kbBackfillAll() {
+  if (!await uiConfirm('回溯全部项目', '把所有项目的历史任务（需求原文 / 已审核测试点 / 评审通过用例 / 离线终稿）与需求补进各自的项目知识库？已关闭自动沉淀或没有历史的项目自动跳过；后台串行执行，会调用 Embedding 模型。')) return;
+  try {
+    const r = await api('/api/v1/knowledge/backfill', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const skipped = r.skipped.length ? `，跳过 ${r.skipped.length} 个（${r.skipped.slice(0, 3).map(x=>`${x.project}：${x.reason}`).join('；')}${r.skipped.length>3?'…':''}）` : '';
+    toast(r.projects.length ? `已开始回溯 ${r.projects.length} 个项目${skipped}，完成后刷新本页查看` : `没有需要回溯的项目${skipped}`, r.projects.length ? 'ok' : 'warn');
+    if (r.projects.length) setTimeout(() => { if (currentView === 'knowledge') renderKnowledge(); }, 4000);
+  } catch (e) { toast(e.message, 'err'); }
+}
 async function _renderKnowledge__impl() {
   setCrumb('知识库');
   if (kbMode === 'deps') return renderDependencies();
@@ -5095,24 +5169,25 @@ async function _renderKnowledge__impl() {
   }
   const all = docs;  // 筛选前范围（台账全集）：各下拉的条数按它统计
   const countBy = f => { const c = {}; for (const d of all) { const k = f(d); if (k) c[k] = (c[k]||0) + 1; } return c; };
-  const levelN = countBy(d => d.level), catN = countBy(d => d.category);
+  const levelN = countBy(d => d.level), catN = countBy(d => d.category), originN = countBy(d => d.origin || 'manual');
   const spaces = Object.keys(countBy(d => d.level === 'public' ? '' : d.space)).sort();
   const modules = [...new Set(all.filter(d => !kbSpace || d.space === kbSpace).map(d => d.module).filter(Boolean))].sort();
   const uploaders = [...new Set(all.map(d => d.created_by).filter(Boolean))].sort();
   const kw = kbKw.toLowerCase();
-  const hit = d => !kw || [d.source, d.doc_id, d.space, d.module, meta.categories[d.category]||d.category, d.level_label, d.created_by, d.embedding_model]
+  const hit = d => !kw || [d.source, d.doc_id, d.space, d.module, meta.categories[d.category]||d.category, d.level_label, d.created_by, d.embedding_model, d.origin_label, d.origin_ref]
     .some(x => String(x||'').toLowerCase().includes(kw));
   docs = docs.filter(d => (!kbLevelFilter || d.level === kbLevelFilter) && (!kbCatFilter || d.category === kbCatFilter) &&
-    (!kbSpace || d.space === kbSpace) && (!kbModule || d.module === kbModule) && (!kbUploader || d.created_by === kbUploader) && hit(d));
-  const filtering = !!(kbLevelFilter || kbCatFilter || kbSpace || kbModule || kbUploader || kw);
+    (!kbSpace || d.space === kbSpace) && (!kbModule || d.module === kbModule) && (!kbUploader || d.created_by === kbUploader) && (!kbOrigin || (d.origin||'manual') === kbOrigin) && hit(d));
+  const filtering = !!(kbLevelFilter || kbCatFilter || kbSpace || kbModule || kbUploader || kbOrigin || kw);
   const pages = Math.max(1, Math.ceil(docs.length / kbSize));
   if (kbPage > pages) kbPage = pages;
   const pageDocs = docs.slice((kbPage - 1) * kbSize, kbPage * kbSize);
   const canUpload = isSysAdmin() || (curUser.projects||[]).some(p => can(p.project, 'knowledge.manage'));
   const LV = {public:'approved', project:'candidate', module:'pending'};
   $('knowledgeArea').innerHTML = `<div class="card">
-    <div class="card-h"><h3>知识库<span class="cnt" style="margin-left:6px">${all.length}</span></h3>${kbModeSeg()}<span class="meta">公共知识库可跨项目使用（须显式标记，仅管理员维护）；项目 / 模块知识只在本项目检索，禁止跨项目污染</span>
+    <div class="card-h"><h3>知识库<span class="cnt" style="margin-left:6px">${all.length}</span></h3>${kbModeSeg()}<span class="meta">公共知识库可跨项目使用（须显式标记，仅管理员维护）；项目 / 模块知识只在本项目检索，禁止跨项目污染。需求原文、审核通过的测试点、评审通过的用例自动沉淀到项目知识库（项目设置可关闭）</span>
       <div class="grow">
+        ${isSysAdmin()?`<button class="btn ghost" onclick="kbBackfillAll()" title="把所有项目上线前的历史任务 / 需求按自动沉淀规则补进知识库（后台串行执行）">回溯全部项目</button>`:''}
         ${canUpload?`<button class="btn" onclick="openKbDlg()">＋ 上传知识</button>`:''}</div></div>
     <div class="card-b">
       <div class="toolbar" style="margin-bottom:10px"><input type="text" id="kbQ" placeholder="检索测试：输入关键词看命中切片（范围 = ${curProjectName?esc(curProjectName)+' + 公共':'公共'}）" value="${esc(kbQuery)}" style="flex:1" onkeydown="if(event.key==='Enter')kbSearch()"><button class="btn ghost sm" onclick="kbSearch()">检索</button></div>
@@ -5123,6 +5198,7 @@ async function _renderKnowledge__impl() {
         ${!curProjectName && spaces.length ? `<select style="width:140px" onchange="kbSet('space', this.value)"><option value="">全部项目</option>${spaces.map(x=>`<option value="${esc(x)}" ${kbSpace===x?'selected':''}>${esc(x)}</option>`).join('')}</select>` : ''}
         ${modules.length ? `<select style="width:130px" onchange="kbSet('module', this.value)"><option value="">全部模块</option>${modules.map(x=>`<option value="${esc(x)}" ${kbModule===x?'selected':''}>${esc(x)}</option>`).join('')}</select>` : ''}
         ${uploaders.length > 1 ? `<select style="width:110px" onchange="kbSet('uploader', this.value)"><option value="">上传人</option>${uploaders.map(x=>`<option value="${esc(x)}" ${kbUploader===x?'selected':''}>${esc(x)}</option>`).join('')}</select>` : ''}
+        <select style="width:120px" onchange="kbSet('origin', this.value)"><option value="">全部来源方式</option>${Object.entries(data.origins||{manual:'手动上传',task:'任务沉淀',requirement:'需求沉淀'}).map(([k,v])=>`<option value="${k}" ${kbOrigin===k?'selected':''}>${v}（${originN[k]||0}）</option>`).join('')}</select>
         <div class="search" style="width:220px">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
           <input type="search" placeholder="筛选台账：来源 / 编号 / 项目 / 模块…" value="${esc(kbKw)}" onchange="kbSet('kw', this.value)" onkeydown="if(event.key==='Enter')kbSet('kw', this.value)">
@@ -5132,15 +5208,21 @@ async function _renderKnowledge__impl() {
       <div class="tbl-wrap" style="margin-top:0"><table>
         <thead><tr><th>来源</th><th style="width:110px">层级</th><th style="width:130px">项目 / 模块</th><th style="width:120px">分类</th><th style="width:70px">切片</th><th style="width:120px">Embedding</th><th style="width:90px">上传人</th><th style="width:110px">时间</th><th style="width:50px"></th></tr></thead>
         <tbody>${pageDocs.map(d=>`<tr>
-          <td><b>${esc(d.source)}</b><div class="hint"><code>${d.doc_id}</code></div></td>
+          <td><a style="font-weight:600;cursor:pointer" title="查看切片内容" onclick="openKbDoc(${jsq(d.doc_id)})">${esc(d.source)}</a>${kbOriginTag(d)}<div class="hint"><code>${d.doc_id}</code></div></td>
           <td><span class="st ${LV[d.level]||'pending'}">${esc(d.level_label||d.level)}</span></td>
           <td class="hint">${d.level==='public'?'—':esc(d.space)}${d.module?`<div>${esc(d.module)}</div>`:''}</td>
           <td>${esc(meta.categories[d.category]||d.category)}</td><td>${d.chunk_count}</td>
           <td class="hint">${esc(d.embedding_model)}</td><td class="hint">${esc(d.created_by||'')}</td><td class="hint">${relTime(d.created_at)}</td>
-          <td>${(d.level==='public'?isSysAdmin():(can(d.space,'knowledge.manage')&&canDelete()))?`<button class="ibtn bad" title="删除" onclick="deleteKb('${d.doc_id}',${jsq(d.source)})">${IC.trash}</button>`:''}</td></tr>`).join('')
+          <td><div class="rowops"><button class="btn ghost sm" title="查看切片内容" onclick="openKbDoc(${jsq(d.doc_id)})">查看</button>${(d.level==='public'?isSysAdmin():(can(d.space,'knowledge.manage')&&canDelete()))?`<button class="ibtn bad" title="删除" onclick="deleteKb('${d.doc_id}',${jsq(d.source)})">${IC.trash}</button>`:''}</div></td></tr>`).join('')
           || `<tr><td colspan="9"><div class="empty">${all.length ? '没有符合筛选条件的知识文档' : '暂无知识文档'}</div></td></tr>`}</tbody></table></div>
       ${docs.length > PT_PAGE_SIZES[0] || kbPage > 1 ? pagerHtml(docs.length, kbPage, kbSize, 'kbSet', '篇') : ''}</div></div>`;
   if (_kbAutoSearch) { _kbAutoSearch = false; if (kbQuery) kbSearch(); }  // 从全局搜索跳入：直接展示命中切片
+}
+function kbOriginTag(d) {
+  if (!d.origin || d.origin === 'manual') return '';
+  const label = esc(d.origin_label || (d.origin === 'task' ? '任务沉淀' : '需求沉淀'));
+  const go = d.origin === 'task' ? `openTask(${jsq(d.origin_ref)})` : `openRequirement(${jsq(d.origin_ref)})`;
+  return ` <a class="st candidate" style="margin-left:6px;text-decoration:none;cursor:pointer" title="自动沉淀，点击查看来源${d.origin==='task'?'任务':'需求'}（来源删除时联动清理）" onclick="${go}">${label}</a>`;
 }
 function kbModeSeg() {
   return `<div class="seg" style="margin-left:10px"><button class="${kbMode==='docs'?'on':''}" onclick="kbMode='docs';renderKnowledge()">知识文档</button><button class="${kbMode==='deps'?'on':''}" onclick="kbMode='deps';renderKnowledge()">依赖关系</button></div>`;
@@ -5313,7 +5395,7 @@ async function kbSearch() {
   try {
     const r = await jpost('/api/v1/knowledge/search', {query: kbQuery, top_k: 6, space: curProjectName || null});
     $('kbHits').innerHTML = r.hits.length ? `<div class="tbl-wrap" style="margin-bottom:12px"><table><tr><th style="width:60px">相似度</th><th style="width:140px">来源</th><th style="width:90px">层级</th><th>切片</th></tr>
-      ${r.hits.map(h=>`<tr><td>${(h.score*100).toFixed(0)}%</td><td class="hint">${esc(h.source)}<div>${esc(h.space)}${h.module?' / '+esc(h.module):''}</div></td><td><span class="tag">${esc((_kbMeta.levels||{})[h.level]||h.level)}</span></td><td class="hint" style="white-space:pre-wrap">${esc(h.text.slice(0,300))}</td></tr>`).join('')}</table></div>` : '<div class="hint" style="margin-bottom:10px">没有命中</div>';
+      ${r.hits.map(h=>`<tr class="rowlink" title="点击查看该文档的完整切片" onclick="openKbDoc(${jsq(h.doc_id)}, ${h.chunk_index})"><td>${(h.score*100).toFixed(0)}%</td><td class="hint"><a style="font-weight:600;cursor:pointer">${esc(h.source)}</a><div>${esc(h.space)}${h.module?' / '+esc(h.module):''} · 第 ${h.chunk_index+1} 片</div></td><td><span class="tag">${esc((_kbMeta.levels||{})[h.level]||h.level)}</span></td><td class="hint" style="white-space:pre-wrap">${esc(h.text.slice(0,300))}${h.text.length>300?`… <a style="cursor:pointer;white-space:nowrap">查看完整切片（${h.text.length} 字）</a>`:''}</td></tr>`).join('')}</table></div>` : '<div class="hint" style="margin-bottom:10px">没有命中</div>';
   } catch (e) { $('kbHits').innerHTML = `<div class="hint" style="color:var(--danger)">${esc(e.message)}</div>`; }
 }
 function kbLevelChanged() {
@@ -5333,7 +5415,7 @@ async function openKbDlg() {
   $('kbProject').innerHTML = projects.map(p=>`<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
   if (curProjectName && projects.some(p=>p.project===curProjectName)) $('kbProject').value = curProjectName;
   await fillKbModules($('kbProject').value);
-  $('kbFiles').value = ''; $('kbText').value = ''; $('kbSource').value = ''; $('kbFileKind').value = 'doc';
+  mfReset($('kbFiles')); $('kbText').value = ''; $('kbSource').value = ''; $('kbFileKind').value = 'doc';
   kbLevelChanged(); $('kbDlg').showModal();
 }
 async function saveKb() {
@@ -5346,6 +5428,49 @@ async function saveKb() {
   try { const r = await api({doc:'/api/v1/knowledge/docs', cases:'/api/v1/knowledge/cases', bugs:'/api/v1/knowledge/bugs'}[kind], {method:'POST', body: fd}); $('kbDlg').close(); toast(`已入库 ${r.ingested.length} 个文档`, 'ok'); renderKnowledge(); }
   catch (e) { toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '入库';
+}
+// 知识文档详情：元数据 + 全部切片原文（关键词筛选高亮、超过 20 片分页）
+let _kbDoc = null, kbDocPage = 1, kbDocSize = 20, kbDocKw = '', _kbDocFocus = null;
+function kbDocSet(name, value) {
+  if (name === 'page') kbDocPage = value;
+  else if (name === 'size') { kbDocSize = value; kbDocPage = 1; }
+  else if (name === 'kw') { kbDocKw = value; kbDocPage = 1; }
+  renderKbDoc();
+}
+async function openKbDoc(id, focusChunk) {
+  // focusChunk：从检索命中打开时定位到该切片（翻到所在页、高亮并滚动到可见）
+  try { _kbDoc = await api('/api/v1/knowledge/docs/' + encodeURIComponent(id)); } catch (e) { return toast(e.message, 'err'); }
+  kbDocKw = '';
+  _kbDocFocus = Number.isInteger(focusChunk) ? focusChunk : null;
+  kbDocPage = _kbDocFocus !== null ? Math.floor(_kbDocFocus / kbDocSize) + 1 : 1;
+  renderKbDoc();
+  if (!$('kbDocDlg').open) $('kbDocDlg').showModal();
+  const el = $('kbDocBody').querySelector('.kb-chunk-focus');
+  if (el) setTimeout(() => el.scrollIntoView({block: 'center'}), 50);
+}
+function renderKbDoc() {
+  const d = _kbDoc; if (!d) return;
+  $('kbDocTitle').innerHTML = `${esc(d.source)}${kbOriginTag(d)}`;
+  $('kbDocMeta').innerHTML = `<code>${d.doc_id}</code>`;
+  const kw = kbDocKw.trim().toLowerCase();
+  const hi = t => kw ? esc(t).replace(new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), m => `<mark>${m}</mark>`) : esc(t);
+  const items = d.chunks.filter(c => !kw || c.text.toLowerCase().includes(kw));
+  const pages = Math.max(1, Math.ceil(items.length / kbDocSize));
+  if (kbDocPage > pages) kbDocPage = pages;
+  const pageItems = items.slice((kbDocPage - 1) * kbDocSize, kbDocPage * kbDocSize);
+  const meta = [['项目', d.level === 'public' ? '公共' : d.space], ['模块', d.module || '—'], ['分类', d.category_label], ['层级', d.level_label],
+    ['切片', `${d.chunk_count} 片 · 共 ${d.total_chars} 字`], ['Embedding', d.embedding_model], ['上传人', d.created_by || '—'], ['时间', fmtTime(d.created_at)]];
+  $('kbDocBody').innerHTML = `<div class="hint" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:4px 16px;margin-bottom:10px">${meta.map(([k,v])=>`<div><span style="opacity:.7">${k}：</span>${esc(String(v))}</div>`).join('')}</div>
+    <div class="hint" style="margin-bottom:8px">下面是向量库里实际保存的切片原文：检索时按切片命中并注入 AI，每片独立参与匹配。</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><b>切片内容</b><span class="cnt">${d.chunk_count}</span>
+      <div class="search" style="margin-left:auto;width:260px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="search" placeholder="在切片中筛选…" value="${esc(kbDocKw)}" onchange="kbDocSet('kw', this.value)" onkeydown="if(event.key==='Enter')kbDocSet('kw', this.value)"></div></div>
+    ${items.length ? pageItems.map(c => `<div class="card ${c.chunk_index===_kbDocFocus?'kb-chunk-focus':''}" style="margin-bottom:8px${c.chunk_index===_kbDocFocus?';border-color:var(--p1);box-shadow:0 0 0 2px var(--p1-bg,rgba(37,99,235,.15))':''}"><div class="card-b" style="padding:8px 12px">
+        <div class="hint" style="margin-bottom:4px">#${c.chunk_index + 1} · ${c.chars} 字${c.chunk_index===_kbDocFocus?' <span class="st approved">本次检索命中</span>':''}</div>
+        <pre style="white-space:pre-wrap;margin:0;font:inherit;line-height:1.6">${hi(c.text)}</pre></div></div>`).join('')
+      : `<div class="empty">没有包含「${esc(kbDocKw)}」的切片</div>`}
+    ${items.length > kbDocSize || kbDocSize !== 20 ? pagerHtml(items.length, kbDocPage, kbDocSize, 'kbDocSet', '片') : (kw ? `<div class="hint">筛选出 ${items.length} 片</div>` : '')}`;
+  const canDel = d.level === 'public' ? isSysAdmin() : (can(d.space, 'knowledge.manage') && canDelete());
+  $('kbDocOps').innerHTML = canDel ? `<button class="btn ghost sm danger" onclick="$('kbDocDlg').close();deleteKb(${jsq(d.doc_id)}, ${jsq(d.source)})">删除文档</button>` : '';
 }
 async function deleteKb(id, name) {
   if (!await uiConfirm('删除知识文档', `删除「${name}」及其全部切片？`, true)) return;
@@ -5539,7 +5664,87 @@ function crumbForReqs() {
   if (curReq && _reqDetail) setCrumb(`<a onclick="curReq=null;renderRequirements()">需求列表</a><span class="sep">/</span>${esc(_reqDetail.title)}`);
   else setCrumb('需求列表');
 }
-function openRequirement(id, tab) { curReq = id; reqTab = tab || 'raw'; switchView('requirements'); }
+function openRequirement(id, tab) { if (id !== curReq) anReset(); curReq = id; reqTab = tab || 'raw'; switchView('requirements'); }
+// AI 需求分析页签：左侧 11 个分析项导航（带条数），右侧当前项逐条编号展示、关键词筛选、分页；可回看历次分析
+let anSec = 'features', anPage = 1, anSize = 20, anKw = '', anHist = -1;
+function anReset() { anSec = 'features'; anPage = 1; anKw = ''; anHist = -1; }
+function anSet(name, value) {
+  if (name === 'page') anPage = value;
+  else if (name === 'size') { anSize = value; anPage = 1; }
+  else if (name === 'sec') { anSec = value; anPage = 1; anKw = ''; }
+  else if (name === 'kw') { anKw = value; anPage = 1; }
+  else if (name === 'hist') { anHist = parseInt(value); anPage = 1; }
+  renderRequirementDetail();
+}
+function reqAnalysisHtml(r, labels, canAI) {
+  const hist = r.analysis_history || [];
+  const viewingOld = anHist >= 0 && anHist < hist.length;
+  const an = viewingOld ? hist[anHist].analysis : r.analysis;
+  const meta = viewingOld ? (hist[anHist].meta || {}) : (r.analysis_meta || {});
+  const openN = (r.questions || []).filter(q => q.status === 'open' && (q.level || 'must') === 'must').length;
+  const toolbar = `<div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap">
+      ${canAI?`<select id="rqAnalyzeModel" style="width:150px">${[...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('')}</select>
+      <button class="btn sm" id="rqAnalyzeBtn" onclick="analyzeReq()">${r.analysis?'重新 AI 分析':'AI 需求分析'}</button>`:''}
+      ${hist.length?`<select style="width:230px" onchange="anSet('hist', this.value)"><option value="-1" ${!viewingOld?'selected':''}>当前结果（${esc(fmtTime((r.analysis_meta||{}).at))}）</option>${hist.map((h,i)=>`<option value="${i}" ${anHist===i?'selected':''}>历史 ${hist.length-i}：${esc(fmtTime((h.meta||{}).at))} · ${esc((h.meta||{}).model||'')}</option>`).reverse().join('')}</select>`:''}
+      ${r.analysis?`<span class="hint">${viewingOld?'<b style="color:var(--warn)">正在查看历史结果</b> · ':''}${esc(meta.model||'')} · ${esc(meta.by||'')} · ${esc(fmtTime(meta.at))}${meta.chunks>1?` · 分 ${meta.chunks} 片分析后合并`:''}</span>`:'<span class="hint">尚未分析。AI 只整理需求已写明的内容，缺失规则会列入「待确认事项」而不是脑补</span>'}</div>`;
+  const intro = `<div class="hint" style="margin-bottom:10px">AI 需求分析把原文、附件与人工补充整理成 11 个结构化分析项，结果随需求保存在数据库（不覆盖原文，重新分析自动留档）；其中业务规则 / 边界条件 / 状态变化 / 权限要求会作为需求的一部分带入测试设计，待确认事项进入确认流。<b>人工确认分析结果后</b>会沉淀到项目知识库（规则 / 边界 / 状态 / 权限 → 业务规则库，功能 / 流程 / 依赖 / 风险 → 需求文档库），供以后的任务检索。</div>`;
+  if (!an) return intro + toolbar + '<div class="empty">还没有分析结果</div>';
+  const canEdit = can(r.project, 'requirement.edit'), c = r.analysis_confirmed;
+  let confirmBar = '';
+  if (!viewingOld) {
+    const status = !c ? '<span class="st pending">未确认 · 未沉淀到知识库</span><span class="hint">请过目各分析项，确认无误后沉淀到知识库；有错漏可先补充需求原文 / 人工补充后重新分析</span>'
+      : r.analysis_confirmed_stale ? `<span class="st candidate">已确认旧版本</span><span class="hint">知识库中是 ${esc(c.by||'')} ${relTime(c.at)} 确认的上一版分析，当前结果重新分析后尚未确认</span>`
+      : `<span class="st approved">已确认 · 已沉淀到知识库</span><span class="hint">${esc(c.by||'')} · ${relTime(c.at)}</span>`;
+    const btns = canEdit ? ((!c || r.analysis_confirmed_stale) ? `<button class="btn sm" onclick="confirmReqAnalysis()">确认分析结果并沉淀到知识库</button>` : '') + (c ? `<button class="btn ghost sm" onclick="confirmReqAnalysis(true)">取消确认</button>` : '') : '';
+    confirmBar = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding:8px 12px;background:var(--well);border-radius:8px">${status}<span style="margin-left:auto;display:flex;gap:6px">${btns}</span></div>`;
+  }
+  const keys = Object.keys(labels);
+  const count = k => (an[k] || []).length;
+  const total = keys.filter(k => k !== 'open_questions').reduce((n, k) => n + count(k), 0);
+  const nav = `<div style="min-width:170px;border-right:1px solid var(--line);padding-right:10px">
+      ${keys.map(k => k === 'open_questions'
+        ? `<button class="btn ghost sm" style="display:flex;width:100%;justify-content:space-between;margin-top:6px;border-top:1px dashed var(--line);padding-top:8px" onclick="reqTab='questions';renderRequirementDetail()"><span>${esc(labels[k])} →</span><span class="cnt ${openN?'hot':''}">${openN||count(k)}</span></button>`
+        : `<button class="btn ghost sm ${anSec===k?'on':''}" style="display:flex;width:100%;justify-content:space-between;${anSec===k?'background:var(--p1-bg,var(--well));color:var(--p1)':''}" onclick="anSet('sec', ${jsq(k)})"><span>${esc(labels[k])}</span><span class="cnt">${count(k)}</span></button>`).join('')}
+      <div class="hint" style="margin-top:8px;padding-top:6px;border-top:1px solid var(--line)">共 ${total} 条分析要点</div></div>`;
+  const sec = keys.includes(anSec) ? anSec : 'features';
+  const kw = anKw.trim().toLowerCase();
+  const all = an[sec] || [];
+  const items = all.map((x, i) => ({n: i + 1, text: x})).filter(x => !kw || String(x.text).toLowerCase().includes(kw));
+  const pages = Math.max(1, Math.ceil(items.length / anSize));
+  if (anPage > pages) anPage = pages;
+  const pageItems = items.slice((anPage - 1) * anSize, anPage * anSize);
+  const hiKw = t => kw ? esc(t).replace(new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), m => `<mark>${m}</mark>`) : esc(t);
+  const body = `<div style="flex:1;min-width:0">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><div class="section-t" style="margin:0">${esc(labels[sec])}<span class="cnt" style="margin-left:6px">${all.length}</span></div>
+        <div class="search" style="margin-left:auto;width:240px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="search" placeholder="在本项内筛选…" value="${esc(anKw)}" onchange="anSet('kw', this.value)" onkeydown="if(event.key==='Enter')anSet('kw', this.value)"></div></div>
+      ${all.length ? (items.length ? `<div class="tbl-wrap" style="margin-top:0"><table><thead><tr><th style="width:48px">#</th><th>${esc(labels[sec])}</th></tr></thead><tbody>
+        ${pageItems.map(x => `<tr><td class="hint">${x.n}</td><td style="white-space:pre-wrap;line-height:1.6">${hiKw(String(x.text))}</td></tr>`).join('')}</tbody></table></div>
+        ${items.length > anSize || anSize !== 20 ? pagerHtml(items.length, anPage, anSize, 'anSet') : `<div class="hint" style="margin-top:6px">共 ${items.length} 条${kw?'（已筛选）':''}</div>`}` : `<div class="empty">没有包含「${esc(anKw)}」的条目</div>`) : '<div class="empty">AI 没有从需求中整理出这一项的内容</div>'}</div>`;
+  const block = openN ? `<div class="hint" style="margin-bottom:10px;padding:8px 12px;border:1px solid var(--warn);border-radius:8px;color:var(--warn)">分析产出 ${openN} 项「必须确认」的待确认事项，确认后才能开始测试设计。<a onclick="reqTab='questions';renderRequirementDetail()">去确认 →</a></div>` : '';
+  return intro + toolbar + confirmBar + block + `<div style="display:flex;gap:16px;align-items:flex-start">${nav}${body}</div>`;
+}
+async function reqBatchConfirmAnalysis() {
+  const scope = curProjectName ? `项目「${curProjectName}」` : '全部项目';
+  let pv;
+  try { pv = await api('/api/v1/requirements/analysis/batch-confirm' + (curProjectName ? '?project=' + encodeURIComponent(curProjectName) : '')); }
+  catch (e) { return toast(e.message, 'err'); }
+  if (!pv.pending) return toast(`${scope}没有待确认的分析结果（已确认 ${pv.confirmed} 条，未分析 ${pv.no_analysis} 条）`, 'warn');
+  const names = pv.pending_titles.slice(0, 8).map(esc).join('、') + (pv.pending > 8 ? ` 等 ${pv.pending} 条` : '');
+  if (!await uiConfirm('批量确认分析结果', `${scope}有 ${pv.pending} 条需求的分析结果待确认：${names}。确认后将沉淀到各自项目知识库（后台执行）。已确认 ${pv.confirmed} 条、未分析 ${pv.no_analysis} 条会跳过。确定？`)) return;
+  try {
+    const r = await jpost('/api/v1/requirements/analysis/batch-confirm', {project: curProjectName || null});
+    toast(`已确认 ${r.confirmed.length} 条，正在沉淀到知识库；跳过 ${r.skipped.length} 条`, 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  renderRequirements();
+}
+async function confirmReqAnalysis(undo) {
+  if (undo && !await uiConfirm('取消确认', '取消后，知识库中由这份分析沉淀的文档会一并移除。确定？')) return;
+  try {
+    await api(`/api/v1/requirements/${curReq}/analysis/confirm`, {method: undo ? 'DELETE' : 'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    toast(undo ? '已取消确认，知识库中的沉淀已移除' : '已确认，分析结果正在沉淀到项目知识库', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  renderRequirementDetail();
+}
 async function renderRequirements() { return (() => keepScroll('reqs', ['reqs', curReq, reqStatus, reqKw, reqDeleted, reqSource, reqCreator, reqPage, reqSize].join('|'), _renderRequirements__impl))(); }
 async function _renderRequirements__impl() {
   if (curReq) return renderRequirementDetail();
@@ -5592,6 +5797,7 @@ async function _renderRequirements__impl() {
         <label class="check" title="回收站：已删除的需求可恢复"><input type="checkbox" ${reqDeleted?'checked':''} onchange="reqSet('deleted', this.checked)"> 显示已删除</label>
         ${filtering?`<span class="hint">筛选出 ${data.total} 条</span><button class="btn ghost sm" onclick="reqSet('reset')">清除筛选</button>`:''}
         ${anySel?`<button class="btn ghost" id="reqDesignBtn" ${_reqSel.size?'':'disabled'} title="勾选需求后合并为一个测试设计任务（须同一项目，且必须确认的事项已确认）" onclick="reqMultiDesign()">合并发起测试设计${_reqSel.size?`（${_reqSel.size}）`:''}</button>`:''}
+        ${canEdit&&(curProjectName||isSysAdmin())?`<button class="btn ghost" onclick="reqBatchConfirmAnalysis()" title="把${curProjectName?'本项目':'全部项目'}已分析但未确认的需求分析结果一次确认并沉淀到知识库">批量确认分析结果</button>`:''}
         ${canEdit?`<button class="btn" onclick="openReqDlg()">＋ 新建需求</button>`:''}</div></div>
     <div class="card-b"><div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
       <thead><tr>${anySel?`<th style="width:30px"><input type="checkbox" title="全选本页可设计的需求（只选本页）" ${(() => { const ids = data.requirements.filter(selectable).map(r => r.req_id); return ids.length && ids.every(id => _reqSel.has(id)) ? 'checked' : ''; })()} onchange="reqSelAll(this.checked)"></th>`:''}<th>需求</th><th style="width:120px">项目 / 版本</th><th style="width:120px">模块</th><th style="width:110px">状态</th><th style="width:130px">来源</th><th style="width:90px">测试设计</th><th style="width:110px">创建</th></tr></thead>
@@ -5613,7 +5819,7 @@ async function openReqDlg() {
   if (!projects.length) return toast('没有可录入需求的项目（需要测试人员及以上项目角色）', 'warn');
   $('rqProject').innerHTML = projects.map(p => `<option value="${esc(p.project)}">${esc(p.project)}</option>`).join('');
   if (curProjectName && projects.some(p => p.project === curProjectName)) $('rqProject').value = curProjectName;
-  $('rqTitle').value = ''; $('rqText').value = ''; $('rqDesc').value = ''; $('rqFiles').value = ''; $('rqUrls').value = '';
+  $('rqTitle').value = ''; $('rqText').value = ''; $('rqDesc').value = ''; mfReset($('rqFiles')); $('rqUrls').value = '';
   await fillReqRefs($('rqProject').value);
   $('reqDlg').showModal();
 }
@@ -5682,15 +5888,7 @@ async function _renderRequirementDetail__impl() {
     <textarea id="rqDescEdit" rows="3" style="width:100%;box-sizing:border-box" ${canEdit?'':'disabled'}>${esc(r.description||'')}</textarea>
     ${canEdit?`<div class="toolbar" style="margin-top:6px"><button class="btn ghost sm" onclick="saveReqDesc()">保存补充</button></div>`:''}`;
 
-  const an = r.analysis;
-  const analysisTab = `<div class="toolbar" style="margin-bottom:10px">
-      ${canAI?`<select id="rqAnalyzeModel" style="width:150px">${[...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('')}</select>
-      <button class="btn sm" id="rqAnalyzeBtn" onclick="analyzeReq()">${an?'重新 AI 分析':'AI 需求分析'}</button>`:''}
-      ${r.analysis_meta?`<span class="hint">上次分析：${esc(r.analysis_meta.model||'')} · ${esc(r.analysis_meta.by||'')} · ${esc(fmtTime(r.analysis_meta.at))}</span>`:'<span class="hint">尚未分析。AI 只整理需求已写明的内容，缺失规则会列入「待确认事项」而不是脑补</span>'}</div>
-    ${an?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px 24px">
-      ${Object.keys(labels).filter(k=>k!=='open_questions').map(k=>`<div><div class="section-t">${esc(labels[k])}<span class="cnt" style="margin-left:6px">${(an[k]||[]).length}</span></div>
-        ${(an[k]||[]).length?`<ul style="margin:4px 0 0 18px;padding:0;line-height:1.7">${an[k].map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<div class="hint">无</div>'}</div>`).join('')}
-    </div>`:''}`;
+  const analysisTab = reqAnalysisHtml(r, labels, canAI);
 
   const qs = r.questions || [];
   const openAll = qs.filter(q=>q.status==='open');
@@ -5724,6 +5922,7 @@ async function _renderRequirementDetail__impl() {
         ${canEdit&&canDelete()?`<button class="btn ghost sm danger" onclick="deleteReq()">删除</button>`:''}
         ${canDesign?`<button class="btn sm" ${designDisabled?'disabled':''} title="${openN?`还有 ${openN} 项必须确认的事项`:''}" onclick="openDesignDlg()">开始测试设计</button>`:''}
       </div></div>
+    ${canDesign&&openN?`<div class="hint" style="padding:0 16px 8px;color:var(--warn)">还有 ${openN} 项「必须确认」的待确认事项，确认后才能开始测试设计（也可把不影响规则的事项「降为建议」）。<a onclick="reqTab='questions';renderRequirementDetail()">去确认 →</a></div>`:''}
     <div class="dtabs">
       <button class="${reqTab==='raw'?'on':''}" onclick="reqTab='raw';renderRequirementDetail()">原文与附件${r.parse_failed?`<span class="cnt hot">${r.parse_failed}</span>`:''}${r.parsing?` <span class="spin"></span>`:''}</button>
       <button class="${reqTab==='analysis'?'on':''}" onclick="reqTab='analysis';renderRequirementDetail()">AI 需求分析</button>
@@ -5802,7 +6001,7 @@ async function analyzeReq() {
   try {
     const r = await jpost(`/api/v1/requirements/${curReq}/analyze`, {model: $('rqAnalyzeModel').value || null});
     toast(r.open_questions ? `分析完成，${r.open_questions} 项待确认事项需要确认` : '分析完成，无待确认事项', r.open_questions ? 'warn' : 'ok');
-    reqTab = r.open_questions ? 'questions' : 'analysis'; renderRequirementDetail();
+    anHist = -1; anPage = 1; reqTab = r.open_questions ? 'questions' : 'analysis'; renderRequirementDetail();
   } catch (e) { toast(e.message, 'err'); btn.disabled = false; btn.textContent = 'AI 需求分析'; }
 }
 async function addReqQuestion() {
@@ -6030,6 +6229,7 @@ function _openProjDlg(name) {
   $('pjStatus').value = p ? (p.status || 'active') : 'active';
   $('pjStatus').parentElement.style.display = name ? '' : 'none';
   $('pjDesc').value = p ? (p.description || '') : '';
+  $('pjAuto').checked = p ? p.knowledge_auto !== false : true;
   $('pjRenameHint').style.display = name ? '' : 'none';
   fillUserNames();
   $('projDlg').showModal();
@@ -6042,11 +6242,12 @@ async function saveProjDlg() {
     if (_editingProject) {
       await api('/api/v1/projects/' + encodeURIComponent(_editingProject),
         {method:'PUT', headers:{'Content-Type':'application/json'},
-         body: JSON.stringify({name, description, code, owner, business_line, status: $('pjStatus').value})});
+         body: JSON.stringify({name, description, code, owner, business_line, status: $('pjStatus').value, knowledge_auto: $('pjAuto').checked})});
       if (curProject === _editingProject) curProject = name;
       if (curProjectName === _editingProject) { curProjectName = name; localStorage.setItem('tg_project', name); renderCurProj(); }
     } else {
       await jpost('/api/v1/projects', {name, description, code, owner, business_line});
+      if (!$('pjAuto').checked) await api('/api/v1/projects/' + encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({knowledge_auto: false})});
     }
     $('projDlg').close(); toast('已保存', 'ok');
     await fillProjectSelect(); await reloadMe();
@@ -6220,6 +6421,7 @@ async function _renderProjectWorkspace__impl() {
   else if (projTab === 'modules') body = await projModulesHtml();
   else if (projTab === 'recycle') body = await projRecycleHtml();
   else if (projTab === 'coverage') body = await projCoverageHtml();
+  else if (projTab === 'profile') body = await projProfileHtml();
   if (stale('projects', _s)) return;
   const STATUS_CLS = {active:'approved', paused:'candidate', archived:'pending'};
   $('projArea').innerHTML = `<div class="card">
@@ -6246,11 +6448,115 @@ async function _renderProjectWorkspace__impl() {
       ${legacy?'':`<button class="${projTab==='members'?'on':''}" onclick="setProjTab('members')">成员<span class="cnt">${p.member_count||0}</span></button>
       <button class="${projTab==='versions'?'on':''}" onclick="setProjTab('versions')">版本</button>
       <button class="${projTab==='modules'?'on':''}" onclick="setProjTab('modules')">模块</button>
-      <button class="${projTab==='coverage'?'on':''}" onclick="setProjTab('coverage')">覆盖追溯</button>`}
+      <button class="${projTab==='coverage'?'on':''}" onclick="setProjTab('coverage')">覆盖追溯</button>
+      <button class="${projTab==='profile'?'on':''}" onclick="setProjTab('profile')">项目画像${p.profile&&p.profile.draft?'<span class="cnt" title="有待确认的 AI 草稿" style="background:var(--warn,#b7791f);color:#fff">草稿</span>':p.profile&&p.profile.active?`<span class="cnt">v${p.profile.version}</span>`:''}</button>`}
       <button class="${projTab==='recycle'?'on':''}" onclick="setProjTab('recycle')">回收站</button>
       <button onclick="repProject=curProject==='（未指定）'?'':curProject;switchView('reports')">报表 ↗</button>
     </div>
     <div class="card-b">${body}</div></div>`;
+}
+
+/* ---- 项目画像：AI 提炼 → 管理员确认 → 注入拆解 / 生成 / 查漏 / 评审全链路 ---- */
+let _profileView = null;
+async function projProfileHtml() {
+  let d, bf; try { [d, bf] = await Promise.all([api('/api/v1/projects/' + encodeURIComponent(curProject) + '/profile'), api('/api/v1/projects/' + encodeURIComponent(curProject) + '/knowledge/backfill')]); } catch (e) { return `<div class="empty">${esc(e.message)}</div>`; }
+  _profileView = d;
+  profileBackfillWatch(bf);
+  const S = d.sections, canAi = can(curProject, 'point.ai');
+  const listHtml = arr => arr && arr.length ? `<ul style="margin:4px 0 0 18px;padding:0">${arr.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>` : '<div class="hint">—</div>';
+  const section = (key, pf) => `<div style="margin-top:12px"><div class="section-t" style="margin-top:0">${S[key]}</div>${key==='background'?(pf.background?`<div style="white-space:pre-wrap">${esc(pf.background)}</div>`:'<div class="hint">—</div>'):key==='glossary'?(pf.glossary.length?`<table style="margin-top:4px"><tbody>${pf.glossary.map(g=>`<tr><td style="width:180px"><b>${esc(g.term)}</b></td><td>${esc(g.meaning)}</td></tr>`).join('')}</tbody></table>`:'<div class="hint">—</div>'):listHtml(pf[key])}</div>`;
+  const editor = (key, pf) => {
+    const val = key==='background' ? (pf.background||'') : key==='glossary' ? pf.glossary.map(g=>`${g.term}：${g.meaning}`).join('\n') : (pf[key]||[]).join('\n');
+    const rows = key==='background' ? 4 : Math.min(12, Math.max(3, val.split('\n').length + 1));
+    return `<label class="f" style="margin-top:10px">${S[key]}<span class="hint">${key==='background'?'':key==='glossary'?'（每行一个：术语：释义）':'（每行一条）'}</span></label><textarea id="pf_${key}" rows="${rows}">${esc(val)}</textarea>`;
+  };
+  const meta = d.draft_meta || {};
+  const intro = `<div class="hint" style="margin-bottom:10px">项目画像是对这个业务的结构化认知（背景 / 角色 / 流程 / 术语 / 规则 / 易错点）。AI 从本项目已沉淀的需求、已确认测试点与评审通过的用例中提炼成草稿，<b>管理员确认后生效</b>，之后每次拆解、生成、查漏、评审、需求分析都会带着它，不再每次从零理解业务。${d.knowledge_auto?'项目每新增几个任务会自动提炼一版新草稿等待确认。':'<span style="color:var(--warn)">本项目已关闭自动沉淀，画像只能手动提炼。</span>'}</div>`;
+  const head = `<div class="section-t" style="display:flex;align-items:center;gap:8px;margin-top:0">项目画像
+      ${d.has_active?`<span class="st approved">v${d.version} 已生效</span><span class="hint" style="font-weight:400">${esc(d.confirmed_by||'')} · ${relTime(d.confirmed_at)}</span>`:'<span class="st pending">尚未生效</span>'}
+      <span style="margin-left:auto;display:flex;gap:6px">
+        ${canAi?`<button class="btn ghost sm" id="pfExtractBtn" onclick="profileExtract()">${d.draft?'重新提炼':d.has_active?'AI 增量提炼':'AI 提炼画像'}</button>`:''}
+        ${d.has_active&&d.can_confirm&&!d.draft?`<button class="btn ghost sm" onclick="profileEditActive()">编辑生效版本</button>`:''}
+      </span></div>`;
+  let draft = '';
+  if (d.draft) {
+    draft = `<div class="card" style="margin-top:10px;border-color:var(--warn,#b7791f)"><div class="card-b">
+      <div style="display:flex;align-items:center;gap:8px"><b>待确认的 AI 草稿</b><span class="hint">${meta.trigger==='auto'?'自动提炼':'手动提炼'} · ${esc(meta.model||'')} · ${relTime(meta.at)} · 素材：需求 ${meta.requirements||0} / 任务 ${meta.tasks||0} / 测试点 ${meta.points||0} / 用例 ${meta.cases||0}</span>
+        <span style="margin-left:auto;display:flex;gap:6px">${d.can_confirm?`<button class="btn sm" onclick="profileConfirm()">确认生效</button><button class="btn ghost sm" onclick="profileDiscard()">丢弃草稿</button>`:'<span class="hint">等待管理员确认</span>'}</span></div>
+      ${d.can_confirm?`<div class="hint" style="margin:6px 0 2px">可直接修改下面的内容后再确认；确认后立即对本项目所有 AI 环节生效</div>${Object.keys(S).map(k=>editor(k, d.draft)).join('')}`:Object.keys(S).map(k=>section(k, d.draft)).join('')}
+    </div></div>`;
+  }
+  let active = '';
+  if (d.has_active) active = `<div id="pfActive" style="margin-top:14px">${d.draft?'<div class="section-t">当前生效版本</div>':''}${Object.keys(S).map(k=>section(k, d.active)).join('')}
+      ${d.history&&d.history.length>1?`<div class="hint" style="margin-top:10px">历史：${d.history.slice().reverse().map(h=>`v${h.version} ${esc(h.by||'')} ${relTime(h.at)}`).join(' · ')}</div>`:''}</div>`;
+  else if (!d.draft) active = `<div class="empty" style="margin-top:12px">还没有项目画像。${canAi?'点击「AI 提炼画像」从本项目的需求与用例中生成草稿；':''}${d.auto_due?'已有素材，下一个任务完成后也会自动提炼。':''}</div>`;
+  return intro + head + draft + active + (d.rendered ? `<details class="fold" style="margin-top:14px"><summary class="hint">查看注入 AI 的画像文本（${d.rendered.length} 字）</summary><pre style="white-space:pre-wrap;font-size:12px;padding:8px 12px;margin:0">${esc(d.rendered)}</pre></details>` : '') + profileBackfillHtml(bf, d.can_confirm);
+}
+// 存量回溯：把上线前的历史任务 / 需求按自动沉淀规则补进知识库（后台执行，这里轮询进度）
+let _bfTimer = null;
+function profileBackfillHtml(bf, canRun) {
+  const last = bf.last, t = bf.targets || {};
+  const running = last && last.status === 'running';
+  let status = '';
+  if (running) status = `<span class="hint"><span class="spin"></span> 回溯中 ${last.done} / ${last.total}${last.current?` · ${esc(last.current)}`:''}</span>`;
+  else if (last && last.status === 'done') status = `<span class="hint">上次回溯：${relTime(last.finished_at)} · ${esc(last.by||'')} · 任务 ${last.tasks} / 需求 ${last.requirements} → 入库 ${last.docs} 篇${last.errors?`，<span style="color:var(--danger)">失败 ${last.errors}（详见服务日志）</span>`:''}</span>`;
+  else if (last && last.status === 'failed') status = `<span class="hint" style="color:var(--danger)">上次回溯失败：${esc(last.error||'')}</span>`;
+  else status = `<span class="hint">尚未回溯过</span>`;
+  const btn = canRun && !running ? `<button class="btn ghost sm" id="pfBackfillBtn" onclick="profileBackfill()" ${bf.knowledge_auto&&(t.tasks||t.requirements)?'':'disabled'} title="${!bf.knowledge_auto?'本项目已关闭自动沉淀':''}">回溯沉淀历史任务</button>` : '';
+  return `<div class="card" style="margin-top:14px"><div class="card-b"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>存量回溯</b><span class="hint">自动沉淀只覆盖上线后的确认 / 评审动作；点一次把本项目已有的 ${t.tasks||0} 个任务（需求原文 / 已审核测试点 / 评审通过用例 / 离线终稿）与 ${t.requirements||0} 条需求补进知识库，按来源替换可重复执行；完成后会自动提炼一版画像草稿</span><span style="margin-left:auto">${btn}</span></div><div style="margin-top:6px">${status}</div></div></div>`;
+}
+function profileBackfillWatch(bf) {
+  clearTimeout(_bfTimer); _bfTimer = null;
+  if (bf && bf.last && bf.last.status === 'running') _bfTimer = setTimeout(() => { if (currentView === 'projects' && projTab === 'profile') renderProjectWorkspace(); }, 2000);
+}
+async function profileBackfill() {
+  if (!await uiConfirm('回溯沉淀', '把本项目全部历史任务与需求补进知识库？后台执行，会调用 Embedding 模型，耗时与历史数量成正比。')) return;
+  const btn = $('pfBackfillBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 启动中'; }
+  try { await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/knowledge/backfill', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); toast('已开始回溯，完成后知识库页可见「任务沉淀 / 需求沉淀」文档', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+  renderProjectWorkspace();
+}
+function profileCollect() {
+  const S = _profileView.sections, out = {};
+  for (const k of Object.keys(S)) {
+    const el = $('pf_' + k); if (!el) return null;
+    const v = el.value;
+    if (k === 'background') out[k] = v.trim();
+    else if (k === 'glossary') out[k] = v.split('\n').map(x=>x.trim()).filter(Boolean).map(x=>{ const [t, ...m] = x.replace(':', '：').split('：'); return {term: t.trim(), meaning: m.join('：').trim()}; });
+    else out[k] = v.split('\n').map(x=>x.replace(/^[-•\s]+/, '').trim()).filter(Boolean);
+  }
+  return out;
+}
+async function profileExtract() {
+  const btn = $('pfExtractBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 提炼中'; }
+  try { await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/profile/extract', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); toast('草稿已生成，请检查后确认生效', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+  await fillProjectSelect(); renderProjectWorkspace();
+}
+async function profileConfirm() {
+  const profile = profileCollect();
+  try {
+    await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/profile/confirm', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(profile ? {profile} : {})});
+    toast('项目画像已生效，后续 AI 环节将带着它理解业务', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  await fillProjectSelect(); renderProjectWorkspace();
+}
+async function profileDiscard() {
+  if (!await uiConfirm('丢弃草稿', '丢弃这份 AI 草稿？生效版本不受影响，之后可重新提炼。')) return;
+  try { await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/profile/draft', {method:'DELETE'}); } catch (e) { toast(e.message, 'err'); }
+  await fillProjectSelect(); renderProjectWorkspace();
+}
+function profileEditActive() {
+  // 把生效版本当草稿打开编辑：确认即生成新版本
+  const d = _profileView; if (!d || !d.active) return;
+  _profileView = {...d, draft: d.active, draft_meta: {trigger: 'manual', model: '人工编辑', at: new Date().toISOString()}};
+  const S = d.sections;
+  const editor = (key, pf) => {
+    const val = key==='background' ? (pf.background||'') : key==='glossary' ? pf.glossary.map(g=>`${g.term}：${g.meaning}`).join('\n') : (pf[key]||[]).join('\n');
+    return `<label class="f" style="margin-top:10px">${S[key]}<span class="hint">${key==='background'?'':key==='glossary'?'（每行一个：术语：释义）':'（每行一条）'}</span></label><textarea id="pf_${key}" rows="${Math.min(12, Math.max(3, val.split('\n').length + 1))}">${esc(val)}</textarea>`;
+  };
+  const box = $('pfActive'); if (!box) return;
+  box.innerHTML = `<div class="card" style="border-color:var(--p1)"><div class="card-b"><div style="display:flex;align-items:center;gap:8px"><b>编辑生效版本</b><span style="margin-left:auto;display:flex;gap:6px"><button class="btn sm" onclick="profileConfirm()">保存并生效</button><button class="btn ghost sm" onclick="renderProjectWorkspace()">取消</button></span></div>${Object.keys(S).map(k=>editor(k, d.active)).join('')}</div></div>`;
 }
 
 /* ---- 覆盖追溯视图（21.1） ---- */

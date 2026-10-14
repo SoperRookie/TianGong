@@ -135,6 +135,13 @@ async def test_knowledge_api_roundtrip(service):
             resp = await client.get("/api/v1/knowledge/docs")
             assert len(resp.json()["documents"]) == 1
 
+            # 文档详情：元数据 + 切片原文
+            detail = (await client.get(f"/api/v1/knowledge/docs/{doc_id}")).json()
+            assert detail["source"] == "规则.md" and detail["category_label"] == "玩法与业务规则库" and detail["origin_label"] == "手动上传"
+            assert [c["chunk_index"] for c in detail["chunks"]] == list(range(detail["chunk_count"]))
+            assert "赔率" in detail["chunks"][0]["text"] and detail["total_chars"] == sum(c["chars"] for c in detail["chunks"])
+            assert (await client.get("/api/v1/knowledge/docs/nope")).status_code == 404
+
             resp = await client.delete(f"/api/v1/knowledge/docs/{doc_id}")
             assert resp.status_code == 200
 

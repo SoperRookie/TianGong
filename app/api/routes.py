@@ -63,7 +63,9 @@ def _knowledge_service(app):
 
 @router.get("/health")
 async def health() -> dict:
-    return {"status": "ok"}
+    from app import __version__
+
+    return {"status": "ok", "version": __version__}
 
 
 # ---- 登录认证与用户管理 ----
@@ -223,10 +225,61 @@ def _ai_ctx(request: Request, record: TaskRecord | None = None, project: str | N
     from app.llm.calllog import set_ai_context
 
     ctx = (record.context or {}) if record is not None else {}
+    project = project or ctx.get("project")
     set_ai_context(task_id=record.task_id if record is not None else None,
-                   project=project or ctx.get("project"),
+                   project=project,
                    requirement_id=requirement_id or ctx.get("requirement_id"),
                    by=_operator(request), purpose=purpose)
+    _set_profile_context(request.app, project)
+
+
+def _set_profile_context(app, project: str | None) -> None:
+    """项目画像进入 Agent 上下文（拆解 / 生成 / 评审 / 查漏 / 需求分析统一取用）；故障降级为无画像。"""
+    from app.agents.context import set_profile
+
+    try:
+        desc = (app.state.projects.get(project) or {}).get("description", "") if project else ""
+        set_profile(app.state.profiles.render(project, get_settings().profile_budget_chars, description=desc))
+    except Exception as e:
+        logger.warning("项目画像加载失败，降级为无画像：{}", e)
+        set_profile(None)
+
+
+def _accumulator(app):
+    from app.knowledge.accumulate import KnowledgeAccumulator
+
+    acc = getattr(app.state, "accumulator", None)
+    if acc is None:
+        acc = app.state.accumulator = KnowledgeAccumulator(app)
+    return acc
+
+
+def _maybe_auto_profile(app, project: str | None, by: str | None = None) -> None:
+    """任务有新产出后：达到刷新条件即后台提炼一版项目画像草稿（等待管理员确认），故障只记日志。"""
+    from app.knowledge.profile import gather_material, should_auto_extract
+
+    try:
+        if not should_auto_extract(app, project):
+            return
+    except Exception as e:
+        logger.warning("项目画像自动提炼判定失败：{}", e)
+        return
+    acc = _accumulator(app)
+
+    async def _job() -> None:
+        from app.agents.profile import run_profile_extract
+        from app.llm.calllog import set_ai_context
+
+        set_ai_context(project=project, purpose="项目画像提炼（自动）", by=by)
+        material, stats = gather_material(app, project, get_settings().profile_material_chars)
+        current = (app.state.profiles.get(project) or {}).get("active")
+        out = await run_profile_extract(app.state.llm, material, current, None)
+        app.state.profiles.save_draft(project, out["profile"], {"model": out["model_name"], "trigger": "auto",
+                                                               "by": by, **stats})
+        logger.info("项目画像自动提炼完成：{}（素材 需求 {} / 任务 {} / 测试点 {} / 用例 {}），等待管理员确认",
+                    project, stats["requirements"], stats["tasks"], stats["points"], stats["cases"])
+
+    acc.schedule(f"profile:{project}", _job)
 
 
 def _task(request: Request, task_id: str, action: str) -> TaskRecord:
@@ -1282,8 +1335,30 @@ async def list_knowledge_docs(
 
     service = _knowledge_service(request.app)
     docs = [d for d in service.store.list_docs(space, category, level) if _knowledge_visible(request, d)]
-    return {"documents": [{**d.model_dump(), "level_label": LEVELS.get(d.level, d.level)} for d in docs],
-            "levels": LEVELS}
+    from app.knowledge.schemas import ORIGINS
+
+    return {"documents": [{**d.model_dump(), "level_label": LEVELS.get(d.level, d.level),
+                           "origin_label": ORIGINS.get(d.origin, d.origin)} for d in docs],
+            "levels": LEVELS, "origins": ORIGINS}
+
+
+@router.get("/api/v1/knowledge/docs/{doc_id}")
+async def get_knowledge_doc(request: Request, doc_id: str) -> dict:
+    """知识文档详情：台账元数据 + 全部切片原文（按切片顺序），看清楚入库的到底是什么、怎么切的。"""
+    from app.knowledge.schemas import CATEGORIES, LEVELS, ORIGINS
+
+    service = _knowledge_service(request.app)
+    doc = service.store.get_doc(doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail=f"知识文档不存在: {doc_id}")
+    if not _knowledge_visible(request, doc):
+        raise HTTPException(status_code=403, detail="无权查看该项目的知识")
+    chunks = service.store.doc_chunks(doc_id)
+    return {**doc.model_dump(), "level_label": LEVELS.get(doc.level, doc.level),
+            "category_label": CATEGORIES.get(doc.category, doc.category),
+            "origin_label": ORIGINS.get(doc.origin, doc.origin),
+            "chunks": [{"chunk_index": h.chunk_index, "text": h.text, "chars": len(h.text)} for h in chunks],
+            "total_chars": sum(len(h.text) for h in chunks)}
 
 
 @router.delete("/api/v1/knowledge/docs/{doc_id}")
@@ -1447,6 +1522,13 @@ async def _launch_task(
         "project": project,
         **(extra_context or {}),
     }
+    if not resume and not task_context.get("requirement_id"):
+        # 知识沉淀：需求原文进项目需求文档库（需求中心发起的任务由需求实体沉淀，避免重复）
+        _acc = _accumulator(request.app)
+        _mod = _acc.module_path(task_context.get("module_id"))
+        _by = _operator(request)
+        _acc.schedule(f"requirement:{task_id}", lambda: _acc.ingest_text(
+            project, _mod, f"任务 {task_id} · 需求原文", requirement, "requirement_docs", "task", task_id, _by))
 
     # 1.5 拆解确认流程（F-3-3）：只做需求分析，等待用户确认测试点。
     # 支持后台执行：任务先落库（queued），拆解与查漏/查重在后台跑，列表随时可见可管理。
@@ -1495,6 +1577,7 @@ async def _launch_task(
             ensure_versions(task_id, "point",
                             point_entities((record.analysis or {}).get("test_points", [])),
                             by=record.created_by)
+            _maybe_auto_profile(request.app, project, record.created_by)
             return {
                 "task_id": task_id,
                 "status": record.status,
@@ -1556,11 +1639,13 @@ async def _launch_task(
             on_module_done=lambda m, r: _save_checkpoint(store, task_id, module=(m, r)),
         )
         store.set_progress(task_id, progress="exporting")
-        return _finalize_task(
+        response = _finalize_task(
             store, task_id, task_dir, sources, result, template,
             knowledge=snapshot, context=task_context, memories=memory_snapshot,
             rules=rule_snapshot,
         )
+        _maybe_auto_profile(request.app, project, creator)
+        return response
 
     # 异步模式（F-6-1/2）：立即返回 task_id，后台执行，GET /tasks/{id} 轮询进度
     if async_mode:
@@ -1820,6 +1905,9 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     # 确认后的失败（含服务重启）一律从已确认测试点续跑，不重新拆解（否则审核记录会被新拆解覆盖）
     record.context = {**ctx, "resume_stage": "confirmed"}
     store.save(record)
+    _acc = _accumulator(request.app)
+    _by = _operator(request)
+    _acc.schedule(f"points:{task_id}", lambda: _acc.ingest_points(record, _by))  # 知识沉淀：确认的测试点
     return await _run_confirmed(request, store, task_id, test_points, async_mode)
 
 
@@ -1951,6 +2039,7 @@ async def _generate_confirmed(request: Request, task_id: str, test_points: list[
     saved.context = {**{k: v for k, v in (saved.context or {}).items() if k != "resume_stage"},
                      "generated_tp_ids": sorted(done)}
     store.save(saved)
+    _maybe_auto_profile(request.app, ctx.get("project"), saved.created_by)
     return response
 
 
@@ -2232,6 +2321,10 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
     response = _finalize_task(store, task_id, task_dir, record.sources, result,
                               request.app.state.templates.get((record.context or {}).get("template_id")))
     response["review"] = {**counts, "log_entries": len(record.review_log), "hints": hints}
+    if any(counts[k] for k in ("approve", "modify", "delete", "unlock")):
+        # 知识沉淀：评审通过 / 人工定稿的用例进测试用例库（整任务按来源替换）
+        _acc = _accumulator(request.app)
+        _acc.schedule(f"cases:{task_id}", lambda: _acc.ingest_cases(store.get(task_id), operator))
     return response
 
 
@@ -2745,6 +2838,10 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
     record.point_review_log.extend(dict(e, at=now, by=operator) for e in outcome["log"])
     store.save(record)
     logger.info("任务 {} 测试点审核：{}", task_id, outcome["counts"])
+    if any(outcome["counts"].get(k) for k in ("approve", "modify", "delete", "unlock")):
+        # 知识沉淀：审核通过的测试点同步进玩法与业务规则库（整任务按来源替换）
+        _acc = _accumulator(request.app)
+        _acc.schedule(f"points:{task_id}", lambda: _acc.ingest_points(record, operator))
     return {
         "task_id": task_id,
         "counts": outcome["counts"],
@@ -2799,8 +2896,9 @@ class PointAddBody(BaseModel):
 @router.post("/api/v1/tasks/{task_id}/points/add")
 async def add_task_points(request: Request, task_id: str, body: PointAddBody) -> dict:
     """审核人主动补充测试点（需求五十六）：手工直接新增，或让 AI 只生成新增内容。"""
-    from app.agents.quality import _points_view
+    from app.agents.context import profile_block
     from app.agents.graph import _chat_json
+    from app.agents.quality import _points_view
     from app.tasks.points import add_points
 
     store = request.app.state.tasks
@@ -2823,6 +2921,7 @@ async def add_task_points(request: Request, task_id: str, body: PointAddBody) ->
             f"用户补充要求：{wrap_data('补充要求', body.instruction.strip())}\n\n"
             "只生成满足补充要求的**新增**测试点，不要复述或修改已有测试点。"
             '只输出 JSON：{"additions": [{"module": "模块名", "point": "测试点描述", "dimension": "维度"}]}'
+            + profile_block()
         )
         try:
             data, _ = await _chat_json(request.app.state.llm, [
@@ -4488,6 +4587,7 @@ def _schedule_link_fetch(request: Request, req_id: str, atts: list[dict]) -> Non
                 app.state.requirements.replace_attachment(req_id, att_id, parsed)
             except RequirementError:
                 return  # 需求已被删除
+        _schedule_requirement_ingest(app, req_id)
 
     jobs = getattr(app.state, "bg_jobs", None)
     if jobs is None:
@@ -4495,6 +4595,18 @@ def _schedule_link_fetch(request: Request, req_id: str, atts: list[dict]) -> Non
     task = asyncio.create_task(_run())
     jobs.add(task)
     task.add_done_callback(jobs.discard)
+
+
+def _schedule_requirement_ingest(app, req_id: str, by: str | None = None) -> None:
+    """知识沉淀：需求原文与已解析附件 / 链接进项目需求文档库（按来源替换，可重复调用）。"""
+    acc = _accumulator(app)
+
+    async def _job() -> None:
+        item = app.state.requirements.get(req_id)
+        if item is not None:
+            await acc.ingest_requirement_entity(item, by)
+
+    acc.schedule(f"requirement:{req_id}", _job)
 
 
 def _schedule_attachment_parse(request: Request, req_id: str, atts: list[dict]) -> None:
@@ -4518,6 +4630,7 @@ def _schedule_attachment_parse(request: Request, req_id: str, atts: list[dict]) 
                 return  # 需求已被删除
             logger.info("需求 {} 附件 {} 解析{}：{}", req_id, path.name, "完成" if parsed["parsed"] else "失败",
                         f"{parsed['chars']} 字" if parsed["parsed"] else parsed.get("error"))
+        _schedule_requirement_ingest(app, req_id)
 
     jobs = getattr(app.state, "bg_jobs", None)
     if jobs is None:
@@ -4570,6 +4683,7 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
         "blocking_questions": len(rstore.blocking_questions(item)),
         "task_count": len(item["tasks"]),
         "analysis_labels": REQUIREMENT_ANALYSIS_LABELS,
+        "analysis_confirmed_stale": rstore.analysis_confirmed_stale(item),
         "parse_failed": sum(1 for a in item["attachments"] if not a.get("parsed") and not a.get("parsing")),
         "parsing": sum(1 for a in item["attachments"] if a.get("parsing")),
     }
@@ -4682,6 +4796,7 @@ async def list_requirements(
         v = _req_view(request, item)
         v.pop("raw_text", None)
         v.pop("analysis", None)
+        v.pop("analysis_history", None)
         v["questions"] = len(item["questions"])
         out.append(v)
     total = len(out)
@@ -4756,6 +4871,7 @@ async def create_requirement(
         _schedule_link_fetch(request, item["req_id"], latts)
     logger.info("需求已创建：{}「{}」（{}，附件 {}，链接 {}，后台解析）", item["req_id"], item["title"], project,
                 len(files), len(links))
+    _schedule_requirement_ingest(request.app, item["req_id"], _operator(request))
     return _req_view(request, rstore.get(item["req_id"]))
 
 
@@ -4797,6 +4913,9 @@ async def update_requirement(request: Request, req_id: str, body: RequirementUpd
         item = request.app.state.requirements.update(req_id, operator=_operator(request), **fields)
     except RequirementError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if "title" in fields or "module_id" in fields:  # 来源名 / 模块层随之变化：清掉旧沉淀后重新沉淀
+        _accumulator(request.app).forget(req_id)
+        _schedule_requirement_ingest(request.app, req_id, _operator(request))
     return _req_view(request, item)
 
 
@@ -4814,6 +4933,7 @@ async def delete_requirement(request: Request, req_id: str, force: bool = False)
         raise HTTPException(status_code=409, detail=f"该需求已发起 {len(linked)} 个测试设计任务；确认删除后任务与用例保留，仅失去来源追溯")
     rstore = request.app.state.requirements
     rstore.delete(req_id, operator=_operator(request))
+    _accumulator(request.app).forget(req_id)  # 自动沉淀的知识随需求删除
     tstore = request.app.state.tasks
     for tid in linked:
         rec = tstore.get(tid)
@@ -4870,6 +4990,7 @@ async def restore_requirement(request: Request, req_id: str) -> dict:
             rec.context["deleted_requirement_ids"] = [x for x in rec.context["deleted_requirement_ids"] if x != req_id]
             rec.context["requirement_deleted"] = False
             tstore.save(rec)
+    _schedule_requirement_ingest(request.app, req_id, _operator(request))
     return _req_view(request, item)
 
 
@@ -4952,10 +5073,101 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
         raise HTTPException(status_code=400, detail=str(e))
     except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError) as e:
         raise HTTPException(status_code=502, detail=str(e))
-    meta = {"model": analysis.get("model_name"), "chunks": analysis.get("chunks"),
+    meta = {"id": uuid.uuid4().hex[:8], "model": analysis.get("model_name"), "chunks": analysis.get("chunks"),
             "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     item = request.app.state.requirements.set_analysis(req_id, analysis, meta)
     logger.info("需求 {} AI 分析完成：待确认 {} 项（{}）", req_id, len(analysis.get("open_questions") or []), meta["model"])
+    return _req_view(request, item)
+
+
+class AnalysisBatchConfirmBody(BaseModel):
+    project: str | None = None
+
+
+def _batch_confirm_scope(request: Request, project: str | None) -> list[dict]:
+    """批量确认范围：指定项目须有需求编辑权限；不指定则系统管理员对全部项目。"""
+    if project:
+        _require_project(request, project, "requirement.edit")
+        return request.app.state.requirements.list(project=project)
+    _require_admin(request)
+    return request.app.state.requirements.list()
+
+
+def _batch_confirm_classify(request: Request, items: list[dict]) -> dict:
+    rstore = request.app.state.requirements
+    out = {"pending": [], "confirmed": [], "no_analysis": []}
+    for item in items:
+        if not item.get("analysis"):
+            out["no_analysis"].append(item)
+        elif item.get("analysis_confirmed") and not rstore.analysis_confirmed_stale(item):
+            out["confirmed"].append(item)
+        else:
+            out["pending"].append(item)
+    return out
+
+
+@router.get("/api/v1/requirements/analysis/batch-confirm")
+async def preview_batch_confirm_analysis(request: Request, project: str | None = None) -> dict:
+    """批量确认前预览：待确认（含已确认旧版本）/ 已确认 / 未分析 的需求数。"""
+    groups = _batch_confirm_classify(request, _batch_confirm_scope(request, project))
+    return {"project": project, **{k: len(v) for k, v in groups.items()},
+            "pending_titles": [x.get("title") or x["req_id"] for x in groups["pending"][:20]]}
+
+
+@router.post("/api/v1/requirements/analysis/batch-confirm")
+async def batch_confirm_requirement_analysis(request: Request, body: AnalysisBatchConfirmBody | None = None) -> dict:
+    """存量需求的分析结果批量确认并沉淀到知识库：已分析且未确认（或确认的是旧版本）的全部确认，
+    未分析 / 已确认当前版本的跳过；沉淀后台串行执行。"""
+    project = body.project if body else None
+    groups = _batch_confirm_classify(request, _batch_confirm_scope(request, project))
+    rstore = request.app.state.requirements
+    by = _operator(request)
+    confirmed = []
+    for item in groups["pending"]:
+        rstore.confirm_analysis(item["req_id"], by)
+        confirmed.append({"req_id": item["req_id"], "title": item.get("title") or item["req_id"], "project": item["project"]})
+    skipped = ([{"req_id": x["req_id"], "title": x.get("title") or x["req_id"], "reason": "未分析"} for x in groups["no_analysis"]]
+               + [{"req_id": x["req_id"], "title": x.get("title") or x["req_id"], "reason": "已确认"} for x in groups["confirmed"]])
+    if confirmed:
+        acc = _accumulator(request.app)
+        ids = [x["req_id"] for x in confirmed]
+
+        async def _job() -> None:
+            for rid in ids:  # 串行：Embedding 走外部接口，避免并发打爆配额
+                item = rstore.get(rid)
+                if item is not None:
+                    try:
+                        await acc.ingest_requirement_entity(item, by)
+                    except Exception as e:
+                        logger.warning("知识沉淀失败（需求 {}）：{}", rid, e)
+
+        acc.schedule("batch-confirm:" + (project or "*"), _job)
+    request.state.audit_detail = f"确认 {len(confirmed)} 条，跳过 {len(skipped)} 条" + (f"（项目 {project}）" if project else "（全部项目）")
+    logger.info("需求分析结果批量确认：{}，确认 {} 条 / 跳过 {} 条", project or "全部项目", len(confirmed), len(skipped))
+    return {"confirmed": confirmed, "skipped": skipped}
+
+
+@router.post("/api/v1/requirements/{req_id}/analysis/confirm")
+async def confirm_requirement_analysis(request: Request, req_id: str) -> dict:
+    """人工确认当前 AI 分析结果：快照留存并沉淀到项目知识库（规则 / 边界 / 状态 / 权限 → 业务规则库，
+    功能 / 流程 / 前置 / 依赖 / 风险 → 需求文档库）；重新分析后需再次确认才会更新知识库。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    try:
+        item = request.app.state.requirements.confirm_analysis(req_id, _operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    _schedule_requirement_ingest(request.app, req_id, _operator(request))
+    return _req_view(request, item)
+
+
+@router.delete("/api/v1/requirements/{req_id}/analysis/confirm")
+async def unconfirm_requirement_analysis(request: Request, req_id: str) -> dict:
+    """取消确认：知识库中由该分析沉淀的文档一并移除。"""
+    _req(request, req_id, "requirement.edit")
+    item = request.app.state.requirements.unconfirm_analysis(req_id)
+    _schedule_requirement_ingest(request.app, req_id, _operator(request))
     return _req_view(request, item)
 
 
@@ -5132,7 +5344,17 @@ def _project_view(request: Request, p: dict, stats: dict | None = None) -> dict:
         "favorite": p["name"] in prefs["favorites"], "last_visited": recent.get(p["name"]),
         "created_by": p.get("created_by"), "created_at": p.get("created_at"),
         "updated_by": p.get("updated_by"), "updated_at": p.get("updated_at"),
+        "knowledge_auto": bool(p.get("knowledge_auto", True)),
+        "profile": _profile_brief(request.app, p["name"]),
     }
+
+
+def _profile_brief(app, project: str) -> dict:
+    from app.knowledge.profile import is_empty_profile
+
+    item = app.state.profiles.get(project) or {}
+    return {"active": not is_empty_profile(item.get("active")), "version": int(item.get("version") or 0),
+            "draft": bool(item.get("draft")), "confirmed_at": item.get("confirmed_at")}
 
 
 @router.get("/api/v1/projects")
@@ -5349,6 +5571,7 @@ class ProjectUpdateBody(BaseModel):
     owner: str | None = None
     status: str | None = None       # active / paused / archived
     business_line: str | None = None
+    knowledge_auto: bool | None = None  # 自动沉淀知识与项目画像草稿（默认开）
 
 
 @router.put("/api/v1/projects/{name}")
@@ -5394,6 +5617,7 @@ async def update_project(request: Request, name: str, body: ProjectUpdateBody) -
         request.app.state.requirements.rename_project(name, new_name)
         request.app.state.memory.rename_project(name, new_name)
         request.app.state.rules.rename_project(name, new_name)
+        request.app.state.profiles.rename_project(name, new_name)
         if getattr(request.app.state, "knowledge", None) is not None:
             request.app.state.knowledge.store.rename_space(name, new_name)
             request.app.state.knowledge.invalidate_cache()
@@ -5406,6 +5630,7 @@ async def update_project(request: Request, name: str, body: ProjectUpdateBody) -
         project = pstore.update(
             name, body.name, body.description, code=body.code, owner=body.owner,
             status=body.status, operator=_operator(request), business_line=body.business_line,
+            knowledge_auto=body.knowledge_auto,
         )
         if body.business_line:
             request.app.state.business_lines.ensure(body.business_line, created_by=_operator(request))
@@ -5435,6 +5660,7 @@ async def delete_project(request: Request, name: str) -> dict:
     request.app.state.versions.drop_project(name)
     request.app.state.modules.drop_project(name)
     request.app.state.user_prefs.drop_project(name)
+    request.app.state.profiles.drop_project(name)
     return {"deleted": name}
 
 
@@ -5738,6 +5964,198 @@ async def get_project(request: Request, name: str) -> dict:
     view["versions"] = len(request.app.state.versions.list(name))
     view["modules"] = len(request.app.state.modules.list(name))
     return view
+
+
+# ---- 项目画像：AI 提炼 → 管理员确认 → 全链路注入 ----
+
+
+class ProfileConfirmBody(BaseModel):
+    profile: dict | None = None   # 管理员编辑后的画像；为空则直接采用当前草稿
+
+
+class ProfileExtractBody(BaseModel):
+    model: str | None = None
+
+
+def _require_profile_admin(request: Request, name: str) -> None:
+    """画像确认 / 手工维护 / 丢弃草稿：系统管理员或该项目的项目管理员。"""
+    _require_project(request, name, "project.view")
+    if not _is_admin(request) and _project_role(request, name) != "project_admin":
+        raise HTTPException(status_code=403, detail="仅管理员可确认项目画像")
+
+
+def _profile_view(request: Request, name: str) -> dict:
+    from app.knowledge.profile import SECTIONS, is_empty_profile, normalize_profile, should_auto_extract
+
+    item = request.app.state.profiles.get(name) or {}
+    active = normalize_profile(item.get("active")) if item.get("active") else None
+    return {
+        "project": name, "sections": SECTIONS,
+        "active": active, "version": int(item.get("version") or 0),
+        "confirmed_by": item.get("confirmed_by"), "confirmed_at": item.get("confirmed_at"),
+        "draft": normalize_profile(item["draft"]) if item.get("draft") else None,
+        "draft_meta": item.get("draft_meta"),
+        "history": item.get("history") or [],
+        "has_active": not is_empty_profile(active),
+        "knowledge_auto": bool((request.app.state.projects.get(name) or {}).get("knowledge_auto", True)),
+        "auto_due": should_auto_extract(request.app, name),
+        "can_confirm": _is_admin(request) or _project_role(request, name) == "project_admin",
+        "rendered": request.app.state.profiles.render(
+            name, get_settings().profile_budget_chars,
+            description=(request.app.state.projects.get(name) or {}).get("description", "")),
+    }
+
+
+@router.get("/api/v1/projects/{name}/profile")
+async def get_project_profile(request: Request, name: str) -> dict:
+    _require_project(request, name, "project.view")
+    if request.app.state.projects.get(name) is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {name}")
+    return _profile_view(request, name)
+
+
+@router.post("/api/v1/projects/{name}/profile/extract")
+async def extract_project_profile(request: Request, name: str, body: ProfileExtractBody | None = None) -> dict:
+    """AI 提炼项目画像草稿：素材 = 项目描述 / 模块树 / 需求 / 已确认测试点 / 评审通过用例；增量更新生效版本。"""
+    from app.agents.profile import run_profile_extract
+    from app.knowledge.profile import gather_material
+
+    _require_project(request, name, "point.ai")
+    if request.app.state.projects.get(name) is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {name}")
+    _ai_ctx(request, project=name, purpose="项目画像提炼")
+    material, stats = gather_material(request.app, name, get_settings().profile_material_chars)
+    if not (stats["requirements"] or stats["tasks"]) and not (request.app.state.projects.get(name) or {}).get("description"):
+        raise HTTPException(status_code=400, detail="项目还没有需求或任务等素材，无法提炼画像")
+    current = (request.app.state.profiles.get(name) or {}).get("active")
+    try:
+        out = await run_profile_extract(request.app.state.llm, material, current, body.model if body else None)
+    except UnknownModelError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    request.app.state.profiles.save_draft(name, out["profile"], {"model": out["model_name"], "trigger": "manual",
+                                                                 "by": _operator(request), **stats})
+    request.state.audit_detail = f"素材：需求 {stats['requirements']} / 任务 {stats['tasks']} / 测试点 {stats['points']} / 用例 {stats['cases']}"
+    logger.info("项目画像提炼完成：{}（{}），等待确认", name, out["model_name"])
+    return _profile_view(request, name)
+
+
+@router.post("/api/v1/projects/{name}/profile/confirm")
+async def confirm_project_profile(request: Request, name: str, body: ProfileConfirmBody | None = None) -> dict:
+    """确认生效（管理员）：采用草稿或传入编辑后的画像；生效后立即注入后续所有 AI 环节。"""
+    from app.knowledge.profile import is_empty_profile
+
+    _require_profile_admin(request, name)
+    item = request.app.state.profiles.get(name) or {}
+    profile = body.profile if body and body.profile is not None else None
+    if profile is None and not item.get("draft"):
+        raise HTTPException(status_code=409, detail="没有待确认的画像草稿")
+    if is_empty_profile(profile if profile is not None else item.get("draft")):
+        raise HTTPException(status_code=400, detail="画像内容为空，无法生效")
+    request.app.state.profiles.confirm(name, profile, by=_operator(request),
+                                       source="manual" if profile is not None else "draft")
+    logger.info("项目画像已确认生效：{} v{}（{}）", name, request.app.state.profiles.get(name)["version"], _operator(request))
+    return _profile_view(request, name)
+
+
+@router.delete("/api/v1/projects/{name}/profile/draft")
+async def discard_project_profile_draft(request: Request, name: str) -> dict:
+    _require_profile_admin(request, name)
+    request.app.state.profiles.discard_draft(name)
+    return _profile_view(request, name)
+
+
+# ---- 存量回溯：把上线前的历史任务 / 需求按自动沉淀规则补进知识库 ----
+
+
+def _backfill_view(request: Request, name: str) -> dict:
+    acc = _accumulator(request.app)
+    p = request.app.state.projects.get(name) or {}
+    return {"project": name, "knowledge_auto": bool(p.get("knowledge_auto", True)),
+            "targets": acc.backfill_targets(name), "last": acc.backfill_status(name)}
+
+
+def _schedule_backfill(app, projects: list[str], by: str | None) -> None:
+    """多个项目串行回溯（向量化走外部 Embedding，串行避免并发打爆配额）；每个项目完成后按条件自动提炼一版画像草稿。"""
+    acc = _accumulator(app)
+    for name in projects:  # 先占位为 running，避免重复触发
+        acc.backfills[name] = {"project": name, "status": "running", "by": by, "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                               "finished_at": None, "total": 0, "done": 0, "tasks": 0, "requirements": 0, "docs": 0,
+                               "errors": 0, "error": None, "current": "排队中"}
+
+    async def _job() -> None:
+        for name in projects:
+            await acc.backfill_project(name, by)
+            _maybe_auto_profile(app, name, by)
+
+    acc.schedule("backfill:" + ",".join(projects), _job)
+
+
+@router.get("/api/v1/projects/{name}/knowledge/backfill")
+async def get_project_backfill(request: Request, name: str) -> dict:
+    _require_project(request, name, "project.view")
+    if request.app.state.projects.get(name) is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {name}")
+    return _backfill_view(request, name)
+
+
+@router.post("/api/v1/projects/{name}/knowledge/backfill")
+async def backfill_project_knowledge(request: Request, name: str) -> dict:
+    """回溯沉淀（管理员）：项目全部历史任务的需求原文 / 已确认测试点 / 评审通过用例 / 离线终稿与需求中心条目，
+    后台按来源替换入库（可重复执行不堆积）；完成后按条件自动提炼一版画像草稿。"""
+    _require_profile_admin(request, name)
+    p = request.app.state.projects.get(name)
+    if p is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {name}")
+    if not p.get("knowledge_auto", True) or not get_settings().knowledge_auto_ingest:
+        raise HTTPException(status_code=409, detail="本项目已关闭自动沉淀，请先在项目设置中开启")
+    acc = _accumulator(request.app)
+    if acc.backfill_running(name):
+        raise HTTPException(status_code=409, detail="该项目正在回溯中，请稍候")
+    targets = acc.backfill_targets(name)
+    if not (targets["tasks"] or targets["requirements"]):
+        raise HTTPException(status_code=400, detail="项目还没有可回溯的历史任务或需求")
+    _schedule_backfill(request.app, [name], _operator(request))
+    request.state.audit_detail = f"任务 {targets['tasks']} / 需求 {targets['requirements']}"
+    return _backfill_view(request, name)
+
+
+@router.get("/api/v1/knowledge/backfill")
+async def list_knowledge_backfill(request: Request) -> dict:
+    """全部项目的回溯状态（系统管理员）。"""
+    _require_admin(request)
+    acc = _accumulator(request.app)
+    items = []
+    for p in request.app.state.projects.list(include_archived=False):
+        items.append({"project": p["name"], "knowledge_auto": bool(p.get("knowledge_auto", True)),
+                      "targets": acc.backfill_targets(p["name"]), "last": acc.backfill_status(p["name"])})
+    return {"items": items, "running": any((x["last"] or {}).get("status") == "running" for x in items)}
+
+
+@router.post("/api/v1/knowledge/backfill")
+async def backfill_all_knowledge(request: Request) -> dict:
+    """一键回溯全部项目（系统管理员）：跳过已关闭自动沉淀、没有历史产物、正在回溯中的项目，其余串行执行。"""
+    _require_admin(request)
+    if not get_settings().knowledge_auto_ingest:
+        raise HTTPException(status_code=409, detail="全局已关闭知识自动沉淀（knowledge_auto_ingest）")
+    acc = _accumulator(request.app)
+    picked, skipped = [], []
+    for p in request.app.state.projects.list(include_archived=False):
+        name = p["name"]
+        t = acc.backfill_targets(name)
+        if not p.get("knowledge_auto", True):
+            skipped.append({"project": name, "reason": "已关闭自动沉淀"})
+        elif acc.backfill_running(name):
+            skipped.append({"project": name, "reason": "正在回溯中"})
+        elif not (t["tasks"] or t["requirements"]):
+            skipped.append({"project": name, "reason": "没有历史任务或需求"})
+        else:
+            picked.append(name)
+    if picked:
+        _schedule_backfill(request.app, picked, _operator(request))
+    request.state.audit_detail = f"回溯 {len(picked)} 个项目，跳过 {len(skipped)} 个"
+    return {"projects": picked, "skipped": skipped}
 
 
 @router.get("/api/v1/cases")
@@ -6193,6 +6611,7 @@ async def upload_final_cases(
     uploads = _upload_list(files, file, "终稿文件")
     final_cases: list[dict] = []
     names: list[str] = []
+    paths: list[str] = []  # 落盘相对路径：回溯沉淀时重新解析终稿
     for upload in uploads:
         name = _safe_filename(upload.filename)
         saved = await _read_upload(upload, store.output_dir / task_id / "final", settings.max_upload_size_mb * 1024 * 1024)
@@ -6201,17 +6620,22 @@ async def upload_final_cases(
         except (CaseImportError, UnsafeFileError, UnicodeDecodeError, ValueError) as e:
             raise HTTPException(status_code=400, detail=f"{name}：{e}" if len(uploads) > 1 else str(e))
         names.append(name)
+        paths.append(str(saved.relative_to(store.output_dir)))
 
     diff = diff_cases(record.result["cases"], final_cases)
     logger.info("任务 {} 终稿回传 diff：{}", task_id, diff["stats"])
     record.offline_review = {
         "filename": "、".join(names),
         "files": names,
+        "paths": paths,
         "by": _operator(request),
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         **diff,
     }
     store.save(record)
+    _acc = _accumulator(request.app)
+    _by = _operator(request)
+    _acc.schedule(f"final:{task_id}", lambda: _acc.ingest_cases(record, _by, cases=final_cases, label="离线终稿"))
     return {"task_id": task_id, "stats": diff["stats"], "added": diff["added"],
             "deleted": diff["deleted"], "modified": diff["modified"]}
 
@@ -6272,6 +6696,7 @@ def _delete_task(request: Request, task_id: str) -> TaskRecord:
     deleted = request.app.state.tasks.delete(task_id, by=_operator(request))
     if deleted is None:
         raise HTTPException(status_code=409, detail="任务当前不可删除")
+    _accumulator(request.app).forget(task_id)  # 自动沉淀的知识随任务删除
     return deleted
 
 
@@ -6312,6 +6737,9 @@ async def restore_task(request: Request, task_id: str) -> dict:
     _require_project(request, (record.context or {}).get("project"), "case.edit")
     _require_delete(request)
     store.restore(task_id)
+    _acc = _accumulator(request.app)
+    _by = _operator(request)
+    _acc.schedule(f"restore:{task_id}", lambda: _acc.reingest_task(store.get(task_id), _by))
     return {"task_id": task_id, "deleted": False}
 
 

@@ -17,7 +17,7 @@ async def client():
 async def test_健康检查与模型列表(client):
     resp = await client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    assert resp.json() == {"status": "ok", "version": "2.0.0"}
 
     resp = await client.get("/api/v1/models")
     assert resp.status_code == 200
