@@ -63,7 +63,9 @@ def _knowledge_service(app):
 
 @router.get("/health")
 async def health() -> dict:
-    return {"status": "ok"}
+    from app import __version__
+
+    return {"status": "ok", "version": __version__}
 
 
 # ---- 登录认证与用户管理 ----

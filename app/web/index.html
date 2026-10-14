@@ -591,7 +591,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </nav>
   <div class="s-foot">
     <div id="userBox" style="margin-bottom:8px"></div>
-    生成质量核心闭环版<br><span id="barInfo"></span></div>
+    <span id="appVer"></span>生成质量核心闭环版<br><span id="barInfo"></span></div>
 </aside>
 
 <div class="content">
@@ -2101,6 +2101,7 @@ async function init() {
     m.models.forEach(x => sel.add(new Option(x.name, x.name)));
   }
   $('barInfo').textContent = m.default_model ? '默认模型 ' + m.default_model : '尚未配置模型（系统设置 → 模型配置）';
+  fetch('/health').then(r => r.json()).then(h => { if (h.version) $('appVer').textContent = `v${h.version} · `; }).catch(() => {});
   const t = await api('/api/v1/templates');
   $('templateSel').innerHTML = '';
   t.templates.forEach(x => $('templateSel').add(

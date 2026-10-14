@@ -1,6 +1,6 @@
 # 天工 Docker 部署文档
 
-适用版本：v1.0.0。用 `docker compose` 在一台 Linux 服务器上拉起 MySQL、应用、Nginx 三个容器。传统裸机部署见 `docs/服务器部署文档.md`，两者的环境变量、数据迁移与运维事项一致，本文只写 Docker 相关部分。
+适用版本：v2.0.0。用 `docker compose` 在一台 Linux 服务器上拉起 MySQL、应用、Nginx 三个容器。传统裸机部署见 `docs/服务器部署文档.md`，两者的环境变量、数据迁移与运维事项一致，本文只写 Docker 相关部分。
 
 ## 1. 架构
 
@@ -22,7 +22,7 @@
 - **有状态数据全部在宿主机目录或命名卷**：`mysql-data` 卷、`./outputs`、`./data`。镜像可随时重建，数据不丢。
 - **Nginx 固定 IP。** 应用只采信来自 `TIANGONG_TRUSTED_PROXIES` 所列地址的 `X-Forwarded-For`，且按精确 IP 匹配，所以 compose 里给 nginx 容器固定 `172.28.0.10`，操作日志才能记录真实客户端 IP。
 - **模型配置目录挂载**：`config/models.yaml` 在宿主机，页面「模型配置」保存后热重载；手工改文件则重启 app 容器，不用重建镜像。挂目录而非单文件，是因为保存时原子替换文件，单文件绑定挂载会失败。
-- Redis 出现在依赖中但 v1.0.0 不需要，compose 里没有它。
+- Redis 出现在依赖中但当前版本不需要，compose 里没有它。
 
 相关文件：
 
@@ -48,7 +48,7 @@
 sudo mkdir -p /opt/tiangong && sudo chown $USER /opt/tiangong
 cd /opt/tiangong
 git clone <仓库地址> .
-git checkout v1.0.0
+git checkout v2.0.0
 ```
 
 ### 3.2 写 `.env`
@@ -152,7 +152,7 @@ find backups -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
 ```bash
 cd /opt/tiangong
 bash backups/daily.sh                  # 先备份
-git fetch --tags && git checkout v1.0.1
+git fetch --tags && git checkout v2.0.0
 docker compose up -d --build app       # 只重建应用镜像，mysql / nginx 不动
 docker compose logs -f app
 ```

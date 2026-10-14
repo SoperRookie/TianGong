@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
+from app import __version__
 from app.api.routes import router
 from app.auth import AuthStore
 from app.config import BASE_DIR, get_settings
@@ -177,7 +178,7 @@ def _purge_logs(settings) -> None:
 
 _settings_boot = get_settings()
 app = FastAPI(
-    title="TestCase Agent", version="0.1.0", lifespan=lifespan,
+    title="天工 TianGong", version=__version__, lifespan=lifespan,
     docs_url="/docs" if _settings_boot.expose_docs else None,
     redoc_url=None,
     openapi_url="/openapi.json" if _settings_boot.expose_docs else None,
