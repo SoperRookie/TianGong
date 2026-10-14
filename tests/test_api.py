@@ -2,6 +2,7 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 
+from app import __version__
 from app.main import app
 from tests.stubs import ANALYST_REPLY, StubLLM, generator_reply, make_case, review_reply
 
@@ -17,7 +18,7 @@ async def client():
 async def test_健康检查与模型列表(client):
     resp = await client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "version": "2.0.0"}
+    assert resp.json() == {"status": "ok", "version": __version__}
 
     resp = await client.get("/api/v1/models")
     assert resp.status_code == 200

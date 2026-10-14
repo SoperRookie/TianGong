@@ -151,6 +151,7 @@ class RequirementStore:
             del hist[:-10]
         item["analysis"] = {k: v for k, v in analysis.items() if k not in ("model_name", "chunks")}
         item["analysis_meta"] = meta
+        item["analysis_edits"] = []  # 新一版分析：上一版的人工修改留痕随历史走
         existing = {q["question"]: q for q in item["questions"]}
         questions = []
         for q in analysis.get("open_questions") or []:
@@ -167,7 +168,10 @@ class RequirementStore:
                 questions.append({"q_id": _hex8(), "question": text, "status": "open",
                                   "level": meta.get("level") if meta.get("level") in ("must", "suggest") else "must",
                                   "reason": str(meta.get("reason", "")), "assumption": str(meta.get("assumption", "")),
-                                  "answer": "", "by": None, "at": None, "source": "ai"})
+                                  "answer": "", "by": None, "at": None, "source": "ai",
+                                  # 核验降级 / 复核补充的条目：记下来源项与原文本，确认成立后可一键采纳回分析结果
+                                  "kind": meta.get("kind") or "question", "key": meta.get("key"),
+                                  "text": str(meta.get("text") or ""), "quote": str(meta.get("quote") or "")})
         # 分析结果里的待确认事项统一存成问题文本，便于展示与比对
         item["analysis"]["open_questions"] = [q["question"] for q in questions]
         # 人工补充的问题保留
@@ -185,7 +189,8 @@ class RequirementStore:
             raise RequirementError("还没有分析结果可确认")
         item["analysis_confirmed"] = {
             "by": by, "at": _now(), "analysis_id": _analysis_id(item),
-            "analysis": {k: list(v) for k, v in item["analysis"].items() if k != "open_questions" and isinstance(v, list)},
+            "analysis": {k: [dict(x) if isinstance(x, dict) else x for x in v]
+                         for k, v in item["analysis"].items() if k != "open_questions" and isinstance(v, list)},
         }
         self._persist(item)
         return item
@@ -201,6 +206,76 @@ class RequirementStore:
         """已确认的是旧一版分析（之后又重新分析过）。"""
         c = item.get("analysis_confirmed") or {}
         return bool(c) and _analysis_id(item) != c.get("analysis_id")
+
+    def edit_analysis_item(self, req_id: str, key: str, action: str, index: int | None = None,
+                           text: str | None = None, operator: str | None = None) -> dict:
+        """人工修改分析结果（edit / delete / add）：条目文本改了就留痕（analysis_edits），
+        修改后的结果是评测集标准答案与学习规则的素材；修改会让已确认的版本变为「旧版本」需重新确认。"""
+        from app.agents.analysis import ITEM_KEYS, as_item
+
+        item = self._get_alive(req_id)
+        analysis = item.get("analysis")
+        if not analysis:
+            raise RequirementError("还没有分析结果可修改")
+        if key not in ITEM_KEYS:
+            raise RequirementError(f"不可修改的分析项: {key}")
+        items = [as_item(x) for x in analysis.get(key) or []]
+        text = (text or "").strip()
+        log = {"key": key, "action": action, "by": operator, "at": _now()}
+        if action == "add":
+            if not text:
+                raise RequirementError("内容不能为空")
+            items.append({"text": text, "quote": "", "verified": None, "manual": True})
+            log["after"] = text
+        else:
+            if index is None or not (0 <= index < len(items)):
+                raise RequirementError("条目不存在（可能已被修改，请刷新）")
+            before = items[index]
+            log["before"] = before["text"]
+            if action == "delete":
+                items.pop(index)
+            elif action == "edit":
+                if not text:
+                    raise RequirementError("内容不能为空")
+                if text == before["text"]:
+                    return item
+                items[index] = {**before, "text": text, "manual": True}
+                items[index].pop("review", None)  # 人工改过的条目不再带复核意见
+                log["after"] = text
+            elif action == "accept_fix":  # 采纳复核给出的改正
+                fix = ((before.get("review") or {}).get("fix") or "").strip()
+                if not fix:
+                    raise RequirementError("该条目没有可采纳的复核改正")
+                items[index] = {**before, "text": fix, "manual": True}
+                items[index].pop("review", None)
+                log.update(action="edit", after=fix, via="review")
+            elif action == "dismiss_review":  # 人工看过复核意见，认为原条目没问题
+                items[index] = {k: v for k, v in before.items() if k != "review"}
+                log = None
+            else:
+                raise RequirementError(f"未知操作: {action}")
+        analysis[key] = items
+        if log is not None:
+            item.setdefault("analysis_edits", []).append(log)
+        item["updated_by"], item["updated_at"] = operator, _now()
+        self._persist(item)
+        return item
+
+    def adopt_question(self, req_id: str, q_id: str, operator: str | None = None) -> dict:
+        """核验降级 / 复核补充的待确认事项经人工确认成立：原条目采纳回对应分析项，问题记为已确认。"""
+        item = self._get_alive(req_id)
+        q = next((x for x in item["questions"] if x["q_id"] == q_id), None)
+        if q is None:
+            raise RequirementError(f"待确认事项不存在: {q_id}")
+        if not q.get("key") or not q.get("text"):
+            raise RequirementError("该事项不是从分析条目降级来的，无法采纳")
+        if not item.get("analysis"):
+            raise RequirementError("还没有分析结果")
+        self.edit_analysis_item(req_id, q["key"], "add", text=q["text"], operator=operator)
+        q.update({"status": "confirmed", "answer": "确认成立，已采纳回分析结果", "by": operator, "at": _now()})
+        self._refresh_status(item)
+        self._persist(item)
+        return item
 
     def add_question(self, req_id: str, question: str, operator: str | None = None, level: str = "must",
                      assumption: str = "") -> dict:
@@ -356,13 +431,16 @@ class RequirementStore:
 
 
 def _analysis_id(item: dict) -> str | None:
-    """标识某一版分析结果：优先 meta.id，旧记录退化为分析时间。"""
+    """标识某一版分析结果：优先 meta.id，旧记录退化为分析时间；人工修改过 n 次则带上 +n（修改即新版本）。"""
     meta = item.get("analysis_meta") or {}
-    return meta.get("id") or meta.get("at")
+    base = meta.get("id") or meta.get("at")
+    edits = len(item.get("analysis_edits") or [])
+    return f"{base}+{edits}" if base and edits else base
 
 
 def design_brief(item: dict) -> str:
     """发起测试设计时喂给拆解/生成 Agent 的需求文本：原文 + 人工补充 + 已确认结论（原文不改）。"""
+    from app.agents.analysis import item_text
     from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
 
     parts = [item["raw_text"].strip()]
@@ -384,7 +462,7 @@ def design_brief(item: dict) -> str:
     keep = [k for k in ("rules", "boundaries", "state_changes", "permissions") if analysis.get(k)]
     if keep:
         parts.append("【AI 需求分析要点（已经人工过目）】\n" + "\n".join(
-            f"{REQUIREMENT_ANALYSIS_LABELS[k]}：" + "；".join(analysis[k]) for k in keep))
+            f"{REQUIREMENT_ANALYSIS_LABELS[k]}：" + "；".join(item_text(x) for x in analysis[k] if item_text(x)) for k in keep))
     return "\n\n".join(p for p in parts if p)
 
 

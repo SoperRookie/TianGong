@@ -138,7 +138,8 @@ async def test_R04_AI遇到未知规则必须输出待确认项_不得编造(cli
     from tests.test_requirements import ANALYSIS_REPLY
 
     await _project(client, "P")
-    r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "登录", "text": "登录需求"})).json()
+    r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "登录",
+                                                        "text": "登录需求：密码错误 5 次锁定 30 分钟"})).json()
     app.state.llm = StubLLM([ANALYSIS_REPLY])
     a = (await client.post(f"/api/v1/requirements/{r['req_id']}/analyze", json={})).json()
     assert a["status"] == "pending_confirm" and a["open_questions"] == 2

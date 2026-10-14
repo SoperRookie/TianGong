@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     profile_material_chars: int = 40000
     profile_budget_chars: int = 2500
 
+    # 需求分析准确率防线：第二个独立 Agent 对照原文复核首轮分析（理解错 / 无依据 / 遗漏），可指定不同模型；
+    # 人工确认分析结果时若有过修改，自动把修改后的结果作为标准答案加入需求分析评测集
+    analysis_review: bool = True
+    analysis_eval_auto_sample: bool = True
+
     # 历史用例复用提示阈值（需求二十九）：向量相似度达到该值提示「高度相关，可复用」
     reuse_hint_score: float = 0.78
 

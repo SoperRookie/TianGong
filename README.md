@@ -4,7 +4,7 @@
 
 > 目标：将测试用例设计从"逐条手写"升级为"系统生成 + 人工评审"，沉淀团队知识资产，用例产出提效 50% 以上。
 
-当前版本：**v2.0.0**（发布说明见 `docs/RELEASE_NOTES_v2.0.0.md`，升级步骤见 `docs/服务器部署文档.md`）。版本号单一来源为 `app/__init__.py`，`/health` 返回，页面侧栏底部显示。
+当前版本：**v2.1.1**（发布说明见 `docs/RELEASE_NOTES_v2.1.1.md`，升级步骤见 `docs/服务器部署文档.md`）。版本号单一来源为 `app/__init__.py`，`/health` 返回，页面侧栏底部显示。
 
 ## 核心能力
 
@@ -81,6 +81,7 @@ open http://localhost:8000/
 - **模型密钥**只能通过形如 `XXX_API_KEY` 的环境变量引用，配置样例见 `.env.example`。
 - 上传限制：单文件 `TIANGONG_MAX_UPLOAD_SIZE_MB`（默认 100）、执行附件 200MB、PDF 300 页、zip 类文档解压后 300MB（压缩包内文件数不限）。所有上传入口（需求文件 / 附件、知识库、用例导入、执行附件、终稿回传）均支持一次选择多个文件。
 - 上传格式不限。可自动读取：Word / Excel / PowerPoint 全系（含 doc / xls / ppt 老版、docm / xlsm / pptm 等宏与模板格式）、WPS（wps / et / dps）、OpenDocument、RTF、PDF、Markdown / TXT / JSON / XML / YAML / 日志等文本、网页、图片（png / jpg / webp / gif / bmp / tiff / ico / heic / avif / psd / svg / emf / wmf，走 Vision）、压缩包（zip / tar / gz / bz2 / xz / 7z / rar，递归解析内含文件；包内 js / css 等脚本样式资源不参与解析）、Axure 原型导出包（zip，按站点地图顺序逐页提取页面文字与说明备注）、邮件（eml / msg，正文与附件）。视频、字体等保留可下载但不参与解析。老版 Office / WPS / 矢量图需服务器安装 LibreOffice（Docker 镜像已内置）。
+- 需求分析准确率防线：`TIANGONG_ANALYSIS_REVIEW`（默认 true，第二个独立 Agent 对照原文复核）、`TIANGONG_ANALYSIS_EVAL_AUTO_SAMPLE`（默认 true，人工改过的分析结果确认时自动进评测集）；管理员侧栏「需求分析评测」页维护评测集与回归评测。
 - 日志留存：AI 调用日志与操作日志默认保留 90 天（`TIANGONG_LOG_RETENTION_DAYS`，启动时与之后每天清理）；文件日志默认 INFO、每日零点或超过 50MB 轮转、gzip、保留 7 天（`TIANGONG_LOG_FILE_LEVEL / _MAX_MB / _RETENTION_DAYS`）；`scripts/server.sh` 启动时关闭控制台副本，`logs/server.out` 只收进程输出。
 
 ## 演示路径（约 10 分钟）
@@ -120,10 +121,16 @@ open http://localhost:8000/
 | GET/POST/PUT/DELETE | `/api/v1/projects/{name}/modules[/{id}]` | 模块树（≤5 级，逻辑删除/恢复/排序/移动） |
 | GET/PUT | `/api/v1/auth/me` | 当前用户（含所属项目角色、收藏/最近访问）/ 自助资料 |
 | GET/POST/PUT/DELETE | `/api/v1/requirements[/{id}]` | 需求中心：需求实体（原文/附件/人工补充/状态），详情含追溯与覆盖识别 |
-| POST | `/api/v1/requirements/{id}/analyze` | AI 需求分析（11 项结构化输出，待确认事项进入确认流；重新分析自动留档最近 10 次 `analysis_history`，详情页按分析项导航、关键词筛选、分页展示并可回看历史） |
+| POST | `/api/v1/requirements/{id}/analyze` | AI 需求分析（11 项结构化输出，每条带原文依据 `quote` 并逐条程序核验，规则 / 边界 / 状态 / 权限四项无依据的降级为待确认事项；独立复核 Agent 对照原文标出理解错 / 无依据并补入遗漏（`reviewer_model` 可指定不同模型，`review` 开关，默认 `TIANGONG_ANALYSIS_REVIEW`）；注入项目画像与知识库中的历史需求 / 业务规则；待确认事项进入确认流；重新分析自动留档最近 10 次 `analysis_history`，详情页按分析项导航、关键词筛选、分页展示并可回看历史） |
 | POST/DELETE | `/api/v1/requirements/{id}/analysis/confirm` | 人工确认 AI 分析结果 / 取消确认：确认后快照沉淀到项目知识库（规则 / 边界 / 状态 / 权限 → 业务规则库，功能 / 流程 / 前置 / 依赖 / 风险 → 需求文档库），重新分析后需再次确认才更新；取消确认或删除需求时移除 |
 | GET/POST | `/api/v1/requirements/analysis/batch-confirm` | 存量需求分析结果批量确认（`project` 指定项目须有需求编辑权限，不指定则系统管理员对全部项目）：GET 预览待确认 / 已确认 / 未分析条数，POST 把已分析未确认（含确认的是旧版本）的全部确认并后台串行沉淀，未分析 / 已确认的跳过并带原因；需求列表页「批量确认分析结果」按钮 |
 | POST | `/api/v1/requirements/{id}/questions[/{qid}]` | 待确认事项：人工补充 / 确认结论 / 重新打开 |
+| POST | `/api/v1/requirements/{id}/analysis/items` | 人工修改分析条目（`edit` / `delete` / `add` / `accept_fix` 采纳复核改正 / `dismiss_review` 标记原条目没问题）：修改留痕 `analysis_edits`，进评测集与学习语料；修改后已确认版本变旧需重新确认 |
+| POST | `/api/v1/requirements/{id}/questions/{qid}/adopt` | 原文核验降级 / 复核补充的待确认事项经人工确认成立：采纳回对应分析项并记为已确认 |
+| POST | `/api/v1/requirements/{id}/analysis/eval-sample` | 把当前分析结果作为标准答案加入需求分析评测集（同一需求重复加入即更新；有复核质疑未处理时 409） |
+| GET | `/api/v1/requirements/writing-guide` | 需求文档编写规范与模板（Markdown，`app/web/requirement-guide.md`）；需求列表页「需求编写规范」弹窗展示、可下载 |
+| GET/PUT/DELETE | `/api/v1/analysis-eval/samples[/{id}]` | 需求分析评测集（管理员）：列表 / 标准答案逐项修订 / 删除 |
+| GET/POST | `/api/v1/analysis-eval/runs[/{id}]` | 回归评测（管理员）：对评测集重跑完整分析流水线，裁判 Agent 与标准答案逐条语义对齐，统计准确率 / 捏造率 / 理解错率 / 遗漏率（总计与按分析项），后台串行执行，记录模型与 Prompt 版本 |
 | POST | `/api/v1/requirements/{id}/design` | 从需求发起测试设计（任务回挂需求/模块/版本；未确认事项未清则 409） |
 | POST | `/api/v1/requirements/design` | 多条需求合并发起测试设计（`req_ids`，须同一项目、最多 20 条；合并为一份需求文本走同一链路，任务回挂全部需求，上下文 `requirement_ids` / `requirement_titles`） |
 | GET | `/api/v1/ai/tasks` / `/ai/calls[/{id}]` / `/ai/stats` | AI 任务中心、调用日志（用途/模型/Prompt 版本/输入输出/发起人）、用量统计 |
