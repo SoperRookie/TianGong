@@ -45,6 +45,9 @@ services:
       # nginx 容器固定 IP（见 networks），只有它转发的 X-Forwarded-For 才被采信
       TIANGONG_TRUSTED_PROXIES: 172.28.0.10
       TZ: ${TZ:-Asia/Shanghai}
+    logging:                            # 容器 stdout 日志上限：单文件 50MB，最多 3 个，防止占满磁盘
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
     volumes:
       - ./outputs:/app/outputs          # 上传原件、导出文件、执行附件、实例锁
       - ./data:/app/data                # 本地向量库 data/knowledge（嵌入式 Qdrant）

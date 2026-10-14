@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     # 日志（Loguru）：控制台级别与文件目录（按日滚动，DEBUG 全量）
     log_level: str = "INFO"
     log_dir: Path = BASE_DIR / "logs"
+    # 文件日志（logs/tiangong_<日期>.log）：级别、每日零点或超过 log_file_max_mb 即轮转、轮转后 gzip、保留天数
+    # 控制台输出可关（server.sh 启动时关掉，避免 logs/server.out 再存一份一样的日志）
+    log_file_level: str = "INFO"
+    log_file_max_mb: int = 50
+    log_file_retention_days: int = 7
+    log_file_compress: bool = True
+    console_log: bool = True
 
     # 文件上传限制（F-2-8），单位 MB
     max_upload_size_mb: int = 100
@@ -105,7 +112,7 @@ class Settings(BaseSettings):
     embedding_max_concurrency: int = 4
 
     # 日志留存（天）：AI 调用日志与操作日志启动时清理更早的记录；0 表示不清理
-    log_retention_days: int = 180
+    log_retention_days: int = 90  # AI 调用日志与操作日志（数据库）保留天数，启动时与之后每天清理一次
 
 
 @lru_cache

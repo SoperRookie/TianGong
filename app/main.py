@@ -1,5 +1,6 @@
 """FastAPI 应用入口。启动：uvicorn app.main:app --reload；Web 界面访问 http://localhost:8000/"""
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -18,7 +19,10 @@ from app.memory import MemoryStore
 from app.tasks import TaskStore
 from app.templates import TemplateStore
 
-setup_logging(get_settings().log_level, get_settings().log_dir)
+_s = get_settings()
+setup_logging(_s.log_level, _s.log_dir, file_level=_s.log_file_level, max_mb=_s.log_file_max_mb,
+              retention_days=_s.log_file_retention_days, compress=_s.log_file_compress, console=_s.console_log)
+del _s
 
 
 def _ensure_models_config(settings) -> None:
@@ -105,6 +109,7 @@ async def lifespan(app: FastAPI):
     app.state.auth.ensure_admin(settings.admin_username, settings.admin_password)
     _acquire_instance_lock(settings)
     _purge_logs(settings)
+    purge_job = asyncio.get_running_loop().create_task(_purge_logs_daily(settings))  # 之后每天清理一次，长期运行也不积压
     logger.info(
         "服务启动：默认模型={} 可用模型={} 输出目录={} 日志目录={}",
         registry.default_model,
@@ -117,6 +122,7 @@ async def lifespan(app: FastAPI):
 
     flush_persist()
     set_current(None)
+    purge_job.cancel()
     _release_instance_lock()
     logger.info("服务关闭")
     from app.logging_setup import close_file_handler
@@ -157,6 +163,12 @@ def _release_instance_lock() -> None:
         except OSError:
             pass
         _lock_handle = None
+
+
+async def _purge_logs_daily(settings) -> None:
+    while True:
+        await asyncio.sleep(24 * 3600)
+        await asyncio.to_thread(_purge_logs, settings)
 
 
 def _purge_logs(settings) -> None:
