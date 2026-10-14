@@ -5674,6 +5674,20 @@ function reqAnalysisHtml(r, labels, canAI) {
   const block = openN ? `<div class="hint" style="margin-bottom:10px;padding:8px 12px;border:1px solid var(--warn);border-radius:8px;color:var(--warn)">分析产出 ${openN} 项「必须确认」的待确认事项，确认后才能开始测试设计。<a onclick="reqTab='questions';renderRequirementDetail()">去确认 →</a></div>` : '';
   return intro + toolbar + confirmBar + block + `<div style="display:flex;gap:16px;align-items:flex-start">${nav}${body}</div>`;
 }
+async function reqBatchConfirmAnalysis() {
+  const scope = curProjectName ? `项目「${curProjectName}」` : '全部项目';
+  let pv;
+  try { pv = await api('/api/v1/requirements/analysis/batch-confirm' + (curProjectName ? '?project=' + encodeURIComponent(curProjectName) : '')); }
+  catch (e) { return toast(e.message, 'err'); }
+  if (!pv.pending) return toast(`${scope}没有待确认的分析结果（已确认 ${pv.confirmed} 条，未分析 ${pv.no_analysis} 条）`, 'warn');
+  const names = pv.pending_titles.slice(0, 8).map(esc).join('、') + (pv.pending > 8 ? ` 等 ${pv.pending} 条` : '');
+  if (!await uiConfirm('批量确认分析结果', `${scope}有 ${pv.pending} 条需求的分析结果待确认：${names}。确认后将沉淀到各自项目知识库（后台执行）。已确认 ${pv.confirmed} 条、未分析 ${pv.no_analysis} 条会跳过。确定？`)) return;
+  try {
+    const r = await jpost('/api/v1/requirements/analysis/batch-confirm', {project: curProjectName || null});
+    toast(`已确认 ${r.confirmed.length} 条，正在沉淀到知识库；跳过 ${r.skipped.length} 条`, 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  renderRequirements();
+}
 async function confirmReqAnalysis(undo) {
   if (undo && !await uiConfirm('取消确认', '取消后，知识库中由这份分析沉淀的文档会一并移除。确定？')) return;
   try {
@@ -5734,6 +5748,7 @@ async function _renderRequirements__impl() {
         <label class="check" title="回收站：已删除的需求可恢复"><input type="checkbox" ${reqDeleted?'checked':''} onchange="reqSet('deleted', this.checked)"> 显示已删除</label>
         ${filtering?`<span class="hint">筛选出 ${data.total} 条</span><button class="btn ghost sm" onclick="reqSet('reset')">清除筛选</button>`:''}
         ${anySel?`<button class="btn ghost" id="reqDesignBtn" ${_reqSel.size?'':'disabled'} title="勾选需求后合并为一个测试设计任务（须同一项目，且必须确认的事项已确认）" onclick="reqMultiDesign()">合并发起测试设计${_reqSel.size?`（${_reqSel.size}）`:''}</button>`:''}
+        ${canEdit&&(curProjectName||isSysAdmin())?`<button class="btn ghost" onclick="reqBatchConfirmAnalysis()" title="把${curProjectName?'本项目':'全部项目'}已分析但未确认的需求分析结果一次确认并沉淀到知识库">批量确认分析结果</button>`:''}
         ${canEdit?`<button class="btn" onclick="openReqDlg()">＋ 新建需求</button>`:''}</div></div>
     <div class="card-b"><div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
       <thead><tr>${anySel?`<th style="width:30px"><input type="checkbox" title="全选本页可设计的需求（只选本页）" ${(() => { const ids = data.requirements.filter(selectable).map(r => r.req_id); return ids.length && ids.every(id => _reqSel.has(id)) ? 'checked' : ''; })()} onchange="reqSelAll(this.checked)"></th>`:''}<th>需求</th><th style="width:120px">项目 / 版本</th><th style="width:120px">模块</th><th style="width:110px">状态</th><th style="width:130px">来源</th><th style="width:90px">测试设计</th><th style="width:110px">创建</th></tr></thead>

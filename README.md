@@ -119,6 +119,7 @@ open http://localhost:8000/
 | GET/POST/PUT/DELETE | `/api/v1/requirements[/{id}]` | 需求中心：需求实体（原文/附件/人工补充/状态），详情含追溯与覆盖识别 |
 | POST | `/api/v1/requirements/{id}/analyze` | AI 需求分析（11 项结构化输出，待确认事项进入确认流；重新分析自动留档最近 10 次 `analysis_history`，详情页按分析项导航、关键词筛选、分页展示并可回看历史） |
 | POST/DELETE | `/api/v1/requirements/{id}/analysis/confirm` | 人工确认 AI 分析结果 / 取消确认：确认后快照沉淀到项目知识库（规则 / 边界 / 状态 / 权限 → 业务规则库，功能 / 流程 / 前置 / 依赖 / 风险 → 需求文档库），重新分析后需再次确认才更新；取消确认或删除需求时移除 |
+| GET/POST | `/api/v1/requirements/analysis/batch-confirm` | 存量需求分析结果批量确认（`project` 指定项目须有需求编辑权限，不指定则系统管理员对全部项目）：GET 预览待确认 / 已确认 / 未分析条数，POST 把已分析未确认（含确认的是旧版本）的全部确认并后台串行沉淀，未分析 / 已确认的跳过并带原因；需求列表页「批量确认分析结果」按钮 |
 | POST | `/api/v1/requirements/{id}/questions[/{qid}]` | 待确认事项：人工补充 / 确认结论 / 重新打开 |
 | POST | `/api/v1/requirements/{id}/design` | 从需求发起测试设计（任务回挂需求/模块/版本；未确认事项未清则 409） |
 | POST | `/api/v1/requirements/design` | 多条需求合并发起测试设计（`req_ids`，须同一项目、最多 20 条；合并为一份需求文本走同一链路，任务回挂全部需求，上下文 `requirement_ids` / `requirement_titles`） |

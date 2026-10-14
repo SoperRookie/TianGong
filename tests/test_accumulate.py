@@ -155,6 +155,24 @@ async def test_需求中心沉淀_附件与原文_删除恢复(client):
     actions = [x["action"] for x in (await client.get("/api/v1/audit?limit=50")).json()["items"]]
     assert "确认需求分析结果" in actions and "取消需求分析确认" in actions
 
+    # 存量需求批量确认：已分析未确认的确认并沉淀，未分析 / 已确认的跳过
+    await client.post("/api/v1/projects", json={"name": "B2"})
+    app.state.llm = StubLLM([ANALYSIS_REPLY])
+    r1 = (await client.post("/api/v1/requirements", data={"project": "B2", "title": "老需求一", "text": "登录 老原文一"})).json()["req_id"]
+    await client.post(f"/api/v1/requirements/{r1}/analyze", json={})
+    await client.post("/api/v1/requirements", data={"project": "B2", "title": "老需求二", "text": "登录 老原文二"})
+    await app.state.accumulator.drain()
+    pv = (await client.get("/api/v1/requirements/analysis/batch-confirm?project=B2")).json()
+    assert (pv["pending"], pv["confirmed"], pv["no_analysis"]) == (1, 0, 1) and pv["pending_titles"] == ["老需求一"]
+    out = (await client.post("/api/v1/requirements/analysis/batch-confirm", json={"project": "B2"})).json()
+    assert [x["title"] for x in out["confirmed"]] == ["老需求一"] and out["skipped"] == [{"req_id": out["skipped"][0]["req_id"], "title": "老需求二", "reason": "未分析"}]
+    await app.state.accumulator.drain()
+    assert {d.source for d in _docs("B2") if d.origin_ref == r1} == {"需求 老需求一 · 原文", "需求 老需求一 · 已确认分析（规则 / 边界 / 状态 / 权限）",
+                                                                     "需求 老需求一 · 已确认分析（功能 / 流程 / 依赖 / 风险）"}
+    out = (await client.post("/api/v1/requirements/analysis/batch-confirm", json={})).json()  # 全部项目（管理员）：都已确认 / 未分析
+    assert out["confirmed"] == [] and {x["reason"] for x in out["skipped"] if x["title"] == "老需求一"} == {"已确认"}
+    assert "批量确认需求分析结果" in [x["action"] for x in (await client.get("/api/v1/audit?limit=50")).json()["items"]]
+
 
 async def test_项目画像_提炼_确认_全链路注入(client):
     await client.post("/api/v1/projects", json={"name": "C0"})

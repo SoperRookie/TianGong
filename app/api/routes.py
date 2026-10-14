@@ -5059,6 +5059,73 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
     return _req_view(request, item)
 
 
+class AnalysisBatchConfirmBody(BaseModel):
+    project: str | None = None
+
+
+def _batch_confirm_scope(request: Request, project: str | None) -> list[dict]:
+    """批量确认范围：指定项目须有需求编辑权限；不指定则系统管理员对全部项目。"""
+    if project:
+        _require_project(request, project, "requirement.edit")
+        return request.app.state.requirements.list(project=project)
+    _require_admin(request)
+    return request.app.state.requirements.list()
+
+
+def _batch_confirm_classify(request: Request, items: list[dict]) -> dict:
+    rstore = request.app.state.requirements
+    out = {"pending": [], "confirmed": [], "no_analysis": []}
+    for item in items:
+        if not item.get("analysis"):
+            out["no_analysis"].append(item)
+        elif item.get("analysis_confirmed") and not rstore.analysis_confirmed_stale(item):
+            out["confirmed"].append(item)
+        else:
+            out["pending"].append(item)
+    return out
+
+
+@router.get("/api/v1/requirements/analysis/batch-confirm")
+async def preview_batch_confirm_analysis(request: Request, project: str | None = None) -> dict:
+    """批量确认前预览：待确认（含已确认旧版本）/ 已确认 / 未分析 的需求数。"""
+    groups = _batch_confirm_classify(request, _batch_confirm_scope(request, project))
+    return {"project": project, **{k: len(v) for k, v in groups.items()},
+            "pending_titles": [x.get("title") or x["req_id"] for x in groups["pending"][:20]]}
+
+
+@router.post("/api/v1/requirements/analysis/batch-confirm")
+async def batch_confirm_requirement_analysis(request: Request, body: AnalysisBatchConfirmBody | None = None) -> dict:
+    """存量需求的分析结果批量确认并沉淀到知识库：已分析且未确认（或确认的是旧版本）的全部确认，
+    未分析 / 已确认当前版本的跳过；沉淀后台串行执行。"""
+    project = body.project if body else None
+    groups = _batch_confirm_classify(request, _batch_confirm_scope(request, project))
+    rstore = request.app.state.requirements
+    by = _operator(request)
+    confirmed = []
+    for item in groups["pending"]:
+        rstore.confirm_analysis(item["req_id"], by)
+        confirmed.append({"req_id": item["req_id"], "title": item.get("title") or item["req_id"], "project": item["project"]})
+    skipped = ([{"req_id": x["req_id"], "title": x.get("title") or x["req_id"], "reason": "未分析"} for x in groups["no_analysis"]]
+               + [{"req_id": x["req_id"], "title": x.get("title") or x["req_id"], "reason": "已确认"} for x in groups["confirmed"]])
+    if confirmed:
+        acc = _accumulator(request.app)
+        ids = [x["req_id"] for x in confirmed]
+
+        async def _job() -> None:
+            for rid in ids:  # 串行：Embedding 走外部接口，避免并发打爆配额
+                item = rstore.get(rid)
+                if item is not None:
+                    try:
+                        await acc.ingest_requirement_entity(item, by)
+                    except Exception as e:
+                        logger.warning("知识沉淀失败（需求 {}）：{}", rid, e)
+
+        acc.schedule("batch-confirm:" + (project or "*"), _job)
+    request.state.audit_detail = f"确认 {len(confirmed)} 条，跳过 {len(skipped)} 条" + (f"（项目 {project}）" if project else "（全部项目）")
+    logger.info("需求分析结果批量确认：{}，确认 {} 条 / 跳过 {} 条", project or "全部项目", len(confirmed), len(skipped))
+    return {"confirmed": confirmed, "skipped": skipped}
+
+
 @router.post("/api/v1/requirements/{req_id}/analysis/confirm")
 async def confirm_requirement_analysis(request: Request, req_id: str) -> dict:
     """人工确认当前 AI 分析结果：快照留存并沉淀到项目知识库（规则 / 边界 / 状态 / 权限 → 业务规则库，
