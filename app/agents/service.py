@@ -109,6 +109,10 @@ async def run_analysis(
     """
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     chunks = split_text(requirement, chunk_max_chars)
+    if len(chunks) == 1:
+        a = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
+        return AnalysisResult(test_points=a["test_points"], blind_spots=a["blind_spots"],
+                              trace=[{"agent": "需求分析", "model": a["model_name"]}])
     outline = await _outline_for(llm, requirement, chunks, model)
     analyses = await gather_or_cancel(
         [analyze_requirement(llm, chunk, model, knowledge_cases=knowledge_cases, outline=outline,
@@ -269,9 +273,12 @@ async def _analyze_then_generate(
                     "model_name": saved.get("model_name", "")}
         logger.info("断点续跑：复用已保存的拆解结果（{} 个模块）", len(analysis["test_points"]))
     else:
-        analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases,
-                                             outline=outline, chunk_no=chunk_no, chunk_total=chunk_total,
-                                             allow_empty=chunk_total > 1)
+        if chunk_total > 1:
+            analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases,
+                                                 outline=outline, chunk_no=chunk_no, chunk_total=chunk_total,
+                                                 allow_empty=True)
+        else:
+            analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
         if not analysis["test_points"]:  # 分片不含可测内容：本片无产出，不进生成
             return GenerationResult(cases=[], passed=True, review_rounds=0, blind_spots=analysis["blind_spots"],
                                     trace=[{"agent": "需求分析", "model": analysis["model_name"], "empty": True}])
@@ -285,10 +292,10 @@ async def _analyze_then_generate(
         knowledge_refs=knowledge_refs, knowledge_cases=knowledge_cases,
         memory_notes=memory_notes, rule_notes=rule_notes, checkpoint=checkpoint, on_module_done=on_module_done,
     )
-    for spot in analysis["blind_spots"]:
+    for spot in reversed(analysis["blind_spots"]):  # 拆解盲区放最前，且保持拆解时的顺序
         if spot not in result.blind_spots:
             result.blind_spots.insert(0, spot)
-    result.trace = [{"agent": "需求分析", "model": analysis["model_name"]}] + result.trace
+    result.trace = (analysis.get("trace") or [{"agent": "需求分析", "model": analysis["model_name"]}]) + result.trace
     return result
 
 

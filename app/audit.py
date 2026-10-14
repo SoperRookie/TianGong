@@ -86,6 +86,9 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [(m, re.compile(p), k, a) for m
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/design$", "ai", "发起测试设计"),
     ("POST", r"^/api/v1/tasks$", "ai", "创建生成任务"),
     ("PUT", r"^/api/v1/tasks/(?P<target>[^/]+)/project$", "task", "遗留任务归属项目"),
+    ("POST", r"^/api/v1/tasks/batch-delete$", "task", "批量删除任务"),
+    ("DELETE", r"^/api/v1/tasks/(?P<target>[^/]+)$", "task", "删除任务"),
+    ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/restore$", "task", "恢复任务"),
     ("POST", r"^/api/v1/admin/migration/assign$", "task", "批量归属遗留任务"),
     ("POST", r"^/api/v1/projects/(?P<target>[^/]+)/dependencies/edges$", "knowledge", "新增依赖关系"),
     ("POST", r"^/api/v1/projects/(?P<target>[^/]+)/dependencies/edges/[^/]+/confirm$", "knowledge", "确认 AI 识别的依赖"),
@@ -104,7 +107,9 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [(m, re.compile(p), k, a) for m
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/fix$", "ai", "AI 修改测试点"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/add$", "point", "补充测试点"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/gap-check$", "ai", "覆盖查漏"),
+    ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/blind-spots/batch$", "point", "批量处置需求盲区"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/blind-spots/[^/]+$", "point", "处置需求盲区"),
+    ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/dup-pairs/batch$", "point", "批量处置疑似重复测试点"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/dup-pairs/[^/]+$", "point", "处置疑似重复测试点"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/dup-check$", "ai", "测试点查重"),
     ("POST", r"^/api/v1/tasks/(?P<target>[^/]+)/points/manual-batch$", "point", "批量录入人工测试点"),
@@ -212,32 +217,51 @@ def list_logs(*, project: str | None = None, kind: str | None = None, user: str 
               keyword: str | None = None, since: str | None = None, security: bool | None = None,
               visible: set[str] | None = None, me: str | None = None, failed_only: bool = False,
               page: int = 1, page_size: int = 50) -> dict:
-    conds = []
+    """查询日志。kind_counts / users / projects 按「范围」（项目、时间、安全 / 业务、可见性）统计，
+    不随类型 / 操作人 / 关键词 / 只看失败 变化，供筛选下拉显示条数与候选。"""
+    from app.db import wait_persist
+
+    wait_persist()  # 日志走后台写入：刚完成的操作立即打开操作日志也要能看到
+    scope = []
     if project:
-        conds.append(audit_log.c.project == project)
+        scope.append(audit_log.c.project == project)
+    if since:
+        scope.append(audit_log.c.at >= since)
+    if security is not None:
+        scope.append(audit_log.c.security == (1 if security else 0))
+    if visible is not None:
+        # 非管理员：所属项目的业务日志 + 自己的操作；安全日志不可见
+        in_scope = audit_log.c.project.in_(sorted(visible)) if visible else audit_log.c.project == "__none__"
+        scope.append((in_scope | (audit_log.c.user == me)) & (audit_log.c.security == 0))
+    conds = list(scope)
     if kind:
         conds.append(audit_log.c.kind == kind)
     if user:
         conds.append(audit_log.c.user == user)
-    if since:
-        conds.append(audit_log.c.at >= since)
-    if security is not None:
-        conds.append(audit_log.c.security == (1 if security else 0))
     if failed_only:
         conds.append(audit_log.c.status >= 400)
     if keyword:
         kw = f"%{keyword}%"
-        conds.append(audit_log.c.action.like(kw) | audit_log.c.target.like(kw) | audit_log.c.detail.like(kw)
-                     | audit_log.c.path.like(kw))
-    if visible is not None:
-        # 非管理员：所属项目的业务日志 + 自己的操作；安全日志不可见
-        scope = audit_log.c.project.in_(sorted(visible)) if visible else audit_log.c.project == "__none__"
-        conds.append((scope | (audit_log.c.user == me)) & (audit_log.c.security == 0))
+        kinds_hit = [k for k, label in KINDS.items() if keyword in label]
+        cond = (audit_log.c.action.like(kw) | audit_log.c.target.like(kw) | audit_log.c.detail.like(kw)
+                | audit_log.c.path.like(kw) | audit_log.c.user.like(kw) | audit_log.c.project.like(kw)
+                | audit_log.c.ip.like(kw))
+        if kinds_hit:
+            cond = cond | audit_log.c.kind.in_(kinds_hit)
+        conds.append(cond)
     with get_engine().begin() as conn:
         total = conn.execute(select(func.count()).select_from(audit_log).where(*conds)).scalar_one()
+        page = max(1, min(page, -(-total // page_size) or 1))  # 超过总页数时收敛到最后一页
         rows = conn.execute(select(audit_log).where(*conds).order_by(audit_log.c.id.desc())
                             .offset((page - 1) * page_size).limit(page_size)).mappings().all()
-    return {"total": total, "page": page, "page_size": page_size,
+        kind_counts = {k: n for k, n in conn.execute(
+            select(audit_log.c.kind, func.count()).where(*scope).group_by(audit_log.c.kind)).all()}
+        users = sorted(u for (u,) in conn.execute(
+            select(audit_log.c.user).where(*scope).distinct()).all() if u)
+        projects = [] if project else sorted(p for (p,) in conn.execute(
+            select(audit_log.c.project).where(*scope).distinct()).all() if p)
+    return {"total": total, "page": page, "page_size": page_size, "kind_counts": kind_counts,
+            "users": users, "projects": projects,
             "items": [{**dict(r), "kind_label": KINDS.get(r["kind"], r["kind"])} for r in rows]}
 
 

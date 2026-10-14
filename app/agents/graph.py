@@ -57,6 +57,30 @@ def renumber_case_ids(cases: list[dict]) -> None:
         case["case_id"] = cid
 
 
+# UI 检查类用例（只看外观、不验证业务结果）不在生成范围内：提示词已禁止，这里按标题做保守兜底过滤。
+# 只匹配明确的外观词；「显示 / 展示 / 文案 / 置灰 / 隐藏」等常与业务结果同现的词不列入，避免误删。
+_UI_CHECK_RE = re.compile(
+    r"样式|布局|排版|字体|字号|字重|颜色|配色|色值|对齐|间距|边距|像素|px\b|圆角|阴影|透明度|"
+    r"图标(?:显示|样式|大小|尺寸)|动效|动画效果|过渡效果|分辨率|机型适配|屏幕适配|横竖屏|"
+    r"UI\s*(?:检查|展示|显示|效果|样式)|界面(?:展示|显示|效果)(?:正常|正确)|页面(?:展示|显示|效果)(?:正常|正确)|"
+    r"视觉|美观|高亮(?:样式|颜色)|响应式",
+    re.IGNORECASE,
+)
+
+
+def is_ui_check_case(case: dict) -> bool:
+    """标题命中外观检查词即判为 UI 检查类（标题是测试目的的浓缩，步骤 / 预期里出现外观词不算）。"""
+    return bool(_UI_CHECK_RE.search(str(case.get("title", ""))))
+
+
+def drop_ui_check_cases(cases: list[dict]) -> tuple[list[dict], list[dict]]:
+    """返回 (保留, 剔除)。剔除后由调用方重编号。"""
+    kept, removed = [], []
+    for case in cases:
+        (removed if is_ui_check_case(case) else kept).append(case)
+    return kept, removed
+
+
 def merge_fix(current: list[dict], data: dict) -> list[dict]:
     """增量合并定点修正结果（PRD 增量更新）：改动用例按 case_id 覆盖原用例，
     其余原样保留（不依赖模型复述——大用例集下全量回传必然超输出上限）；
@@ -337,6 +361,14 @@ def build_graph(
             if not cases:
                 raise LLMOutputError("用例生成未输出任何用例（模型返回结构异常或被截断）")
             logger.info("用例生成（全量）：{} 条", len(cases))
+        cases, removed = drop_ui_check_cases(cases)
+        if removed:
+            renumber_case_ids(cases)  # 剔除后保持模块内编号连续，否则规则校验会报编号不连续
+            titles = [str(c.get("title", "")) for c in removed]
+            logger.info("剔除 UI 检查类用例 {} 条：{}", len(removed), titles)
+            trace.append({"agent": "UI 检查过滤", "removed": len(removed), "titles": titles})
+            if not cases:
+                raise LLMOutputError("用例生成结果全部为 UI 检查类用例（不在生成范围内），没有可用用例")
         return {"cases": cases, "trace": trace}
 
     async def review(state: OrchestrationState) -> dict:

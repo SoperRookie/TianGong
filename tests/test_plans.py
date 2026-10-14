@@ -446,3 +446,32 @@ async def test_新建轮次指定执行人(client):
     detail = (await client.get(f"/api/v1/plans/{pid}")).json()
     first = next(i for i in detail["items"] if i["item_id"] == items[0])
     assert first["assignee"] == "admin" and first["assign_log"][-1]["prev"] == "zhang"
+
+
+async def test_计划列表_状态计数_执行进度与关键词筛选(client):
+    task_id = await _task_with_approved(client, make_case())
+    a = await _plan(client, name="冒烟 A", owner="alice")
+    b = await _plan(client, name="回归 B", owner="bob")
+    await _plan(client, name="空计划 C")
+    await client.post(f"/api/v1/plans/{a['plan_id']}/cases", json={"task_id": task_id})
+    await client.post(f"/api/v1/plans/{b['plan_id']}/cases", json={"task_id": task_id})
+    run = (await client.post(f"/api/v1/plans/{a['plan_id']}/runs", json={"name": "第一轮冒烟"})).json()
+    item_id = (await client.get(f"/api/v1/plans/{a['plan_id']}")).json()["items"][0]["item_id"]
+    await client.post(f"/api/v1/plans/{a['plan_id']}/runs/{run['run_id']}/results",
+                      json={"items": [{"item_id": item_id, "status": "pass"}]})
+    await client.post(f"/api/v1/plans/{a['plan_id']}/runs/{run['run_id']}/finish", json={})
+    await client.post(f"/api/v1/plans/{b['plan_id']}/runs", json={"name": "回归第一轮"})
+    data = (await client.get("/api/v1/plans", params={"project": "P端", "page": 1, "page_size": 20})).json()
+    assert data["total"] == 3 and sum(data["status_counts"].values()) == 3 and data["owners"] == ["alice", "anonymous", "bob"]  # 未填负责人默认创建人
+    # 执行进度：未执行 / 执行中 / 已结束；非法值 400；状态筛选不影响 status_counts
+    names = lambda r: sorted(p["name"] for p in r["plans"])
+    assert names((await client.get("/api/v1/plans", params={"project": "P端", "run_state": "none"})).json()) == ["空计划 C"]
+    assert names((await client.get("/api/v1/plans", params={"project": "P端", "run_state": "running"})).json()) == ["回归 B"]
+    assert names((await client.get("/api/v1/plans", params={"project": "P端", "run_state": "finished"})).json()) == ["冒烟 A"]
+    assert (await client.get("/api/v1/plans", params={"project": "P端", "run_state": "x"})).status_code == 400
+    r = (await client.get("/api/v1/plans", params={"project": "P端", "status": "archived"})).json()
+    assert r["total"] == 0 and sum(r["status_counts"].values()) == 3
+    # 关键词覆盖轮次名与负责人；分页页大小校验
+    assert names((await client.get("/api/v1/plans", params={"project": "P端", "keyword": "第一轮冒烟"})).json()) == ["冒烟 A"]
+    assert names((await client.get("/api/v1/plans", params={"project": "P端", "keyword": "bob"})).json()) == ["回归 B"]
+    assert (await client.get("/api/v1/plans", params={"project": "P端", "page": 5, "page_size": 20})).json()["page"] == 1

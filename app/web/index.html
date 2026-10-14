@@ -318,6 +318,9 @@ tr.rowlink td { transition:background .1s; }
 .warnline { color:var(--warn); font-size:12.5px; background:var(--warn-bg);
   border:1px solid #f0dfc0; border-radius:var(--radius-s); padding:8px 12px; margin-top:10px; }
 .hint { color:var(--ink-3); font-size:12px; }
+.ref { font-size:12px; color:var(--ink-2); line-height:1.5; word-break:break-all; }
+.ref b { font-weight:600; color:var(--ink); }
+.ref .sep { margin:0 4px; color:var(--ink-3); }
 .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; }
 .filters { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; }
 .filters select { width:auto; }
@@ -928,6 +931,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <textarea id="pdText" rows="3"></textarea>
     <label class="f">测试维度</label>
     <select id="pdDim"></select>
+    <label class="f">需求来源<span class="hint">（设计需求页 › 需求点，如「3.2 登录失败处理 › 密码错误 5 次锁定」，供确认 / 评审时回到需求核对）</span></label>
+    <input type="text" id="pdRef" placeholder="页面或章节 › 条目编号或原文摘录">
   </div>
   <div class="dlg-f">
     <button class="btn ghost" onclick="resolvePoint(null)">取消</button>
@@ -1461,8 +1466,11 @@ const $ = id => document.getElementById(id);
 const DIMENSIONS = ["正常流程","异常流程","输入校验","边界值","状态转换","权限","数据","重复操作","中断","网络"];
 let currentTask = null, editingCase = null, currentView = 'board';
 let detailTab = 'overview', caseTab = 'all', caseModule = '', caseView = 'table', pointView = 'table';
-let ptSub = 'points', ptPage = 1, ptSize = 20, ptModule = '', ptStatus = '', bsPage = 1, bsSize = 20, bsFilter = 'open', bsKw = '';
+let ptSub = 'blind', ptPage = 1, ptSize = 20, ptModule = '', ptStatus = '', bsPage = 1, bsSize = 20, bsFilter = 'open', bsKw = '';
 let dpPage = 1, dpSize = 20, dpFilter = 'open', dpKw = '';
+const bsSel = new Set(), dpSel = new Set();   // 盲区 / 重复对的勾选（跨页保留；切任务清空）
+function selToggle(set, id, checked, render) { if (checked) set.add(id); else set.delete(id); render(); }
+function selSetAll(set, ids, checked, render) { ids.forEach(id => checked ? set.add(id) : set.delete(id)); render(); }
 let casePage = 1, caseSize = 20, casePrio = '', caseKw = '';
 const PT_PAGE_SIZES = [20, 50, 100, 200];
 let lastPointDiff = null, lastCaseDiff = null, lastHints = [];
@@ -1638,7 +1646,7 @@ function rejectInfoLine(s) {
   return `<div class="hint" style="color:var(--danger)">${types} 原因：${esc(s.comment)}${extra?' · '+extra:''}</div>`;
 }
 let _pdResolve = null;
-function askPoint(title, {module=null, point='', dimension=''}={}) {
+function askPoint(title, {module=null, point='', dimension='', ref=''}={}) {
   return new Promise(res => {
     _pdResolve = res;
     $('pdTitle').textContent = title;
@@ -1647,6 +1655,7 @@ function askPoint(title, {module=null, point='', dimension=''}={}) {
     $('pdText').value = point;
     $('pdDim').innerHTML = '<option value="">（未指定）</option>' + DIMENSIONS.map(d=>`<option>${d}</option>`).join('');
     $('pdDim').value = dimension || '';
+    $('pdRef').value = ref || '';
     $('pointDlg').showModal();
   });
 }
@@ -1656,7 +1665,7 @@ function submitPoint() {
   const needModule = $('pdModuleWrap').style.display !== 'none';
   const module = $('pdModule').value.trim();
   if (needModule && !module) return toast('请填写模块名', 'warn');
-  resolvePoint({module, point, dimension: $('pdDim').value});
+  resolvePoint({module, point, dimension: $('pdDim').value, ref: $('pdRef').value.trim()});
 }
 function resolvePoint(v) { $('pointDlg').close(); const r=_pdResolve; _pdResolve=null; r && r(v); }
 let _inResolve = null;
@@ -2190,13 +2199,24 @@ function relTime(iso) {
   return Math.floor(s/86400) + ' 天前';
 }
 let _tasksCache = [];
-let listQuery = '', listStatus = '', listProject = '', listCreator = '';
+let listQuery = '', listStatus = '', listProject = '', listCreator = '', listPage = 1, listSize = 20;
+function listSet(name, value) {
+  if (name === 'page') listPage = value;
+  else if (name === 'size') { listSize = value; listPage = 1; }
+  else if (name === 'status') { listStatus = value; listPage = 1; }
+  else if (name === 'project') { listProject = value; listPage = 1; }
+  else if (name === 'line') { listLine = value; listProject = ''; listPage = 1; }
+  else if (name === 'creator') { listCreator = value; listPage = 1; }
+  else if (name === 'kw') { listQuery = value; listPage = 1; }
+  else if (name === 'reset') { listQuery = ''; listStatus = ''; listProject = ''; listLine = ''; listCreator = ''; listPage = 1; const i = $('taskSearch'); if (i) i.value = ''; }
+  renderTaskListRows();
+}
 let _listInflight = false, _tasksSig = '';
 async function refreshList() {
   if (!curUser || _listInflight) return;  // 未登录暂停轮询；上一轮未返回则跳过（不叠加请求）
   _listInflight = true;
   let data;
-  try { data = await api('/api/v1/tasks'); } catch (e) { return; } finally { _listInflight = false; }
+  try { data = await api('/api/v1/tasks?limit=5000' + (canDelete() ? '&include_deleted=true' : '')); } catch (e) { return; } finally { _listInflight = false; }  // 列表页本地筛选 + 分页，不受默认 50 条截断；有删除权限时连已删除一起拉（「已删除」筛选与恢复）
   const sig = JSON.stringify(data.tasks);
   const changed = sig !== _tasksSig;
   _tasksSig = sig; _tasksCache = data.tasks;
@@ -2218,7 +2238,9 @@ const LIST_FILTERS = [
   ['', '全部'], ['active', '进行中'], ['awaiting_confirmation', '待审核'],
   ['completed', '完成'], ['failed', '失败'],
 ];
-const matchStatus = (t, f) => !f || (f === 'active' ? ['queued','running'].includes(t.status) : t.status === f);
+const listFilters = () => canDelete() ? [...LIST_FILTERS, ['deleted', '已删除']] : LIST_FILTERS;  // 已删除任务只对有删除权限者可见（可恢复）
+const matchStatus = (t, f) => f === 'deleted' ? !!t.deleted_at
+  : !t.deleted_at && (!f || (f === 'active' ? ['queued','running'].includes(t.status) : t.status === f));
 const matchProject = (t, p) => !p || (p === '__none__' ? !t.project : t.project === p);
 let listLine = '';
 const matchLine = (t, l) => !l || (!!t.project && projLineOf(t.project) === l);
@@ -2228,7 +2250,8 @@ function filteredTasks() {
   return _tasksCache.filter(t => matchStatus(t, listStatus) && matchProject(t, listProject) && matchLine(t, listLine) &&
     matchCreator(t, listCreator) &&
     (!q || t.task_id.includes(q) || (t.project||'').toLowerCase().includes(q) ||
-      (t.created_by||'').toLowerCase().includes(q) ||
+      (t.created_by||'').toLowerCase().includes(q) || (t.requirement_title||'').toLowerCase().includes(q) ||
+      (t.error||'').toLowerCase().includes(q) || statusText(t.status).toLowerCase().includes(q) ||
       (t.sources||[]).some(s => s.toLowerCase().includes(q))));
 }
 function renderTaskListPage() {
@@ -2237,32 +2260,36 @@ function renderTaskListPage() {
       <div class="card-h"><h3>任务列表</h3><span class="meta" id="taskTotal"></span>
         <div class="grow">
           <div class="seg" id="listSeg"></div>
-          <select id="lineSel" style="width:120px" onchange="listLine=this.value;listProject='';renderTaskListRows()" title="按业务线筛选"></select>
-          <select id="projectSel" style="width:140px" onchange="listProject=this.value;renderTaskListRows()"></select>
-          <select id="creatorSel" style="width:120px" onchange="listCreator=this.value;renderTaskListRows()"></select>
-          <div class="search" style="width:210px">
+          <select id="lineSel" style="width:120px" onchange="listSet('line', this.value)" title="按业务线筛选"></select>
+          <select id="projectSel" style="width:140px" onchange="listSet('project', this.value)"></select>
+          <select id="creatorSel" style="width:120px" onchange="listSet('creator', this.value)"></select>
+          <div class="search" style="width:230px">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            <input type="text" id="taskSearch" placeholder="搜索任务 / 项目 / 来源…" value="${esc(listQuery)}"
-              oninput="listQuery=this.value;renderTaskListRows()">
+            <input type="search" id="taskSearch" placeholder="搜索任务 / 项目 / 来源 / 需求 / 错误…" value="${esc(listQuery)}"
+              oninput="listSet('kw', this.value)">
           </div>
+          <span class="hint" id="listHint" style="display:none"></span>
+          <button class="btn ghost sm" id="listReset" style="display:none" onclick="listSet('reset')">清除筛选</button>
           ${curProjectName&&can(curProjectName,'case.edit')?`<button class="btn ghost" onclick="createManualTask(curProjectName)" title="不经 AI，直接人工新增或 Excel 导入用例">＋ 人工用例集</button>`:''}
           <button class="btn" onclick="openDrawer()">＋ 新建任务</button>
         </div></div>
       <div class="card-b">
         <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
-          <thead><tr><th style="width:110px">状态</th><th style="width:130px">任务 ID</th><th style="width:140px">项目</th><th>来源</th>
-          <th style="width:100px">创建人</th><th style="width:80px">测试点</th><th style="width:80px">用例数</th><th style="width:60px">修订</th><th style="width:100px">创建时间</th></tr></thead>
+          <thead><tr>${canDelete()?`<th style="width:30px">${allCheckedHtml('tkck', 'tkPage', '全选本页可删除的任务')}</th>`:''}<th style="width:110px">状态</th><th style="width:130px">任务 ID</th><th style="width:140px">项目</th><th>来源</th>
+          <th style="width:100px">创建人</th><th style="width:80px">测试点</th><th style="width:80px">用例数</th><th style="width:60px">修订</th><th style="width:100px">创建时间</th>${canDelete()?'<th style="width:60px">操作</th>':''}</tr></thead>
           <tbody id="taskTbody"></tbody>
         </table></div>
+        <div id="taskPager"></div>
+        <div class="toolbar" id="taskBatch" style="display:none"></div>
       </div></div>`;
   }
   renderTaskListRows();
 }
 function renderTaskListRows() {
   const tasks = filteredTasks();
-  $('listSeg').innerHTML = LIST_FILTERS.map(([v, label]) => {
+  $('listSeg').innerHTML = listFilters().map(([v, label]) => {
     const n = _tasksCache.filter(t => matchStatus(t, v) && matchProject(t, listProject) && matchLine(t, listLine)).length;
-    return `<button class="${listStatus===v?'on':''}" onclick="listStatus='${v}';renderTaskListRows()">${label} ${n}</button>`;
+    return `<button class="${listStatus===v?'on':''}" onclick="listSet('status','${v}')">${label} ${n}</button>`;
   }).join('');
   // 项目过滤下拉：由当前任务集合聚合（保持已选值，轮询不打断）
   if ($('lineSel')) $('lineSel').innerHTML = `<option value="">全部业务线</option>` + (_businessLines||[]).map(l => `<option value="${esc(l)}" ${listLine===l?'selected':''}>${esc(l)}</option>`).join('');
@@ -2274,10 +2301,22 @@ function renderTaskListRows() {
   const creators = [...new Set(_tasksCache.map(t => t.created_by).filter(Boolean))].sort();
   $('creatorSel').innerHTML = `<option value="">全部创建人</option>`
     + creators.map(c => `<option value="${esc(c)}" ${listCreator===c?'selected':''}>${esc(c)}${curUser&&c===curUser.username?'（我）':''}</option>`).join('');
-  $('taskTotal').textContent = `共 ${_tasksCache.length} 个任务`;
-  $('taskTbody').innerHTML = tasks.map(t => `
-    <tr class="rowlink" onclick="openTask('${t.task_id}')">
-      <td><span class="pill ${t.status}">${statusText(t.status)}</span>
+  const alive = _tasksCache.filter(t => !t.deleted_at).length, gone = _tasksCache.length - alive;
+  $('taskTotal').textContent = `共 ${alive} 个任务${gone?`（另有 ${gone} 个已删除）`:''}`;
+  const filtering = !!(listQuery.trim() || listStatus || listProject || listLine || listCreator);
+  $('listHint').style.display = filtering ? '' : 'none'; $('listHint').textContent = filtering ? `筛选出 ${tasks.length} 个` : '';
+  $('listReset').style.display = filtering ? '' : 'none';
+  const pages = Math.max(1, Math.ceil(tasks.length / listSize));
+  if (listPage > pages) listPage = pages;
+  const pageTasks = tasks.slice((listPage - 1) * listSize, listPage * listSize);
+  $('taskPager').innerHTML = tasks.length > PT_PAGE_SIZES[0] || listPage > 1 ? pagerHtml(tasks.length, listPage, listSize, 'listSet', '个') : '';
+  const del = canDelete();
+  for (const id of tkSel) if (!_tasksCache.some(t => t.task_id === id && !t.deleted_at)) tkSel.delete(id);  // 已删除 / 不存在的从勾选集合剔除
+  const deletable = t => del && !t.deleted_at && !['queued','running'].includes(t.status);
+  $('taskTbody').innerHTML = pageTasks.map(t => `
+    <tr class="${t.deleted_at?'':'rowlink'}" ${t.deleted_at?'':`onclick="openTask('${t.task_id}')"`}>
+      ${del?`<td onclick="event.stopPropagation()">${deletable(t)?`<input type="checkbox" class="tkck" data-tid="${t.task_id}" ${tkSel.has(t.task_id)?'checked':''} onchange="tkToggle('${t.task_id}', this.checked)">`:''}</td>`:''}
+      <td>${t.deleted_at?`<span class="pill failed">已删除</span><div class="hint" style="white-space:nowrap" title="${esc(t.deleted_at)}">${esc(t.deleted_by||'')} ${relTime(t.deleted_at)}</div>`:`<span class="pill ${t.status}">${statusText(t.status)}</span>`}
         ${t.progress?`<div class="hint">${progressText(t.progress)} <span class="spin"></span></div>`:''}</td>
       <td><span class="tid-cell">${t.task_id}</span></td>
       <td>${t.project?`<span class="tag">${esc(t.project)}</span>`:'<span class="hint">—</span>'}</td>
@@ -2288,8 +2327,49 @@ function renderTaskListRows() {
       <td>${t.case_count ? `<b>${t.case_count}</b> 条` : '<span class="hint">—</span>'}</td>
       <td>${t.revision_count ? t.revision_count + ' 轮' : '<span class="hint">—</span>'}</td>
       <td class="hint" title="${esc(t.created_at||'')}">${relTime(t.created_at)}</td>
-    </tr>`).join('') || `<tr><td colspan="9"><div class="empty" style="display:flex;flex-direction:column;align-items:center;gap:10px;padding:34px 0">
-      ${owlSvg('idle', 64)}${_tasksCache.length ? '当前筛选下无任务' : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
+      ${del?`<td onclick="event.stopPropagation()"><div class="rowops">
+        ${t.deleted_at?`<button class="btn ghost sm" title="恢复任务：回到列表与详情，用例重新计入统计" onclick="restoreTask('${t.task_id}')">恢复</button>`
+          :deletable(t)?`<button class="ibtn bad" title="删除任务（可在「已删除」里恢复）" onclick="deleteTask('${t.task_id}')">${IC.trash}</button>`
+          :'<span class="hint" title="执行中的任务请先取消再删除">—</span>'}</div></td>`:''}
+    </tr>`).join('') || `<tr><td colspan="${del?11:9}"><div class="empty" style="display:flex;flex-direction:column;align-items:center;gap:10px;padding:34px 0">
+      ${owlSvg('idle', 64)}${_tasksCache.length ? (listStatus==='deleted' ? '没有已删除的任务' : '没有符合筛选条件的任务') : '暂无任务，点击右上角「新建任务」开始'}</div></td></tr>`;
+  renderTaskBatch();
+}
+/* 任务列表删除：勾选跨页保留（Set），表头全选本页；单条 / 批量删除都是逻辑删除，「已删除」筛选里可恢复 */
+const tkSel = new Set();
+function tkToggle(id, on) { on ? tkSel.add(id) : tkSel.delete(id); renderTaskBatch(); }
+function tkPage() { document.querySelectorAll('.tkck').forEach(c => tkToggle(c.dataset.tid, c.checked)); }
+function renderTaskBatch() {
+  const bar = $('taskBatch'); if (!bar) return;
+  bar.style.display = tkSel.size ? '' : 'none';
+  bar.innerHTML = tkSel.size ? `<span class="hint">已勾选 <b>${tkSel.size}</b> 个任务</span>
+    <button class="btn danger sm" onclick="batchDeleteTasks()">批量删除</button>
+    <button class="btn ghost sm" onclick="tkSel.clear(); renderTaskListRows()">取消全选</button>` : '';
+}
+const TASK_DELETE_NOTE = '任务及其测试点 / 用例将从列表与详情隐藏，不再计入用例中心与统计；版本历史与审计留档保留，可在「已删除」筛选里恢复。测试计划里的用例快照不受影响。';
+async function deleteTask(id, fromDetail = false) {
+  if (!await uiConfirm('删除任务', `删除任务 ${id}？${TASK_DELETE_NOTE}`, true)) return;
+  try {
+    await api(`/api/v1/tasks/${id}`, {method:'DELETE'}); tkSel.delete(id);
+    toast('任务已删除，可在任务列表「已删除」里恢复', 'ok');
+    if (fromDetail && currentTask && currentTask.task_id === id) { await refreshList(); backToList(); return; }  // 详情页删除：回到列表 / 来源页
+    await refreshList(); if ($('taskTbody')) renderTaskListRows();
+  } catch (e) { toast('删除失败：' + e.message, 'err'); }
+}
+async function batchDeleteTasks() {
+  const ids = [...tkSel];
+  if (!ids.length) return toast('请先勾选任务', 'warn');
+  if (!await uiConfirm('批量删除任务', `删除选中的 ${ids.length} 个任务？${TASK_DELETE_NOTE}`, true)) return;
+  try {
+    const r = await jpost('/api/v1/tasks/batch-delete', {ids});
+    tkSel.clear();
+    toast(`已删除 ${r.deleted.length} 个` + (r.skipped.length ? `，${r.skipped.length} 个跳过：${[...new Set(r.skipped.map(x => x.reason))].join('；')}` : ''), r.skipped.length ? 'warn' : 'ok');
+    await refreshList(); if ($('taskTbody')) renderTaskListRows();
+  } catch (e) { toast('批量删除失败：' + e.message, 'err'); }
+}
+async function restoreTask(id) {
+  try { await jpost(`/api/v1/tasks/${id}/restore`, {}); toast('任务已恢复', 'ok'); await refreshList(); if ($('taskTbody')) renderTaskListRows(); }
+  catch (e) { toast('恢复失败：' + e.message, 'err'); }
 }
 function backToList() {
   currentTask = null;
@@ -2348,7 +2428,8 @@ async function openTask(id, keepLocal) {
   if (!keepLocal) {
     lastPointDiff = null; lastCaseDiff = null; lastHints = [];
     caseTab = 'all'; caseModule = ''; expandedSteps = new Set(); pointView = 'table';
-    ptSub = 'points'; ptPage = 1; ptModule = ''; ptStatus = ''; bsPage = 1; bsFilter = 'open'; bsKw = ''; dpPage = 1; dpFilter = 'open'; dpKw = '';
+    ptSub = 'blind'; ptPage = 1; ptModule = ''; ptStatus = ''; bsPage = 1; bsFilter = 'open'; bsKw = ''; dpPage = 1; dpFilter = 'open'; dpKw = '';
+    bsSel.clear(); dpSel.clear();
     casePage = 1; casePrio = ''; caseKw = '';
     detailTab = currentTask.status === 'awaiting_confirmation' ? 'points'
       : ((currentTask.result && currentTask.result.cases && currentTask.result.cases.length) || ((currentTask.context||{}).manual && currentTask.status==='completed')) ? 'cases' : 'overview';
@@ -2390,6 +2471,7 @@ function _renderDetail__impl() {
       ${t.progress?'<span class="hint">'+progressText(t.progress)+' <span class="spin"></span></span>':''}
       <div class="grow">
         ${running?'<button class="btn ghost sm" onclick="cancelTask()">取消任务</button>':''}
+        ${!running&&canDelete()?`<button class="btn ghost sm" style="color:var(--danger)" onclick="deleteTask(${jsq(t.task_id)}, true)" title="删除任务（可在任务列表「已删除」里恢复）">删除任务</button>`:''}
         <span class="hint">${t.created_by?esc(t.created_by)+' · ':''}${(t.context||{}).requirement_title?esc(t.context.requirement_title):(srcText_(t.sources)||'-')} · ${relTime(t.created_at)}</span></div>
     </div>
     ${t.error?`<div class="card-b" style="color:var(--danger);padding-top:0;display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span>${esc(t.error)}</span>${resumeHint(t)}${t.resume&&t.resume.resumable?`<button class="btn sm" onclick="retryTask()">${resumeLabel(t)}</button>`:''}</div>`:''}
@@ -2600,6 +2682,13 @@ async function loadOvPlans(taskId) {
 
 /* ==================== 测试点审核 ==================== */
 const normPoint = p => typeof p === 'string' ? {point:p, tp_id:'', status:'pending', legacy:true} : p;
+/* 设计需求页来源（ref）：「页面或章节 › 需求点」，页面段加粗便于按页核对；旧数据没有分隔符时整段展示 */
+function refHtml(ref, empty='<span class="hint" title="该测试点没有记录需求来源，可通过「修改」补上">—</span>') {
+  if (!ref) return empty;
+  const i = ref.indexOf('›');
+  const page = i > 0 ? ref.slice(0, i).trim() : '', item = i > 0 ? ref.slice(i + 1).trim() : ref.trim();
+  return `<span class="ref" title="${esc(ref)}">${page?`<b>${esc(page)}</b><span class="sep">›</span>`:''}${esc(item)}</span>`;
+}
 function allPoints(t) {
   const modules = (t.analysis||{}).test_points || [];
   return modules.flatMap(m => (m.points||[]).map(p => ({...normPoint(p), module:m.module})));
@@ -2612,6 +2701,14 @@ const srcChip = src => src === 'manual' || src === 'blind_spot'
 const pStatusText = {pending:'待审核', approved:'已通过', rejected:'已驳回'};
 
 /* 通用分页条：total 总数、page 当前页、size 每页、set(name, value) 回调表达式 */
+/* 列表全选 / 取消（DOM 态勾选的列表）：表头复选框「全选本页」，取消即清空；after 为勾选变化后的回调 */
+function checkAll(cls, checked, after) {
+  document.querySelectorAll(`.${cls}:not(:disabled)`).forEach(c => c.checked = !!checked);
+  if (after) after();
+}
+function allCheckedHtml(cls, after='', title='全选本页') {
+  return `<input type="checkbox" title="${title}" onclick="checkAll('${cls}', this.checked${after?`, ${after}`:''})">`;
+}
 function pagerHtml(total, page, size, setExpr, unit='条') {
   const pages = Math.max(1, Math.ceil(total / size));
   const first = total ? (page - 1) * size + 1 : 0, last = Math.min(page * size, total);
@@ -2668,11 +2765,11 @@ function renderPointWorkbench(t) {
   const bsAll = t.blind_spots || [], bsOpen = bsAll.filter(b=>b.status==='open').length;
   const dpAll = t.dup_pairs || [], dpOpen = dpAll.filter(p=>p.status==='open').length;
 
-  // 子页签：测试点 / 需求盲区 / 疑似重复 三张独立列表，各自筛选与分页
+  // 子页签：需求盲区 / 疑似重复 / 测试点 三张独立列表，各自筛选与分页；打开任务默认落在需求盲区（先清盲区与重复，再审测试点）
   const sub = `<div class="seg" style="margin-bottom:10px">
-    <button class="${ptSub==='points'?'on':''}" onclick="ptSub='points';renderDetail()">测试点 <span class="cnt">${pts.length}</span></button>
     <button class="${ptSub==='blind'?'on':''}" onclick="ptSub='blind';renderDetail()">需求盲区 <span class="cnt ${bsOpen?'hot':''}">${bsOpen?bsOpen+' 待处置':bsAll.length}</span></button>
     <button class="${ptSub==='dup'?'on':''}" onclick="ptSub='dup';renderDetail()">疑似重复 <span class="cnt ${dpOpen?'hot':''}">${dpOpen?dpOpen+' 待处置':dpAll.length}</span></button>
+    <button class="${ptSub==='points'?'on':''}" onclick="ptSub='points';renderDetail()">测试点 <span class="cnt">${pts.length}</span></button>
   </div>`;
   if (ptSub === 'blind') return sub + renderBlindSpots(t);
   if (ptSub === 'dup') return sub + renderDupPairs(t, confirmable);
@@ -2690,6 +2787,7 @@ function renderPointWorkbench(t) {
           ${(p.warnings||[]).map(w=>`<div class="hint" style="color:var(--warn)">⚠ ${esc(w)}</div>`).join('')}
           ${editingHint('point', p.tp_id)}
           ${rejectInfoLine(p)}</td>
+        <td style="width:170px">${refHtml(p.ref)}</td>
         <td style="width:84px">${p.dimension?`<span class="tag">${esc(p.dimension)}</span>`:'<span class="hint">—</span>'}</td>
         <td style="width:76px">${p.legacy?'':srcChip(p.source||'ai')}</td>
         <td style="width:92px"><span class="st ${p.status}">${pStatusText[p.status]||p.status}</span>
@@ -2710,7 +2808,7 @@ function renderPointWorkbench(t) {
       lastMod = p.module;
       const m = modules.find(x => x.module === p.module) || {points: []};
       const onPage = pageItems.filter(x => x.module === p.module).length;
-      rows += `<tr class="module-head"><td colspan="7">
+      rows += `<tr class="module-head"><td colspan="8">
         <label class="check"><input type="checkbox" onclick="toggleModule(${jsq(p.module)},this.checked)">
         ${esc(p.module)}　<span class="hint">${(m.points||[]).length} 条${onPage<(m.points||[]).length?` · 本页 ${onPage} 条`:''}</span></label></td></tr>`;
     }
@@ -2745,8 +2843,8 @@ function renderPointWorkbench(t) {
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
     ${pts.length && pts.every(p=>p.legacy) ? '<div class="hint" style="margin:6px 0">项目化之前的旧版任务：测试点为只读留档，不支持审核操作</div>' : ''}
     ${pointView==='mind' ? renderPointMind(t, modules, confirmable) : filters + `<div class="tbl-wrap"><table>
-      <tr><th></th><th>编号</th><th>测试点</th><th>维度</th><th>来源</th><th>状态</th><th>操作</th></tr>
-      ${rows || `<tr><td colspan="7"><div class="empty">${pts.length?'没有符合筛选条件的测试点':'暂无测试点'}</div></td></tr>`}
+      <tr><th>${pts.some(p=>!p.legacy)?allCheckedHtml('ptck', 'renderBatchBar', '全选本页测试点（批量通过 / 驳回）'):''}</th><th>编号</th><th>测试点</th><th title="设计需求页来源：页面或章节 › 需求点，用于确认与评审时回到需求核对逻辑">需求来源</th><th>维度</th><th>来源</th><th>状态</th><th>操作</th></tr>
+      ${rows || `<tr><td colspan="8"><div class="empty">${pts.length?'没有符合筛选条件的测试点':'暂无测试点'}</div></td></tr>`}
     </table></div>` + (filtered.length > PT_PAGE_SIZES[0] || ptPage > 1 ? pagerHtml(filtered.length, ptPage, ptSize, 'ptSet') : '')}
     ${t.pending_fix&&t.pending_fix.kind==='points'?renderFixProposals(t.pending_fix)
       :rejected&&confirmable?`<div class="toolbar"><button class="btn soft sm" onclick="fixPoints()" id="fixPtBtn">AI 修改驳回项（${rejected}）</button>
@@ -2770,6 +2868,7 @@ function buildPointMinderJson(t, modules) {
       children: (m.points||[]).map(normPoint).map(p => ({
         data: {text: p.point, kind: 'point', tpId: p.tp_id, resource: [p.tp_id, ...(p.dimension ? [p.dimension] : []), label[p.status] || p.status]},
         children: [
+          ...(p.ref ? [{data: {text: `来源：${p.ref}`, kind: 'note', resource: ['需求来源']}}] : []),
           ...(p.status === 'rejected' && (p.comment || p.fix_request) ? [{data: {text: `驳回：${p.comment || ''}${p.fix_request ? '｜要求：' + p.fix_request : ''}`, kind: 'note', resource: ['驳回意见']}}] : []),
           ...((p.warnings||[]).map(w => ({data: {text: w, kind: 'note', resource: ['提示']}}))),
         ],
@@ -2793,7 +2892,7 @@ function renderPointMind(t, modules, confirmable) {
       <button class="btn ghost sm" onclick="mExpand()">展开全部</button>
     </div>
     <div class="minder-box" id="pointMinder"></div>
-    <div class="hint" style="margin-top:8px">结构：需求 → 模块 → 测试点（编号 / 维度 / 状态）→ 驳回意见与提示。${confirmable ? '选中节点后用上方按钮审核，双击节点直接修改；通过即锁定为正式测试点。' : '该任务已完成生成，脑图为留档视图。'}</div>`;
+    <div class="hint" style="margin-top:8px">结构：需求 → 模块 → 测试点（编号 / 维度 / 状态）→ 需求来源、驳回意见与提示。${confirmable ? '选中节点后用上方按钮审核，双击节点直接修改；通过即锁定为正式测试点。' : '该任务已完成生成，脑图为留档视图。'}</div>`;
 }
 function pmNode() {
   const n = _minder && _minder.getSelectedNode();
@@ -2835,7 +2934,13 @@ function renderBlindSpots(t) {
       ${canReview?`<button class="btn ghost sm" onclick="bsExplain(${jsq(b.bs_id)})" title="需求其他地方已经写明，不是盲区">需求已说明</button>
       <button class="btn ghost sm" onclick="bsIgnore(${jsq(b.bs_id)})">忽略</button>`:''}`
     : canReview ? `<button class="btn ghost sm" onclick="bsAct(${jsq(b.bs_id)},'reopen')">重开</button>` : '';
-  const rows = pageItems.map((b, i) => `<tr>
+  for (const id of [...bsSel]) if (!items.some(b => b.bs_id === id)) bsSel.delete(id);
+  const selectable = b => b.status === 'open' ? (canReview || canEdit) : canReview;   // 待处置可批量处置；已处置可批量重开
+  const pageIds = pageItems.filter(selectable).map(b => b.bs_id), allIds = filtered.filter(selectable).map(b => b.bs_id);
+  const pageAll = pageIds.length > 0 && pageIds.every(id => bsSel.has(id));
+  const sel = items.filter(b => bsSel.has(b.bs_id)), selOpen = sel.filter(b => b.status === 'open'), selDone = sel.filter(b => b.status !== 'open');
+  const rows = pageItems.map((b, i) => `<tr class="${bsSel.has(b.bs_id)?'mine':''}">
+      <td style="width:30px">${selectable(b)?`<input type="checkbox" ${bsSel.has(b.bs_id)?'checked':''} onchange="selToggle(bsSel, ${jsq(b.bs_id)}, this.checked, renderDetail)">`:''}</td>
       <td style="width:50px" class="hint">${(bsPage - 1) * bsSize + i + 1}</td>
       <td>${esc(b.text)}${b.stale?' <span class="tag">已不在当前拆解结果</span>':''}${b.ai_resolved&&b.status==='explained'?' <span class="tag">AI 复核</span>':''}
         ${b.note?`<div class="hint">${esc(b.note)}</div>`:''}${tgt(b)}</td>
@@ -2843,21 +2948,32 @@ function renderBlindSpots(t) {
       <td style="width:150px" class="hint">${b.by?`${esc(b.by)}${b.at?`<div>${esc(fmtTime(b.at))}</div>`:''}`:'—'}</td>
       <td style="width:300px"><div class="rowops" style="flex-wrap:wrap;gap:4px">${ops(b)}</div></td>
     </tr>`).join('');
+  const batch = sel.length ? `<div class="toolbar" style="margin:0 0 8px;padding:8px 10px;background:var(--line-2);border-radius:8px;flex-wrap:wrap">
+      <span>已选 <b>${sel.length}</b> 条${selOpen.length&&selDone.length?`<span class="hint">（待处置 ${selOpen.length} · 已处置 ${selDone.length}）</span>`:''}</span>
+      ${selOpen.length?`
+        ${canEdit&&hasReq?`<button class="btn ghost sm" onclick="bsBatch('to_question')">批量转待确认事项</button>`:''}
+        ${canEdit?`<button class="btn ghost sm" onclick="bsBatch('to_point')">批量转测试点</button>`:''}
+        ${canReview?`<button class="btn ghost sm" onclick="bsBatch('explain')">批量需求已说明</button>
+        <button class="btn ghost sm" onclick="bsBatch('ignore')">批量忽略</button>`:''}`:''}
+      ${selDone.length&&canReview?`<button class="btn ghost sm" onclick="bsBatch('reopen')">批量重开</button>`:''}
+      <button class="btn ghost sm" style="margin-left:auto" onclick="bsSel.clear(); renderDetail()">取消全选</button></div>` : '';
   return `<div class="toolbar" style="margin-top:0">
       <span class="hint">AI 标出的需求含糊 / 缺失处 · 共 ${items.length} 条 · 待处置 <b style="color:${open.length?'var(--warn)':'var(--ok)'}">${open.length}</b>${aiResolved?` · ${aiResolved} 条经分片复核已被需求其他部分说明`:''}</span>
       <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <input type="search" placeholder="搜索盲区 / 处置说明 / 去向" value="${esc(bsKw)}" style="width:200px"
           onchange="bsSet('kw', this.value)" onkeydown="if(event.key==='Enter'){bsSet('kw', this.value)}">
         ${kw?`<span class="hint">命中 ${filtered.length} 条</span>`:''}
+        ${allIds.length>pageIds.length?`<button class="btn ghost sm" onclick="selSetAll(bsSel, JSON.parse(${jsq(JSON.stringify(allIds))}), true, renderDetail)" title="勾选当前筛选结果的全部 ${allIds.length} 条（含其他页）">全选全部 ${allIds.length} 条</button>`:''}
         <div class="seg">
         ${[['open','待处置'],['all','全部'],['question','已转待确认事项'],['point','已转测试点'],['explained','需求已说明'],['ignored','已忽略']]
           .filter(([k]) => k==='open' || k==='all' || counts[k])
           .map(([k,v])=>`<button class="${bsFilter===k?'on':''}" onclick="bsSet('filter',${jsq(k)})">${v}${k==='all'?'':` ${counts[k]||0}`}</button>`).join('')}
         </div></div></div>
-    <div class="hint" style="margin:0 0 8px">处置去向：<b>转待确认事项</b> = 需求本身缺规则，交需求负责人补结论；<b>转测试点</b> = 可直接验证，进入测试点审核；<b>需求已说明</b> = 其他章节已写明，不是盲区（写出处）；<b>忽略</b> = 与本次无关。处置后可重开。</div>
+    <div class="hint" style="margin:0 0 8px">处置去向：<b>转待确认事项</b> = 需求本身缺规则，交需求负责人补结论；<b>转测试点</b> = 可直接验证，进入测试点审核；<b>需求已说明</b> = 其他章节已写明，不是盲区（写出处）；<b>忽略</b> = 与本次无关。处置后可重开。勾选后可批量处置。</div>
+    ${batch}
     <div class="tbl-wrap"><table>
-      <tr><th>#</th><th>盲区</th><th>状态</th><th>处置人</th><th>操作</th></tr>
-      ${rows || `<tr><td colspan="5"><div class="empty">${!items.length ? '本次拆解没有标出需求盲区' : kw ? '没有符合搜索条件的盲区' : bsFilter==='open' ? '全部盲区已处置' : '该状态下没有盲区'}</div></td></tr>`}
+      <tr><th>${pageIds.length?`<input type="checkbox" title="全选本页" ${pageAll?'checked':''} onclick="selSetAll(bsSel, JSON.parse(${jsq(JSON.stringify(pageIds))}), this.checked, renderDetail)">`:''}</th><th>#</th><th>盲区</th><th>状态</th><th>处置人</th><th>操作</th></tr>
+      ${rows || `<tr><td colspan="6"><div class="empty">${!items.length ? '本次拆解没有标出需求盲区' : kw ? '没有符合搜索条件的盲区' : bsFilter==='open' ? '全部盲区已处置' : '该状态下没有盲区'}</div></td></tr>`}
     </table></div>
     ${filtered.length > PT_PAGE_SIZES[0] || bsPage > 1 ? pagerHtml(filtered.length, bsPage, bsSize, 'bsSet') : ''}`;
 }
@@ -2889,6 +3005,33 @@ async function bsExplain(bsId) {
   if (!note) return;
   const r = await bsAct(bsId, 'explain', {note});
   if (r) toast('已标记为需求已说明，不再视为盲区', 'ok');
+}
+async function bsBatch(action) {
+  const sel = (currentTask.blind_spots||[]).filter(b => bsSel.has(b.bs_id));
+  const ids = (action === 'reopen' ? sel.filter(b => b.status !== 'open') : sel.filter(b => b.status === 'open')).map(b => b.bs_id);
+  if (!ids.length) return toast('没有可执行该操作的盲区', 'warn');
+  const body = {action, ids};
+  if (action === 'to_question') {
+    const ctx = currentTask.context || {};
+    const rids = (ctx.requirement_ids && ctx.requirement_ids.length ? ctx.requirement_ids : [ctx.requirement_id]).filter(Boolean);
+    const titles = ctx.requirement_titles || [ctx.requirement_title];
+    const v = await askBlindQuestion(`${ids.length} 条盲区（逐条写入）`, rids.map((id,i)=>({id, title: titles[i]||id})));
+    if (!v) return; Object.assign(body, v);
+  } else if (action === 'to_point') {
+    const v = await askPoint(`${ids.length} 条盲区转为测试点（每条用盲区原文做测试点）`, {module:'需求盲区', point: '（逐条沿用盲区原文）'});
+    if (!v) return; body.module = v.module; body.dimension = v.dimension;
+  } else if (action === 'explain') {
+    const note = await askInput('批量标记需求已说明', `${ids.length} 条 · 统一写明需求哪里说明了（章节 / 原文片段）`, '');
+    if (!note) return; body.note = note;
+  } else if (action === 'ignore') {
+    if (!await uiConfirm('批量忽略盲区', `忽略选中的 ${ids.length} 条盲区？忽略后可重开。`)) return;
+  }
+  try {
+    const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/blind-spots/batch`, body);
+    bsSel.clear();
+    toast(`已处置 ${r.applied.length} 条${r.skipped.length?`，${r.skipped.length} 条跳过：${[...new Set(r.skipped.map(x=>x.reason))].join('；')}`:''}`, r.skipped.length?'warn':'ok');
+    await openTask(currentTask.task_id, true);
+  } catch (e) { toast('批量处置失败：' + e.message, 'err'); }
 }
 async function bsIgnore(bsId) {
   if (!await uiConfirm('忽略盲区', '与本次测试无关或无需处理？忽略后可在「查看已处置」里重开。')) return;
@@ -2926,7 +3069,13 @@ function renderDupPairs(t, confirmable) {
   const pageItems = filtered.slice((dpPage - 1) * dpSize, dpPage * dpSize);
   const stCls = {open:'pending', ignored:'rejected', resolved:'approved'};
   const side = (id, text, p) => `<b class="cid">${esc(id)}</b>${(p.deleted||[]).includes(id)?' <span class="tag">已删除</span>':''}<div>${esc(text)}</div>`;
-  const rows = pageItems.map((p, i) => `<tr>
+  for (const k of [...dpSel]) if (!items.some(p => p.key === k)) dpSel.delete(k);
+  const selectable = p => canReview && (p.status === 'open' || p.status === 'ignored');
+  const pageKeys = pageItems.filter(selectable).map(p => p.key), allKeys = filtered.filter(selectable).map(p => p.key);
+  const pageAll = pageKeys.length > 0 && pageKeys.every(k => dpSel.has(k));
+  const sel = items.filter(p => dpSel.has(p.key)), selOpen = sel.filter(p => p.status === 'open'), selIgn = sel.filter(p => p.status === 'ignored');
+  const rows = pageItems.map((p, i) => `<tr class="${dpSel.has(p.key)?'mine':''}">
+      <td style="width:30px">${selectable(p)?`<input type="checkbox" ${dpSel.has(p.key)?'checked':''} onchange="selToggle(dpSel, ${jsq(p.key)}, this.checked, renderDetail)">`:''}</td>
       <td style="width:40px" class="hint">${(dpPage - 1) * dpSize + i + 1}</td>
       <td>${side(p.a, p.a_point, p)}</td>
       <td>${side(p.b, p.b_point, p)}</td>
@@ -2942,6 +3091,11 @@ function renderDupPairs(t, confirmable) {
         : p.status==='ignored' && canReview ? `<button class="btn ghost sm" onclick="dpAct(${jsq(p.key)},'reopen')">重开</button>` : ''}
       </div></td>
     </tr>`).join('');
+  const batch = sel.length ? `<div class="toolbar" style="margin:0 0 8px;padding:8px 10px;background:var(--line-2);border-radius:8px;flex-wrap:wrap">
+      <span>已选 <b>${sel.length}</b> 组${selOpen.length&&selIgn.length?`<span class="hint">（待处置 ${selOpen.length} · 已忽略 ${selIgn.length}）</span>`:''}</span>
+      ${selOpen.length?`<button class="btn ghost sm" onclick="dpBatch('ignore')">批量忽略</button>`:''}
+      ${selIgn.length?`<button class="btn ghost sm" onclick="dpBatch('reopen')">批量重开</button>`:''}
+      <button class="btn ghost sm" style="margin-left:auto" onclick="dpSel.clear(); renderDetail()">取消全选</button></div>` : '';
   return `<div class="toolbar" style="margin-top:0">
       <span class="hint">文字初筛 + AI 语义复核 · 共 ${items.length} 组 · 待处置 <b style="color:${open.length?'var(--warn)':'var(--ok)'}">${open.length}</b> · AI 不删除，由人工处置</span>
       <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -2949,15 +3103,17 @@ function renderDupPairs(t, confirmable) {
         <input type="search" placeholder="搜索编号 / 测试点 / 原因" value="${esc(dpKw)}" style="width:190px"
           onchange="dpSet('kw', this.value)" onkeydown="if(event.key==='Enter'){dpSet('kw', this.value)}">
         ${kw?`<span class="hint">命中 ${filtered.length} 组</span>`:''}
+        ${allKeys.length>pageKeys.length?`<button class="btn ghost sm" onclick="selSetAll(dpSel, JSON.parse(${jsq(JSON.stringify(allKeys))}), true, renderDetail)" title="勾选当前筛选结果的全部 ${allKeys.length} 组（含其他页）">全选全部 ${allKeys.length} 组</button>`:''}
         <div class="seg">
         ${[['open','待处置'],['all','全部'],['ignored','已忽略'],['resolved','已处置']]
           .filter(([k]) => k==='open' || k==='all' || counts[k])
           .map(([k,v])=>`<button class="${dpFilter===k?'on':''}" onclick="dpSet('filter',${jsq(k)})">${v}${k==='all'?'':` ${counts[k]||0}`}</button>`).join('')}
         </div></div></div>
     <div class="hint" style="margin:0 0 8px">处置去向：<b>删除其中一条</b>（进回收站，可恢复，该组自动变为已处置）；<b>忽略</b> = 人工判定不重复或都需保留；修改测试点文本后点「重新检查」刷新。</div>
+    ${batch}
     <div class="tbl-wrap"><table>
-      <tr><th>#</th><th>测试点 A</th><th>测试点 B</th><th>相似度 / 判定</th><th>原因 / 建议</th><th>状态</th><th>操作</th></tr>
-      ${rows || `<tr><td colspan="7"><div class="empty">${!items.length ? (t.dup_report ? '重复检查未发现疑似重复测试点' : '尚未执行重复检查') : kw ? '没有符合搜索条件的重复对' : dpFilter==='open' ? '全部疑似重复已处置' : '该状态下没有重复对'}</div></td></tr>`}
+      <tr><th>${pageKeys.length?`<input type="checkbox" title="全选本页" ${pageAll?'checked':''} onclick="selSetAll(dpSel, JSON.parse(${jsq(JSON.stringify(pageKeys))}), this.checked, renderDetail)">`:''}</th><th>#</th><th>测试点 A</th><th>测试点 B</th><th>相似度 / 判定</th><th>原因 / 建议</th><th>状态</th><th>操作</th></tr>
+      ${rows || `<tr><td colspan="8"><div class="empty">${!items.length ? (t.dup_report ? '重复检查未发现疑似重复测试点' : '尚未执行重复检查') : kw ? '没有符合搜索条件的重复对' : dpFilter==='open' ? '全部疑似重复已处置' : '该状态下没有重复对'}</div></td></tr>`}
     </table></div>
     ${filtered.length > PT_PAGE_SIZES[0] || dpPage > 1 ? pagerHtml(filtered.length, dpPage, dpSize, 'dpSet', '组') : ''}`;
 }
@@ -2967,6 +3123,18 @@ async function dpAct(key, action, body={}) {
     await openTask(currentTask.task_id, true);
     return r;
   } catch (e) { toast('处置失败：' + e.message, 'err'); return null; }
+}
+async function dpBatch(action) {
+  const sel = (currentTask.dup_pairs||[]).filter(p => dpSel.has(p.key));
+  const keys = sel.filter(p => action === 'ignore' ? p.status === 'open' : p.status === 'ignored').map(p => p.key);
+  if (!keys.length) return toast('没有可执行该操作的重复对', 'warn');
+  if (action === 'ignore' && !await uiConfirm('批量忽略疑似重复', `人工判定选中的 ${keys.length} 组都不重复或都需保留？忽略后可重开。`)) return;
+  try {
+    const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/points/dup-pairs/batch`, {action, keys});
+    dpSel.clear();
+    toast(`已处置 ${r.applied.length} 组${r.skipped.length?`，${r.skipped.length} 组跳过`:''}`, r.skipped.length?'warn':'ok');
+    await openTask(currentTask.task_id, true);
+  } catch (e) { toast('批量处置失败：' + e.message, 'err'); }
 }
 async function dpIgnore(key) {
   if (!await uiConfirm('忽略疑似重复', '人工判定这两条不重复或都需保留？忽略后可在「已忽略」里重开。')) return;
@@ -3056,9 +3224,9 @@ async function pointModify(tp) {
   jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'start'})
     .then(d => { if (d.holder) toast(`${d.holder.by} 正在编辑此测试点，注意保存冲突`, 'warn'); })
     .catch(()=>{});
-  const v = await askPoint('修改测试点 ' + tp, {point: p?p.point:'', dimension: p?p.dimension:''});
+  const v = await askPoint('修改测试点 ' + tp, {point: p?p.point:'', dimension: p?p.dimension:'', ref: p?p.ref:''});
   jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'stop'}).catch(()=>{});
-  if (v) pointsReview([{tp_id:tp, action:'modify', point:v.point, dimension:v.dimension,
+  if (v) pointsReview([{tp_id:tp, action:'modify', point:v.point, dimension:v.dimension, ref:v.ref,
                         base_version: (p&&p.version)||1}]);
 }
 function toggleModule(mod, checked) {
@@ -3145,8 +3313,10 @@ function renderCases(t) {
   const canEditCases = can((t.context||{}).project, 'case.edit') && t.status === 'completed';
   const canReview = can((t.context||{}).project, 'case.review');
   const modules = [...new Set(r.cases.map(c=>c.module))];
+  const ptMap = new Map(allPoints(t).map(p => [p.tp_id, p]));  // 用例的来源测试点 → 设计需求页来源，评审时回到需求核对
+  const refsOf = c => [...new Set((c.point_ids||[]).map(x => (ptMap.get(x)||{}).ref).filter(Boolean))];
   const kw = caseKw.toLowerCase();
-  const hit = c => !kw || [c.case_id, c.title, c.module, c.keywords, c.precondition, c.remark, ...(c.point_ids||[]),
+  const hit = c => !kw || [c.case_id, c.title, c.module, c.keywords, c.precondition, c.remark, ...(c.point_ids||[]), ...refsOf(c),
     ...(c.steps||[]).flatMap(st=>[st.action, st.expected])].some(x => String(x||'').toLowerCase().includes(kw));
   const visible = r.cases.filter(c =>
     (caseTab==='all' || caseState(t, c).status===caseTab) &&
@@ -3165,7 +3335,8 @@ function renderCases(t) {
       <td style="width:80px">${esc(c.module)}</td>
       <td style="min-width:180px">${esc(c.title)}
         ${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}
-        ${(c.point_ids||[]).length?`<div class="hint" title="来源测试点">${c.point_ids.map(x=>`<code>${esc(x)}</code>`).join(' ')}</div>`:''}
+        ${(c.point_ids||[]).length?`<div class="hint" title="来源测试点">${c.point_ids.map(x=>`<code title="${esc((ptMap.get(x)||{}).point||'')}">${esc(x)}</code>`).join(' ')}</div>
+        ${refsOf(c).length?`<div class="hint">需求来源：${refsOf(c).map(x=>refHtml(x)).join('<span class="hint">；</span>')}</div>`:''}`:''}
         ${editingHint('case', c.uid)}
         ${rejectInfoLine(s)}</td>
       <td style="width:44px"><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
@@ -3213,7 +3384,7 @@ function renderCases(t) {
       </div></div>
     ${t.pending_fix&&t.pending_fix.kind==='cases'?renderFixProposals(t.pending_fix):''}
     ${caseView==='mind' ? renderCaseMind(t, visible) : `<div class="toolbar" style="margin:6px 0 0">${stepsToggleHtml()}<span class="hint">操作步骤 / 预期结果</span></div><div class="tbl-wrap"><table>
-      <tr><th><input type="checkbox" class="allck" onclick="document.querySelectorAll('.cck').forEach(c=>c.checked=this.checked)"></th>
+      <tr><th><input type="checkbox" class="allck" title="全选本页用例" onclick="checkAll('cck', this.checked, renderBatchBar)"></th>
       <th>编号 / 版本</th><th>模块</th><th>标题 / 关键词</th><th>优先级</th><th>操作步骤</th><th>预期结果</th><th>状态</th><th>操作</th></tr>
       ${rows || `<tr><td colspan="9"><div class="empty">${r.cases.length?'该筛选下暂无用例':'暂无用例'}</div></td></tr>`}</table></div>` + (visible.length > PT_PAGE_SIZES[0] || casePage > 1 ? pagerHtml(visible.length, casePage, caseSize, 'caseSet') : '')}
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
@@ -3627,6 +3798,7 @@ function renderFixProposals(pf) {
     <div class="toolbar">
       <button class="btn" onclick="confirmFix(false)">应用所选</button>
       <button class="btn ghost" onclick="confirmFix(true)">全部拒绝</button>
+      <label class="check" style="margin-left:auto">${allCheckedHtml('fpck', '', '全选 / 取消全部提案')} 全选 / 取消</label>
     </div>`;
 }
 async function confirmFix(rejectAll) {
@@ -3736,7 +3908,20 @@ const EXEC_LABEL = {pass:'通过', fail:'失败', blocked:'阻塞', skipped:'跳
 const EXEC_CLS = {pass:'approved', fail:'rejected', blocked:'candidate', skipped:'pending'};
 /* ---------- 测试计划视图（M4：计划实体 + 快照 + 分配 + 计划执行与附件） ---------- */
 let curPlan = null, planRunId = null, plansMine = false, plansProject = '', plansLine = '', planExecFilter = '';
-let plansKw = '', plansStatus = '', plansOwner = '', plansPage = 1, plansSize = 20;
+let plansKw = '', plansStatus = '', plansOwner = '', plansPage = 1, plansSize = 20, plansRun = '';
+let myPage = 1, mySize = 20, myProject = '', myPlan = '', myModule = '', myPrio = '', myStatus = '', myKw = '';
+function mySet(name, value) {
+  if (name === 'page') { myPage = value; renderPlans(); return; }
+  if (name === 'size') mySize = value;
+  else if (name === 'project') { myProject = value; myPlan = ''; }
+  else if (name === 'plan') myPlan = value;
+  else if (name === 'module') myModule = value;
+  else if (name === 'prio') myPrio = value;
+  else if (name === 'status') myStatus = value;
+  else if (name === 'kw') myKw = value;
+  else if (name === 'reset') { myProject = ''; myPlan = ''; myModule = ''; myPrio = ''; myStatus = ''; myKw = ''; }
+  myPage = 1; renderPlans();
+}
 function plansSet(field, value) {  // 任何筛选/页大小变化回到第一页
   if (field === 'plansKw') plansKw = value;
   else if (field === 'plansStatus') plansStatus = value;
@@ -3744,6 +3929,10 @@ function plansSet(field, value) {  // 任何筛选/页大小变化回到第一�
   else if (field === 'plansSize') plansSize = value;
   else if (field === 'plansProject') plansProject = value;
   else if (field === 'plansLine') { plansLine = value; plansProject = ''; }
+  else if (field === 'plansRun') plansRun = value;
+  else if (field === 'page') { plansPage = value; renderPlans(); return; }
+  else if (field === 'size') plansSize = value;
+  else if (field === 'reset') { plansKw = ''; plansStatus = ''; plansOwner = ''; plansProject = ''; plansLine = ''; plansRun = ''; }
   plansPage = 1; renderPlans();
 }
 let _planDetail = null;
@@ -3770,6 +3959,7 @@ async function _renderPlans__impl() {
   if (plansKw.trim()) q.set('keyword', plansKw.trim());
   if (plansStatus) q.set('status', plansStatus);
   if (plansOwner) q.set('owner', plansOwner);
+  if (plansRun) q.set('run_state', plansRun);
   q.set('page', plansPage); q.set('page_size', plansSize);
   try { data = await api('/api/v1/plans?' + q); }
   catch (e) { return toast(e.message, 'err'); }
@@ -3794,15 +3984,43 @@ async function _renderPlans__impl() {
   if (plansMine) {
     try {
       const mine = await api('/api/v1/plans/my-items' + (myShowDone ? '?include_done=true' : ''));
+      // 本地筛选 + 分页：项目 / 计划 / 模块 / 优先级 / 执行状态 / 关键词；页内仍按计划分组
+      const kw = myKw.trim().toLowerCase();
+      const hit = it => !kw || [it.case_id, it.title, it.module, it.plan_name, it.project, it.run_name,
+        ...(((it.snapshot||{}).steps)||[]).flatMap(st=>[st.action, st.expected])].some(x => String(x||'').toLowerCase().includes(kw));
+      const items = mine.items.filter(it =>
+        (!myProject || it.project === myProject) && (!myPlan || it.plan_id === myPlan) &&
+        (!myModule || it.module === myModule) && (!myPrio || it.priority === myPrio) &&
+        (!myStatus || (myStatus === 'pending' ? !it.result : (it.result||{}).status === myStatus)) && hit(it));
+      const filtering = !!(kw || myProject || myPlan || myModule || myPrio || myStatus);
+      const pages = Math.max(1, Math.ceil(items.length / mySize));
+      if (myPage > pages) myPage = pages;
+      const pageItems = items.slice((myPage - 1) * mySize, myPage * mySize);
+      const opts = (list, cur) => list.map(([v, l]) => `<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`).join('');
+      const uniq = f => [...new Set(mine.items.map(f).filter(Boolean))].sort();
+      const planOpts = [...new Map(mine.items.map(it => [it.plan_id, it.plan_name])).entries()];
       const byPlan = {};
-      for (const it of mine.items) (byPlan[it.plan_id] = byPlan[it.plan_id] || {name: it.plan_name, project: it.project, run: it.run_name, active: it.run_active, items: []}).items.push(it);
+      for (const it of pageItems) (byPlan[it.plan_id] = byPlan[it.plan_id] || {name: it.plan_name, project: it.project, run: it.run_name, active: it.run_active, items: []}).items.push(it);
       myCard = `<div class="card" style="margin-bottom:14px"><div class="card-h">
         <h3>我的待执行用例<span class="cnt" style="margin-left:6px">${mine.pending}</span></h3>
         <span class="meta">分配给我、本轮尚未执行的用例，可在此直接打结果${myShowDone ? ` · 本轮已执行 ${mine.executed}` : ''}</span>
         <div class="grow">
           ${stepsToggleHtml()}
-          <label class="check">显示本轮已执行 <input type="checkbox" ${myShowDone?'checked':''} onchange="myShowDone=this.checked;renderPlans()"></label></div></div>
-        <div class="card-b">${mine.items.length ? Object.entries(byPlan).map(([pid, g]) => `
+          <label class="check">显示本轮已执行 <input type="checkbox" ${myShowDone?'checked':''} onchange="myShowDone=this.checked;mySet('status','')"></label></div></div>
+        <div class="card-b">
+          <div class="filters" style="margin:0 0 10px">
+            <select style="width:130px" onchange="mySet('project', this.value)"><option value="">全部项目</option>${opts(uniq(it=>it.project).map(x=>[x,x]), myProject)}</select>
+            <select style="width:150px" onchange="mySet('plan', this.value)"><option value="">全部计划</option>${opts(planOpts, myPlan)}</select>
+            <select style="width:120px" onchange="mySet('module', this.value)"><option value="">全部模块</option>${opts(uniq(it=>it.module).map(x=>[x,x]), myModule)}</select>
+            <select style="width:90px" onchange="mySet('prio', this.value)"><option value="">优先级</option>${opts(['P0','P1','P2','P3'].map(x=>[x,x]), myPrio)}</select>
+            ${myShowDone?`<select style="width:110px" onchange="mySet('status', this.value)"><option value="">执行状态</option>${opts([['pending','待执行'],...Object.entries(EXEC_LABEL)], myStatus)}</select>`:''}
+            <div class="search" style="width:220px">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+              <input type="search" placeholder="搜索编号 / 标题 / 计划 / 步骤…" value="${esc(myKw)}" onchange="mySet('kw', this.value)" onkeydown="if(event.key==='Enter')mySet('kw', this.value)">
+            </div>
+            ${filtering?`<span class="hint">筛选出 ${items.length} 条</span><button class="btn ghost sm" onclick="mySet('reset')">清除筛选</button>`:''}
+          </div>
+          ${pageItems.length ? Object.entries(byPlan).map(([pid, g]) => `
           <div class="section-t" style="display:flex;align-items:center;gap:8px"><a onclick="openPlan('${pid}','__me')">${esc(g.name)}</a><span class="hint">${esc(g.project)} · ${g.run ? esc(g.run) : '尚未开始执行轮次'}${g.active ? '' : (can(g.project,'plan.manage') ? ` · <button class="btn ghost sm" onclick="myStartRun('${pid}')">开始新一轮执行</button>` : ' · <span style="color:var(--warn)">轮次未开始或已结束，需负责人新建轮次后才能执行</span>')}</span></div>
           <div class="tbl-wrap" style="margin:4px 0 12px"><table>
             <tr><th style="width:104px">编号 / 版本</th><th>标题</th><th style="width:90px">模块</th><th style="width:44px">优先级</th><th>操作步骤</th><th>预期结果</th><th style="width:110px">执行状态</th><th style="width:150px">操作</th></tr>
@@ -3817,7 +4035,8 @@ async function _renderPlans__impl() {
                 <button class="btn ghost sm" onclick="myExecAct('${pid}','${it.run_id}','${it.item_id}','blocked')">阻塞</button>
                 <button class="btn ghost sm" onclick="myExecAct('${pid}','${it.run_id}','${it.item_id}','skipped')">跳过</button>` : ''}
                 <button class="btn ghost sm" onclick="openPlan('${pid}','__me')">进计划</button></div></td></tr>`; }).join('')}
-          </table></div>`).join('') : '<div class="empty">当前没有分配给我的待执行用例</div>'}</div></div>`;
+          </table></div>`).join('') : `<div class="empty">${mine.items.length ? '没有符合筛选条件的用例' : '当前没有分配给我的待执行用例'}</div>`}
+          ${items.length > PT_PAGE_SIZES[0] || myPage > 1 ? pagerHtml(items.length, myPage, mySize, 'mySet') : ''}</div></div>`;
     } catch (e) { myCard = `<div class="card" style="margin-bottom:14px"><div class="card-b"><div class="empty">加载执行任务失败：${esc(e.message)}</div></div></div>`; }
   }
   $('plansArea').innerHTML = myCard + `<div class="card">
@@ -3835,35 +4054,29 @@ async function _renderPlans__impl() {
           <option value="">全部项目</option>
           ${projects.filter(p => !plansLine || p.business_line === plansLine).map(p => `<option value="${esc(p.project)}" ${plansProject===p.project?'selected':''}>${esc(p.project)}</option>`).join('')}
         </select>
-        <select style="width:110px" onchange="plansSet('plansStatus', this.value)">
+        <select style="width:130px" onchange="plansSet('plansStatus', this.value)">
           <option value="">全部状态</option>
-          ${Object.entries(PLAN_ST).map(([k, v]) => `<option value="${k}" ${plansStatus===k?'selected':''}>${v[0]}</option>`).join('')}
+          ${Object.entries(PLAN_ST).map(([k, v]) => `<option value="${k}" ${plansStatus===k?'selected':''}>${v[0]}（${(data.status_counts||{})[k]||0}）</option>`).join('')}
         </select>
-        <select style="width:130px" onchange="plansSet('plansOwner', this.value)">
-          <option value="">全部负责人</option>
-          ${(data.owners||[]).map(o => `<option value="${esc(o)}" ${plansOwner===o?'selected':''}>${esc(o)}</option>`).join('')}
+        <select style="width:110px" onchange="plansSet('plansRun', this.value)" title="最近一轮执行">
+          <option value="">执行进度</option>
+          ${[['none','未执行'],['running','执行中'],['finished','已结束']].map(([k,v]) => `<option value="${k}" ${plansRun===k?'selected':''}>${v}</option>`).join('')}
         </select>
+        ${(data.owners||[]).length?`<select style="width:120px" onchange="plansSet('plansOwner', this.value)">
+          <option value="">负责人</option>
+          ${data.owners.map(o => `<option value="${esc(o)}" ${plansOwner===o?'selected':''}>${esc(o)}</option>`).join('')}
+        </select>`:''}
         <div class="search" style="width:240px">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-          <input type="text" placeholder="搜索计划名 / 项目 / 负责人…" value="${esc(plansKw)}"
-            oninput="plansKw=this.value" onchange="plansSet('plansKw', this.value)" onkeydown="if(event.key==='Enter')plansSet('plansKw', this.value)">
+          <input type="search" placeholder="搜索计划名 / 项目 / 负责人 / 轮次…" value="${esc(plansKw)}"
+            onchange="plansSet('plansKw', this.value)" onkeydown="if(event.key==='Enter')plansSet('plansKw', this.value)">
         </div>
-        ${plansKw||plansStatus||plansOwner||plansProject ? `<button class="btn ghost sm" onclick="plansKw='';plansStatus='';plansOwner='';plansProject='';plansSet('plansPage', 1)">清除筛选</button>` : ''}
+        ${plansKw||plansStatus||plansOwner||plansProject||plansLine||plansRun ? `<span class="hint">筛选出 ${data.total} 个</span><button class="btn ghost sm" onclick="plansSet('reset')">清除筛选</button>` : ''}
       </div>
       ${data.plans.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
       <tr><th>计划 / 项目</th><th style="width:90px">负责人</th><th style="width:180px">周期</th><th style="width:80px">状态</th><th style="width:150px">用例</th><th style="width:210px">最近执行</th><th style="width:130px">我的任务</th></tr>
       ${rows}</table></div>
-      <div class="filters" style="justify-content:flex-end;align-items:center;margin-top:10px">
-        <span class="hint">共 ${data.total} 个 · 第 ${data.page}/${data.pages} 页</span>
-        <label class="check">每页
-          <select style="width:70px" onchange="plansSet('plansSize', parseInt(this.value))">
-            ${[10,20,50,100].map(s => `<option value="${s}" ${plansSize===s?'selected':''}>${s}</option>`).join('')}
-          </select></label>
-        <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="plansPage=1;renderPlans()">«</button>
-        <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="plansPage--;renderPlans()">上一页</button>
-        <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="plansPage++;renderPlans()">下一页</button>
-        <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="plansPage=${data.pages};renderPlans()">»</button>
-      </div>` : `<div class="empty">${plansKw||plansStatus||plansOwner ? '没有符合筛选条件的测试计划' : (curUser&&curUser.projects||[]).some(p=>can(p.project,'plan.manage'))||isSysAdmin()?'暂无测试计划。点击「＋ 新建计划」创建，并从项目的已通过用例中加入快照':'暂无测试计划（创建计划需要测试负责人及以上项目角色）'}</div>`}</div>
+      ${data.total > PT_PAGE_SIZES[0] || data.page > 1 ? pagerHtml(data.total, data.page, plansSize, 'plansSet', '个') : ''}` : `<div class="empty">${plansKw||plansStatus||plansOwner||plansProject||plansLine||plansRun ? '没有符合筛选条件的测试计划' : (curUser&&curUser.projects||[]).some(p=>can(p.project,'plan.manage'))||isSysAdmin()?'暂无测试计划。点击「＋ 新建计划」创建，并从项目的已通过用例中加入快照':'暂无测试计划（创建计划需要测试负责人及以上项目角色）'}</div>`}</div>
   </div>`;
 }
 
@@ -4003,7 +4216,7 @@ async function _renderPlanDetail__impl() {
       <button class="btn sm" onclick="openPlanCaseDlg()">＋ 加入用例</button>` : ''}
     </div></div>
     <div class="card-b">${p.items.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
-      <tr><th></th><th>编号 / 版本</th><th>标题</th><th>模块</th><th>优先级</th><th>操作步骤</th><th>预期结果</th><th>执行人</th><th>执行状态</th><th>操作</th></tr>
+      <tr><th>${editable?allCheckedHtml('plck', '', '全选本页（批量分配执行人）'):''}</th><th>编号 / 版本</th><th>标题</th><th>模块</th><th>优先级</th><th>操作步骤</th><th>预期结果</th><th>执行人</th><th>执行状态</th><th>操作</th></tr>
       ${rows}</table></div>` : '<div class="empty">尚未加入用例。点击「＋ 加入用例」从本项目已通过的正式用例中挑选</div>'}
       ${p.items.length && !shownItems.length ? '<div class="empty">当前筛选下没有用例</div>' : ''}</div></div>`;
 
@@ -4105,7 +4318,7 @@ async function pcLoadCases() {
   $('pcModule').innerHTML = '<option value="">全部模块</option>'
     + data.modules.map(m => `<option value="${esc(m)}" ${m===cur?'selected':''}>${esc(m)}</option>`).join('');
   $('pcList').innerHTML = data.cases.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
-    <tr><th style="width:26px"></th><th style="width:110px">编号 / 版本</th><th>标题</th><th style="width:90px">模块</th><th style="width:50px">优先级</th><th style="width:70px">状态</th></tr>
+    <tr><th style="width:26px">${data.cases.some(c=>!c.added)?allCheckedHtml('pcck', '', '全选可加入的用例'):''}</th><th style="width:110px">编号 / 版本</th><th>标题</th><th style="width:90px">模块</th><th style="width:50px">优先级</th><th style="width:70px">状态</th></tr>
     ${data.cases.map(c => `<tr>
       <td>${c.added ? '' : `<input type="checkbox" class="pcck" data-uid="${esc(c.uid)}">`}</td>
       <td><span class="cid">${esc(c.case_id)}</span><div class="hint">v${c.version||1}</div></td>
@@ -4658,7 +4871,20 @@ function renderOfflineDiff(o) {
 const PROMPT_NAMES = {analyst:'需求拆解', requirement_analysis:'需求分析', generator:'用例生成', reviewer:'用例评审', fix_instruction:'定点修正指令',
   gap_check:'覆盖查漏', dup_judge:'语义查重', point_fix:'测试点修改', case_fix:'用例修改', requirement_diff:'需求变更', learning:'修改习惯学习',
   point_supplement:'测试点补充', point_compare:'人工与 AI 测试点对比', vision_image:'图片理解', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
-let aiTab = 'tasks', aiStatus = '', aiMine = false, aiCallPage = 1, aiCallPurpose = '', aiCallStatus = '', aiCallModel = '', aiDays = 30;
+let aiTab = 'tasks', aiStatus = '', aiMine = false, aiCallPage = 1, aiCallSize = 50, aiCallPurpose = '', aiCallStatus = '', aiCallModel = '', aiCallBy = '', aiCallProject = '', aiCallKw = '', aiDays = 30;
+function acallSet(name, value) {
+  if (name === 'page') aiCallPage = value;
+  else if (name === 'size') { aiCallSize = value; aiCallPage = 1; }
+  else if (name === 'days') { aiDays = value; aiCallPage = 1; }
+  else if (name === 'purpose') { aiCallPurpose = value; aiCallPage = 1; }
+  else if (name === 'status') { aiCallStatus = value; aiCallPage = 1; }
+  else if (name === 'model') { aiCallModel = value; aiCallPage = 1; }
+  else if (name === 'by') { aiCallBy = value; aiCallPage = 1; }
+  else if (name === 'project') { aiCallProject = value; aiCallPage = 1; }
+  else if (name === 'kw') { aiCallKw = (value || '').trim(); aiCallPage = 1; }
+  else if (name === 'reset') { aiCallPurpose = ''; aiCallStatus = ''; aiCallModel = ''; aiCallBy = ''; aiCallProject = ''; aiCallKw = ''; aiCallPage = 1; }
+  renderAiCenter();
+}
 const ERROR_KIND_HINT = {
   quota: '模型欠费或配额用尽：请充值，或在「模型配置」切换默认模型后继续',
   auth: '模型密钥无效或未配置：请检查 .env 中的密钥后继续',
@@ -4729,16 +4955,26 @@ function promptVersionsCell(pv) {
   return `<details><summary class="hint" style="cursor:pointer;list-style:none">${ents.length} 个 Prompt${custom?`（${custom} 个定制版）`:'（均内置 v1）'} ▾</summary><div style="margin-top:4px">${codes.join(' ')}</div></details>`;
 }
 async function aiCallsHtml() {
-  const q = new URLSearchParams({page: aiCallPage, page_size: 50, days: aiDays});
-  if (curProjectName) q.set('project', curProjectName); if (aiCallPurpose) q.set('purpose', aiCallPurpose); if (aiCallStatus) q.set('status', aiCallStatus); if (aiCallModel) q.set('model', aiCallModel);
+  const q = new URLSearchParams({page: aiCallPage, page_size: aiCallSize, days: aiDays});
+  if (curProjectName) q.set('project', curProjectName); else if (aiCallProject) q.set('project', aiCallProject);
+  if (aiCallPurpose) q.set('purpose', aiCallPurpose); if (aiCallStatus) q.set('status', aiCallStatus); if (aiCallModel) q.set('model', aiCallModel);
+  if (aiCallBy) q.set('by', aiCallBy); if (aiCallKw) q.set('keyword', aiCallKw);
   const data = await api('/api/v1/ai/calls?' + q);
-  const pages = Math.max(1, Math.ceil(data.total / 50));
-  return `<div class="toolbar" style="margin-bottom:10px">
-      <select style="width:120px" onchange="aiDays=+this.value;aiCallPage=1;renderAiCenter()">${[[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${aiDays===v?'selected':''}>${l}</option>`).join('')}</select>
-      <select style="width:150px" onchange="aiCallPurpose=this.value;aiCallPage=1;renderAiCenter()"><option value="">全部用途</option>${Object.values(PROMPT_NAMES).filter(n=>!n.startsWith('注入')).map(n=>`<option ${aiCallPurpose===n?'selected':''}>${n}</option>`).join('')}<option ${aiCallPurpose==='模型连通性测试'?'selected':''}>模型连通性测试</option></select>
-      <select style="width:100px" onchange="aiCallStatus=this.value;aiCallPage=1;renderAiCenter()"><option value="">全部状态</option><option value="ok" ${aiCallStatus==='ok'?'selected':''}>成功</option><option value="error" ${aiCallStatus==='error'?'selected':''}>失败</option></select>
-      <input type="text" placeholder="模型名" value="${esc(aiCallModel)}" style="width:130px" onchange="aiCallModel=this.value;aiCallPage=1;renderAiCenter()">
-      <span class="hint">共 ${data.total} 次</span></div>
+  aiCallPage = data.page;  // 后端已按总页数收敛
+  const pc = data.purpose_counts || {}, sc = data.status_counts || {};
+  const scopeTotal = Object.values(pc).reduce((a, b) => a + b, 0);
+  const filtering = aiCallPurpose || aiCallStatus || aiCallModel || aiCallBy || aiCallKw || (!curProjectName && aiCallProject);
+  const withCur = (list, cur) => [...new Set([...(list || []), ...(cur ? [cur] : [])])];
+  const opt = (v, l, cur) => `<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`;
+  return `<div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap">
+      <select style="width:110px" onchange="acallSet('days', +this.value)">${[[1,'今天'],[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${aiDays===v?'selected':''}>${l}</option>`).join('')}</select>
+      <select style="width:160px" onchange="acallSet('purpose', this.value)"><option value="">全部用途</option>${withCur(Object.keys(pc).sort(), aiCallPurpose).map(n=>opt(n, `${n}（${pc[n]||0}）`, aiCallPurpose)).join('')}</select>
+      <select style="width:110px" onchange="acallSet('status', this.value)"><option value="">全部状态</option>${[['ok','成功'],['error','失败']].map(([v,l])=>opt(v, `${l}（${sc[v]||0}）`, aiCallStatus)).join('')}</select>
+      ${(data.models||[]).length>1||aiCallModel?`<select style="width:150px" onchange="acallSet('model', this.value)"><option value="">全部模型</option>${withCur(data.models, aiCallModel).map(m=>opt(m, m, aiCallModel)).join('')}</select>`:''}
+      ${(data.users||[]).length>1||aiCallBy?`<select style="width:110px" onchange="acallSet('by', this.value)"><option value="">发起人</option>${withCur(data.users, aiCallBy).map(u=>opt(u, u, aiCallBy)).join('')}</select>`:''}
+      ${!curProjectName&&((data.projects||[]).length>1||aiCallProject)?`<select style="width:130px" onchange="acallSet('project', this.value)"><option value="">全部项目</option>${withCur(data.projects, aiCallProject).map(p=>opt(p, p, aiCallProject)).join('')}</select>`:''}
+      <input type="search" placeholder="搜索用途 / 模型 / 项目 / 任务 / 需求 / 发起人 / 错误" value="${esc(aiCallKw)}" style="width:250px" onchange="acallSet('kw', this.value)" onkeydown="if(event.key==='Enter'){acallSet('kw', this.value)}">
+      ${filtering?`<span class="hint">筛选出 ${data.total} 次</span><button class="btn ghost sm" onclick="acallSet('reset')">清除筛选</button>`:`<span class="hint">共 ${scopeTotal} 次</span>`}</div>
     <div class="tbl-wrap" style="margin-top:0"><table>
       <thead><tr><th style="width:130px">时间</th><th style="width:120px">用途</th><th style="width:130px">模型</th><th>Prompt 版本</th><th style="width:90px">项目</th><th style="width:110px">任务 / 需求</th><th style="width:80px">发起人</th><th style="width:70px">耗时</th><th style="width:100px">Token 入/出</th><th style="width:80px">状态</th></tr></thead>
       <tbody>${data.items.map(c => `<tr class="rowlink" onclick="openAiCall(${c.id})">
@@ -4750,11 +4986,8 @@ async function aiCallsHtml() {
         <td class="hint">${esc(c.by||'')}</td><td class="hint">${c.elapsed_ms} ms${c.attempts>1?`<div>${c.attempts} 次尝试</div>`:''}</td>
         <td class="hint">${c.prompt_tokens||0} / ${c.completion_tokens||0}</td>
         <td>${c.status==='ok'?'<span class="st approved">成功</span>':`<span class="st rejected" title="${esc(c.error)}">失败</span>`}${c.finish_reason==='length'?'<div class="hint" style="color:var(--warn)">输出截断</div>':''}</td></tr>`).join('')
-        || '<tr><td colspan="10"><div class="empty">暂无调用记录</div></td></tr>'}</tbody></table></div>
-    <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
-      <button class="btn ghost sm" ${aiCallPage<=1?'disabled':''} onclick="aiCallPage--;renderAiCenter()">上一页</button>
-      <span class="hint">${aiCallPage} / ${pages}</span>
-      <button class="btn ghost sm" ${aiCallPage>=pages?'disabled':''} onclick="aiCallPage++;renderAiCenter()">下一页</button></div>`;
+        || `<tr><td colspan="10"><div class="empty">${filtering ? '没有符合筛选条件的调用记录' : (aiDays ? '该时间范围内暂无调用记录' : '暂无调用记录')}</div></td></tr>`}</tbody></table></div>
+    ${data.total > PT_PAGE_SIZES[0] || aiCallPage > 1 ? pagerHtml(data.total, aiCallPage, aiCallSize, 'acallSet', '次') : ''}`;
 }
 async function openAiCall(id) {
   let c; try { c = await api('/api/v1/ai/calls/' + id); } catch (e) { return toast(e.message, 'err'); }
@@ -4833,6 +5066,19 @@ async function runSearch(q) {
 
 /* ---- 知识库（16 章三层） ---- */
 let kbLevelFilter = '', kbCatFilter = '', _kbMeta = null, kbQuery = '', _kbAutoSearch = false;
+let kbPage = 1, kbSize = 20, kbSpace = '', kbModule = '', kbUploader = '', kbKw = '';
+function kbSet(name, value) {
+  if (name === 'page') { kbPage = value; renderKnowledge(); return; }
+  if (name === 'size') kbSize = value;
+  else if (name === 'level') kbLevelFilter = value;
+  else if (name === 'cat') kbCatFilter = value;
+  else if (name === 'space') { kbSpace = value; kbModule = ''; }
+  else if (name === 'module') kbModule = value;
+  else if (name === 'uploader') kbUploader = value;
+  else if (name === 'kw') kbKw = (value || '').trim();
+  else if (name === 'reset') { kbLevelFilter = ''; kbCatFilter = ''; kbSpace = ''; kbModule = ''; kbUploader = ''; kbKw = ''; }
+  kbPage = 1; renderKnowledge();
+}
 let kbMode = 'docs', depKind = 'requirement', depModule = '', depFocus = null, _depGraph = null;
 async function renderKnowledge() { return (() => keepScroll('kb', 'kb', _renderKnowledge__impl))(); }
 async function _renderKnowledge__impl() {
@@ -4847,29 +5093,53 @@ async function _renderKnowledge__impl() {
   if (curProjectName) {  // 当前项目视角：本项目 + 公共
     try { const pub = (await api('/api/v1/knowledge/docs?level=public')).documents; const ids = new Set(docs.map(d=>d.doc_id)); docs = docs.concat(pub.filter(d=>!ids.has(d.doc_id))); } catch (e) {}
   }
-  if (kbLevelFilter) docs = docs.filter(d => d.level === kbLevelFilter);
-  if (kbCatFilter) docs = docs.filter(d => d.category === kbCatFilter);
+  const all = docs;  // 筛选前范围（台账全集）：各下拉的条数按它统计
+  const countBy = f => { const c = {}; for (const d of all) { const k = f(d); if (k) c[k] = (c[k]||0) + 1; } return c; };
+  const levelN = countBy(d => d.level), catN = countBy(d => d.category);
+  const spaces = Object.keys(countBy(d => d.level === 'public' ? '' : d.space)).sort();
+  const modules = [...new Set(all.filter(d => !kbSpace || d.space === kbSpace).map(d => d.module).filter(Boolean))].sort();
+  const uploaders = [...new Set(all.map(d => d.created_by).filter(Boolean))].sort();
+  const kw = kbKw.toLowerCase();
+  const hit = d => !kw || [d.source, d.doc_id, d.space, d.module, meta.categories[d.category]||d.category, d.level_label, d.created_by, d.embedding_model]
+    .some(x => String(x||'').toLowerCase().includes(kw));
+  docs = docs.filter(d => (!kbLevelFilter || d.level === kbLevelFilter) && (!kbCatFilter || d.category === kbCatFilter) &&
+    (!kbSpace || d.space === kbSpace) && (!kbModule || d.module === kbModule) && (!kbUploader || d.created_by === kbUploader) && hit(d));
+  const filtering = !!(kbLevelFilter || kbCatFilter || kbSpace || kbModule || kbUploader || kw);
+  const pages = Math.max(1, Math.ceil(docs.length / kbSize));
+  if (kbPage > pages) kbPage = pages;
+  const pageDocs = docs.slice((kbPage - 1) * kbSize, kbPage * kbSize);
   const canUpload = isSysAdmin() || (curUser.projects||[]).some(p => can(p.project, 'knowledge.manage'));
   const LV = {public:'approved', project:'candidate', module:'pending'};
   $('knowledgeArea').innerHTML = `<div class="card">
-    <div class="card-h"><h3>知识库</h3>${kbModeSeg()}<span class="meta">公共知识库可跨项目使用（须显式标记，仅管理员维护）；项目 / 模块知识只在本项目检索，禁止跨项目污染</span>
+    <div class="card-h"><h3>知识库<span class="cnt" style="margin-left:6px">${all.length}</span></h3>${kbModeSeg()}<span class="meta">公共知识库可跨项目使用（须显式标记，仅管理员维护）；项目 / 模块知识只在本项目检索，禁止跨项目污染</span>
       <div class="grow">
-        <select style="width:120px" onchange="kbLevelFilter=this.value;renderKnowledge()"><option value="">全部层级</option>${Object.entries(meta.levels).map(([k,v])=>`<option value="${k}" ${kbLevelFilter===k?'selected':''}>${v}</option>`).join('')}</select>
-        <select style="width:130px" onchange="kbCatFilter=this.value;renderKnowledge()"><option value="">全部分类</option>${Object.entries(meta.categories).map(([k,v])=>`<option value="${k}" ${kbCatFilter===k?'selected':''}>${v}</option>`).join('')}</select>
         ${canUpload?`<button class="btn" onclick="openKbDlg()">＋ 上传知识</button>`:''}</div></div>
     <div class="card-b">
       <div class="toolbar" style="margin-bottom:10px"><input type="text" id="kbQ" placeholder="检索测试：输入关键词看命中切片（范围 = ${curProjectName?esc(curProjectName)+' + 公共':'公共'}）" value="${esc(kbQuery)}" style="flex:1" onkeydown="if(event.key==='Enter')kbSearch()"><button class="btn ghost sm" onclick="kbSearch()">检索</button></div>
       <div id="kbHits"></div>
+      <div class="filters" style="margin:0 0 10px">
+        <select style="width:120px" onchange="kbSet('level', this.value)"><option value="">全部层级</option>${Object.entries(meta.levels).map(([k,v])=>`<option value="${k}" ${kbLevelFilter===k?'selected':''}>${v}（${levelN[k]||0}）</option>`).join('')}</select>
+        <select style="width:140px" onchange="kbSet('cat', this.value)"><option value="">全部分类</option>${Object.entries(meta.categories).map(([k,v])=>`<option value="${k}" ${kbCatFilter===k?'selected':''}>${v}（${catN[k]||0}）</option>`).join('')}</select>
+        ${!curProjectName && spaces.length ? `<select style="width:140px" onchange="kbSet('space', this.value)"><option value="">全部项目</option>${spaces.map(x=>`<option value="${esc(x)}" ${kbSpace===x?'selected':''}>${esc(x)}</option>`).join('')}</select>` : ''}
+        ${modules.length ? `<select style="width:130px" onchange="kbSet('module', this.value)"><option value="">全部模块</option>${modules.map(x=>`<option value="${esc(x)}" ${kbModule===x?'selected':''}>${esc(x)}</option>`).join('')}</select>` : ''}
+        ${uploaders.length > 1 ? `<select style="width:110px" onchange="kbSet('uploader', this.value)"><option value="">上传人</option>${uploaders.map(x=>`<option value="${esc(x)}" ${kbUploader===x?'selected':''}>${esc(x)}</option>`).join('')}</select>` : ''}
+        <div class="search" style="width:220px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input type="search" placeholder="筛选台账：来源 / 编号 / 项目 / 模块…" value="${esc(kbKw)}" onchange="kbSet('kw', this.value)" onkeydown="if(event.key==='Enter')kbSet('kw', this.value)">
+        </div>
+        ${filtering?`<span class="hint">筛选出 ${docs.length} 篇</span><button class="btn ghost sm" onclick="kbSet('reset')">清除筛选</button>`:''}
+      </div>
       <div class="tbl-wrap" style="margin-top:0"><table>
         <thead><tr><th>来源</th><th style="width:110px">层级</th><th style="width:130px">项目 / 模块</th><th style="width:120px">分类</th><th style="width:70px">切片</th><th style="width:120px">Embedding</th><th style="width:90px">上传人</th><th style="width:110px">时间</th><th style="width:50px"></th></tr></thead>
-        <tbody>${docs.map(d=>`<tr>
+        <tbody>${pageDocs.map(d=>`<tr>
           <td><b>${esc(d.source)}</b><div class="hint"><code>${d.doc_id}</code></div></td>
           <td><span class="st ${LV[d.level]||'pending'}">${esc(d.level_label||d.level)}</span></td>
           <td class="hint">${d.level==='public'?'—':esc(d.space)}${d.module?`<div>${esc(d.module)}</div>`:''}</td>
           <td>${esc(meta.categories[d.category]||d.category)}</td><td>${d.chunk_count}</td>
           <td class="hint">${esc(d.embedding_model)}</td><td class="hint">${esc(d.created_by||'')}</td><td class="hint">${relTime(d.created_at)}</td>
           <td>${(d.level==='public'?isSysAdmin():(can(d.space,'knowledge.manage')&&canDelete()))?`<button class="ibtn bad" title="删除" onclick="deleteKb('${d.doc_id}',${jsq(d.source)})">${IC.trash}</button>`:''}</td></tr>`).join('')
-          || '<tr><td colspan="9"><div class="empty">暂无知识文档</div></td></tr>'}</tbody></table></div></div></div>`;
+          || `<tr><td colspan="9"><div class="empty">${all.length ? '没有符合筛选条件的知识文档' : '暂无知识文档'}</div></td></tr>`}</tbody></table></div>
+      ${docs.length > PT_PAGE_SIZES[0] || kbPage > 1 ? pagerHtml(docs.length, kbPage, kbSize, 'kbSet', '篇') : ''}</div></div>`;
   if (_kbAutoSearch) { _kbAutoSearch = false; if (kbQuery) kbSearch(); }  // 从全局搜索跳入：直接展示命中切片
 }
 function kbModeSeg() {
@@ -5083,29 +5353,48 @@ async function deleteKb(id, name) {
 }
 
 /* ---- 操作日志（17 章） ---- */
-let auditTab = 'all', auditKind = '', auditUser = '', auditKw = '', auditDays = 30, auditPage = 1, auditFailed = false;
+let auditTab = 'all', auditKind = '', auditUser = '', auditKw = '', auditDays = 30, auditPage = 1, auditSize = 50, auditFailed = false, auditProject = '';
+function auditSet(name, value) {
+  if (name === 'page') auditPage = value;
+  else if (name === 'size') { auditSize = value; auditPage = 1; }
+  else if (name === 'tab') { auditTab = value; auditPage = 1; }
+  else if (name === 'days') { auditDays = value; auditPage = 1; }
+  else if (name === 'kind') { auditKind = value; auditPage = 1; }
+  else if (name === 'user') { auditUser = value; auditPage = 1; }
+  else if (name === 'project') { auditProject = value; auditPage = 1; }
+  else if (name === 'kw') { auditKw = (value || '').trim(); auditPage = 1; }
+  else if (name === 'failed') { auditFailed = !!value; auditPage = 1; }
+  else if (name === 'reset') { auditKind = ''; auditUser = ''; auditProject = ''; auditKw = ''; auditFailed = false; auditPage = 1; }
+  renderAudit();
+}
 async function renderAudit() {
   setCrumb('操作日志');
-  const q = new URLSearchParams({days: auditDays, page: auditPage, page_size: 50});
+  const q = new URLSearchParams({days: auditDays, page: auditPage, page_size: auditSize});
   if (auditTab === 'security') q.set('security', 'true');
-  if (curProjectName && auditTab !== 'security') q.set('project', curProjectName);
+  const scopedProject = curProjectName && auditTab !== 'security' ? curProjectName : '';
+  if (scopedProject) q.set('project', scopedProject); else if (auditProject) q.set('project', auditProject);
   if (auditKind) q.set('kind', auditKind); if (auditUser) q.set('user', auditUser); if (auditKw) q.set('keyword', auditKw); if (auditFailed) q.set('failed_only', 'true');
   const _s = tick('audit');
   let d; try { d = await api('/api/v1/audit?' + q); } catch (e) { return $('auditArea').innerHTML = `<div class="card"><div class="card-b"><div class="empty">${esc(e.message)}</div></div></div>`; }
   if (stale('audit', _s)) return;
-  const pages = Math.max(1, Math.ceil(d.total / 50));
+  auditPage = d.page;  // 后端已按总页数收敛
+  const counts = d.kind_counts || {};
+  const scopeTotal = Object.values(counts).reduce((a, b) => a + b, 0);
+  const filtering = auditKind || auditUser || auditKw || auditFailed || (!scopedProject && auditProject);
   const fmt = t => esc(fmtTime(t, true));
+  const opt = (v, l, cur) => `<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`;
   $('auditArea').innerHTML = `<div class="card">
-    <div class="card-h" style="border-bottom:none"><h3>操作日志</h3><span class="meta">全部写操作自动留痕（操作人 / IP / 对象 / 结果）；安全日志含登录、用户与角色变更、系统配置</span></div>
-    ${isSysAdmin()?`<div class="dtabs"><button class="${auditTab==='all'?'on':''}" onclick="auditTab='all';auditPage=1;renderAudit()">业务操作</button><button class="${auditTab==='security'?'on':''}" onclick="auditTab='security';auditPage=1;renderAudit()">系统安全</button></div>`:''}
+    <div class="card-h" style="border-bottom:none"><h3>操作日志 <span class="hint" style="font-weight:normal">${scopeTotal} 条</span></h3><span class="meta">全部写操作自动留痕（操作人 / IP / 对象 / 结果）；安全日志含登录、用户与角色变更、系统配置</span></div>
+    ${isSysAdmin()?`<div class="dtabs"><button class="${auditTab==='all'?'on':''}" onclick="auditSet('tab','all')">业务操作</button><button class="${auditTab==='security'?'on':''}" onclick="auditSet('tab','security')">系统安全</button></div>`:''}
     <div class="card-b">
-    <div class="toolbar" style="margin-bottom:10px">
-      <select style="width:110px" onchange="auditDays=+this.value;auditPage=1;renderAudit()">${[[1,'今天'],[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${auditDays===v?'selected':''}>${l}</option>`).join('')}</select>
-      <select style="width:120px" onchange="auditKind=this.value;auditPage=1;renderAudit()"><option value="">全部类型</option>${Object.entries(d.kinds).map(([k,v])=>`<option value="${k}" ${auditKind===k?'selected':''}>${v}</option>`).join('')}</select>
-      <input type="text" placeholder="操作人" value="${esc(auditUser)}" style="width:110px" onchange="auditUser=this.value;auditPage=1;renderAudit()">
-      <input type="text" placeholder="动作 / 对象 / 明细 关键词" value="${esc(auditKw)}" style="width:200px" onchange="auditKw=this.value;auditPage=1;renderAudit()">
-      <label class="check">只看失败 <input type="checkbox" ${auditFailed?'checked':''} onchange="auditFailed=this.checked;auditPage=1;renderAudit()"></label>
-      <span class="hint">共 ${d.total} 条</span></div>
+    <div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap">
+      <select style="width:110px" onchange="auditSet('days', +this.value)">${[[1,'今天'],[7,'近 7 天'],[30,'近 30 天'],[90,'近 90 天'],[0,'全部']].map(([v,l])=>`<option value="${v}" ${auditDays===v?'selected':''}>${l}</option>`).join('')}</select>
+      <select style="width:150px" onchange="auditSet('kind', this.value)"><option value="">全部类型</option>${Object.entries(d.kinds).filter(([k])=>counts[k]||auditKind===k).map(([k,v])=>opt(k, `${v}（${counts[k]||0}）`, auditKind)).join('')}</select>
+      ${(d.users||[]).length>1||auditUser?`<select style="width:120px" onchange="auditSet('user', this.value)"><option value="">操作人</option>${[...new Set([...(d.users||[]), ...(auditUser?[auditUser]:[])])].map(u=>opt(u, u, auditUser)).join('')}</select>`:''}
+      ${!scopedProject&&((d.projects||[]).length>1||auditProject)?`<select style="width:130px" onchange="auditSet('project', this.value)"><option value="">全部项目</option>${[...new Set([...(d.projects||[]), ...(auditProject?[auditProject]:[])])].map(p=>opt(p, p, auditProject)).join('')}</select>`:''}
+      <input type="search" placeholder="搜索动作 / 对象 / 明细 / 操作人 / 项目 / IP" value="${esc(auditKw)}" style="width:250px" onchange="auditSet('kw', this.value)" onkeydown="if(event.key==='Enter'){auditSet('kw', this.value)}">
+      <label class="check">只看失败 <input type="checkbox" ${auditFailed?'checked':''} onchange="auditSet('failed', this.checked)"></label>
+      ${filtering?`<span class="hint">筛选出 ${d.total} 条</span><button class="btn ghost sm" onclick="auditSet('reset')">清除筛选</button>`:''}</div>
     <div class="tbl-wrap" style="margin-top:0"><table>
       <thead><tr><th style="width:150px">时间</th><th style="width:90px">操作人</th><th style="width:90px">类型</th><th style="width:150px">动作</th><th>对象 / 明细</th><th style="width:100px">项目</th><th style="width:60px">结果</th><th style="width:120px">IP</th>${auditTab==='security'?'<th>客户端</th>':''}<th style="width:60px">耗时</th></tr></thead>
       <tbody>${d.items.map(x=>`<tr>
@@ -5115,30 +5404,51 @@ async function renderAudit() {
         <td class="hint">${esc(x.project||'—')}</td>
         <td>${x.status<400?'<span class="st approved">成功</span>':`<span class="st rejected">${x.status}</span>`}</td>
         <td class="hint">${esc(x.ip||'')}</td>${auditTab==='security'?`<td class="hint" style="max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(x.ua)}">${esc(x.ua||'')}</td>`:''}
-        <td class="hint">${x.duration_ms} ms</td></tr>`).join('') || `<tr><td colspan="10"><div class="empty">暂无记录</div></td></tr>`}</tbody></table></div>
-    <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
-      <button class="btn ghost sm" ${auditPage<=1?'disabled':''} onclick="auditPage--;renderAudit()">上一页</button><span class="hint">${auditPage} / ${pages}</span>
-      <button class="btn ghost sm" ${auditPage>=pages?'disabled':''} onclick="auditPage++;renderAudit()">下一页</button></div>
+        <td class="hint">${x.duration_ms} ms</td></tr>`).join('') || `<tr><td colspan="10"><div class="empty">${filtering ? '没有符合筛选条件的记录' : (auditDays ? '该时间范围内暂无记录' : '暂无记录')}</div></td></tr>`}</tbody></table></div>
+    ${d.total > PT_PAGE_SIZES[0] || auditPage > 1 ? pagerHtml(d.total, auditPage, auditSize, 'auditSet') : ''}
     </div></div>`;
 }
 
 /* ---- Prompt 管理（管理员） ---- */
 let curPromptKey = null, _promptDetail = null, _promptViewVer = null;
+let promptKind = '', promptState = '', promptKw = '', promptPage = 1, promptSize = 20;
+function promptSet(name, value) {
+  if (name === 'page') promptPage = value;
+  else if (name === 'size') { promptSize = value; promptPage = 1; }
+  else if (name === 'kind') { promptKind = value; promptPage = 1; }
+  else if (name === 'state') { promptState = value; promptPage = 1; }
+  else if (name === 'kw') { promptKw = (value || '').trim(); promptPage = 1; }
+  else if (name === 'reset') { promptKind = ''; promptState = ''; promptKw = ''; promptPage = 1; }
+  renderPrompts();
+}
 async function renderPrompts() {
   setCrumb(curPromptKey && _promptDetail ? `<a onclick="curPromptKey=null;renderPrompts()">Prompt 管理</a><span class="sep">/</span>${esc(_promptDetail.name)}` : 'Prompt 管理');
   if (curPromptKey) return renderPromptDetail();
-  let data; try { data = await api('/api/v1/ai/prompts'); } catch (e) { return toast(e.message, 'err'); }
+  const q = new URLSearchParams({page: promptPage, page_size: promptSize});
+  if (promptKind) q.set('kind', promptKind); if (promptState) q.set('state', promptState); if (promptKw) q.set('keyword', promptKw);
+  let data; try { data = await api('/api/v1/ai/prompts?' + q); } catch (e) { return toast(e.message, 'err'); }
+  promptPage = data.page;  // 后端已按总页数收敛
+  const kc = data.kind_counts || {}, sc = data.state_counts || {};
+  const scopeTotal = Object.values(kc).reduce((a, b) => a + b, 0);
+  const filtering = promptKind || promptState || promptKw;
+  const KIND = {system:'系统', user:'用户', block:'注入块'};
   $('promptArea').innerHTML = `<div class="card">
-    <div class="card-h"><h3>Prompt 管理</h3><span class="meta">全部 Prompt 版本化：新建版本为草稿，激活后生效，可随时回滚；每次 AI 调用记录所用版本</span></div>
+    <div class="card-h"><h3>Prompt 管理 <span class="hint" style="font-weight:normal">${scopeTotal} 个</span></h3><span class="meta">全部 Prompt 版本化：新建版本为草稿，激活后生效，可随时回滚；每次 AI 调用记录所用版本</span>
+      <div class="grow">
+        <input type="search" placeholder="搜索名称 / 键 / 场景 / 占位符 / 各版本内容与说明" value="${esc(promptKw)}" style="width:280px" onchange="promptSet('kw', this.value)" onkeydown="if(event.key==='Enter'){promptSet('kw', this.value)}">
+        <select style="width:120px" onchange="promptSet('kind', this.value)"><option value="">全部类型</option>${Object.entries(KIND).map(([k,l])=>`<option value="${k}" ${promptKind===k?'selected':''}>${l}（${kc[k]||0}）</option>`).join('')}</select>
+        <select style="width:120px" onchange="promptSet('state', this.value)"><option value="">全部状态</option>${Object.entries(data.states||{}).map(([k,l])=>`<option value="${k}" ${promptState===k?'selected':''}>${l}（${sc[k]||0}）</option>`).join('')}</select>
+        ${filtering?`<span class="hint">筛选出 ${data.total} 个</span><button class="btn ghost sm" onclick="promptSet('reset')">清除筛选</button>`:''}</div></div>
     <div class="card-b"><div class="tbl-wrap" style="margin-top:0"><table>
       <thead><tr><th style="width:170px">Prompt</th><th style="width:70px">类型</th><th>使用场景</th><th>生效内容（预览）</th><th style="width:90px">生效版本</th><th style="width:70px">版本数</th><th style="width:110px">最近更新</th></tr></thead>
       <tbody>${data.prompts.map(p=>`<tr class="rowlink" onclick="curPromptKey='${p.key}';_promptViewVer=null;renderPrompts()">
         <td><b>${esc(p.name)}</b><div class="hint"><code>${p.key}</code></div></td>
-        <td><span class="tag">${{system:'系统',user:'用户',block:'注入块'}[p.kind]||p.kind}</span></td>
+        <td><span class="tag">${KIND[p.kind]||p.kind}</span></td>
         <td class="hint">${esc(p.where)}${p.placeholders.length?`<div>占位符 ${p.placeholders.map(x=>`<code>{${esc(x)}}</code>`).join(' ')}</div>`:''}</td>
         <td class="hint" style="max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.preview)}</td>
         <td>v${p.active_version}${p.customized?' <span class="st candidate">已定制</span>':' <span class="hint">内置</span>'}${p.drafts?`<div class="hint">草稿 ${p.drafts}</div>`:''}</td>
-        <td>${p.versions}</td><td class="hint">${relTime(p.updated_at)}</td></tr>`).join('')}</tbody></table></div></div></div>`;
+        <td>${p.versions}</td><td class="hint">${relTime(p.updated_at)}</td></tr>`).join('') || `<tr><td colspan="7"><div class="empty">${filtering?'没有符合筛选条件的 Prompt':'暂无 Prompt'}</div></td></tr>`}</tbody></table></div>
+    ${data.total > PT_PAGE_SIZES[0] || promptPage > 1 ? pagerHtml(data.total, promptPage, promptSize, 'promptSet', '个') : ''}</div></div>`;
 }
 async function renderPromptDetail() {
   let p; try { p = await api('/api/v1/ai/prompts/' + curPromptKey); } catch (e) { toast(e.message, 'err'); curPromptKey = null; return renderPrompts(); }
@@ -5770,7 +6080,19 @@ async function deleteProject(name) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-let projListStatus = '', projListKw = '';
+let projListStatus = '', projListKw = '', projListOwner = '', projListRole = '', projListPage = 1, projListSize = 20;
+function projListSet(name, value) {
+  if (name === 'page') projListPage = value;
+  else if (name === 'size') { projListSize = value; projListPage = 1; }
+  else if (name === 'kw') { projListKw = (value || '').trim(); projListPage = 1; }
+  else if (name === 'status') { projListStatus = value; projListPage = 1; }
+  else if (name === 'line') { projListLine = value; projListPage = 1; }
+  else if (name === 'owner') { projListOwner = value; projListPage = 1; }
+  else if (name === 'role') { projListRole = value; projListPage = 1; }
+  else if (name === 'group') { projGroupByLine = !!value; projListPage = 1; }
+  else if (name === 'reset') { projListKw = ''; projListStatus = ''; projListLine = ''; projListOwner = ''; projListRole = ''; projListPage = 1; }
+  renderProjects();
+}
 function crumbForProjects() {
   if (curProject) {
     setCrumb(`<a onclick="backToProjects()">项目管理</a><span class="sep">/</span>${esc(curProject)}`);
@@ -5791,8 +6113,17 @@ async function renderProjects() {
   try { _projectsCache = await getProjects(true); } catch (e) { return toast(e.message, 'err'); }
   if (stale('projects', _s)) return;
   const kw = projListKw.trim().toLowerCase();
-  const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus) && (!projListLine || p.business_line === projListLine)
-    && (!kw || p.project.toLowerCase().includes(kw) || (p.code||'').toLowerCase().includes(kw) || (p.owner||'').toLowerCase().includes(kw)));
+  const real = _projectsCache.filter(p => !p.builtin);
+  const countBy = f => real.reduce((m, p) => { const k = f(p) || ''; m[k] = (m[k] || 0) + 1; return m; }, {});
+  const statusCounts = countBy(p => p.status), lineCounts = countBy(p => p.business_line), roleCounts = countBy(p => p.my_role);
+  const owners = [...new Set(real.map(p => p.owner).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh'));
+  const shown = _projectsCache.filter(p => (!projListStatus || p.status === projListStatus) && (!projListLine || (p.business_line||'') === projListLine)
+    && (!projListOwner || p.owner === projListOwner) && (!projListRole || p.my_role === projListRole)
+    && (!kw || [p.project, p.code, p.owner, p.description, p.business_line, p.created_by].some(x => (x||'').toLowerCase().includes(kw))));
+  const filtering = kw || projListStatus || projListLine || projListOwner || projListRole;
+  const pages = Math.max(1, Math.ceil(shown.length / projListSize));
+  if (projListPage > pages) projListPage = pages;
+  const pageItems = shown.slice((projListPage - 1) * projListSize, projListPage * projListSize);
   const STATUS_CLS = {active:'approved', paused:'candidate', archived:'pending'};
   const rowOf = p => {
     const reviewed = p.approved + p.rejected + p.pending;
@@ -5824,7 +6155,7 @@ async function renderProjects() {
   if (projGroupByLine) {
     // 业务线维度：同一业务线的项目归在一起，未分业务线的排最后；组头显示项目数与任务 / 用例合计
     const groups = new Map();
-    for (const p of shown) { const k = p.builtin ? '' : (p.business_line || ''); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); }
+    for (const p of pageItems) { const k = p.builtin ? '' : (p.business_line || ''); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); }
     const keys = [...groups.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, 'zh'));
     const canRename = isSysAdmin() || openProjects();
     rows = keys.map(k => {
@@ -5836,18 +6167,21 @@ async function renderProjects() {
         ${!k && canRename && ps.some(p=>!p.builtin) ? '<span class="hint" style="margin-left:10px">在「编辑项目」里填写业务线即可归入</span>' : ''}</td></tr>`;
       return head + ps.map(rowOf).join('');
     }).join('');
-  } else rows = shown.map(rowOf).join('');
+  } else rows = pageItems.map(rowOf).join('');
+  const opt = (v, l, cur) => `<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`;
+  const lines = [...new Set([...(_businessLines||[]), ...Object.keys(lineCounts).filter(Boolean), ...(projListLine?[projListLine]:[])])];
   $('projArea').innerHTML = `<div class="card">
-    <div class="card-h"><h3>项目管理</h3><span class="meta">共 ${_projectsCache.filter(p=>!p.builtin).length} 个 · 收藏置顶 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
-      <div class="grow">
-        <input type="text" placeholder="搜索名称 / 编码 / 负责人（回车）" value="${esc(projListKw)}" style="width:190px" onchange="projListKw=this.value;renderProjects()">
-        <label class="check" title="按业务线分组展示"><input type="checkbox" ${projGroupByLine?'checked':''} onchange="projGroupByLine=this.checked;renderProjects()"> 按业务线分组</label>
-        <select style="width:120px" onchange="projListLine=this.value;renderProjects()" title="按业务线筛选"><option value="">全部业务线</option>
-          ${(_businessLines||[]).map(l=>`<option value="${esc(l)}" ${projListLine===l?'selected':''}>${esc(l)}</option>`).join('')}</select>
-        <select style="width:120px" onchange="projListStatus=this.value;renderProjects()">
-          <option value="">全部状态</option>
-          ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>`<option value="${v}" ${projListStatus===v?'selected':''}>${l}</option>`).join('')}
-        </select>
+    <div class="card-h"><h3>项目管理 <span class="hint" style="font-weight:normal">${real.length} 个</span></h3><span class="meta">收藏置顶 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
+      <div class="grow" style="flex-wrap:wrap">
+        <input type="search" placeholder="搜索名称 / 编码 / 描述 / 负责人 / 业务线" value="${esc(projListKw)}" style="width:220px" onchange="projListSet('kw', this.value)" onkeydown="if(event.key==='Enter'){projListSet('kw', this.value)}">
+        <label class="check" title="按业务线分组展示"><input type="checkbox" ${projGroupByLine?'checked':''} onchange="projListSet('group', this.checked)"> 按业务线分组</label>
+        <select style="width:130px" onchange="projListSet('line', this.value)" title="按业务线筛选"><option value="">全部业务线</option>
+          ${lines.map(l=>opt(l, `${l}（${lineCounts[l]||0}）`, projListLine)).join('')}</select>
+        <select style="width:120px" onchange="projListSet('status', this.value)"><option value="">全部状态</option>
+          ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>opt(v, `${l}（${statusCounts[v]||0}）`, projListStatus)).join('')}</select>
+        ${owners.length>1||projListOwner?`<select style="width:110px" onchange="projListSet('owner', this.value)"><option value="">负责人</option>${[...new Set([...owners, ...(projListOwner?[projListOwner]:[])])].map(o=>opt(o, o, projListOwner)).join('')}</select>`:''}
+        ${Object.keys(roleCounts).filter(Boolean).length>1||projListRole?`<select style="width:120px" onchange="projListSet('role', this.value)"><option value="">我的角色</option>${Object.entries(PROJECT_ROLES).filter(([k])=>roleCounts[k]||projListRole===k).map(([k,l])=>opt(k, `${l}（${roleCounts[k]||0}）`, projListRole)).join('')}</select>`:''}
+        ${filtering?`<span class="hint">筛选出 ${shown.filter(p=>!p.builtin).length} 个</span><button class="btn ghost sm" onclick="projListSet('reset')">清除筛选</button>`:''}
         ${isSysAdmin()||openProjects()?`<button class="btn ghost sm" onclick="openLineDlg()">业务线管理</button><button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>`:''}
         <button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
     <div class="card-b">
@@ -5855,8 +6189,9 @@ async function renderProjects() {
         <thead><tr><th style="width:26px"></th><th>项目</th><th style="width:90px">业务线</th><th style="width:90px">负责人</th><th style="width:70px">状态</th><th style="width:110px">我的角色</th>
         <th style="width:56px">任务</th><th style="width:80px">用例</th>
         <th>用例生命周期</th><th style="width:110px">执行</th><th style="width:90px">最近活动</th><th style="width:90px">操作</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="12"><div class="empty">${_projectsCache.length?'没有符合筛选的项目':(isSysAdmin()||openProjects()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="12"><div class="empty">${filtering?'没有符合筛选条件的项目':(isSysAdmin()||openProjects()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
       </table></div>
+      ${shown.length > PT_PAGE_SIZES[0] || projListPage > 1 ? pagerHtml(shown.length, projListPage, projListSize, 'projListSet', '个') : ''}
     </div></div>`;
 }
 
@@ -6603,7 +6938,7 @@ async function saveAccessMode(mode) {
     await reloadMe(); getProjects(true);
   } catch (e) { toast(e.message, 'err'); refreshUsers(); }
 }
-async function refreshUsers() { return (() => keepScroll('users', [usersPage, usersSize, usersKw, usersRole, usersStatus].join('|'), _refreshUsers__impl))(); }
+async function refreshUsers() { return (() => keepScroll('users', [usersPage, usersSize, usersKw, usersRole, usersStatus, usersProject, usersTotp].join('|'), _refreshUsers__impl))(); }
 async function _refreshUsers__impl() {
   try {
     window._authSettings = await api('/api/v1/auth/settings').catch(()=>window._authSettings);
@@ -6613,24 +6948,24 @@ async function _refreshUsers__impl() {
     if (usersKw.trim()) q.set('keyword', usersKw.trim());
     if (usersRole) q.set('role', usersRole);
     if (usersStatus) q.set('status', usersStatus);
+    if (usersProject) q.set('project', usersProject);
+    if (usersTotp) q.set('totp', usersTotp);
     const data = await api('/api/v1/auth/users?' + q);
     _usersCache = data.users;
-    usersPage = data.page;
+    usersPage = data.page;  // 后端已按总页数收敛
+    const rc = data.role_counts || {}, sc = data.status_counts || {};
+    const scopeTotal = Object.values(rc).reduce((a, b) => a + b, 0);
+    const filtering = usersKw.trim() || usersRole || usersStatus || usersProject || usersTotp;
     const fmt = t => esc(fmtTime(t));
-    const first = data.total ? (data.page - 1) * data.page_size + 1 : 0, last = Math.min(data.page * data.page_size, data.total);
-    const pager = `<div class="filters" style="justify-content:flex-end;align-items:center">
-      <span class="hint">共 ${data.total} 人 · 第 ${data.page}/${data.pages} 页（${first}-${last}）</span>
-      <label class="check">每页 <select style="width:70px" onchange="usersSet('size', parseInt(this.value))">${[10,20,50,100].map(s => `<option value="${s}" ${usersSize===s?'selected':''}>${s}</option>`).join('')}</select></label>
-      <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="usersSet('page', 1)">«</button>
-      <button class="btn ghost sm" ${data.page<=1?'disabled':''} onclick="usersSet('page', ${data.page-1})">上一页</button>
-      <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="usersSet('page', ${data.page+1})">下一页</button>
-      <button class="btn ghost sm" ${data.page>=data.pages?'disabled':''} onclick="usersSet('page', ${data.pages})">»</button></div>`;
+    const opt = (v, l, cur) => `<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`;
+    const projects = [...new Set([...(data.projects||[]), ...(usersProject?[usersProject]:[])])];
     $('usersList').innerHTML = `<div class="filters" style="margin-bottom:8px">
-      <input type="text" placeholder="搜索用户名 / 姓名 / 邮箱 / 手机" value="${esc(usersKw)}" style="width:220px" onchange="usersSet('kw', this.value)">
-      <select style="width:110px" onchange="usersSet('role', this.value)"><option value="">全部角色</option><option value="admin" ${usersRole==='admin'?'selected':''}>admin</option><option value="member" ${usersRole==='member'?'selected':''}>member</option></select>
-      <select style="width:110px" onchange="usersSet('status', this.value)"><option value="">全部状态</option><option value="active" ${usersStatus==='active'?'selected':''}>正常</option><option value="disabled" ${usersStatus==='disabled'?'selected':''}>已禁用</option></select>
-      ${usersKw||usersRole||usersStatus?`<button class="btn ghost sm" onclick="usersKw='';usersRole='';usersStatus='';usersSet('page',1)">清除筛选</button>`:''}</div>
-    ${data.total ? '' : '<div class="empty">没有符合条件的用户</div>'}
+      <input type="search" placeholder="搜索用户名 / 姓名 / 邮箱 / 手机 / 所属项目" value="${esc(usersKw)}" style="width:250px" onchange="usersSet('kw', this.value)" onkeydown="if(event.key==='Enter'){usersSet('kw', this.value)}">
+      <select style="width:130px" onchange="usersSet('role', this.value)"><option value="">全部角色</option>${[['admin','系统管理员'],['member','普通成员']].map(([v,l])=>opt(v, `${l}（${rc[v]||0}）`, usersRole)).join('')}</select>
+      <select style="width:120px" onchange="usersSet('status', this.value)"><option value="">全部状态</option>${[['active','正常'],['disabled','已禁用']].map(([v,l])=>opt(v, `${l}（${sc[v]||0}）`, usersStatus)).join('')}</select>
+      ${projects.length?`<select style="width:140px" onchange="usersSet('project', this.value)"><option value="">所属项目</option>${projects.map(p=>opt(p, p, usersProject)).join('')}</select>`:''}
+      <select style="width:120px" onchange="usersSet('totp', this.value)"><option value="">两步验证</option>${[['on','已绑定'],['off','未绑定']].map(([v,l])=>opt(v, l, usersTotp)).join('')}</select>
+      ${filtering?`<span class="hint">筛选出 ${data.total} 人</span><button class="btn ghost sm" onclick="usersSet('reset')">清除筛选</button>`:`<span class="hint">共 ${scopeTotal} 人</span>`}</div>
     <div class="tbl-wrap" style="margin-top:0"><table>
       <tr><th>用户名</th><th>姓名</th><th>邮箱 / 手机</th><th>系统角色</th><th>状态</th><th>所属项目</th><th>两步验证</th><th>最后登录</th><th>创建时间</th><th style="width:110px">操作</th></tr>
       ${data.users.map(u => `<tr style="${u.status==='disabled'?'opacity:.6':''}">
@@ -6647,14 +6982,15 @@ async function _refreshUsers__impl() {
           <button class="ibtn" title="编辑资料 / 角色 / 状态 / 重置密码" onclick="openUserEdit(${jsq(u.username)})">${IC.edit}</button>
           ${curUser&&u.username===curUser.username?'':`<button class="ibtn ${u.status==='disabled'?'ok':''}" title="${u.status==='disabled'?'启用':'禁用'}" onclick="toggleUserStatus(${jsq(u.username)},'${u.status==='disabled'?'active':'disabled'}')">${u.status==='disabled'?IC.check:IC.x}</button>`}
           ${curUser&&u.username===curUser.username?'':`<button class="ibtn bad" title="删除" onclick="deleteUser(${jsq(u.username)})">${IC.trash}</button>`}
-        </div></td></tr>`).join('')}
-    </table></div>${pager}`;
+        </div></td></tr>`).join('') || `<tr><td colspan="10"><div class="empty">${filtering?'没有符合筛选条件的用户':'暂无用户'}</div></td></tr>`}
+    </table></div>${data.total > PT_PAGE_SIZES[0] || usersPage > 1 ? pagerHtml(data.total, usersPage, usersSize, 'usersSet', '人') : ''}`;
   } catch (e) { toast(e.message, 'err'); }
 }
-let _usersCache = [], usersPage = 1, usersSize = 20, usersKw = '', usersRole = '', usersStatus = '';
+let _usersCache = [], usersPage = 1, usersSize = 20, usersKw = '', usersRole = '', usersStatus = '', usersProject = '', usersTotp = '';
 function usersSet(field, value) {
   if (field === 'page') usersPage = value;
-  else { if (field === 'size') usersSize = value; else if (field === 'kw') usersKw = value; else if (field === 'role') usersRole = value; else if (field === 'status') usersStatus = value; usersPage = 1; }
+  else if (field === 'reset') { usersKw = ''; usersRole = ''; usersStatus = ''; usersProject = ''; usersTotp = ''; usersPage = 1; }
+  else { if (field === 'size') usersSize = value; else if (field === 'kw') usersKw = (value || '').trim(); else if (field === 'role') usersRole = value; else if (field === 'status') usersStatus = value; else if (field === 'project') usersProject = value; else if (field === 'totp') usersTotp = value; usersPage = 1; }
   refreshUsers();
 }
 function openUserDlg() {

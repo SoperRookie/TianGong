@@ -339,6 +339,20 @@ async def test_用户列表_查询条件与分页(client, auth_on):
     await client.put("/api/v1/auth/users/pg0", headers=headers, json={"status": "disabled"})
     data = (await client.get("/api/v1/auth/users?status=disabled", headers=headers)).json()
     assert [u["username"] for u in data["users"]] == ["pg0"]
+    # 角色 / 状态计数与项目候选按全集统计，不随筛选变化；关键词匹配所属项目；两步验证筛选
+    assert data["status_counts"]["disabled"] == 1
+    assert data["role_counts"]["member"] == 3 and data["role_counts"]["admin"] >= 1
+    await client.post("/api/v1/projects", headers=headers, json={"name": "分页项目"})
+    await client.put("/api/v1/projects/分页项目/members", headers=headers, json={"username": "pg1", "role": "tester"})
+    data = (await client.get("/api/v1/auth/users?keyword=分页项目", headers=headers)).json()
+    assert [u["username"] for u in data["users"]] == ["admin", "pg1"] and data["projects"] == ["分页项目"]  # 建项目者自动成为成员
+    data = (await client.get("/api/v1/auth/users?project=分页项目&role=member", headers=headers)).json()
+    assert [u["username"] for u in data["users"]] == ["pg1"] and data["role_counts"]["member"] == 3 and data["projects"] == ["分页项目"]
+    data = (await client.get("/api/v1/auth/users?project=分页项目&status=disabled", headers=headers)).json()
+    assert data["total"] == 0 and data["status_counts"]["disabled"] == 1
+    assert (await client.get("/api/v1/auth/users?totp=on", headers=headers)).json()["total"] == 0
+    assert (await client.get("/api/v1/auth/users?totp=off", headers=headers)).json()["total"] == data["role_counts"]["member"] + data["role_counts"]["admin"]
+    assert (await client.get("/api/v1/auth/users?totp=xx", headers=headers)).status_code == 400
 
 
 async def test_项目开放模式_所有人可见可建可改_删除仅管理员(client, auth_on):

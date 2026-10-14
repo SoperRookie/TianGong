@@ -53,6 +53,8 @@ class TaskRecord(BaseModel):
     pending_fix: dict | None = Field(default=None, description="待确认的 AI 修改提案（完整需求 7.3/9.4 确认流）：接受/拒绝前不落地")
     blind_spot_reviews: dict[str, dict] = Field(default_factory=dict, description="需求盲区处置记录：bs_id -> {text, status, note, by, at, target}（转待确认事项 / 转测试点 / 需求已说明 / 忽略）")
     prompt_versions: dict[str, int] = Field(default_factory=dict, description="本任务用到的 Prompt 版本（核心规则 23）")
+    deleted_at: str | None = Field(default=None, description="逻辑删除时间：删除后从列表与详情隐藏，管理员可在「已删除」里恢复")
+    deleted_by: str | None = Field(default=None, description="删除人")
 
 
 class TaskStore:
@@ -103,8 +105,12 @@ class TaskStore:
         self._records[record.task_id] = record
         self._persist(record)
 
-    def get(self, task_id: str) -> TaskRecord | None:
-        return self._records.get(task_id)
+    def get(self, task_id: str, include_deleted: bool = False) -> TaskRecord | None:
+        """已删除的任务对外视同不存在（404），只有恢复 / 已删除列表显式带 include_deleted。"""
+        record = self._records.get(task_id)
+        if record is None or (record.deleted_at and not include_deleted):
+            return None
+        return record
 
     _sorted: list[TaskRecord] | None = None
 
@@ -114,9 +120,14 @@ class TaskStore:
         return self._sorted
 
     def list(self, status: str | None = None, limit: int = 50, project: str | None = None,
-             projects: set[str] | None = None) -> list[TaskRecord]:
-        """倒序列表（排序结果缓存，保存时失效）；project / projects 按所属项目过滤。"""
+             projects: set[str] | None = None, deleted: bool | None = False) -> list[TaskRecord]:
+        """倒序列表（排序结果缓存，保存时失效）；project / projects 按所属项目过滤。
+
+        deleted：False 只列未删除（默认，所有业务统计口径）；True 只列已删除；None 全部。
+        """
         records = self._ordered()
+        if deleted is not None:
+            records = [r for r in records if bool(r.deleted_at) == deleted]
         if project is not None:
             records = [r for r in records if (r.context or {}).get("project") == project]
         elif projects is not None:
@@ -135,6 +146,27 @@ class TaskStore:
         self._persist(record)
 
     # ---- 异步执行（F-6-2）：进程内后台任务，Celery 落地时替换此层 ----
+
+    def delete(self, task_id: str, by: str | None = None) -> TaskRecord | None:
+        """逻辑删除：记录保留（版本历史 / 回收站 / 审计仍可追溯），列表与详情不再可见；进行中的任务不可删。"""
+        record = self._records.get(task_id)
+        if record is None or record.deleted_at or record.status in ("queued", "running"):
+            return None
+        record.deleted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        record.deleted_by = by
+        self._persist(record)
+        logger.info("任务 {} 已删除（{}）", task_id, by or "-")
+        return record
+
+    def restore(self, task_id: str) -> TaskRecord | None:
+        record = self._records.get(task_id)
+        if record is None or not record.deleted_at:
+            return None
+        record.deleted_at = None
+        record.deleted_by = None
+        self._persist(record)
+        logger.info("任务 {} 已恢复", task_id)
+        return record
 
     def cancel(self, task_id: str) -> bool:
         """取消后台任务（任务管理）：中断执行并标记失败留痕。

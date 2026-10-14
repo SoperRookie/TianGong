@@ -223,3 +223,66 @@ async def test_确认接口幂等_重复确认拒绝且故障可恢复重试(cli
     # 完成后重复确认：409（点击一次即生效，重复请求被状态锁拒绝）
     resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={})
     assert resp.status_code == 409
+
+
+async def test_任务删除_恢复_批量删除_列表与用例中心隐藏(client):
+    case = make_case()
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(case), review_reply(True)] * 3)
+    ids = [(await client.post("/api/v1/tasks", data={"text": f"需求 {i}"})).json()["task_id"] for i in range(3)]
+    a, b, c = ids
+    assert {t["task_id"] for t in (await client.get("/api/v1/tasks")).json()["tasks"]} >= set(ids)
+    for tid in ids:  # 用例中心只收审核通过的正式用例
+        await client.post(f"/api/v1/tasks/{tid}/review", json={"items": [{"case_id": case["case_id"], "action": "accept"}]})
+    total_cases = (await client.get("/api/v1/cases?page=0")).json()["total"]
+    assert total_cases >= 3
+
+    # 单条删除：详情 404、列表不再出现、用例中心不再计入；带 include_deleted 可见并有删除时间 / 删除人
+    resp = await client.delete(f"/api/v1/tasks/{a}")
+    assert resp.status_code == 200 and resp.json()["deleted"] is True and resp.json()["deleted_at"]
+    assert (await client.get(f"/api/v1/tasks/{a}")).status_code == 404
+    assert a not in {t["task_id"] for t in (await client.get("/api/v1/tasks")).json()["tasks"]}
+    assert (await client.get("/api/v1/cases?page=0")).json()["total"] == total_cases - 1
+    gone = [t for t in (await client.get("/api/v1/tasks?include_deleted=true")).json()["tasks"] if t["task_id"] == a]
+    assert gone and gone[0]["deleted_at"] and gone[0]["deleted_by"] == "anonymous"
+    assert (await client.delete(f"/api/v1/tasks/{a}")).status_code == 404  # 已删除的再删视同不存在
+    # 恢复
+    assert (await client.post(f"/api/v1/tasks/{a}/restore")).json()["deleted"] is False
+    assert (await client.get(f"/api/v1/tasks/{a}")).status_code == 200
+    assert (await client.get("/api/v1/cases?page=0")).json()["total"] == total_cases
+    assert (await client.post(f"/api/v1/tasks/{a}/restore")).status_code == 404  # 未删除的无从恢复
+    # 执行中的任务不可删
+    app.state.tasks.set_progress(b, status="running")
+    assert (await client.delete(f"/api/v1/tasks/{b}")).status_code == 409
+    app.state.tasks.set_progress(b, status="completed")
+    # 批量删除：不存在的跳过并带原因，其余生效
+    r = (await client.post("/api/v1/tasks/batch-delete", json={"ids": [a, b, c, "nope", a]})).json()
+    assert r["deleted"] == [a, b, c] and r["skipped"] == [{"task_id": "nope", "reason": "任务不存在: nope"}]
+    assert not {a, b, c} & {t["task_id"] for t in (await client.get("/api/v1/tasks")).json()["tasks"]}
+    # 操作日志
+    actions = [(x["action"], x["target"], x["detail"]) for x in (await client.get("/api/v1/audit?days=0&kind=task")).json()["items"]]
+    assert ("删除任务", a, "") in actions and ("恢复任务", a, "") in actions
+    assert ("批量删除任务", "", "删除 3 个，跳过 1 个") in actions
+
+
+async def test_修改测试点可维护设计需求页来源(client):
+    import json
+
+    reply = json.dumps({"modules": [{"module": "登录页", "points": [
+        {"point": "密码错误 5 次锁定", "dimension": "异常流程", "ref": "3.2 登录失败处理 › 密码错误 5 次锁定"},
+        {"point": "正常登录", "dimension": "正常流程"}]}], "blind_spots": []}, ensure_ascii=False)
+    app.state.llm = StubLLM([reply])
+    task_id = (await client.post("/api/v1/tasks", data={"text": "登录需求", "confirm_points": "true"})).json()["task_id"]
+    pts = (await client.get(f"/api/v1/tasks/{task_id}")).json()["analysis"]["test_points"][0]["points"]
+    assert pts[0]["ref"] == "3.2 登录失败处理 › 密码错误 5 次锁定" and "ref" not in pts[1]
+    p1, p2 = pts[0]["tp_id"], pts[1]["tp_id"]
+    # 不传 ref：保留；传 ref：改写；传空串：清空
+    await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [{"tp_id": p1, "action": "modify", "point": "密码连续错误 5 次锁定账号"}]})
+    await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [{"tp_id": p2, "action": "modify", "point": "正常登录", "ref": "登录页 › 账号密码登录"}]})
+    pts = (await client.get(f"/api/v1/tasks/{task_id}")).json()["analysis"]["test_points"][0]["points"]
+    assert pts[0]["ref"] == "3.2 登录失败处理 › 密码错误 5 次锁定" and pts[1]["ref"] == "登录页 › 账号密码登录"
+    await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [{"tp_id": p1, "action": "modify", "point": "密码连续错误 5 次锁定账号", "ref": ""}]})
+    pts = (await client.get(f"/api/v1/tasks/{task_id}")).json()["analysis"]["test_points"][0]["points"]
+    assert not pts[0].get("ref")
+    # 手工新增带来源
+    r = (await client.post(f"/api/v1/tasks/{task_id}/points/add", json={"points": [{"module": "登录页", "point": "验证码错误提示", "ref": "登录页 › 验证码"}]})).json()
+    assert r["added"][0]["ref"] == "登录页 › 验证码"

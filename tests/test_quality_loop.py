@@ -886,3 +886,41 @@ async def test_疑似重复对_忽略重开留痕_删除后自动已处置(clien
     p = next(p for p in t["dup_pairs"] if p["key"] == key)
     assert p["status"] == "resolved" and p["deleted"] == ["TP002"]
     assert (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/{key}", json={"action": "reopen"})).status_code == 409
+
+
+async def test_盲区与重复对_批量处置(client):
+    app.state.llm = StubLLM([ANALYST_REPLY_BLIND, GAP_REPLY])
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求", "confirm_points": "true"})
+    task_id = resp.json()["task_id"]
+    spots = (await client.get(f"/api/v1/tasks/{task_id}")).json()["blind_spots"]
+    a, b, c = (x["bs_id"] for x in spots)
+    # 批量说明必须带出处；批量忽略：已处置的跳过并带原因，其余生效，一次落盘
+    assert (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/batch", json={"action": "explain", "ids": [a]})).status_code == 200
+    r = (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/batch", json={"action": "explain", "ids": [a], "note": "3.2 节"})).json()
+    assert r["skipped"] == [] and r["applied"][0]["status"] == "explained"
+    r = (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/batch", json={"action": "ignore", "ids": [a, b, c, "bs404"]})).json()
+    assert [x["status"] for x in r["applied"]] == ["ignored", "ignored"]
+    assert {x["id"]: x["reason"] for x in r["skipped"]} == {a: "该盲区已处置（explained），请先重开", "bs404": "盲区不存在"}
+    assert {x["bs_id"]: x["status"] for x in r["blind_spots"]} == {a: "explained", b: "ignored", c: "ignored"}
+    assert (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/batch", json={"action": "ignore", "ids": []})).status_code == 400
+    assert (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/batch", json={"action": "xx", "ids": [a]})).status_code == 400
+    # 批量重开后批量转测试点：每条用自己的原文，模块统一
+    r = (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/batch", json={"action": "reopen", "ids": [b, c]})).json()
+    assert [x["status"] for x in r["applied"]] == ["open", "open"]
+    r = (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/batch",
+                           json={"action": "to_point", "ids": [b, c], "module": "登录", "point": "不应生效的统一描述"})).json()
+    assert [x["status"] for x in r["applied"]] == ["point", "point"]
+    pts = (await client.get(f"/api/v1/tasks/{task_id}")).json()["analysis"]["test_points"]
+    new_pts = [p for m in pts for p in m["points"] if p.get("source") == "blind_spot"]
+    assert sorted(p["point"] for p in new_pts) == sorted([spots[1]["text"], spots[2]["text"]])  # point 字段不生效，各用原文
+    assert all(m["module"] == "登录" for m in pts if any(p.get("source") == "blind_spot" for p in m["points"]))
+    # 重复对批量忽略 / 重开
+    app.state.llm = StubLLM([json.dumps({"pairs": []})])
+    pairs = (await client.post(f"/api/v1/tasks/{task_id}/points/dup-check")).json().get("dup_pairs") or []
+    if pairs:
+        keys = [p["key"] for p in pairs]
+        r = (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/batch", json={"action": "ignore", "keys": keys + ["nokey"]})).json()
+        assert len(r["applied"]) == len(keys) and r["skipped"] == [{"key": "nokey", "reason": "疑似重复对不存在"}]
+        r = (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/batch", json={"action": "reopen", "keys": keys})).json()
+        assert all(p["status"] == "open" for p in r["applied"])
+    assert (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/batch", json={"action": "ignore", "keys": []})).status_code == 400
