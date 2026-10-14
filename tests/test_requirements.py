@@ -19,12 +19,21 @@ async def client():
             yield c
 
 
+# 新格式：每条 {text, quote}；规则 / 边界 / 状态 / 权限四项的 quote 必须能在原文里找到，否则降级为待确认事项
 ANALYSIS_REPLY = json.dumps({
-    "features": ["账号密码登录"], "rules": ["密码错误 5 次锁定 30 分钟"], "preconditions": ["已注册账号"],
-    "normal_flows": ["输入账号密码→登录成功"], "exception_flows": ["密码错误提示"], "boundaries": ["5 次"],
-    "state_changes": ["正常→锁定"], "permissions": [], "dependencies": ["短信网关"], "risks": ["锁定误伤"],
+    "features": ["账号密码登录"],
+    "rules": [{"text": "密码错误 5 次锁定 30 分钟", "quote": "密码错误 5 次锁定 30 分钟"}],
+    "preconditions": ["已注册账号"],
+    "normal_flows": ["输入账号密码→登录成功"], "exception_flows": ["密码错误提示"],
+    "boundaries": [{"text": "密码错误次数上限 5 次", "quote": "密码错误 5 次"}],
+    "state_changes": [{"text": "正常→锁定", "quote": "5 次锁定 30 分钟"}], "permissions": [],
+    "dependencies": ["短信网关"], "risks": [{"text": "锁定误伤", "quote": ""}],
     "open_questions": ["锁定期间是否允许找回密码？", "锁定次数是否按账号还是按设备统计？"],
 }, ensure_ascii=False)
+
+
+def texts(items):
+    return [x["text"] if isinstance(x, dict) else x for x in items]
 
 
 async def _req(client, project="P", title="登录需求", text="用户输入账号密码登录；密码错误 5 次锁定 30 分钟。") -> dict:
@@ -98,7 +107,8 @@ async def test_AI分析_待确认事项_确认后才能测试设计_追溯(clien
     app.state.llm = StubLLM([ANALYSIS_REPLY])
     a = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
     assert a["status"] == "pending_confirm" and a["open_questions"] == 2
-    assert a["analysis"]["rules"] == ["密码错误 5 次锁定 30 分钟"] and set(a["analysis_labels"]) >= {"features", "open_questions"}
+    assert texts(a["analysis"]["rules"]) == ["密码错误 5 次锁定 30 分钟"] and set(a["analysis_labels"]) >= {"features", "open_questions"}
+    assert a["analysis"]["rules"][0]["verified"] is True and a["analysis_meta"]["verification"]["demoted"] == 0
     assert a["raw_text"] == r["raw_text"]  # AI 结果不覆盖原文
     assert a.get("analysis_history", []) == []
     app.state.llm = StubLLM([ANALYSIS_REPLY])
@@ -360,7 +370,8 @@ async def test_待确认事项分级_必须项阻塞设计_建议项带假设继
     r = await _req(client)
     rid = r["req_id"]
     reply = json.dumps({
-        "features": ["账号密码登录"], "rules": ["密码错误 5 次锁定 30 分钟"], "preconditions": [], "normal_flows": [],
+        "features": ["账号密码登录"], "rules": [{"text": "密码错误 5 次锁定 30 分钟", "quote": "密码错误 5 次锁定 30 分钟"}],
+        "preconditions": [], "normal_flows": [],
         "exception_flows": [], "boundaries": [], "state_changes": [], "permissions": [], "dependencies": [], "risks": [],
         "open_questions": [
             {"question": "锁定期间是否允许找回密码？", "level": "must", "reason": "决定锁定态预期", "assumption": ""},

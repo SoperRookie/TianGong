@@ -220,7 +220,9 @@ def requirement_hints(requirements: list[dict], edges: list[dict]) -> list[dict]
     existing = {(e["from"], e["to"]) for e in edges}
     hints = []
     for r in requirements:
-        deps = ((r.get("analysis") or {}).get("dependencies") or [])
+        from app.agents.analysis import item_text
+
+        deps = [item_text(x) for x in ((r.get("analysis") or {}).get("dependencies") or []) if item_text(x)]
         for text in deps:
             for other in requirements:
                 if other["req_id"] == r["req_id"] or (r["req_id"], other["req_id"]) in existing:

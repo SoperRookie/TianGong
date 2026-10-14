@@ -87,6 +87,11 @@ async def lifespan(app: FastAPI):
     from app.requirements import RequirementStore, migrate_tasks
 
     app.state.requirements = RequirementStore()
+    from app.analysis_eval import AnalysisEvalStore
+    app.state.analysis_eval = AnalysisEvalStore()   # 需求分析评测集与回归评测结果
+    interrupted = app.state.analysis_eval.mark_interrupted()
+    if interrupted:
+        logger.warning("{} 次需求分析评测因上次服务重启中断，已标为失败", interrupted)
     from app.dependencies import DependencyStore
     app.state.dependencies = DependencyStore()
     migrated = migrate_tasks(app.state.tasks, app.state.requirements)

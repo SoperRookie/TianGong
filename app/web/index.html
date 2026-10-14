@@ -577,6 +577,9 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <button id="nav-models" onclick="switchView('models')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><circle cx="8" cy="7.5" r=".8" fill="currentColor"/><circle cx="8" cy="16.5" r=".8" fill="currentColor"/></svg>
         模型配置</button>
+      <button id="nav-aneval" onclick="switchView('aneval')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16"/><path d="M6 16l4-6 3 4 5-8"/><circle cx="18" cy="6" r="1.5"/></svg>
+        需求分析评测</button>
     </div>
     <div class="grp">操作日志</div>
     <button id="nav-audit" onclick="switchView('audit')">
@@ -629,6 +632,23 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   <div class="dlg-f"><button class="btn ghost" onclick="$('mergeDlg').close()">取消</button><button class="btn" onclick="doMerge()">合并</button></div>
 </dialog>
 
+<!-- 需求文档编写规范（给产品方） -->
+<dialog id="reqGuideDlg" style="width:820px">
+  <div class="dlg-h"><h3>需求文档编写规范</h3><span class="meta">给产品 / 需求方：规则逐条编号、数值写死、状态成表，AI 分析才有可核验的依据</span></div>
+  <div class="dlg-b" id="reqGuideBody" style="max-height:70vh;overflow:auto"></div>
+  <div class="dlg-f"><button class="btn ghost" onclick="downloadReqGuide()">下载 Markdown 模板</button><button class="btn" onclick="$('reqGuideDlg').close()">关闭</button></div>
+</dialog>
+
+<!-- 需求分析评测：修订标准答案 -->
+<dialog id="evalSampleDlg" style="width:760px">
+  <div class="dlg-h"><h3>修订标准答案 · <span id="evsTitle"></span></h3><span class="meta">标准答案是评测的尺子：只写需求原文明确支持的事实，一行一条</span></div>
+  <div class="dlg-b" style="max-height:70vh;overflow:auto">
+    <details style="margin-bottom:8px"><summary class="hint" style="cursor:pointer">查看需求原文</summary><pre id="evsText" style="white-space:pre-wrap;max-height:240px;overflow:auto;background:var(--well);padding:8px 10px;border-radius:6px;font-size:12px"></pre></details>
+    <div id="evsBody"></div>
+  </div>
+  <div class="dlg-f"><button class="btn ghost" onclick="$('evalSampleDlg').close()">取消</button><button class="btn" onclick="saveEvalSample()">保存</button></div>
+</dialog>
+
 <!-- 依赖关系：添加 -->
 <dialog id="depDlg" style="width:620px">
   <div class="dlg-h"><h3>添加依赖</h3><span class="meta" id="depHint"></span></div>
@@ -676,6 +696,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <!-- AI 中心：AI 任务中心（任务 / 调用日志 / 统计）与 Prompt 管理（M5） -->
 <div class="layout" id="view-aicenter" style="display:none"><div class="page" style="max-width:1420px" id="aiArea"></div></div>
 <div class="layout" id="view-prompts" style="display:none"><div class="page" style="max-width:1320px" id="promptArea"></div></div>
+<div class="layout" id="view-aneval" style="display:none"><div class="page" style="max-width:1320px" id="anEvalArea"></div></div>
 
 <!-- 需求中心：需求列表 ⇄ 需求详情（M2） -->
 <div class="layout" id="view-requirements" style="display:none">
@@ -2030,7 +2051,7 @@ const owlMoodOf = t => ['queued','running'].includes(t.status) || (t.status==='a
   : (t.status === 'completed' && t.result && (t.result.passed || (t.result.cases||[]).length && (t.result.cases||[]).every(c => caseState(t, c).status === 'approved'))) ? 'pass' : 'idle';
 
 /* ---------- 视图切换与面包屑 ---------- */
-const VIEW_LABELS = {projects:'项目管理', requirements:'需求列表', aicenter:'AI 任务中心', prompts:'Prompt 管理', audit:'操作日志', knowledge:'知识库', workbench:'我的工作台', search:'搜索结果', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理'};
+const VIEW_LABELS = {projects:'项目管理', requirements:'需求列表', aicenter:'AI 任务中心', prompts:'Prompt 管理', audit:'操作日志', knowledge:'知识库', workbench:'我的工作台', search:'搜索结果', board:'任务列表', plans:'测试计划', cases:'测试用例', reports:'报表', rules:'学习规则', memory:'记忆', models:'模型配置', users:'用户管理', aneval:'需求分析评测'};
 function setCrumb(html) { $('crumb').innerHTML = html; }
 function crumbForBoard() {
   if (currentTask) {
@@ -2038,14 +2059,14 @@ function crumbForBoard() {
     setCrumb(`<a onclick="backToList()">${esc(from)}</a><span class="sep">/</span>任务 <code>${currentTask.task_id}</code>`);
   } else setCrumb(VIEW_LABELS.board);
 }
-const ADMIN_VIEWS = ['rules','memory','models','users','prompts'];  // 沉淀与反哺 + 系统设置：仅管理员
+const ADMIN_VIEWS = ['rules','memory','models','users','prompts','aneval'];  // 沉淀与反哺 + 系统设置：仅管理员
 function switchView(v) {
   if (ADMIN_VIEWS.includes(v) && curUser && curUser.role !== 'admin') {
     toast('该页面需要管理员权限', 'warn');
     v = 'projects';
   }
   currentView = v;
-  for (const k of ['projects','requirements','aicenter','prompts','audit','knowledge','workbench','search','board','plans','cases','reports','rules','memory','models','users']) {
+  for (const k of ['projects','requirements','aicenter','prompts','audit','knowledge','workbench','search','board','plans','cases','reports','rules','memory','models','users','aneval']) {
     $('view-'+k).style.display = k===v ? '' : 'none';
     if ($('nav-'+k)) $('nav-'+k).classList.toggle('on', k===v && !(k==='plans' && plansMine));
   }
@@ -2073,6 +2094,7 @@ function switchView(v) {
   if (v==='rules') refreshRules();
   if (v==='memory') refreshMemories();
   if (v==='models') refreshModelsCfg();
+  if (v==='aneval') renderAnEval();
   if (v==='users') refreshUsers();
   renderBatchBar();
 }
@@ -4934,7 +4956,7 @@ function renderOfflineDiff(o) {
 /* ==================== AI 中心（M5）：任务中心 / 调用日志 / Prompt 管理 ==================== */
 const PROMPT_NAMES = {analyst:'需求拆解', requirement_analysis:'需求分析', generator:'用例生成', reviewer:'用例评审', fix_instruction:'定点修正指令',
   gap_check:'覆盖查漏', dup_judge:'语义查重', point_fix:'测试点修改', case_fix:'用例修改', requirement_diff:'需求变更', learning:'修改习惯学习',
-  point_supplement:'测试点补充', point_compare:'人工与 AI 测试点对比', vision_image:'图片理解', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
+  point_supplement:'测试点补充', point_compare:'人工与 AI 测试点对比', vision_image:'图片理解', requirement_analysis_review:'需求分析复核', analysis_judge:'评测裁判', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
 let aiTab = 'tasks', aiStatus = '', aiMine = false, aiCallPage = 1, aiCallSize = 50, aiCallPurpose = '', aiCallStatus = '', aiCallModel = '', aiCallBy = '', aiCallProject = '', aiCallKw = '', aiDays = 30;
 function acallSet(name, value) {
   if (name === 'page') aiCallPage = value;
@@ -5676,6 +5698,9 @@ function anSet(name, value) {
   else if (name === 'hist') { anHist = parseInt(value); anPage = 1; }
   renderRequirementDetail();
 }
+const AN_EVIDENCE_KEYS = ['rules','boundaries','state_changes','permissions'];
+const anItem = x => (x && typeof x === 'object') ? {text: x.text || '', quote: x.quote || '', verified: x.verified, review: x.review || null, manual: !!x.manual} : {text: String(x ?? ''), quote: '', verified: null, review: null, manual: false};
+const anModelOpts = () => [...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('');
 function reqAnalysisHtml(r, labels, canAI) {
   const hist = r.analysis_history || [];
   const viewingOld = anHist >= 0 && anHist < hist.length;
@@ -5683,45 +5708,208 @@ function reqAnalysisHtml(r, labels, canAI) {
   const meta = viewingOld ? (hist[anHist].meta || {}) : (r.analysis_meta || {});
   const openN = (r.questions || []).filter(q => q.status === 'open' && (q.level || 'must') === 'must').length;
   const toolbar = `<div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap">
-      ${canAI?`<select id="rqAnalyzeModel" style="width:150px">${[...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('')}</select>
+      ${canAI?`<select id="rqAnalyzeModel" style="width:150px" title="分析模型（最高推理强度）">${anModelOpts()}</select>
+      <select id="rqReviewerModel" style="width:160px" title="独立复核模型：第二个 Agent 对照原文挑理解错 / 无依据 / 遗漏，建议选与分析不同的模型"><option value="">复核：同分析模型</option>${anModelOpts()}</select>
       <button class="btn sm" id="rqAnalyzeBtn" onclick="analyzeReq()">${r.analysis?'重新 AI 分析':'AI 需求分析'}</button>`:''}
       ${hist.length?`<select style="width:230px" onchange="anSet('hist', this.value)"><option value="-1" ${!viewingOld?'selected':''}>当前结果（${esc(fmtTime((r.analysis_meta||{}).at))}）</option>${hist.map((h,i)=>`<option value="${i}" ${anHist===i?'selected':''}>历史 ${hist.length-i}：${esc(fmtTime((h.meta||{}).at))} · ${esc((h.meta||{}).model||'')}</option>`).reverse().join('')}</select>`:''}
-      ${r.analysis?`<span class="hint">${viewingOld?'<b style="color:var(--warn)">正在查看历史结果</b> · ':''}${esc(meta.model||'')} · ${esc(meta.by||'')} · ${esc(fmtTime(meta.at))}${meta.chunks>1?` · 分 ${meta.chunks} 片分析后合并`:''}</span>`:'<span class="hint">尚未分析。AI 只整理需求已写明的内容，缺失规则会列入「待确认事项」而不是脑补</span>'}</div>`;
-  const intro = `<div class="hint" style="margin-bottom:10px">AI 需求分析把原文、附件与人工补充整理成 11 个结构化分析项，结果随需求保存在数据库（不覆盖原文，重新分析自动留档）；其中业务规则 / 边界条件 / 状态变化 / 权限要求会作为需求的一部分带入测试设计，待确认事项进入确认流。<b>人工确认分析结果后</b>会沉淀到项目知识库（规则 / 边界 / 状态 / 权限 → 业务规则库，功能 / 流程 / 依赖 / 风险 → 需求文档库），供以后的任务检索。</div>`;
+      ${r.analysis?`<span class="hint">${viewingOld?'<b style="color:var(--warn)">正在查看历史结果</b> · ':''}${esc(meta.model||'')} · ${esc(meta.by||'')} · ${esc(fmtTime(meta.at))}${meta.chunks>1?` · 分 ${meta.chunks} 片分析后合并`:''}${meta.knowledge?` · 注入知识库 ${meta.knowledge} 片`:''}</span>`:'<span class="hint">尚未分析。AI 只整理需求已写明的内容，每条带原文依据并逐条程序核验，无依据的降级为「待确认事项」而不是脑补</span>'}</div>`;
+  const intro = `<div class="hint" style="margin-bottom:10px">AI 需求分析把原文、附件与人工补充整理成 11 个结构化分析项。三道防线：① 每条要点带<b>原文依据</b>，程序逐条核验，规则 / 边界 / 状态 / 权限四项没依据的自动降级为待确认事项；② 第二个<b>独立复核</b> Agent 对照原文挑理解错、无依据与遗漏，意见标在条目上由人拍板；③ 人工可逐条<b>修改 / 删除 / 补充</b>，修改留痕进评测集与学习规则。<b>确认</b>后规则 / 边界 / 状态 / 权限 → 业务规则库，其余 → 需求文档库。</div>`;
   if (!an) return intro + toolbar + '<div class="empty">还没有分析结果</div>';
-  const canEdit = can(r.project, 'requirement.edit'), c = r.analysis_confirmed;
+  const canEdit = can(r.project, 'requirement.edit'), c = r.analysis_confirmed, pending = r.review_pending || 0;
+  const v = meta.verification, rv = meta.review;
+  const statsBar = !viewingOld && (v || rv) ? `<div class="hint" style="margin-bottom:10px;display:flex;gap:16px;flex-wrap:wrap">
+      ${v?`<span>原文核验：核对 ${v.checked} 条，通过 <b>${v.verified}</b>，不符 ${v.unverified}${v.demoted?`，<b style="color:var(--warn)">${v.demoted} 条无依据已降级为待确认</b>`:''}</span>`:''}
+      ${rv?(rv.error?`<span style="color:var(--danger)">独立复核失败：${esc(rv.error)}</span>`:rv.skipped?`<span>独立复核跳过：${esc(rv.skipped)}</span>`:`<span>独立复核（${esc(rv.model||'')}）：理解错 <b style="color:${rv.wrong?'var(--danger)':'inherit'}">${rv.wrong}</b>，无依据 <b>${rv.unsupported}</b>，补充 <b>${rv.added}</b>${rv.unverified_added?`，补充未通过核验 ${rv.unverified_added}（已转待确认）`:''}</span>`):'<span>未做独立复核</span>'}
+      ${r.analysis_edit_count?`<span>人工修改 ${r.analysis_edit_count} 处</span>`:''}</div>` : '';
   let confirmBar = '';
   if (!viewingOld) {
-    const status = !c ? '<span class="st pending">未确认 · 未沉淀到知识库</span><span class="hint">请过目各分析项，确认无误后沉淀到知识库；有错漏可先补充需求原文 / 人工补充后重新分析</span>'
-      : r.analysis_confirmed_stale ? `<span class="st candidate">已确认旧版本</span><span class="hint">知识库中是 ${esc(c.by||'')} ${relTime(c.at)} 确认的上一版分析，当前结果重新分析后尚未确认</span>`
+    const status = pending ? `<span class="st rejected">复核质疑 ${pending} 条未处理</span><span class="hint">逐条采纳改正 / 手动修改 / 删除 / 标记没问题后才能确认与沉淀</span>`
+      : !c ? '<span class="st pending">未确认 · 未沉淀到知识库</span><span class="hint">请过目各分析项（可逐条改 / 删 / 补），确认无误后沉淀到知识库</span>'
+      : r.analysis_confirmed_stale ? `<span class="st candidate">已确认旧版本</span><span class="hint">知识库中是 ${esc(c.by||'')} ${relTime(c.at)} 确认的那一版，之后重新分析或人工修改过，需再次确认</span>`
       : `<span class="st approved">已确认 · 已沉淀到知识库</span><span class="hint">${esc(c.by||'')} · ${relTime(c.at)}</span>`;
-    const btns = canEdit ? ((!c || r.analysis_confirmed_stale) ? `<button class="btn sm" onclick="confirmReqAnalysis()">确认分析结果并沉淀到知识库</button>` : '') + (c ? `<button class="btn ghost sm" onclick="confirmReqAnalysis(true)">取消确认</button>` : '') : '';
-    confirmBar = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding:8px 12px;background:var(--well);border-radius:8px">${status}<span style="margin-left:auto;display:flex;gap:6px">${btns}</span></div>`;
+    const evalBtn = canEdit ? `<button class="btn ghost sm" ${pending?'disabled':''} onclick="addReqEvalSample()" title="把当前分析结果作为这份需求的标准答案存入需求分析评测集（管理员可在「需求分析评测」页回归评测）">${r.eval_sample?'更新评测集标准答案':'加入评测集'}</button>` : '';
+    const btns = canEdit ? ((!c || r.analysis_confirmed_stale) ? `<button class="btn sm" ${pending?'disabled':''} onclick="confirmReqAnalysis()">确认分析结果并沉淀到知识库</button>` : '') + (c ? `<button class="btn ghost sm" onclick="confirmReqAnalysis(true)">取消确认</button>` : '') : '';
+    confirmBar = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding:8px 12px;background:var(--well);border-radius:8px">${status}${r.eval_sample?`<span class="hint" title="标准答案更新于 ${esc(fmtTime(r.eval_sample.updated_at))}">· 已在评测集</span>`:''}<span style="margin-left:auto;display:flex;gap:6px">${evalBtn}${btns}</span></div>`;
   }
   const keys = Object.keys(labels);
   const count = k => (an[k] || []).length;
+  const flagged = k => (an[k] || []).filter(x => { const it = anItem(x); return it.review && (it.review.verdict === 'wrong' || it.review.verdict === 'unsupported'); }).length;
   const total = keys.filter(k => k !== 'open_questions').reduce((n, k) => n + count(k), 0);
   const nav = `<div style="min-width:170px;border-right:1px solid var(--line);padding-right:10px">
       ${keys.map(k => k === 'open_questions'
         ? `<button class="btn ghost sm" style="display:flex;width:100%;justify-content:space-between;margin-top:6px;border-top:1px dashed var(--line);padding-top:8px" onclick="reqTab='questions';renderRequirementDetail()"><span>${esc(labels[k])} →</span><span class="cnt ${openN?'hot':''}">${openN||count(k)}</span></button>`
-        : `<button class="btn ghost sm ${anSec===k?'on':''}" style="display:flex;width:100%;justify-content:space-between;${anSec===k?'background:var(--p1-bg,var(--well));color:var(--p1)':''}" onclick="anSet('sec', ${jsq(k)})"><span>${esc(labels[k])}</span><span class="cnt">${count(k)}</span></button>`).join('')}
+        : `<button class="btn ghost sm ${anSec===k?'on':''}" style="display:flex;width:100%;justify-content:space-between;${anSec===k?'background:var(--p1-bg,var(--well));color:var(--p1)':''}" onclick="anSet('sec', ${jsq(k)})"><span>${esc(labels[k])}</span><span class="cnt ${flagged(k)?'hot':''}" title="${flagged(k)?`${flagged(k)} 条复核质疑未处理`:''}">${count(k)}</span></button>`).join('')}
       <div class="hint" style="margin-top:8px;padding-top:6px;border-top:1px solid var(--line)">共 ${total} 条分析要点</div></div>`;
   const sec = keys.includes(anSec) ? anSec : 'features';
   const kw = anKw.trim().toLowerCase();
-  const all = an[sec] || [];
-  const items = all.map((x, i) => ({n: i + 1, text: x})).filter(x => !kw || String(x.text).toLowerCase().includes(kw));
+  const all = (an[sec] || []).map((x, i) => ({n: i + 1, i, ...anItem(x)}));
+  const items = all.filter(x => !kw || x.text.toLowerCase().includes(kw) || x.quote.toLowerCase().includes(kw));
   const pages = Math.max(1, Math.ceil(items.length / anSize));
   if (anPage > pages) anPage = pages;
   const pageItems = items.slice((anPage - 1) * anSize, anPage * anSize);
   const hiKw = t => kw ? esc(t).replace(new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), m => `<mark>${m}</mark>`) : esc(t);
+  const editable = canEdit && !viewingOld;
+  const quoteLine = it => it.quote
+    ? `<div class="hint" style="margin-top:3px">${it.verified===true?'<span style="color:var(--ok,#2e9e5b)">✓ 原文依据</span>':'<span style="color:var(--warn)">⚠ 依据与原文不符</span>'}：「${hiKw(it.quote)}」</div>`
+    : (AN_EVIDENCE_KEYS.includes(sec) && !it.manual ? '<div class="hint" style="margin-top:3px">未给出原文依据</div>' : '');
+  const reviewBox = it => {
+    if (!it.review || it.review.verdict === 'added') return '';
+    const wrong = it.review.verdict === 'wrong';
+    const ops = editable ? `<div class="rowops" style="margin-top:4px">${wrong&&it.review.fix?`<button class="btn sm" onclick="anItemOp({key:${jsq(sec)},action:'accept_fix',index:${it.i}})">采纳改正</button>`:''}<button class="btn ghost sm" onclick="anEditItem(${jsq(sec)},${it.i})">手动修改</button>${wrong?'':`<button class="btn ghost sm danger" onclick="anDeleteItem(${jsq(sec)},${it.i})">删除</button>`}<button class="btn ghost sm" onclick="anItemOp({key:${jsq(sec)},action:'dismiss_review',index:${it.i}})">原条目没问题</button></div>` : '';
+    return `<div style="margin-top:6px;padding:6px 10px;border:1px solid ${wrong?'var(--danger)':'var(--warn)'};border-radius:6px"><b style="color:${wrong?'var(--danger)':'var(--warn)'}">复核：${wrong?'理解错':'无依据'}</b> ${esc(it.review.note||'')}${wrong&&it.review.fix?`<div>建议改为：<b>${esc(it.review.fix)}</b></div>`:''}${ops}</div>`;
+  };
   const body = `<div style="flex:1;min-width:0">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><div class="section-t" style="margin:0">${esc(labels[sec])}<span class="cnt" style="margin-left:6px">${all.length}</span></div>
+        ${AN_EVIDENCE_KEYS.includes(sec)?'<span class="hint">事实项：每条须有原文依据，带入测试设计与业务规则库</span>':''}
         <div class="search" style="margin-left:auto;width:240px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="search" placeholder="在本项内筛选…" value="${esc(anKw)}" onchange="anSet('kw', this.value)" onkeydown="if(event.key==='Enter')anSet('kw', this.value)"></div></div>
-      ${all.length ? (items.length ? `<div class="tbl-wrap" style="margin-top:0"><table><thead><tr><th style="width:48px">#</th><th>${esc(labels[sec])}</th></tr></thead><tbody>
-        ${pageItems.map(x => `<tr><td class="hint">${x.n}</td><td style="white-space:pre-wrap;line-height:1.6">${hiKw(String(x.text))}</td></tr>`).join('')}</tbody></table></div>
-        ${items.length > anSize || anSize !== 20 ? pagerHtml(items.length, anPage, anSize, 'anSet') : `<div class="hint" style="margin-top:6px">共 ${items.length} 条${kw?'（已筛选）':''}</div>`}` : `<div class="empty">没有包含「${esc(anKw)}」的条目</div>`) : '<div class="empty">AI 没有从需求中整理出这一项的内容</div>'}</div>`;
+      ${all.length ? (items.length ? `<div class="tbl-wrap" style="margin-top:0"><table><thead><tr><th style="width:48px">#</th><th>${esc(labels[sec])}</th>${editable?'<th style="width:90px"></th>':''}</tr></thead><tbody>
+        ${pageItems.map(it => `<tr><td class="hint">${it.n}</td><td style="white-space:pre-wrap;line-height:1.6">${hiKw(it.text)}${it.manual?' <span class="tag">人工</span>':''}${it.review&&it.review.verdict==='added'?' <span class="tag" style="background:var(--p1-bg,var(--well));color:var(--p1)" title="独立复核认为首轮分析遗漏，已通过原文核验后补入">复核补充</span>':''}${quoteLine(it)}${reviewBox(it)}</td>${editable?`<td><div class="rowops"><button class="btn ghost sm" onclick="anEditItem(${jsq(sec)},${it.i})">改</button><button class="btn ghost sm danger" onclick="anDeleteItem(${jsq(sec)},${it.i})">删</button></div></td>`:''}</tr>`).join('')}</tbody></table></div>
+        ${items.length > anSize || anSize !== 20 ? pagerHtml(items.length, anPage, anSize, 'anSet') : `<div class="hint" style="margin-top:6px">共 ${items.length} 条${kw?'（已筛选）':''}</div>`}` : `<div class="empty">没有包含「${esc(anKw)}」的条目</div>`) : '<div class="empty">AI 没有从需求中整理出这一项的内容</div>'}
+      ${editable?`<div style="margin-top:8px"><button class="btn ghost sm" onclick="anAddItem(${jsq(sec)})">＋ 人工补充一条${esc(labels[sec])}</button></div>`:''}</div>`;
   const block = openN ? `<div class="hint" style="margin-bottom:10px;padding:8px 12px;border:1px solid var(--warn);border-radius:8px;color:var(--warn)">分析产出 ${openN} 项「必须确认」的待确认事项，确认后才能开始测试设计。<a onclick="reqTab='questions';renderRequirementDetail()">去确认 →</a></div>` : '';
-  return intro + toolbar + confirmBar + block + `<div style="display:flex;gap:16px;align-items:flex-start">${nav}${body}</div>`;
+  return intro + toolbar + statsBar + confirmBar + block + `<div style="display:flex;gap:16px;align-items:flex-start">${nav}${body}</div>`;
+}
+async function anItemOp(body) {
+  try { await jpost(`/api/v1/requirements/${curReq}/analysis/items`, body); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function anEditItem(key, index) {
+  const it = anItem((((_reqDetail||{}).analysis||{})[key]||[])[index]);
+  const text = await askInput('修改分析条目', '以需求原文为准修改（修改会留痕，进评测集与学习规则）', it.text);
+  if (!text || text === it.text) return;
+  anItemOp({key, action: 'edit', index, text});
+}
+async function anDeleteItem(key, index) {
+  if (!await uiConfirm('删除分析条目', '删除后不可恢复（重新分析会重新生成）。确定？', true)) return;
+  anItemOp({key, action: 'delete', index});
+}
+async function anAddItem(key) {
+  const text = await askInput('人工补充分析条目', '一条一个事实，写清数值、单位与方向');
+  if (!text) return;
+  anItemOp({key, action: 'add', text});
+}
+async function addReqEvalSample() {
+  const r = _reqDetail || {};
+  if (!await uiConfirm(r.eval_sample ? '更新评测集标准答案' : '加入评测集', '把当前分析结果（人工过目 / 修改后）作为这份需求的标准答案存入需求分析评测集；以后每次改 Prompt、换模型，管理员可在「需求分析评测」页回归评测。确定？')) return;
+  try { await jpost(`/api/v1/requirements/${curReq}/analysis/eval-sample`, {}); toast('已存入评测集', 'ok'); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function adoptReqQuestion(qid) {
+  try { await jpost(`/api/v1/requirements/${curReq}/questions/${qid}/adopt`, {}); toast('已采纳回分析结果，并记为已确认', 'ok'); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+// 需求文档编写规范（服务端 Markdown → 轻量渲染）
+let _reqGuideMd = '';
+async function openReqGuide() {
+  try { if (!_reqGuideMd) _reqGuideMd = (await api('/api/v1/requirements/writing-guide')).markdown; }
+  catch (e) { return toast(e.message, 'err'); }
+  $('reqGuideBody').innerHTML = mdLite(_reqGuideMd);
+  $('reqGuideDlg').showModal();
+}
+function downloadReqGuide() {
+  const blob = new Blob([_reqGuideMd], {type: 'text/markdown;charset=utf-8'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = '需求文档编写规范.md'; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function mdLite(md) {
+  const lines = md.split('\n'), out = []; let i = 0;
+  const inline = t => esc(t).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  while (i < lines.length) {
+    const l = lines[i];
+    if (l.startsWith('```')) { const buf = []; i++; while (i < lines.length && !lines[i].startsWith('```')) buf.push(lines[i++]); i++; out.push(`<pre style="white-space:pre-wrap;background:var(--well);padding:10px 12px;border-radius:8px;font-size:12px;line-height:1.6">${esc(buf.join('\n'))}</pre>`); continue; }
+    const h = l.match(/^(#{1,4})\s+(.+)$/);
+    if (h) { const n = h[1].length; out.push(`<div style="margin:${n===1?'0':'14px'} 0 6px;font-size:${n===1?16:n===2?14:13}px;font-weight:600">${inline(h[2])}</div>`); i++; continue; }
+    if (l.startsWith('|')) { const rows = []; while (i < lines.length && lines[i].startsWith('|')) rows.push(lines[i++]); const cells = r => r.split('|').slice(1, -1).map(c => c.trim()); const body = rows.filter(r => !/^\|\s*-+/.test(r)); out.push(`<div class="tbl-wrap" style="margin:6px 0"><table><tr>${cells(body[0]).map(c => `<th>${inline(c)}</th>`).join('')}</tr>${body.slice(1).map(r => `<tr>${cells(r).map(c => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')}</table></div>`); continue; }
+    if (/^\s*[-*]\s+/.test(l) || /^\s*\d+\.\s+/.test(l)) {
+      const ordered = /^\s*\d+\./.test(l), items = [];
+      while (i < lines.length && (/^\s*[-*]\s+/.test(lines[i]) || /^\s*\d+\.\s+/.test(lines[i]) || /^\s{2,}\S/.test(lines[i]))) {
+        const t = lines[i];
+        if (/^\s{2,}[-*]\s+/.test(t) && items.length) items[items.length - 1] += `<div class="hint" style="margin-left:14px">${inline(t.trim().replace(/^[-*]\s+/, ''))}</div>`;
+        else if (/^\s{2,}\S/.test(t) && !/^\s*[-*]\s+|^\s*\d+\.\s+/.test(t) && items.length) items[items.length - 1] += '<br>' + inline(t.trim());
+        else items.push(inline(t.trim().replace(/^([-*]|\d+\.)\s+/, '')).replace(/^\[ \]\s*/, '☐ ').replace(/^\[x\]\s*/i, '☑ '));
+        i++;
+      }
+      out.push(`<${ordered?'ol':'ul'} style="margin:4px 0 8px 20px;line-height:1.7">${items.map(x => `<li>${x}</li>`).join('')}</${ordered?'ol':'ul'}>`); continue;
+    }
+    if (!l.trim()) { i++; continue; }
+    const buf = []; while (i < lines.length && lines[i].trim() && !/^(#|```|\||\s*[-*]\s|\s*\d+\.\s)/.test(lines[i])) buf.push(lines[i++]);
+    out.push(`<p style="margin:4px 0 8px;line-height:1.7">${inline(buf.join(' '))}</p>`);
+  }
+  return out.join('');
+}
+// ---- 需求分析评测（管理员）：评测集 / 评测记录 / 评测详情 ----
+let evTab = 'samples', _evRun = null, _evRunPoll = null;
+const evPct = v => v == null ? '—' : (v * 100).toFixed(1) + '%';
+async function renderAnEval() {
+  setCrumb('需求分析评测');
+  clearTimeout(_evRunPoll);
+  let body = '';
+  try { body = evTab === 'samples' ? await evSamplesHtml() : evTab === 'runs' ? await evRunsHtml() : await evRunDetailHtml(); }
+  catch (e) { body = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+  $('anEvalArea').innerHTML = `<div class="card">
+    <div class="card-h" style="border-bottom:none"><h3>需求分析评测</h3><span class="meta">把「AI 理解需求的准确率」变成可反复测量的数字：评测集 = 需求原文 + 人工确认的标准答案；每次改 Prompt / 换模型跑一遍回归评测，比较准确率、捏造率、理解错率、遗漏率</span></div>
+    <div class="dtabs">${[['samples','评测集'],['runs','评测记录']].map(([k,l])=>`<button class="${evTab===k?'on':''}" onclick="evTab='${k}';renderAnEval()">${l}</button>`).join('')}${evTab==='detail'?'<button class="on">评测详情</button>':''}</div>
+    <div class="card-b">${body}</div></div>`;
+}
+async function evSamplesHtml() {
+  const d = await api('/api/v1/analysis-eval/samples' + (curProjectName ? '?project=' + encodeURIComponent(curProjectName) : ''));
+  const running = d.running;
+  return `<div class="hint" style="margin-bottom:10px">样本来源：需求详情 → AI 需求分析 → 「加入评测集」；人工修改过分析结果再确认时${d.auto_sample?'会自动加入':'不会自动加入（已关闭 TIANGONG_ANALYSIS_EVAL_AUTO_SAMPLE）'}。标准答案可在这里逐项修订。建议 20~30 份覆盖主要业务的需求。</div>
+    <div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap">
+      <select id="evModel" style="width:160px" title="分析模型">${anModelOpts()}</select>
+      <select id="evReviewer" style="width:160px" title="独立复核模型"><option value="">复核：同分析模型</option>${anModelOpts()}</select>
+      <label class="check">独立复核 <input type="checkbox" id="evReview" checked></label>
+      <button class="btn sm" ${running||!d.samples.length?'disabled':''} onclick="startEvalRun()">${running?`评测进行中 ${running.done}/${running.total}`:`运行回归评测（${curProjectName?'本项目 ':''}${d.samples.length} 个样本）`}</button>
+      ${running?`<a onclick="openEvalRun('${running.run_id}')">查看进度 →</a>`:''}</div>
+    <div class="tbl-wrap" style="margin-top:0"><table><thead><tr><th>需求</th><th style="width:120px">项目</th><th style="width:90px">标准答案</th><th style="width:80px">原文字数</th><th style="width:110px">来源</th><th style="width:140px">更新</th><th style="width:170px">操作</th></tr></thead><tbody>
+      ${d.samples.map(s=>`<tr><td><a onclick="openRequirement('${s.req_id}','analysis')">${esc(s.title)}</a>${s.notes?`<div class="hint">${esc(s.notes)}</div>`:''}</td><td class="hint">${esc(s.project||'')}</td><td>${s.golden_count} 条</td><td class="hint">${s.chars}</td><td class="hint">${s.origin==='confirm'?'确认时自动':'手动加入'}${s.edits?`<div>人工改 ${s.edits} 处</div>`:''}</td><td class="hint">${esc(s.updated_by||'')}<div>${relTime(s.updated_at)}</div></td>
+        <td><div class="rowops"><button class="btn ghost sm" onclick="openEvalSample('${s.sample_id}')">修订标准答案</button><button class="btn ghost sm danger" onclick="deleteEvalSample('${s.sample_id}')">删除</button></div></td></tr>`).join('') || '<tr><td colspan="7"><div class="empty">评测集为空。到需求详情的「AI 需求分析」页，把人工确认过的分析结果「加入评测集」</div></td></tr>'}</tbody></table></div>`;
+}
+async function startEvalRun() {
+  try {
+    const r = await jpost('/api/v1/analysis-eval/runs', {project: curProjectName || null, model: $('evModel').value || null, reviewer_model: $('evReviewer').value || null, review: $('evReview').checked});
+    toast('评测已启动，后台逐样本执行', 'ok'); openEvalRun(r.run_id);
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function evRunsHtml() {
+  const d = await api('/api/v1/analysis-eval/runs');
+  return `<div class="tbl-wrap" style="margin-top:0"><table><thead><tr><th style="width:140px">时间</th><th style="width:100px">状态</th><th>模型 / 复核</th><th style="width:70px">样本</th><th style="width:80px">准确率</th><th style="width:80px">捏造率</th><th style="width:80px">理解错率</th><th style="width:80px">遗漏率</th><th>Prompt 版本</th><th style="width:80px">发起人</th></tr></thead><tbody>
+    ${d.runs.map(r=>{const t=r.totals||{};return `<tr class="rowlink" onclick="openEvalRun('${r.run_id}')"><td class="hint">${esc(fmtTime(r.at))}</td><td>${r.status==='running'?`<span class="st candidate">进行中 ${r.done}/${r.total}</span>`:r.status==='done'?'<span class="st approved">完成</span>':`<span class="st rejected" title="${esc(r.error||'')}">失败</span>`}</td><td class="hint">${esc(r.model||'默认')}${r.review?` / 复核 ${esc(r.reviewer_model||'同分析模型')}`:' / 无复核'}${r.project?`<div>项目 ${esc(r.project)}</div>`:''}</td><td>${r.done}/${r.total}${r.failed?`<div class="hint" style="color:var(--danger)">失败 ${r.failed}</div>`:''}</td><td><b>${evPct(t.accuracy)}</b></td><td>${evPct(t.fabricated_rate)}</td><td>${evPct(t.wrong_rate)}</td><td>${evPct(t.missing_rate)}</td><td onclick="event.stopPropagation()">${promptVersionsCell(r.prompt_versions)}</td><td class="hint">${esc(r.by||'')}</td></tr>`}).join('') || '<tr><td colspan="10"><div class="empty">还没有评测记录</div></td></tr>'}</tbody></table></div>`;
+}
+function openEvalRun(id) { _evRun = id; evTab = 'detail'; renderAnEval(); }
+async function evRunDetailHtml() {
+  const r = await api('/api/v1/analysis-eval/runs/' + _evRun);
+  if (r.status === 'running') _evRunPoll = setTimeout(() => { if (currentView === 'aneval' && evTab === 'detail') renderAnEval(); }, 3000);
+  const t = r.totals || {}, L = r.labels || {};
+  const head = `<div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap"><button class="btn ghost sm" onclick="evTab='runs';renderAnEval()">← 评测记录</button><span class="hint">${esc(fmtTime(r.at))} · ${esc(r.by||'')} · 模型 ${esc(r.model||'默认')}${r.review?` · 复核 ${esc(r.reviewer_model||'同分析模型')}`:' · 无复核'} · ${promptVersionsCell(r.prompt_versions)}</span>${r.status==='running'?`<span class="st candidate">进行中 ${r.done}/${r.total} <span class="spin"></span></span>`:r.status==='done'?'<span class="st approved">完成</span>':`<span class="st rejected">失败：${esc(r.error||'')}</span>`}</div>`;
+  const kpi = r.totals ? `<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">${[['准确率',t.accuracy,'匹配 / (标准答案 + 捏造)'],['捏造率',t.fabricated_rate,'捏造 / AI 输出'],['理解错率',t.wrong_rate,'理解错 / (匹配 + 理解错)'],['遗漏率',t.missing_rate,'遗漏 / 标准答案']].map(([l,v,d])=>`<div style="flex:1;min-width:150px;padding:10px 14px;background:var(--well);border-radius:8px"><div class="hint">${l}</div><div style="font-size:22px;font-weight:600">${evPct(v)}</div><div class="hint">${d}</div></div>`).join('')}<div style="flex:1;min-width:170px;padding:10px 14px;background:var(--well);border-radius:8px"><div class="hint">计数</div><div class="hint" style="line-height:1.8">标准答案 ${t.golden} · AI 输出 ${t.predicted}<br>匹配 ${t.matched} · 理解错 ${t.wrong} · 捏造 ${t.extra} · 遗漏 ${t.missing}</div></div></div>` : '';
+  const perKey = r.per_key ? `<div class="tbl-wrap" style="margin-top:0;margin-bottom:12px"><table><thead><tr><th>分析项</th><th>标准答案</th><th>AI 输出</th><th>匹配</th><th>理解错</th><th>捏造</th><th>遗漏</th><th>准确率</th></tr></thead><tbody>${Object.entries(r.per_key).map(([k,m])=>`<tr><td>${esc(L[k]||k)}</td><td>${m.golden}</td><td>${m.predicted}</td><td>${m.matched}</td><td ${m.wrong?'style="color:var(--danger)"':''}>${m.wrong}</td><td ${m.extra?'style="color:var(--warn)"':''}>${m.extra}</td><td ${m.missing?'style="color:var(--warn)"':''}>${m.missing}</td><td>${evPct(m.accuracy)}</td></tr>`).join('')}</tbody></table></div>` : '';
+  const samples = r.samples.map(s => {
+    const m = s.metrics || {};
+    const diff = s.per_key ? Object.entries(s.per_key).filter(([k,v])=>v.wrong_items.length||v.extra_items.length||v.missing_items.length).map(([k,v])=>`<div style="margin-top:6px"><b>${esc(L[k]||k)}</b>${v.wrong_items.map(w=>`<div style="color:var(--danger)">理解错：AI「${esc(w[1])}」 ← 标准「${esc(w[0])}」${w[2]?`（${esc(w[2])}）`:''}</div>`).join('')}${v.extra_items.map(x=>`<div style="color:var(--warn)">捏造：${esc(x)}</div>`).join('')}${v.missing_items.map(x=>`<div style="color:var(--warn)">遗漏：${esc(x)}</div>`).join('')}</div>`).join('') : '';
+    const rv = s.review || {};
+    return `<details style="margin-bottom:8px;padding:8px 12px;border:1px solid var(--line);border-radius:8px"><summary style="cursor:pointer">${s.status==='done'?`<b>${evPct(m.accuracy)}</b>`:s.status==='failed'?'<span class="st rejected">失败</span>':'<span class="hint">等待</span>'} ${esc(s.title)} <span class="hint">${s.status==='done'?`匹配 ${m.matched} · 理解错 ${m.wrong} · 捏造 ${m.extra} · 遗漏 ${m.missing}${s.verification?` · 核验降级 ${s.verification.demoted}`:''}${rv.wrong!=null?` · 复核质疑 ${rv.wrong+rv.unsupported} 补充 ${rv.added}`:''}`:esc(s.error||'')}</span></summary>${diff||(s.status==='done'?'<div class="hint" style="margin-top:6px">与标准答案完全一致</div>':'')}${s.open_questions&&s.open_questions.length?`<div class="hint" style="margin-top:6px">待确认事项 ${s.open_questions.length} 条：${s.open_questions.slice(0,5).map(esc).join('；')}</div>`:''}</details>`;
+  }).join('');
+  return head + kpi + perKey + samples;
+}
+async function openEvalSample(id) {
+  let s; try { s = await api('/api/v1/analysis-eval/samples/' + id); } catch (e) { return toast(e.message, 'err'); }
+  const labels = s.labels || {};
+  $('evsTitle').textContent = s.title;
+  $('evsText').textContent = s.text || '';
+  $('evsBody').innerHTML = Object.keys(labels).filter(k => k !== 'open_questions').map(k => { const v = s.golden[k] || []; return `<label class="f">${esc(labels[k])}<span class="hint">（一行一条，${v.length} 条）</span></label><textarea data-key="${esc(k)}" rows="${Math.min(8, Math.max(2, v.length + 1))}" style="width:100%;box-sizing:border-box">${esc(v.join('\n'))}</textarea>`; }).join('')
+    + `<label class="f">备注</label><input type="text" id="evsNotes" value="${esc(s.notes||'')}" placeholder="如：标准答案由产品确认 / 覆盖支付模块">`;
+  $('evalSampleDlg').dataset.id = id; $('evalSampleDlg').showModal();
+}
+async function saveEvalSample() {
+  const id = $('evalSampleDlg').dataset.id, golden = {};
+  $('evsBody').querySelectorAll('textarea').forEach(t => golden[t.dataset.key] = t.value.split('\n').map(x => x.trim()).filter(Boolean));
+  try { await api('/api/v1/analysis-eval/samples/' + id, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({golden, notes: $('evsNotes').value})}); $('evalSampleDlg').close(); toast('已保存', 'ok'); renderAnEval(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function deleteEvalSample(id) {
+  if (!await uiConfirm('删除评测样本', '只删除评测集中的样本，不影响需求本身。确定？', true)) return;
+  try { await api('/api/v1/analysis-eval/samples/' + id, {method: 'DELETE'}); renderAnEval(); } catch (e) { toast(e.message, 'err'); }
 }
 async function reqBatchConfirmAnalysis() {
   const scope = curProjectName ? `项目「${curProjectName}」` : '全部项目';
@@ -5798,6 +5986,7 @@ async function _renderRequirements__impl() {
         ${filtering?`<span class="hint">筛选出 ${data.total} 条</span><button class="btn ghost sm" onclick="reqSet('reset')">清除筛选</button>`:''}
         ${anySel?`<button class="btn ghost" id="reqDesignBtn" ${_reqSel.size?'':'disabled'} title="勾选需求后合并为一个测试设计任务（须同一项目，且必须确认的事项已确认）" onclick="reqMultiDesign()">合并发起测试设计${_reqSel.size?`（${_reqSel.size}）`:''}</button>`:''}
         ${canEdit&&(curProjectName||isSysAdmin())?`<button class="btn ghost" onclick="reqBatchConfirmAnalysis()" title="把${curProjectName?'本项目':'全部项目'}已分析但未确认的需求分析结果一次确认并沉淀到知识库">批量确认分析结果</button>`:''}
+        <button class="btn ghost" onclick="openReqGuide()" title="给产品 / 需求方的写法规范与模板：规则逐条编号、数值写死、状态成表">需求编写规范</button>
         ${canEdit?`<button class="btn" onclick="openReqDlg()">＋ 新建需求</button>`:''}</div></div>
     <div class="card-b"><div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
       <thead><tr>${anySel?`<th style="width:30px"><input type="checkbox" title="全选本页可设计的需求（只选本页）" ${(() => { const ids = data.requirements.filter(selectable).map(r => r.req_id); return ids.length && ids.every(id => _reqSel.has(id)) ? 'checked' : ''; })()} onchange="reqSelAll(this.checked)"></th>`:''}<th>需求</th><th style="width:120px">项目 / 版本</th><th style="width:120px">模块</th><th style="width:110px">状态</th><th style="width:130px">来源</th><th style="width:90px">测试设计</th><th style="width:110px">创建</th></tr></thead>
@@ -5898,12 +6087,12 @@ async function _renderRequirementDetail__impl() {
     ${canEdit?`<div class="toolbar" style="margin-bottom:10px"><input type="text" id="rqNewQ" placeholder="人工补充一条待确认事项…" style="flex:1"><select id="rqNewQLevel" style="width:110px"><option value="must">必须确认</option><option value="suggest">建议确认</option></select><button class="btn ghost sm" onclick="addReqQuestion()">添加</button></div>`:''}
     ${qs.length?`<div class="tbl-wrap"><table><tr><th style="width:36px">#</th><th>问题</th><th style="width:96px">等级</th><th style="width:90px">状态</th><th>确认结论</th><th style="width:120px">确认人</th><th style="width:150px">操作</th></tr>
       ${qs.map((q,i)=>`<tr>
-        <td class="hint">${i+1}</td><td>${esc(q.question)}${q.source==='manual'?' <span class="tag">人工</span>':''}${q.reason?`<div class="hint">${esc(q.reason)}</div>`:''}${(q.level||'must')==='suggest'&&q.status==='open'?`<div class="hint">不确认时假设：${esc(q.assumption||'按行业惯例处理')}</div>`:''}</td>
+        <td class="hint">${i+1}</td><td>${esc(q.question)}${q.source==='manual'?' <span class="tag">人工</span>':''}${q.kind==='unverified'?' <span class="tag" style="background:var(--danger-bg);color:var(--danger)">原文核验降级</span>':q.kind==='review'?' <span class="tag">复核补充</span>':''}${q.reason?`<div class="hint">${esc(q.reason)}</div>`:''}${(q.level||'must')==='suggest'&&q.status==='open'?`<div class="hint">不确认时假设：${esc(q.assumption||'按行业惯例处理')}</div>`:''}</td>
         <td>${(q.level||'must')==='must'?'<span class="tag" style="background:var(--danger-bg);color:var(--danger)">必须确认</span>':'<span class="tag">建议确认</span>'}${canEdit&&q.status==='open'?`<div><a class="hint" onclick="setReqQuestionLevel('${q.q_id}','${(q.level||'must')==='must'?'suggest':'must'}')">${(q.level||'must')==='must'?'降为建议':'升为必须'}</a></div>`:''}</td>
         <td>${q.status==='open'?'<span class="st rejected">待确认</span>':'<span class="st approved">已确认</span>'}</td>
         <td>${q.status==='open'?(canEdit?`<input type="text" id="qa-${q.q_id}" placeholder="填写确认结论（产品/开发口径）" style="width:100%;box-sizing:border-box">`:'<span class="hint">—</span>'):esc(q.answer)}</td>
         <td class="hint">${q.status==='open'?'':`${esc(q.by||'')}<div>${esc(fmtTime(q.at))}</div>`}</td>
-        <td><div class="rowops">${canEdit?(q.status==='open'?`<button class="btn sm" onclick="answerReqQuestion('${q.q_id}')">确认</button>`:`<button class="btn ghost sm" onclick="answerReqQuestion('${q.q_id}',true)">重新打开</button>`):''}</div></td></tr>`).join('')}
+        <td><div class="rowops">${canEdit?(q.status==='open'?`${q.key&&q.text?`<button class="btn ghost sm" onclick="adoptReqQuestion('${q.q_id}')" title="确认该条成立：采纳回「${esc((r.analysis_labels||{})[q.key]||q.key)}」并记为已确认">采纳</button>`:''}<button class="btn sm" onclick="answerReqQuestion('${q.q_id}')">确认</button>`:`<button class="btn ghost sm" onclick="answerReqQuestion('${q.q_id}',true)">重新打开</button>`):''}</div></td></tr>`).join('')}
     </table></div>`:'<div class="empty">暂无待确认事项</div>'}
     ${suggestN?`<div class="hint" style="margin-top:8px">${suggestN} 项建议级事项未确认，不阻塞测试设计，将按各自假设处理</div>`:''}`;
 
@@ -5999,7 +6188,7 @@ async function reparseAtt(attId) {
 async function analyzeReq() {
   const btn = $('rqAnalyzeBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 分析中';
   try {
-    const r = await jpost(`/api/v1/requirements/${curReq}/analyze`, {model: $('rqAnalyzeModel').value || null});
+    const r = await jpost(`/api/v1/requirements/${curReq}/analyze`, {model: $('rqAnalyzeModel').value || null, reviewer_model: ($('rqReviewerModel')||{}).value || null});
     toast(r.open_questions ? `分析完成，${r.open_questions} 项待确认事项需要确认` : '分析完成，无待确认事项', r.open_questions ? 'warn' : 'ok');
     anHist = -1; anPage = 1; reqTab = r.open_questions ? 'questions' : 'analysis'; renderRequirementDetail();
   } catch (e) { toast(e.message, 'err'); btn.disabled = false; btn.textContent = 'AI 需求分析'; }

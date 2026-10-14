@@ -301,3 +301,28 @@ def test_普通压缩包内脚本样式资源只汇总不解析(tmp_path):
     text = parse_file(z).full_text
     assert "账号密码登录" in text and "function login" not in text and "color: red" not in text
     assert "2 个脚本 / 样式资源文件不参与解析" in text and "app.js" in text
+
+
+def test_压缩包内文档图片多于外层图片_占位重新编号不连锁覆盖(tmp_path):
+    """早先逐张边改边替：docx 第 1 张改成 [[图片:2]] 后，处理 docx 第 2 张时又把它改成 [[图片:3]]……
+    连锁覆盖后前面几张图的占位全部丢失、只剩最后几张各重复多次，理解结果随之丢失。"""
+    import zipfile
+
+    from docx import Document
+
+    d = tmp_path / "后台需求.docx"
+    doc = Document()
+    for i in range(1, 4):
+        doc.add_paragraph(f"第 {i} 页说明")
+        img = tmp_path / f"p{i}.png"
+        img.write_bytes(_png_bytes((200, 200)))
+        doc.add_picture(str(img))
+    doc.save(d)
+    z = tmp_path / "需求包.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("封面.png", _png_bytes((200, 200)))
+        zf.write(d, "后台需求.docx")
+    parsed = parse_file(z)
+    placeholders = [s.content for s in parsed.sections if s.content.startswith("[[图片:")]
+    assert placeholders == ["[[图片:1]]", "[[图片:2]]", "[[图片:3]]", "[[图片:4]]"]
+    assert [img.placeholder for img in parsed.embedded_images] == placeholders

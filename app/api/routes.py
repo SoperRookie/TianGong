@@ -4669,6 +4669,50 @@ def _req_dir(req_id: str) -> Path:
     return d
 
 
+def _review_pending(analysis: dict | None) -> int:
+    """独立复核标出、尚未人工处理（采纳 / 修改 / 忽略）的条目数。"""
+    from app.agents.analysis import ITEM_KEYS
+
+    if not analysis:
+        return 0
+    return sum(1 for k in ITEM_KEYS for x in analysis.get(k) or []
+               if isinstance(x, dict) and (x.get("review") or {}).get("verdict") in ("wrong", "unsupported"))
+
+
+def _eval_sample_of(app, req_id: str) -> dict | None:
+    store = getattr(app.state, "analysis_eval", None)
+    sample = store.get_sample(f"req-{req_id}") if store is not None else None
+    return {"sample_id": sample["sample_id"], "updated_at": sample["updated_at"], "edits": sample.get("edits", 0)} if sample else None
+
+
+async def _analysis_knowledge(app, text: str, project: str | None, req_id: str | None) -> tuple[str | None, int]:
+    """需求分析阶段的知识注入：本项目（含同业务线 / 公共层）的需求文档库与业务规则库，只用于理解术语与背景；
+    排除该需求自己沉淀的文档（否则上一版分析会"自证"）。任何故障降级为无知识注入。"""
+    try:
+        service = _knowledge_service(app)
+        if not service.store.list_docs():
+            return None, 0
+        from app.knowledge.steward import KnowledgeSteward
+
+        steward = KnowledgeSteward(service, budget_chars=get_settings().knowledge_budget_chars)
+        bundle = await steward.for_generation(_knowledge_query(text), space=_knowledge_spaces(app, project))
+        if req_id:
+            own = {d.doc_id for d in service.store.list_docs() if d.origin != "manual" and d.origin_ref == req_id}
+            bundle.hits = {c: [h for h in hs if h.doc_id not in own] for c, hs in bundle.hits.items()}
+        if bundle.empty:
+            return None, 0
+        n = sum(len(v) for v in bundle.hits.values())
+        logger.info("需求分析知识注入：{} 个切片（项目={}）", n, project or "-")
+        return bundle.render(), n
+    except Exception as e:
+        logger.warning("需求分析知识检索故障，降级为无知识注入：{}", e)
+        return None, 0
+
+
+async def _eval_knowledge(app, text: str, project: str | None, req_id: str | None) -> str | None:
+    return (await _analysis_knowledge(app, text, project, req_id))[0]
+
+
 def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
     from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
     from app.requirements import REQ_STATUSES, SOURCE_TYPES
@@ -4684,6 +4728,9 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
         "task_count": len(item["tasks"]),
         "analysis_labels": REQUIREMENT_ANALYSIS_LABELS,
         "analysis_confirmed_stale": rstore.analysis_confirmed_stale(item),
+        "review_pending": _review_pending(item.get("analysis")),
+        "analysis_edit_count": len(item.get("analysis_edits") or []),
+        "eval_sample": _eval_sample_of(request.app, item["req_id"]),
         "parse_failed": sum(1 for a in item["attachments"] if not a.get("parsed") and not a.get("parsing")),
         "parsing": sum(1 for a in item["attachments"] if a.get("parsing")),
     }
@@ -4797,6 +4844,7 @@ async def list_requirements(
         v.pop("raw_text", None)
         v.pop("analysis", None)
         v.pop("analysis_history", None)
+        v.pop("analysis_edits", None)
         v["questions"] = len(item["questions"])
         out.append(v)
     total = len(out)
@@ -4873,6 +4921,15 @@ async def create_requirement(
                 len(files), len(links))
     _schedule_requirement_ingest(request.app, item["req_id"], _operator(request))
     return _req_view(request, rstore.get(item["req_id"]))
+
+
+@router.get("/api/v1/requirements/writing-guide")
+async def requirement_writing_guide() -> dict:
+    """需求文档编写规范与模板（给产品方）：规则逐条编号、数值明确、状态流转成表，AI 分析才有可核验的依据。"""
+    from app.config import BASE_DIR
+
+    path = BASE_DIR / "app" / "web" / "requirement-guide.md"
+    return {"markdown": path.read_text(encoding="utf-8") if path.exists() else "（规范文件缺失）", "filename": "需求文档编写规范.md"}
 
 
 @router.get("/api/v1/requirements/{req_id}")
@@ -5052,6 +5109,8 @@ async def download_requirement_attachment(request: Request, req_id: str, att_id:
 
 class AnalyzeBody(BaseModel):
     model: str | None = None
+    reviewer_model: str | None = None   # 独立复核用的模型；空则与分析模型相同
+    review: bool | None = None          # 空则按系统设置（TIANGONG_ANALYSIS_REVIEW）
 
 
 @router.post("/api/v1/requirements/{req_id}/analyze")
@@ -5066,17 +5125,23 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
     text = design_brief({**item, "analysis": None, "questions": []})
     if not text.strip():
         raise HTTPException(status_code=400, detail="需求原文为空（文件解析失败时请先重新解析）")
-    model = body.model if body else None
+    body = body or AnalyzeBody()
+    refs, knowledge_n = await _analysis_knowledge(request.app, text, item["project"], req_id)
     try:
-        analysis = await run_requirement_analysis(text, request.app.state.llm, model=model)
+        analysis = await run_requirement_analysis(text, request.app.state.llm, model=body.model, knowledge_refs=refs,
+                                                  review=body.review, reviewer_model=body.reviewer_model)
     except UnknownModelError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     meta = {"id": uuid.uuid4().hex[:8], "model": analysis.get("model_name"), "chunks": analysis.get("chunks"),
-            "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "knowledge": knowledge_n, "verification": analysis.get("verification"), "review": analysis.get("review")}
     item = request.app.state.requirements.set_analysis(req_id, analysis, meta)
-    logger.info("需求 {} AI 分析完成：待确认 {} 项（{}）", req_id, len(analysis.get("open_questions") or []), meta["model"])
+    v, r = meta.get("verification") or {}, meta.get("review") or {}
+    logger.info("需求 {} AI 分析完成：待确认 {} 项，核验降级 {}，复核质疑 {}，复核补充 {}（{}）", req_id,
+                len(analysis.get("open_questions") or []), v.get("demoted", 0), (r.get("wrong", 0) + r.get("unsupported", 0)),
+                r.get("added", 0), meta["model"])
     return _req_view(request, item)
 
 
@@ -5153,13 +5218,84 @@ async def confirm_requirement_analysis(request: Request, req_id: str) -> dict:
     功能 / 流程 / 前置 / 依赖 / 风险 → 需求文档库）；重新分析后需再次确认才会更新知识库。"""
     from app.requirements import RequirementError
 
-    _req(request, req_id, "requirement.edit")
+    item = _req(request, req_id, "requirement.edit")
+    pending = _review_pending(item.get("analysis"))
+    if pending:
+        raise HTTPException(status_code=409, detail=f"还有 {pending} 条独立复核质疑的条目未处理（采纳改正 / 修改 / 删除 / 忽略后再确认）")
     try:
         item = request.app.state.requirements.confirm_analysis(req_id, _operator(request))
     except RequirementError as e:
         raise HTTPException(status_code=409, detail=str(e))
     _schedule_requirement_ingest(request.app, req_id, _operator(request))
+    _auto_eval_sample(request, item)
     return _req_view(request, item)
+
+
+def _auto_eval_sample(request: Request, item: dict) -> None:
+    """人工改过的分析结果经确认即是一份标准答案：自动加入 / 更新评测集（可关 TIANGONG_ANALYSIS_EVAL_AUTO_SAMPLE）。"""
+    if not get_settings().analysis_eval_auto_sample or not item.get("analysis_edits"):
+        return
+    from app.requirements import design_brief
+
+    try:
+        text = design_brief({**item, "analysis": None, "questions": []})
+        request.app.state.analysis_eval.upsert_from_requirement(item, text, _operator(request), origin="confirm")
+        logger.info("需求 {} 的人工修正分析结果已加入评测集（修改 {} 处）", item["req_id"], len(item["analysis_edits"]))
+    except Exception as e:
+        logger.warning("自动加入评测集失败（{}）：{}", item["req_id"], e)
+
+
+class AnalysisItemBody(BaseModel):
+    key: str
+    action: str                 # edit / delete / add / accept_fix / dismiss_review
+    index: int | None = None
+    text: str | None = None
+
+
+@router.post("/api/v1/requirements/{req_id}/analysis/items")
+async def edit_requirement_analysis_item(request: Request, req_id: str, body: AnalysisItemBody) -> dict:
+    """人工修改分析条目（改文本 / 删除 / 新增 / 采纳复核改正 / 忽略复核意见）：留痕进评测集与学习规则；
+    修改后已确认的版本变为旧版本，需重新确认才更新知识库。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    try:
+        item = request.app.state.requirements.edit_analysis_item(
+            req_id, body.key, body.action, index=body.index, text=body.text, operator=_operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    request.state.audit_detail = f"{body.key} {body.action}" + (f" #{body.index + 1}" if body.index is not None else "")
+    return _req_view(request, item)
+
+
+@router.post("/api/v1/requirements/{req_id}/questions/{q_id}/adopt")
+async def adopt_requirement_question(request: Request, req_id: str, q_id: str) -> dict:
+    """核验降级 / 复核补充的待确认事项确认成立：采纳回对应分析项，并记为已确认。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    try:
+        item = request.app.state.requirements.adopt_question(req_id, q_id, operator=_operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _req_view(request, item)
+
+
+@router.post("/api/v1/requirements/{req_id}/analysis/eval-sample")
+async def add_requirement_eval_sample(request: Request, req_id: str) -> dict:
+    """把当前（人工过目 / 修改后的）分析结果作为标准答案加入需求分析评测集；同一需求重复加入即更新。"""
+    from app.requirements import RequirementError, design_brief
+
+    item = _req(request, req_id, "requirement.edit")
+    pending = _review_pending(item.get("analysis"))
+    if pending:
+        raise HTTPException(status_code=409, detail=f"还有 {pending} 条复核质疑未处理，处理后再作为标准答案")
+    try:
+        text = design_brief({**item, "analysis": None, "questions": []})
+        sample = request.app.state.analysis_eval.upsert_from_requirement(item, text, _operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"sample": _eval_sample_view(sample), "requirement": _req_view(request, item)}
 
 
 @router.delete("/api/v1/requirements/{req_id}/analysis/confirm")
@@ -5226,6 +5362,124 @@ async def answer_requirement_question(request: Request, req_id: str, q_id: str, 
     except RequirementError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return _req_view(request, item)
+
+
+# ---- 需求分析评测（管理员）：评测集维护 + 回归评测 ----
+
+
+def _eval_sample_view(s: dict) -> dict:
+    return {**{k: v for k, v in s.items() if k != "text"}, "chars": len(s.get("text") or ""),
+            "golden_count": sum(len(v) for v in (s.get("golden") or {}).values())}
+
+
+@router.get("/api/v1/analysis-eval/samples")
+async def list_eval_samples(request: Request, project: str | None = None) -> dict:
+    from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
+    from app.analysis_eval import METRIC_LABELS
+
+    _require_admin(request)
+    store = request.app.state.analysis_eval
+    samples = [_eval_sample_view(s) for s in store.list_samples(project)]
+    running = store.running()
+    return {"samples": samples, "labels": REQUIREMENT_ANALYSIS_LABELS, "metric_labels": METRIC_LABELS,
+            "running": {"run_id": running["run_id"], "done": running["done"], "total": running["total"]} if running else None,
+            "auto_sample": get_settings().analysis_eval_auto_sample}
+
+
+@router.get("/api/v1/analysis-eval/samples/{sample_id}")
+async def get_eval_sample(request: Request, sample_id: str) -> dict:
+    from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
+
+    _require_admin(request)
+    sample = request.app.state.analysis_eval.get_sample(sample_id)
+    if sample is None:
+        raise HTTPException(status_code=404, detail="样本不存在")
+    return {**sample, "labels": REQUIREMENT_ANALYSIS_LABELS}
+
+
+class EvalSampleBody(BaseModel):
+    golden: dict[str, list[str]] | None = None
+    title: str | None = None
+    notes: str | None = None
+
+
+@router.put("/api/v1/analysis-eval/samples/{sample_id}")
+async def update_eval_sample(request: Request, sample_id: str, body: EvalSampleBody) -> dict:
+    """修订标准答案（逐项文本）/ 标题 / 备注。"""
+    _require_admin(request)
+    try:
+        sample = request.app.state.analysis_eval.update_sample(sample_id, body.golden, body.title, body.notes, _operator(request))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="样本不存在")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _eval_sample_view(sample)
+
+
+@router.delete("/api/v1/analysis-eval/samples/{sample_id}")
+async def delete_eval_sample(request: Request, sample_id: str) -> dict:
+    _require_admin(request)
+    if not request.app.state.analysis_eval.delete_sample(sample_id):
+        raise HTTPException(status_code=404, detail="样本不存在")
+    return {"deleted": sample_id}
+
+
+class EvalRunBody(BaseModel):
+    project: str | None = None
+    sample_ids: list[str] | None = None
+    model: str | None = None
+    reviewer_model: str | None = None
+    review: bool | None = None
+
+
+@router.post("/api/v1/analysis-eval/runs")
+async def start_eval_run(request: Request, body: EvalRunBody | None = None) -> dict:
+    """启动一次回归评测（后台串行）：对所选样本重跑分析流水线，裁判对齐标准答案计分。同一时间只允许一次。"""
+    import asyncio
+
+    from app.analysis_eval import run_eval
+
+    _require_admin(request)
+    body = body or EvalRunBody()
+    store = request.app.state.analysis_eval
+    if store.running():
+        raise HTTPException(status_code=409, detail="已有评测在运行，请等它结束")
+    samples = store.list_samples(body.project)
+    if body.sample_ids:
+        wanted = set(body.sample_ids)
+        samples = [s for s in samples if s["sample_id"] in wanted]
+    if not samples:
+        raise HTTPException(status_code=400, detail="评测集为空：先在需求分析页把人工确认过的分析结果「加入评测集」")
+    if body.model:
+        try:
+            request.app.state.llm.registry.get(body.model)
+        except UnknownModelError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    review = get_settings().analysis_review if body.review is None else body.review
+    pstore = request.app.state.prompts
+    versions = {k: pstore.active(k)["version_no"] for k in ("requirement_analysis", "requirement_analysis_review", "analysis_judge")}
+    run = store.create_run(samples, _operator(request), body.model, body.reviewer_model, review, body.project, versions)
+    asyncio.get_running_loop().create_task(run_eval(request.app, run["run_id"], _eval_knowledge))
+    request.state.audit_detail = f"{len(samples)} 个样本，模型 {body.model or '默认'}"
+    logger.info("需求分析评测启动（{}）：{} 个样本，模型 {}，复核 {}", run["run_id"], len(samples), body.model or "默认", review)
+    return {k: v for k, v in run.items() if k != "samples"}
+
+
+@router.get("/api/v1/analysis-eval/runs")
+async def list_eval_runs(request: Request, limit: int = 50) -> dict:
+    _require_admin(request)
+    return {"runs": request.app.state.analysis_eval.list_runs(limit)}
+
+
+@router.get("/api/v1/analysis-eval/runs/{run_id}")
+async def get_eval_run(request: Request, run_id: str) -> dict:
+    from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
+
+    _require_admin(request)
+    run = request.app.state.analysis_eval.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="评测记录不存在")
+    return {**run, "labels": REQUIREMENT_ANALYSIS_LABELS}
 
 
 class DesignBody(BaseModel):
@@ -6233,6 +6487,8 @@ async def list_all_cases(
 
 def _dep_nodes(request: Request, project: str, kind: str, module: str = "", requirement_id: str = "") -> dict[str, dict]:
     """依赖图节点全集（本项目）：需求实体 或 正式用例；用例可按模块 / 需求缩小范围。"""
+    from app.agents.analysis import item_text
+
     tasks_store = request.app.state.tasks
     if kind == "requirement":
         nodes = {}
@@ -6260,7 +6516,8 @@ def _dep_nodes(request: Request, project: str, kind: str, module: str = "", requ
             summary = " ".join((r.get("raw_text") or "").split())[:240]
             nodes[r["req_id"]] = {"id": r["req_id"], "title": r["title"], "status": r.get("status"),
                                   "module_id": r.get("module_id"), "tasks": len(r.get("tasks") or []),
-                                  "features": a.get("features") or [], "dependencies": a.get("dependencies") or [],
+                                  "features": [item_text(x) for x in a.get("features") or [] if item_text(x)],
+                                  "dependencies": [item_text(x) for x in a.get("dependencies") or [] if item_text(x)],
                                   "summary": summary, "modules": modules[:12], "points": points}
         return nodes
     from app.reports import project_cases
@@ -6520,7 +6777,7 @@ async def analyze_learning(request: Request, body: LearningAnalyzeBody | None = 
 
     body = body or LearningAnalyzeBody()
     samples = collect_samples(request.app.state.tasks, project=body.project,
-                              plans=request.app.state.plans)
+                              plans=request.app.state.plans, requirements=request.app.state.requirements)
     if not samples:
         return {"candidates": [], "samples": 0, "message": "暂无人工修改留痕可供学习"}
     try:

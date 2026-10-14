@@ -4,6 +4,7 @@
 OCR 兜底（PaddleOCR）待 POC-R5 结论后按需接入。
 """
 
+import asyncio
 import base64
 import io
 from pathlib import Path
@@ -63,8 +64,54 @@ def load_image_bytes(path: str | Path) -> tuple[bytes, str]:
     except Exception as e:
         raise ValueError(f"{path.name} 无法解码为图片（{suffix}）：{e}") from None
 
-# 超大截图降采样上限（最长边像素）：控制视觉 token 数，避免撑爆私有化模型上下文
+# 单块图片最长边上限（像素）：控制视觉 token 数，避免撑爆私有化模型上下文
 MAX_IMAGE_SIDE = 2000
+# 大图切块：整页原型截图 / 长截图往往几千到上万像素，整体缩到 2000 以内文字就糊了，模型只能概括大意。
+# 改为按 2000 像素切成带重叠的块逐块理解再拼接；块数超过上限时才整体缩小（相邻块重叠 120 像素，避免切断的控件两边都看不全）
+TILE_OVERLAP = 120
+MAX_TILES = 16
+
+
+def _grid(w: int, h: int) -> tuple[int, int]:
+    step = MAX_IMAGE_SIDE - TILE_OVERLAP
+    nx = max(1, -(-(w - TILE_OVERLAP) // step)) if w > MAX_IMAGE_SIDE else 1
+    ny = max(1, -(-(h - TILE_OVERLAP) // step)) if h > MAX_IMAGE_SIDE else 1
+    return nx, ny
+
+
+def split_tiles(raw: bytes, mime: str) -> list[tuple[bytes, str, tuple[int, int]]]:
+    """大图切块：返回 [(图片字节, mime, (行, 列))]，按从上到下、从左到右排列；小图原样一块返回。"""
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            w, h = img.size
+            if max(w, h) <= MAX_IMAGE_SIDE:
+                return [(raw, mime, (1, 1))]
+            nx, ny = _grid(w, h)
+            if nx * ny > MAX_TILES:
+                # 块数超限：整体缩小到恰好 MAX_TILES 块以内
+                scale = (MAX_TILES / (nx * ny)) ** 0.5
+                img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+                w, h = img.size
+                nx, ny = _grid(w, h)
+            rgb = img.convert("RGB")
+            tiles: list[tuple[bytes, str, tuple[int, int]]] = []
+            step = MAX_IMAGE_SIDE - TILE_OVERLAP
+            # 最后一块只取剩余部分、不往回对齐到边缘：回退对齐会让末块与上一块重叠几百像素，边界处的内容被两块各写一遍
+            for r in range(ny):
+                top = r * step
+                bottom = min(h, top + MAX_IMAGE_SIDE)
+                for c in range(nx):
+                    left = c * step
+                    right = min(w, left + MAX_IMAGE_SIDE)
+                    buf = io.BytesIO()
+                    rgb.crop((left, top, right, bottom)).save(buf, format="PNG", optimize=True)
+                    tiles.append((buf.getvalue(), "image/png", (r + 1, c + 1)))
+            return tiles
+    except Image.DecompressionBombError:
+        raise ValueError("图片像素数异常巨大（疑似解压炸弹），已拒绝处理")
+    except Exception:
+        # 无法用 Pillow 解码（少见格式等）：原样上送，交由模型侧处理
+        return [(raw, mime, (1, 1))]
 
 
 def _downscale(raw: bytes, mime: str) -> tuple[bytes, str]:
@@ -106,11 +153,32 @@ VISION_PROMPT = """你是一名资深测试分析师，请仔细观察这张需�
 async def understand_image_bytes(
     data: bytes, mime: str, llm: LLMClient, prompt: str | None = None
 ) -> str:
-    """Vision 模型理解图片字节，返回 Markdown 文本（自动路由 Vision 模型，F-1-5）。"""
+    """Vision 模型理解图片字节，返回 Markdown 文本（自动路由 Vision 模型，F-1-5）。超过单块上限的大图切块逐块理解后拼接。"""
     if prompt is None:
         from app.prompts import prompt_text
 
         prompt = prompt_text("vision_image")
+    tiles = split_tiles(data, mime)
+    if len(tiles) == 1:
+        return await _understand_one(tiles[0][0], tiles[0][1], llm, prompt)
+    n = len(tiles)
+    rows = max(r for _, _, (r, _) in tiles)
+    cols = max(c for _, _, (_, c) in tiles)
+    sem = asyncio.Semaphore(4)
+
+    async def one(i: int, payload: bytes, m: str, pos: tuple[int, int]) -> str:
+        note = (f"\n\n【说明】这是一张大图按从上到下、从左到右切成 {n} 块（{rows} 行 × {cols} 列）后的第 {i} 块"
+                f"（第 {pos[0]} 行第 {pos[1]} 列），相邻块之间有少量重叠。只描述本块内可见的内容，"
+                f"被切断的元素照实描述可见部分，不要推测块外内容。")
+        async with sem:
+            content = await _understand_one(payload, m, llm, prompt + note)
+        return f"【大图第 {i}/{n} 块】\n{content}"
+
+    parts = await asyncio.gather(*[one(i, payload, m, pos) for i, (payload, m, pos) in enumerate(tiles, 1)])
+    return "\n\n".join(parts)
+
+
+async def _understand_one(data: bytes, mime: str, llm: LLMClient, prompt: str) -> str:
     from app.config import get_settings
 
     payload, mime = _downscale(data, mime)
