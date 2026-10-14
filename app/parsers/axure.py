@@ -10,7 +10,7 @@ import json
 import re
 from pathlib import Path
 
-from app.parsers.base import ParsedDocument, Section
+from app.parsers.base import EmbeddedImage, ParsedDocument, Section
 
 _PLAYER_PAGES = {"index.html", "start.html", "start_c_1.html", "start_g_0.html", "start_with_pages.html"}
 _SKIP_DIRS = ("resources/", "plugins/", "images/", "files/", "data/")
@@ -126,7 +126,8 @@ def parse_axure_export(files: list[tuple[str, Path]], source: str, root: str) ->
 
     sections = [Section(level=1, title=f"Axure 原型：{source}"),
                 Section(level=0, content=f"共 {len(ordered)} 个页面，按站点地图顺序列出各页可见文字与说明备注；"
-                                         "脚本、样式与切图资源不参与解析。")]
+                                         "脚本、样式与切图碎片不参与解析，页面里的整幅设计稿 / 截图按图片理解。")]
+    images: list[EmbeddedImage] = []
     for label, url in ordered:
         try:
             title, lines = _page_text(read_text_any(by_name[url]))
@@ -144,4 +145,45 @@ def parse_axure_export(files: list[tuple[str, Path]], source: str, root: str) ->
                 notes = []
             if notes:
                 sections.append(Section(level=0, content="【说明 / 备注】\n" + "\n".join(f"- {n}" for n in notes)))
-    return ParsedDocument(source=source, doc_type="axure", sections=sections)
+        for data, mime in _page_pictures(by_name, Path(url).stem, len(images)):
+            placeholder = f"[[图片:{len(images) + 1}]]"
+            sections.append(Section(level=0, content=placeholder))
+            images.append(EmbeddedImage(placeholder=placeholder, data=data, mime=mime))
+    return ParsedDocument(source=source, doc_type="axure", sections=sections, embedded_images=images)
+
+
+# 页面图片控件：短边 ≥ PICTURE_MIN_SIDE 且 ≥ PICTURE_MIN_BYTES 才当作整幅设计稿 / 截图送 Vision；按钮、图标等切图碎片跳过。
+# 全包最多 PICTURE_MAX 张，svg 切片一律跳过（Axure 把矢量控件逐个导出成 svg，数量多且无业务信息）
+PICTURE_MIN_SIDE = 400
+PICTURE_MIN_BYTES = 20 * 1024
+PICTURE_MAX = 30
+_PICTURE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def _page_pictures(by_name: dict[str, Path], page_stem: str, taken: int) -> list[tuple[bytes, str]]:
+    import io
+
+    from PIL import Image
+
+    from app.parsers.image import _MIME
+
+    prefix = f"images/{page_stem}/".lower()
+    out: list[tuple[bytes, str]] = []
+    for name in sorted(by_name):
+        if taken + len(out) >= PICTURE_MAX:
+            break
+        low = name.lower()
+        if not low.startswith(prefix) or not low.endswith(_PICTURE_SUFFIXES):
+            continue
+        path = by_name[name]
+        try:
+            if path.stat().st_size < PICTURE_MIN_BYTES:
+                continue
+            data = path.read_bytes()
+            with Image.open(io.BytesIO(data)) as img:
+                if min(img.size) < PICTURE_MIN_SIDE:
+                    continue
+        except Exception:
+            continue
+        out.append((data, _MIME.get(path.suffix.lower(), "image/png")))
+    return out

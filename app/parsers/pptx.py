@@ -14,6 +14,21 @@ _NS = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main",
        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
 _SLIDE_RE = re.compile(r"^ppt/slides/slide(\d+)\.xml$")
 _IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}
+_VECTOR_SUFFIXES = (".emf", ".wmf", ".svg")
+
+
+def _rasterize(data: bytes, suffix: str) -> bytes | None:
+    import tempfile
+
+    from app.parsers.convert import ConversionUnavailableError, rasterize_vector
+
+    with tempfile.TemporaryDirectory(prefix="tg-pptx-") as d:
+        f = Path(d) / f"shape{suffix}"
+        f.write_bytes(data)
+        try:
+            return rasterize_vector(f)
+        except (ConversionUnavailableError, OSError):
+            return None
 
 
 class PptxParser:
@@ -52,10 +67,16 @@ class PptxParser:
                         media = "ppt/" + target.replace("../", "")
                         if media not in zf.namelist():
                             continue
-                        mime = _IMG_MIME.get(Path(media).suffix.lower())
-                        if not mime:
+                        suffix = Path(media).suffix.lower()
+                        mime = _IMG_MIME.get(suffix)
+                        data = None
+                        if mime:
+                            data = zf.read(media)
+                        elif suffix in _VECTOR_SUFFIXES:   # 矢量图（emf / wmf / svg）经 LibreOffice 栅格化；没装则跳过
+                            data, mime = _rasterize(zf.read(media), suffix), "image/png"
+                        if not data:
                             continue
                         placeholder = f"[[图片:{len(images) + 1}]]"
                         sections.append(Section(level=0, content=placeholder))
-                        images.append(EmbeddedImage(placeholder=placeholder, data=zf.read(media), mime=mime))
+                        images.append(EmbeddedImage(placeholder=placeholder, data=data, mime=mime))
         return ParsedDocument(source=path.name, doc_type="pptx", sections=sections, embedded_images=images)

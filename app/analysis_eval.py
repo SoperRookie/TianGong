@@ -47,6 +47,29 @@ def empty_metrics() -> dict:
             "accuracy": None, "fabricated_rate": None, "wrong_rate": None, "missing_rate": None}
 
 
+def predicted_after_review(analysis: dict) -> tuple[dict[str, list[str]], dict]:
+    """评测用的 AI 输出：与标准答案同口径——标准答案排除了带质疑未处理的条目，这里把复核结论按「人工全部采纳」处理：
+    理解错且给了改正的取改正文本，无依据的去掉。返回 (各项文本, {wrong_fixed, unsupported_dropped})。"""
+    out: dict[str, list[str]] = {}
+    stats = {"wrong_fixed": 0, "unsupported_dropped": 0}
+    for k in ITEM_KEYS:
+        vals = []
+        for x in analysis.get(k) or []:
+            text = item_text(x)
+            if not text:
+                continue
+            review = (x.get("review") or {}) if isinstance(x, dict) else {}
+            if review.get("verdict") == "unsupported":
+                stats["unsupported_dropped"] += 1
+                continue
+            if review.get("verdict") == "wrong" and (review.get("fix") or "").strip():
+                text = review["fix"].strip()
+                stats["wrong_fixed"] += 1
+            vals.append(text)
+        out[k] = vals
+    return out, stats
+
+
 def finalize_metrics(m: dict) -> dict:
     """由计数算比率：准确率 = 匹配 / (标准答案 + 捏造)；捏造率 = 捏造 / AI 输出；理解错率 = 理解错 / (匹配 + 理解错)；遗漏率 = 遗漏 / 标准答案。"""
     def rate(a: int, b: int) -> float | None:
@@ -59,42 +82,59 @@ def finalize_metrics(m: dict) -> dict:
     return m
 
 
+def _pair(pair, g_len: int, predicted: dict, default_key: str, reason_at: int | None):
+    """解析裁判的编号对 [g, p, (原因), (p 所在分析项)] → (gi, pkey, pi, 原因)；非法返回 None。"""
+    if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+        return None
+    try:
+        gi, pi = int(pair[0]) - 1, int(pair[1]) - 1
+    except (TypeError, ValueError):
+        return None
+    rest = [x for x in pair[2:]]
+    reason = ""
+    if reason_at is not None and len(rest) > 0:
+        reason = str(rest.pop(0))
+    pkey = default_key
+    if rest and isinstance(rest[0], str) and rest[0] in ITEM_KEYS:
+        pkey = rest[0]
+    if not (0 <= gi < g_len and 0 <= pi < len(predicted.get(pkey) or [])):
+        return None
+    return gi, pkey, pi, reason
+
+
 def score_alignment(golden: dict[str, list[str]], predicted: dict[str, list[str]], verdict: dict) -> tuple[dict, dict]:
     """把裁判输出（编号对齐）折算成计数。裁判没提到的标准答案按遗漏、没提到的 AI 输出按捏造计（裁判必须逐条表态）。
-    返回 (总计, 按分析项明细)。"""
+    编号对可带 AI 输出所在分析项（归类不同的同一事实算匹配，不记一次遗漏加一次捏造）。返回 (总计, 按分析项明细)。"""
     total = empty_metrics()
     per_key: dict[str, dict] = {}
+    used_p: set[tuple[str, int]] = set()          # 全局：被匹配 / 判错占用的 AI 输出条目（跨项也算）
+    matched_g: dict[str, set[int]] = {k: set() for k in ITEM_KEYS}
+    wrong_g: dict[str, set[int]] = {k: set() for k in ITEM_KEYS}
+    wrong_items: dict[str, list[list]] = {k: [] for k in ITEM_KEYS}
+    for key in ITEM_KEYS:
+        g = golden.get(key) or []
+        v = verdict.get(key) if isinstance(verdict.get(key), dict) else {}
+        for pair in v.get("matched") or []:
+            r = _pair(pair, len(g), predicted, key, None)
+            if r is not None:
+                gi, pkey, pi, _ = r
+                matched_g[key].add(gi)
+                used_p.add((pkey, pi))
+        for pair in v.get("wrong") or []:
+            r = _pair(pair, len(g), predicted, key, 2)
+            if r is not None and r[0] not in matched_g[key]:
+                gi, pkey, pi, reason = r
+                wrong_g[key].add(gi)
+                used_p.add((pkey, pi))
+                wrong_items[key].append([g[gi], (predicted.get(pkey) or [])[pi], reason])
     for key in ITEM_KEYS:
         g, p = golden.get(key) or [], predicted.get(key) or []
-        v = verdict.get(key) if isinstance(verdict.get(key), dict) else {}
-        matched_g: set[int] = set()
-        used_p: set[int] = set()
-        wrong: list[list] = []
-        for pair in v.get("matched") or []:
-            if isinstance(pair, (list, tuple)) and len(pair) >= 2:
-                try:
-                    gi, pi = int(pair[0]) - 1, int(pair[1]) - 1
-                except (TypeError, ValueError):
-                    continue
-                if 0 <= gi < len(g) and 0 <= pi < len(p):
-                    matched_g.add(gi)
-                    used_p.add(pi)
-        wrong_g: set[int] = set()
-        for pair in v.get("wrong") or []:
-            if isinstance(pair, (list, tuple)) and len(pair) >= 2:
-                try:
-                    gi, pi = int(pair[0]) - 1, int(pair[1]) - 1
-                except (TypeError, ValueError):
-                    continue
-                if 0 <= gi < len(g) and 0 <= pi < len(p) and gi not in matched_g:
-                    wrong_g.add(gi)
-                    used_p.add(pi)
-                    wrong.append([g[gi], p[pi], str(pair[2]) if len(pair) > 2 else ""])
-        extra = [p[i] for i in range(len(p)) if i not in used_p]
-        missing = [g[i] for i in range(len(g)) if i not in matched_g and i not in wrong_g]
+        extra = [p[i] for i in range(len(p)) if (key, i) not in used_p]
+        missing = [g[i] for i in range(len(g)) if i not in matched_g[key] and i not in wrong_g[key]]
         m = empty_metrics()
-        m.update(golden=len(g), predicted=len(p), matched=len(matched_g), wrong=len(wrong_g), extra=len(extra), missing=len(missing))
-        per_key[key] = {**finalize_metrics(m), "wrong_items": wrong, "extra_items": extra, "missing_items": missing}
+        m.update(golden=len(g), predicted=len(p), matched=len(matched_g[key]), wrong=len(wrong_g[key]),
+                 extra=len(extra), missing=len(missing))
+        per_key[key] = {**finalize_metrics(m), "wrong_items": wrong_items[key], "extra_items": extra, "missing_items": missing}
         for k in ("golden", "predicted", "matched", "wrong", "extra", "missing"):
             total[k] += m[k]
     return finalize_metrics(total), per_key
@@ -294,9 +334,10 @@ async def run_eval(app, run_id: str, knowledge_fn=None) -> None:
             analysis = await run_requirement_analysis(
                 sample["text"], app.state.llm, run.get("model"), knowledge_refs=refs,
                 review=run.get("review"), reviewer_model=run.get("reviewer_model"))
-            predicted = {k: [item_text(x) for x in analysis.get(k) or [] if item_text(x)] for k in ITEM_KEYS}
+            predicted, review_applied = predicted_after_review(analysis)
             metrics, per_key, judge_model = await judge_sample(app.state.llm, sample["golden"], predicted, run.get("model"))
             entry.update(status="done", metrics=metrics, per_key=per_key, predicted=predicted, golden=sample["golden"],
+                         review_applied=review_applied,
                          model=analysis.get("model_name"), judge_model=judge_model,
                          verification=analysis.get("verification"), review=analysis.get("review"),
                          open_questions=[q.get("question") if isinstance(q, dict) else str(q) for q in analysis.get("open_questions") or []])

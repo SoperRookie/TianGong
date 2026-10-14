@@ -257,3 +257,81 @@ async def test_批量确认_复核质疑未处理的跳过(client, monkeypatch):
     r = (await client.post("/api/v1/requirements/analysis/batch-confirm", json={"project": "P"})).json()
     assert r["confirmed"] == [] and [x["reason"] for x in r["skipped"] if x["req_id"] == rid] == ["复核质疑未处理"]
     assert (await client.get(f"/api/v1/requirements/{rid}")).json()["analysis_confirmed"] is None
+
+
+def test_评测计分_跨分析项匹配不记遗漏加捏造_复核结论同口径():
+    from app.analysis_eval import predicted_after_review
+
+    golden = {"rules": ["密码错误 5 次锁定", "锁定 30 分钟"], "boundaries": []}
+    predicted = {"rules": ["锁定 30 分钟"], "boundaries": ["密码错误 5 次锁定账号"]}
+    verdict = {"rules": {"matched": [[2, 1], [1, 1, "boundaries"]], "wrong": []}, "boundaries": {"matched": [], "wrong": []}}
+    total, per_key = score_alignment(golden, predicted, verdict)
+    assert (total["matched"], total["missing"], total["extra"]) == (2, 0, 0) and total["accuracy"] == 1.0
+    assert per_key["boundaries"]["extra_items"] == []
+    # 跨项 wrong：[g, p, 原因, p 所在项]
+    verdict = {"rules": {"matched": [[2, 1]], "wrong": [[1, 1, "次数写错", "boundaries"]]}}
+    total, per_key = score_alignment(golden, predicted, verdict)
+    assert total["wrong"] == 1 and total["extra"] == 0 and per_key["rules"]["wrong_items"][0][1] == "密码错误 5 次锁定账号"
+
+    analysis = {"rules": [{"text": "锁定 15 分钟", "review": {"verdict": "wrong", "fix": "锁定 30 分钟"}},
+                          {"text": "无依据", "review": {"verdict": "unsupported"}},
+                          {"text": "正常条目"}]}
+    pred, stats = predicted_after_review(analysis)
+    assert pred["rules"] == ["锁定 30 分钟", "正常条目"] and stats == {"wrong_fixed": 1, "unsupported_dropped": 1}
+
+
+async def test_采纳降级事项保留原文依据并核验_驳回复核意见留痕不算新版本(client):
+    from app.requirements import _analysis_id
+
+    rid = await _req(client)
+    reply = json.loads(ANALYSIS_REPLY)
+    reply["rules"].append({"text": "锁定 15 分钟后解锁", "quote": "锁定 15 分钟后解锁"})   # 依据对不上 → 降级为待确认
+    app.state.llm = StubLLM([json.dumps(reply, ensure_ascii=False)])
+    a = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
+    q = next(x for x in a["questions"] if x.get("kind") == "unverified" and x.get("quote"))
+    r = (await client.post(f"/api/v1/requirements/{rid}/questions/{q['q_id']}/adopt", json={})).json()
+    added = [x for x in r["analysis"][q["key"]] if x["text"] == q["text"]]
+    assert added and added[0]["quote"] == q["quote"] and added[0]["verified"] is False and added[0]["manual"]
+    item = app.state.requirements.get(rid)
+    before = _analysis_id(item)
+    item["analysis"]["rules"][0]["review"] = {"verdict": "wrong", "fix": "x", "note": "n"}
+    app.state.requirements._persist(item)
+    r = (await client.post(f"/api/v1/requirements/{rid}/analysis/items", json={"key": "rules", "action": "dismiss_review", "index": 0})).json()
+    assert r["review_pending"] == 0
+    logs = app.state.requirements.get(rid)["analysis_edits"]
+    assert logs[-1]["action"] == "dismiss_review" and logs[-1]["review_verdict"] == "wrong"
+    assert _analysis_id(app.state.requirements.get(rid)) == before   # 只留痕，不算内容修改
+
+
+async def test_附件疑似非需求文本_分析与设计拦截_确认后可继续_分析早于附件提示(client, monkeypatch):
+    from tests.test_requirements import _wait_parsed
+
+    await client.post("/api/v1/projects", json={"name": "P"})
+    css = "\n".join(f"#u{i} {{\n  position:absolute;\n  left:{i}px;\n  width:100px;\n}}" for i in range(300)).encode()
+    r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "原型源码"},
+                           files=[("files", ("styles.css", css, "text/css"))])).json()
+    r = await _wait_parsed(client, r["req_id"]); rid = r["req_id"]
+    assert r["content_warnings"] and "疑似非需求文本" in r["content_warnings"][0]["warning"]
+    resp = await client.post(f"/api/v1/requirements/{rid}/analyze", json={})
+    assert resp.status_code == 409 and "疑似非需求文本" in resp.json()["detail"]
+    assert (await client.post(f"/api/v1/requirements/{rid}/design", json={})).status_code == 409
+    app.state.llm = StubLLM([ANALYSIS_REPLY])
+    a = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={"ignore_warnings": True})).json()
+    assert a["analysis"] and a["analysis_outdated"] is False
+    # 分析之后追加附件并解析完成 → 提示分析早于附件
+    r = (await client.post(f"/api/v1/requirements/{rid}/attachments",
+                           files=[("files", ("补充.txt", "密码错误 5 次锁定 30 分钟".encode(), "text/plain"))])).json()
+    r = await _wait_parsed(client, rid)
+    assert r["analysis_outdated"] is True
+
+
+def test_分片直接生成的检查点按片隔离():
+    from app.agents.service import _chunk_checkpoint
+
+    saved_analysis, saved_mods = [], []
+    ck = {"chunks": {"2": {"test_points": [{"module": "登录", "points": []}]}}, "modules": {"2:登录": {"cases": []}, "1:登录": {"cases": [1]}}}
+    out = _chunk_checkpoint(ck, lambda a: saved_analysis.append(a), lambda m, r: saved_mods.append(m), 2)
+    assert out["checkpoint"] == {"analysis": {"test_points": [{"module": "登录", "points": []}]}, "modules": {"登录": {"cases": []}}}
+    out["on_analysis"]({"test_points": []}); out["on_module_done"]("登录", None)
+    assert saved_analysis == [{"test_points": [], "chunk_no": 2}] and saved_mods == ["2:登录"]
+    assert _chunk_checkpoint(None, None, None, 1) == {"checkpoint": None, "on_analysis": None, "on_module_done": None}

@@ -154,11 +154,12 @@ ANALYSIS_JUDGE_SYSTEM = """你是需求分析评测裁判。给你同一份需�
 
 规则：
 - 一条标准答案最多匹配一条 AI 输出；AI 把一条拆成两条且都正确时，都算 matched 到同一条标准答案不算 extra；
-- 同一事实在不同分析项之间归类不同（如标准答案放 rules、AI 放 boundaries）算 matched，不算 extra / missing；
+- 同一事实在不同分析项之间归类不同（如标准答案放 rules、AI 放 boundaries）算 matched，不算 extra / missing：
+  这种情况在编号对后面加上 AI 输出所在的分析项键名，如 [1, 2, "boundaries"]（wrong 则写成 [2, 1, "原因", "boundaries"]）；
 - 判断以事实为准，不计较措辞长短。
 
-只输出 JSON，用条目编号表示（g 为标准答案编号，p 为 AI 输出编号）：
-{"rules": {"matched": [[1, 2]], "wrong": [[2, 1, "锁定时长原文 30 分钟，AI 写 15 分钟"]], "extra": [3], "missing": [3]},
+只输出 JSON，按标准答案的分析项组织，用条目编号表示（g 为标准答案编号，p 为 AI 输出编号；p 默认指同一分析项，跨项时带键名）：
+{"rules": {"matched": [[1, 2], [4, 1, "boundaries"]], "wrong": [[2, 1, "锁定时长原文 30 分钟，AI 写 15 分钟"]], "extra": [3], "missing": [3]},
  "boundaries": {"matched": [], "wrong": [], "extra": [], "missing": []}}"""
 
 # 独立查漏 Agent（需求七/八/十）：与生成 Agent 分离的第二轮覆盖检查，只允许新增

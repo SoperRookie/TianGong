@@ -23,6 +23,7 @@ from app.llm.client import AllModelsFailedError
 from app.llm.registry import NoVisionModelError, UnknownModelError
 from app.llm.schemas import MissingAPIKeyError
 from app.parsers.base import UnsafeFileError
+from app.parsers.sanity import content_warning
 from app.parsers import (
     IMAGE_SUFFIXES,
     LinkFetchError,
@@ -1673,7 +1674,12 @@ def _save_checkpoint(store, task_id: str, analysis: dict | None = None, module: 
         return
     ck = dict(record.checkpoint or {})
     if analysis is not None:
-        ck["analysis"] = analysis
+        if analysis.get("chunk_no"):   # 分片直接生成：每片的拆解结果分开存
+            chunks = dict(ck.get("chunks") or {})
+            chunks[str(analysis["chunk_no"])] = {k: v for k, v in analysis.items() if k != "chunk_no"}
+            ck["chunks"] = chunks
+        else:
+            ck["analysis"] = analysis
     if module is not None:
         name, result = module
         mods = dict(ck.get("modules") or {})
@@ -2086,7 +2092,7 @@ async def revise_task(request: Request, task_id: str, body: ReviseBody) -> dict:
     )
     rule_notes, rule_snapshot = _gather_rules(request.app, ctx.get("project"))
     # 使用习惯沉淀（F-8-2）：跨任务重复的修订指令固化为偏好，后续生成主动满足
-    request.app.state.memory.record_usage("revision", body.instruction)
+    request.app.state.memory.record_usage("revision", body.instruction, ref=task_id)
     # 已锁定用例退出 AI 修改队列（需求五十四）：不进入修订上下文，修订后原样合并回来
     all_cases: list[dict] = record.result["cases"]
     locked_uids = {uid for uid, s in record.case_reviews.items() if s.get("locked")}
@@ -4409,10 +4415,13 @@ async def finish_plan_run(request: Request, plan_id: str, run_id: str) -> dict:
     if run.get("finished_at"):
         raise HTTPException(status_code=409, detail="该执行轮次已结束")
     run["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    request.app.state.plans.save(plan)
     summary = run_summary(plan, run)
-    logger.info("计划 {} 轮次 {} 已结束：{}", plan_id, run_id, summary)
-    return {"run_id": run_id, "finished_at": run["finished_at"], "summary": summary}
+    # 本轮把计划内用例全部执行过（无论结果）→ 计划完成；还有没执行的保持进行中；再开一轮会退回进行中
+    if plan["items"] and summary.get("executed", 0) >= len(plan["items"]) and plan["status"] in ("not_started", "in_progress"):
+        plan["status"] = "done"
+    request.app.state.plans.save(plan)
+    logger.info("计划 {} 轮次 {} 已结束：{}，计划状态 {}", plan_id, run_id, summary, plan["status"])
+    return {"run_id": run_id, "finished_at": run["finished_at"], "summary": summary, "plan_status": plan["status"]}
 
 
 @router.post("/api/v1/plans/{plan_id}/runs/{run_id}/attachments")
@@ -4507,6 +4516,7 @@ def _attachment_record(saved: Path, doc=None, error: str | None = None) -> dict:
         "parsed": doc is not None, "error": error,
         "text": doc.full_text if doc is not None else "",
         "chars": len(doc.full_text) if doc is not None else 0,
+        "warning": content_warning(doc.full_text) if doc is not None else None,
         "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
@@ -4669,6 +4679,35 @@ def _req_dir(req_id: str) -> Path:
     return d
 
 
+def _content_warnings(item: dict) -> list[dict]:
+    """解析结果疑似非需求文本的附件（分析 / 发起设计前拦截确认）。"""
+    return [{"att_id": a["att_id"], "filename": a.get("filename"), "warning": a["warning"]}
+            for a in item.get("attachments", []) if a.get("parsed") and a.get("warning")]
+
+
+def _analysis_inputs(item: dict) -> list[str]:
+    """分析输入指纹：已解析附件的 id@解析时间（追加 / 重新解析 / 删除附件都会变）。"""
+    return sorted(f"{a['att_id']}@{a.get('parsed_at') or ''}" for a in item.get("attachments", []) if a.get("parsed"))
+
+
+def _analysis_outdated(item: dict) -> bool:
+    """分析之后附件有变化（追加 / 重新解析 / 删除）：分析结果基于旧输入，页面提示重新分析。旧记录没有指纹时退化为比较时间。"""
+    meta = item.get("analysis_meta") or {}
+    if not meta or not item.get("analysis"):
+        return False
+    if meta.get("inputs") is not None:
+        return meta["inputs"] != _analysis_inputs(item)
+    at = meta.get("at") or ""
+    return any(a.get("parsed") and (a.get("parsed_at") or "") > at for a in item.get("attachments", []))
+
+
+def _require_content_ok(item: dict, ignore: bool) -> None:
+    warns = _content_warnings(item)
+    if warns and not ignore:
+        raise HTTPException(status_code=409, detail="附件解析结果疑似非需求文本：" + "；".join(
+            f"「{w['filename']}」{w['warning']}" for w in warns) + "。确认要按这些内容继续请重试并勾选忽略告警")
+
+
 def _review_pending(analysis: dict | None) -> int:
     """独立复核标出、尚未人工处理（采纳 / 修改 / 忽略）的条目数。"""
     from app.agents.analysis import review_pending_count
@@ -4694,7 +4733,10 @@ async def _analysis_knowledge(app, text: str, project: str | None, req_id: str |
         steward = KnowledgeSteward(service, budget_chars=get_settings().knowledge_budget_chars)
         bundle = await steward.for_generation(_knowledge_query(text), space=_knowledge_spaces(app, project))
         if req_id:
-            own = {d.doc_id for d in service.store.list_docs() if d.origin != "manual" and d.origin_ref == req_id}
+            # 排除该需求自己沉淀的（原文 / 附件 / 已确认分析）以及由它发起的任务沉淀的（测试点 / 用例 / 终稿）：都是上一轮理解的产物
+            item = app.state.requirements.get(req_id) or {}
+            refs = {req_id, *(item.get("tasks") or [])}
+            own = {d.doc_id for d in service.store.list_docs() if d.origin != "manual" and d.origin_ref in refs}
             bundle.hits = {c: [h for h in hs if h.doc_id not in own] for c, hs in bundle.hits.items()}
         if bundle.empty:
             return None, 0
@@ -4730,6 +4772,8 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
         "eval_sample": _eval_sample_of(request.app, item["req_id"]),
         "parse_failed": sum(1 for a in item["attachments"] if not a.get("parsed") and not a.get("parsing")),
         "parsing": sum(1 for a in item["attachments"] if a.get("parsing")),
+        "content_warnings": _content_warnings(item),
+        "analysis_outdated": _analysis_outdated(item),
     }
     mstore = request.app.state.modules
     if item.get("module_id"):
@@ -5108,6 +5152,7 @@ class AnalyzeBody(BaseModel):
     model: str | None = None
     reviewer_model: str | None = None   # 独立复核用的模型；空则与分析模型相同
     review: bool | None = None          # 空则按系统设置（TIANGONG_ANALYSIS_REVIEW）
+    ignore_warnings: bool = False       # 附件内容疑似非需求文本时，人工确认后仍继续
 
 
 @router.post("/api/v1/requirements/{req_id}/analyze")
@@ -5118,11 +5163,12 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
 
     item = _req(request, req_id, "requirement.ai")
     _require_attachments_ready(item)
+    body = body or AnalyzeBody()
+    _require_content_ok(item, body.ignore_warnings)
     _ai_ctx(request, project=item["project"], requirement_id=req_id)
     text = design_brief({**item, "analysis": None, "questions": []})
     if not text.strip():
         raise HTTPException(status_code=400, detail="需求原文为空（文件解析失败时请先重新解析）")
-    body = body or AnalyzeBody()
     refs, knowledge_n = await _analysis_knowledge(request.app, text, item["project"], req_id)
     try:
         analysis = await run_requirement_analysis(text, request.app.state.llm, model=body.model, knowledge_refs=refs,
@@ -5132,6 +5178,7 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
     except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     meta = {"id": uuid.uuid4().hex[:8], "model": analysis.get("model_name"), "chunks": analysis.get("chunks"),
+            "inputs": _analysis_inputs(item),
             "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "knowledge": knowledge_n, "verification": analysis.get("verification"), "review": analysis.get("review")}
     item = request.app.state.requirements.set_analysis(req_id, analysis, meta)
@@ -5489,6 +5536,7 @@ class DesignBody(BaseModel):
     knowledge_space: str | None = None
     confirm_points: bool = True   # 默认走拆解确认（测试点评审后再生成用例）
     async_mode: bool = True
+    ignore_warnings: bool = False  # 附件内容疑似非需求文本时，人工确认后仍继续
 
 
 class MultiDesignBody(DesignBody):
@@ -5514,6 +5562,7 @@ async def _design_from_requirements(request: Request, items: list[dict], body: D
     blocked = []
     for it in items:
         _require_attachments_ready(it)
+        _require_content_ok(it, body.ignore_warnings)
         n = len(rstore.blocking_questions(it))
         if n:
             blocked.append(f"「{it['title']}」{n} 项")

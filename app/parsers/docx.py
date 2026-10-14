@@ -32,12 +32,28 @@ class DocxParser:
                 sections.append(Section(level=0, content=content))
             buffer.clear()
 
-        for para in document.paragraphs:
-            for data, mime in self._para_images(para, document):
-                flush()
-                placeholder = f"[[图片:{len(images) + 1}]]"
-                sections.append(Section(level=0, content=placeholder))
-                images.append(EmbeddedImage(placeholder=placeholder, data=data, mime=mime))
+        def add_image(data: bytes, mime: str) -> None:
+            flush()
+            placeholder = f"[[图片:{len(images) + 1}]]"
+            sections.append(Section(level=0, content=placeholder))
+            images.append(EmbeddedImage(placeholder=placeholder, data=data, mime=mime))
+
+        for kind, obj in self._iter_body(document):
+            if kind == "table":
+                # 表格文字仍统一收进 tables；单元格里的图片（Axure / 产品常把页面截图放在表格里）按位置提取，
+                # 合并单元格会重复返回同一单元格，按关系 id 去重
+                seen: set[str] = set()
+                for row in obj.rows:
+                    for cell in row.cells:
+                        for para in cell.paragraphs:
+                            for rid, data, mime in self._para_images(para, document):
+                                if rid not in seen:
+                                    seen.add(rid)
+                                    add_image(data, mime)
+                continue
+            para = obj
+            for _, data, mime in self._para_images(para, document):
+                add_image(data, mime)
             text = para.text.strip()
             if not text:
                 continue
@@ -62,14 +78,26 @@ class DocxParser:
         )
 
     @staticmethod
-    def _para_images(para, document) -> list[tuple[bytes, str]]:
-        """提取段落内嵌图片字节（w:drawing → a:blip 的关系引用）。"""
-        results: list[tuple[bytes, str]] = []
+    def _iter_body(document):
+        """按正文顺序产出 ("para", Paragraph) / ("table", Table)：python-docx 的 document.paragraphs 不含表格里的段落。"""
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+
+        for child in document.element.body.iterchildren():
+            if child.tag == qn("w:p"):
+                yield "para", Paragraph(child, document)
+            elif child.tag == qn("w:tbl"):
+                yield "table", Table(child, document)
+
+    @staticmethod
+    def _para_images(para, document) -> list[tuple[str, bytes, str]]:
+        """提取段落内嵌图片 (关系 id, 字节, mime)（w:drawing → a:blip 的关系引用）。"""
+        results: list[tuple[str, bytes, str]] = []
         for blip in para._element.findall(".//" + qn("a:blip")):
             rid = blip.get(qn("r:embed"))
             if not rid:
                 continue
             part = document.part.related_parts.get(rid)
             if part is not None:
-                results.append((part.blob, part.content_type))
+                results.append((rid, part.blob, part.content_type))
         return results

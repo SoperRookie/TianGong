@@ -1,7 +1,7 @@
 """PDF 解析（F-2-1）：PyMuPDF 提取文本与章节结构。
 
-扫描版 PDF（无文本层）当前抛出 ScannedPDFError，OCR 兜底链路（PaddleOCR）
-待多模态/OCR 方案落地后接入（POC-R5 结论出来前不锁定实现）。
+扫描版 PDF（无文本层的页）：整页按 SCAN_DPI 栅格化为 PNG 作为内嵌图片，由 enrich_images 经 Vision 理解（大图自动切块）。
+整份文档没有文本层且页数超过 SCANNED_PAGE_LIMIT 时仍抛 ScannedPDFError，避免一次上传打满 Vision 配额。
 """
 
 from pathlib import Path
@@ -17,6 +17,9 @@ class ScannedPDFError(ValueError):
 
 # 正文主流字号的倍数超过该值视为标题
 _HEADING_SIZE_RATIO = 1.15
+# 扫描页栅格化分辨率与整份扫描件的页数上限
+SCAN_DPI = 150
+SCANNED_PAGE_LIMIT = 60
 
 
 class PdfParser:
@@ -36,13 +39,22 @@ class PdfParser:
                 pages.append(
                     (self._page_spans(page), self._page_images(doc, page, seen_xrefs))
                 )
-        all_spans = [s for spans, _ in pages for s in spans]
-        if not all_spans:
-            raise ScannedPDFError(
-                f"{path.name} 未提取到文本，疑似扫描版 PDF；OCR 兜底链路尚未接入，"
-                "请先转换为文本版 PDF 或直接粘贴需求文本"
-            )
+            all_spans = [s for spans, _ in pages for s in spans]
+            if not all_spans and doc.page_count > SCANNED_PAGE_LIMIT:
+                raise ScannedPDFError(
+                    f"{path.name} 没有文本层（扫描版）且有 {doc.page_count} 页，超过整页图片理解的上限 {SCANNED_PAGE_LIMIT} 页，"
+                    "请先 OCR 转成文本版 PDF 或拆分后上传"
+                )
+            # 没有文本层也没有可提取图片的页（扫描页 / 纯矢量页）：整页栅格化交给 Vision
+            scanned = 0
+            for i, (spans, imgs) in enumerate(pages):
+                if not spans and not imgs:
+                    pix = doc[i].get_pixmap(dpi=SCAN_DPI)
+                    pages[i] = ([], [(pix.tobytes("png"), "image/png")])
+                    scanned += 1
         sections, images = self._build(pages, all_spans)
+        if scanned:
+            sections.insert(0, Section(level=0, content=f"（{scanned} 页没有文本层，已按整页图片理解）"))
         return ParsedDocument(
             source=path.name, doc_type="pdf", sections=sections, embedded_images=images
         )
@@ -81,7 +93,7 @@ class PdfParser:
     ) -> tuple[list[Section], list[EmbeddedImage]]:
         # 以全文出现最多的字号为正文基准，显著更大的行视作标题
         sizes = [round(size, 1) for _, size in all_spans]
-        body_size = max(set(sizes), key=sizes.count)
+        body_size = max(set(sizes), key=sizes.count) if sizes else 0.0
         heading_sizes = sorted(
             {s for s in sizes if s > body_size * _HEADING_SIZE_RATIO}, reverse=True
         )

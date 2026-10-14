@@ -171,3 +171,37 @@ async def test_async_mode_failure_marked(client):
         await asyncio.sleep(0.05)
     assert record["status"] == "failed"
     assert "模型全挂" in record["error"]
+
+
+async def test_任务并发上限_超出的排队(tmp_path, monkeypatch):
+    import asyncio
+
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "task_max_concurrency", 1)
+    store = TaskStore(tmp_path)
+    for t in ("q1", "q2"):
+        store.save(TaskRecord(task_id=t, status="queued"))
+    gate = asyncio.Event(); order = []
+
+    async def job(name):
+        order.append(name); await gate.wait()
+
+    store.submit("q1", lambda: job("q1")); store.submit("q2", lambda: job("q2"))
+    await asyncio.sleep(0.05)
+    assert store.get("q1").status == "running" and store.get("q2").status == "queued" and order == ["q1"]
+    gate.set(); await asyncio.sleep(0.05)
+    assert order == ["q1", "q2"] and store.get("q2").status in ("running", "queued")
+
+
+def test_测试点驳回进学习样本(tmp_path):
+    from app.learning.service import collect_samples
+
+    store = TaskStore(tmp_path)
+    rec = TaskRecord(task_id="l1", status="awaiting_confirmation", context={"project": "P"})
+    rec.analysis = {"test_points": [{"module": "登录", "points": [{"tp_id": "TP001", "point": "验证页面布局正确"}]}]}
+    rec.point_review_log = [{"tp_id": "TP001", "action": "reject", "comment": "UI 检查不在范围", "reject_types": ["超出范围"], "fix_request": "删除"},
+                            {"tp_id": "TP001", "action": "approve", "comment": ""}]
+    store.save(rec)
+    samples = [s for s in collect_samples(store) if s["来源"] == "测试点驳回"]
+    assert len(samples) == 1 and samples[0]["测试点"] == "验证页面布局正确" and samples[0]["驳回类型"] == ["超出范围"]

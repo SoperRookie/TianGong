@@ -208,10 +208,10 @@ class RequirementStore:
         return bool(c) and _analysis_id(item) != c.get("analysis_id")
 
     def edit_analysis_item(self, req_id: str, key: str, action: str, index: int | None = None,
-                           text: str | None = None, operator: str | None = None) -> dict:
+                           text: str | None = None, operator: str | None = None, quote: str | None = None) -> dict:
         """人工修改分析结果（edit / delete / add）：条目文本改了就留痕（analysis_edits），
         修改后的结果是评测集标准答案与学习规则的素材；修改会让已确认的版本变为「旧版本」需重新确认。"""
-        from app.agents.analysis import ITEM_KEYS, as_item
+        from app.agents.analysis import ITEM_KEYS, as_item, normalize, quote_found
 
         item = self._get_alive(req_id)
         analysis = item.get("analysis")
@@ -225,7 +225,9 @@ class RequirementStore:
         if action == "add":
             if not text:
                 raise RequirementError("内容不能为空")
-            items.append({"text": text, "quote": "", "verified": None, "manual": True})
+            quote = (quote or "").strip()   # 采纳降级事项时带回原 quote，并按原文重新核验，不丢溯源
+            verified = quote_found(quote, normalize(design_brief({**item, "analysis": None, "questions": []}))) if quote else None
+            items.append({"text": text, "quote": quote, "verified": verified, "manual": True})
             log["after"] = text
         else:
             if index is None or not (0 <= index < len(items)):
@@ -249,9 +251,10 @@ class RequirementStore:
                 items[index] = {**before, "text": fix, "manual": True}
                 items[index].pop("review", None)
                 log.update(action="edit", after=fix, via="review")
-            elif action == "dismiss_review":  # 人工看过复核意见，认为原条目没问题
+            elif action == "dismiss_review":  # 人工看过复核意见，认为原条目没问题：留痕（谁、何时、驳回了什么意见）
+                review = before.get("review") or {}
                 items[index] = {k: v for k, v in before.items() if k != "review"}
-                log = None
+                log.update(review_verdict=review.get("verdict"), review_note=review.get("note"))
             else:
                 raise RequirementError(f"未知操作: {action}")
         analysis[key] = items
@@ -271,7 +274,7 @@ class RequirementStore:
             raise RequirementError("该事项不是从分析条目降级来的，无法采纳")
         if not item.get("analysis"):
             raise RequirementError("还没有分析结果")
-        self.edit_analysis_item(req_id, q["key"], "add", text=q["text"], operator=operator)
+        self.edit_analysis_item(req_id, q["key"], "add", text=q["text"], operator=operator, quote=q.get("quote"))
         q.update({"status": "confirmed", "answer": "确认成立，已采纳回分析结果", "by": operator, "at": _now()})
         self._refresh_status(item)
         self._persist(item)
@@ -434,7 +437,8 @@ def _analysis_id(item: dict) -> str | None:
     """标识某一版分析结果：优先 meta.id，旧记录退化为分析时间；人工修改过 n 次则带上 +n（修改即新版本）。"""
     meta = item.get("analysis_meta") or {}
     base = meta.get("id") or meta.get("at")
-    edits = len(item.get("analysis_edits") or [])
+    # 只数改了内容的操作：看过复核意见认为原条目没问题（dismiss_review）只留痕，不算新版本
+    edits = sum(1 for x in item.get("analysis_edits") or [] if x.get("action") in ("edit", "delete", "add"))
     return f"{base}+{edits}" if base and edits else base
 
 

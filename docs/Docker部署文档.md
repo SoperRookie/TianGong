@@ -1,6 +1,6 @@
 # 天工 Docker 部署文档
 
-适用版本：v2.1.1。用 `docker compose` 在一台 Linux 服务器上拉起 MySQL、应用、Nginx 三个容器。传统裸机部署见 `docs/服务器部署文档.md`，两者的环境变量、数据迁移与运维事项一致，本文只写 Docker 相关部分。
+适用版本：v2.1.2。用 `docker compose` 在一台 Linux 服务器上拉起 MySQL、应用、Nginx 三个容器。传统裸机部署见 `docs/服务器部署文档.md`，两者的环境变量、数据迁移与运维事项一致，本文只写 Docker 相关部分。
 
 ## 1. 架构
 
@@ -48,7 +48,7 @@
 sudo mkdir -p /opt/tiangong && sudo chown $USER /opt/tiangong
 cd /opt/tiangong
 git clone <仓库地址> .
-git checkout v2.1.1
+git checkout v2.1.2
 ```
 
 ### 3.2 写 `.env`
@@ -152,7 +152,7 @@ find backups -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
 ```bash
 cd /opt/tiangong
 bash backups/daily.sh                  # 先备份
-git fetch --tags && git checkout v2.1.1
+git fetch --tags && git checkout v2.1.2
 docker compose up -d --build app       # 只重建应用镜像，mysql / nginx 不动
 docker compose logs -f app
 ```

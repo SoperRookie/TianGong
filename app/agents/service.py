@@ -191,7 +191,8 @@ async def run_generation(
     outcomes = await asyncio.gather(
         *[
             _analyze_then_generate(chunk, llm, model, reviewer_model, template, on_analyzed=on_analyzed,
-                                   outline=outline, chunk_no=i, chunk_total=len(chunks), **kw)
+                                   outline=outline, chunk_no=i, chunk_total=len(chunks), **kw,
+                                   **_chunk_checkpoint(checkpoint, on_analysis, on_module_done, i))
             for i, chunk in enumerate(chunks, 1)
         ],
         return_exceptions=True,
@@ -205,6 +206,24 @@ async def run_generation(
         llm, chunks, merged.blind_spots, model)
     merged.trace.extend(extra)
     return merged
+
+
+def _chunk_checkpoint(checkpoint: dict | None, on_analysis, on_module_done, chunk_no: int) -> dict:
+    """分片直接生成的断点续跑：检查点按片隔离——拆解结果存在 chunks[片号]，模块结果键名加「片号:」前缀，
+    避免不同片里同名模块互相冒充；回调同样带上片号。"""
+    prefix = f"{chunk_no}:"
+    ck = checkpoint or {}
+    mods = {k[len(prefix):]: v for k, v in (ck.get("modules") or {}).items() if k.startswith(prefix)}
+    sub = {"analysis": (ck.get("chunks") or {}).get(str(chunk_no)), "modules": mods} if ck else None
+
+    def _on_analysis(analysis: dict) -> None:
+        on_analysis({**analysis, "chunk_no": chunk_no})
+
+    def _on_module_done(module: str, result) -> None:
+        on_module_done(prefix + module, result)
+
+    return {"checkpoint": sub, "on_analysis": _on_analysis if on_analysis else None,
+            "on_module_done": _on_module_done if on_module_done else None}
 
 
 async def _analyze_then_generate(

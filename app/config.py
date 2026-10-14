@@ -114,6 +114,7 @@ class Settings(BaseSettings):
 
     # LLM / Embedding 并发上限与限流退避
     llm_max_concurrency: int = 4
+    task_max_concurrency: int = 2       # 同时执行的测试设计任务数，超出的排队（queued）；模型调用另有 llm_max_concurrency
     embedding_max_concurrency: int = 4
 
     # 日志留存（天）：AI 调用日志与操作日志启动时清理更早的记录；0 表示不清理
