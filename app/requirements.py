@@ -95,7 +95,7 @@ class RequirementStore:
             "raw_text": raw_text or "", "description": (description or "").strip(),
             "source_type": source_type if source_type in SOURCE_TYPES else "manual",
             "attachments": attachments or [],
-            "analysis": None, "analysis_meta": None, "questions": [],
+            "analysis": None, "analysis_meta": None, "analysis_confirmed": None, "questions": [],
             "status": "draft", "tasks": [],
             "created_by": created_by, "created_at": created_at or _now(),
             "updated_by": created_by, "updated_at": _now(), "deleted_at": None, "deleted_by": None,
@@ -177,6 +177,30 @@ class RequirementStore:
         self._refresh_status(item)
         self._persist(item)
         return item
+
+    def confirm_analysis(self, req_id: str, by: str | None) -> dict:
+        """人工确认当前分析结果：快照留存（知识沉淀以快照为准），重新分析后需再次确认才会更新知识库。"""
+        item = self._get_alive(req_id)
+        if not item.get("analysis"):
+            raise RequirementError("还没有分析结果可确认")
+        item["analysis_confirmed"] = {
+            "by": by, "at": _now(), "analysis_id": _analysis_id(item),
+            "analysis": {k: list(v) for k, v in item["analysis"].items() if k != "open_questions" and isinstance(v, list)},
+        }
+        self._persist(item)
+        return item
+
+    def unconfirm_analysis(self, req_id: str) -> dict:
+        item = self._get_alive(req_id)
+        item["analysis_confirmed"] = None
+        self._persist(item)
+        return item
+
+    @staticmethod
+    def analysis_confirmed_stale(item: dict) -> bool:
+        """已确认的是旧一版分析（之后又重新分析过）。"""
+        c = item.get("analysis_confirmed") or {}
+        return bool(c) and _analysis_id(item) != c.get("analysis_id")
 
     def add_question(self, req_id: str, question: str, operator: str | None = None, level: str = "must",
                      assumption: str = "") -> dict:
@@ -329,6 +353,12 @@ class RequirementStore:
             item["status"] = "pending_confirm"
         else:
             item["status"] = "confirmed" if item["questions"] else "analyzed"
+
+
+def _analysis_id(item: dict) -> str | None:
+    """标识某一版分析结果：优先 meta.id，旧记录退化为分析时间。"""
+    meta = item.get("analysis_meta") or {}
+    return meta.get("id") or meta.get("at")
 
 
 def design_brief(item: dict) -> str:

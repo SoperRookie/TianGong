@@ -86,6 +86,8 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [(m, re.compile(p), k, a) for m
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/attachments/[^/]+/reparse$", "requirement", "重新解析附件"),
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/merge$", "requirement", "合并需求"),
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/analyze$", "ai", "AI 需求分析"),
+    ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/analysis/confirm$", "requirement", "确认需求分析结果"),
+    ("DELETE", r"^/api/v1/requirements/(?P<target>[^/]+)/analysis/confirm$", "requirement", "取消需求分析确认"),
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/questions$", "requirement", "补充待确认事项"),
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/questions/[^/]+$", "requirement", "确认待确认事项"),
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/design$", "ai", "发起测试设计"),

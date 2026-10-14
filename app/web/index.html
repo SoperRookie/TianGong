@@ -5638,8 +5638,17 @@ function reqAnalysisHtml(r, labels, canAI) {
       <button class="btn sm" id="rqAnalyzeBtn" onclick="analyzeReq()">${r.analysis?'重新 AI 分析':'AI 需求分析'}</button>`:''}
       ${hist.length?`<select style="width:230px" onchange="anSet('hist', this.value)"><option value="-1" ${!viewingOld?'selected':''}>当前结果（${esc(fmtTime((r.analysis_meta||{}).at))}）</option>${hist.map((h,i)=>`<option value="${i}" ${anHist===i?'selected':''}>历史 ${hist.length-i}：${esc(fmtTime((h.meta||{}).at))} · ${esc((h.meta||{}).model||'')}</option>`).reverse().join('')}</select>`:''}
       ${r.analysis?`<span class="hint">${viewingOld?'<b style="color:var(--warn)">正在查看历史结果</b> · ':''}${esc(meta.model||'')} · ${esc(meta.by||'')} · ${esc(fmtTime(meta.at))}${meta.chunks>1?` · 分 ${meta.chunks} 片分析后合并`:''}</span>`:'<span class="hint">尚未分析。AI 只整理需求已写明的内容，缺失规则会列入「待确认事项」而不是脑补</span>'}</div>`;
-  const intro = `<div class="hint" style="margin-bottom:10px">AI 需求分析把原文、附件与人工补充整理成 11 个结构化分析项，结果随需求保存在数据库（不覆盖原文，重新分析自动留档）；其中业务规则 / 边界条件 / 状态变化 / 权限要求会作为需求的一部分带入测试设计，待确认事项进入确认流。</div>`;
+  const intro = `<div class="hint" style="margin-bottom:10px">AI 需求分析把原文、附件与人工补充整理成 11 个结构化分析项，结果随需求保存在数据库（不覆盖原文，重新分析自动留档）；其中业务规则 / 边界条件 / 状态变化 / 权限要求会作为需求的一部分带入测试设计，待确认事项进入确认流。<b>人工确认分析结果后</b>会沉淀到项目知识库（规则 / 边界 / 状态 / 权限 → 业务规则库，功能 / 流程 / 依赖 / 风险 → 需求文档库），供以后的任务检索。</div>`;
   if (!an) return intro + toolbar + '<div class="empty">还没有分析结果</div>';
+  const canEdit = can(r.project, 'requirement.edit'), c = r.analysis_confirmed;
+  let confirmBar = '';
+  if (!viewingOld) {
+    const status = !c ? '<span class="st pending">未确认 · 未沉淀到知识库</span><span class="hint">请过目各分析项，确认无误后沉淀到知识库；有错漏可先补充需求原文 / 人工补充后重新分析</span>'
+      : r.analysis_confirmed_stale ? `<span class="st candidate">已确认旧版本</span><span class="hint">知识库中是 ${esc(c.by||'')} ${relTime(c.at)} 确认的上一版分析，当前结果重新分析后尚未确认</span>`
+      : `<span class="st approved">已确认 · 已沉淀到知识库</span><span class="hint">${esc(c.by||'')} · ${relTime(c.at)}</span>`;
+    const btns = canEdit ? ((!c || r.analysis_confirmed_stale) ? `<button class="btn sm" onclick="confirmReqAnalysis()">确认分析结果并沉淀到知识库</button>` : '') + (c ? `<button class="btn ghost sm" onclick="confirmReqAnalysis(true)">取消确认</button>` : '') : '';
+    confirmBar = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding:8px 12px;background:var(--well);border-radius:8px">${status}<span style="margin-left:auto;display:flex;gap:6px">${btns}</span></div>`;
+  }
   const keys = Object.keys(labels);
   const count = k => (an[k] || []).length;
   const total = keys.filter(k => k !== 'open_questions').reduce((n, k) => n + count(k), 0);
@@ -5663,7 +5672,15 @@ function reqAnalysisHtml(r, labels, canAI) {
         ${pageItems.map(x => `<tr><td class="hint">${x.n}</td><td style="white-space:pre-wrap;line-height:1.6">${hiKw(String(x.text))}</td></tr>`).join('')}</tbody></table></div>
         ${items.length > anSize || anSize !== 20 ? pagerHtml(items.length, anPage, anSize, 'anSet') : `<div class="hint" style="margin-top:6px">共 ${items.length} 条${kw?'（已筛选）':''}</div>`}` : `<div class="empty">没有包含「${esc(anKw)}」的条目</div>`) : '<div class="empty">AI 没有从需求中整理出这一项的内容</div>'}</div>`;
   const block = openN ? `<div class="hint" style="margin-bottom:10px;padding:8px 12px;border:1px solid var(--warn);border-radius:8px;color:var(--warn)">分析产出 ${openN} 项「必须确认」的待确认事项，确认后才能开始测试设计。<a onclick="reqTab='questions';renderRequirementDetail()">去确认 →</a></div>` : '';
-  return intro + toolbar + block + `<div style="display:flex;gap:16px;align-items:flex-start">${nav}${body}</div>`;
+  return intro + toolbar + confirmBar + block + `<div style="display:flex;gap:16px;align-items:flex-start">${nav}${body}</div>`;
+}
+async function confirmReqAnalysis(undo) {
+  if (undo && !await uiConfirm('取消确认', '取消后，知识库中由这份分析沉淀的文档会一并移除。确定？')) return;
+  try {
+    await api(`/api/v1/requirements/${curReq}/analysis/confirm`, {method: undo ? 'DELETE' : 'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    toast(undo ? '已取消确认，知识库中的沉淀已移除' : '已确认，分析结果正在沉淀到项目知识库', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  renderRequirementDetail();
 }
 async function renderRequirements() { return (() => keepScroll('reqs', ['reqs', curReq, reqStatus, reqKw, reqDeleted, reqSource, reqCreator, reqPage, reqSize].join('|'), _renderRequirements__impl))(); }
 async function _renderRequirements__impl() {

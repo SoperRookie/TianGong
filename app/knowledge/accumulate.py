@@ -4,6 +4,7 @@
 - 需求原文（新建任务上传 / 粘贴的需求；需求中心的原文、附件与链接解析完成后）→ 需求文档库
 - 审核通过的测试点（连同设计需求页来源）→ 玩法与业务规则库：这是对业务最精炼的描述
 - 评审通过 / 人工定稿的用例、离线终稿 → 测试用例库（标记「任务沉淀」，与手动导入的历史用例同库）
+- 人工确认后的 AI 需求分析结果 → 规则 / 边界 / 状态 / 权限进玩法与业务规则库，功能点 / 流程 / 前置 / 依赖 / 风险进需求文档库
 
 规则：
 - 按来源替换：同一任务 / 需求重复确认只覆盖自己那份，不堆积；任务 / 需求删除时联动清理，恢复时重新沉淀
@@ -45,6 +46,23 @@ def render_point_chunks(test_points: list[dict]) -> list[str]:
             dim = f"[{p['dimension']}] " if p.get("dimension") else ""
             lines.append(f"- {dim}{p['point']}{_ref_line(p)}")
         chunks.append("\n".join(lines))
+    return chunks
+
+
+# 已确认的需求分析：哪些分析项进规则库、哪些进需求文档库
+ANALYSIS_RULE_KEYS = ("rules", "boundaries", "state_changes", "permissions")
+ANALYSIS_DOC_KEYS = ("features", "preconditions", "normal_flows", "exception_flows", "dependencies", "risks")
+
+
+def render_analysis_chunks(analysis: dict, keys: tuple[str, ...], title: str) -> list[str]:
+    """已确认的分析结果按分析项渲染为知识切片：一个分析项一片。"""
+    from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
+
+    chunks = []
+    for key in keys:
+        items = [str(x).strip() for x in (analysis.get(key) or []) if str(x).strip()]
+        if items:
+            chunks.append(f"【需求「{title}」· {REQUIREMENT_ANALYSIS_LABELS[key]}】（AI 分析、人工确认）\n" + "\n".join(f"- {x}" for x in items))
     return chunks
 
 
@@ -223,6 +241,36 @@ class KnowledgeAccumulator:
                 name = att.get("source_url") or att.get("filename") or att.get("att_id")
                 await self.ingest_text(project, module, f"需求 {title} · {name}", att["text"], "requirement_docs",
                                        "requirement", rid, by)
+        await self.ingest_requirement_analysis(item, by)
+
+    def _analysis_sources(self, item: dict) -> dict[str, str]:
+        title = item.get("title") or item["req_id"]
+        return {"business_rules": f"需求 {title} · 已确认分析（规则 / 边界 / 状态 / 权限）",
+                "requirement_docs": f"需求 {title} · 已确认分析（功能 / 流程 / 依赖 / 风险）"}
+
+    async def ingest_requirement_analysis(self, item: dict, by: str | None = None) -> int:
+        """人工确认后的 AI 需求分析结果 → 知识库（以确认时的快照为准，按来源替换）；未确认则清掉旧沉淀。返回入库文档数。"""
+        project = item.get("project")
+        if not self.enabled(project) or item.get("deleted_at"):
+            return 0
+        confirmed = item.get("analysis_confirmed") or {}
+        analysis = confirmed.get("analysis") or {}
+        module = self.module_path(item.get("module_id"))
+        title = item.get("title") or item["req_id"]
+        service = self._service()
+        n = 0
+        for category, keys in (("business_rules", ANALYSIS_RULE_KEYS), ("requirement_docs", ANALYSIS_DOC_KEYS)):
+            source = self._analysis_sources(item)[category]
+            chunks = render_analysis_chunks(analysis, keys, title) if confirmed else []
+            if not chunks:
+                service._drop_same_source(project, category, source)
+                service.invalidate_cache()
+                continue
+            doc = await service.ingest_chunks(chunks, source=source, category=category, space=project, module=module,
+                                              created_by=by, origin="requirement", origin_ref=item["req_id"])
+            logger.info("知识沉淀：{}「{}」{} 片（{}）", project, source, doc.chunk_count, item["req_id"])
+            n += 1
+        return n
 
     def forget(self, origin_ref: str) -> None:
         try:

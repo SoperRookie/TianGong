@@ -4662,6 +4662,7 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
         "blocking_questions": len(rstore.blocking_questions(item)),
         "task_count": len(item["tasks"]),
         "analysis_labels": REQUIREMENT_ANALYSIS_LABELS,
+        "analysis_confirmed_stale": rstore.analysis_confirmed_stale(item),
         "parse_failed": sum(1 for a in item["attachments"] if not a.get("parsed") and not a.get("parsing")),
         "parsing": sum(1 for a in item["attachments"] if a.get("parsing")),
     }
@@ -5051,10 +5052,34 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
         raise HTTPException(status_code=400, detail=str(e))
     except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError) as e:
         raise HTTPException(status_code=502, detail=str(e))
-    meta = {"model": analysis.get("model_name"), "chunks": analysis.get("chunks"),
+    meta = {"id": uuid.uuid4().hex[:8], "model": analysis.get("model_name"), "chunks": analysis.get("chunks"),
             "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     item = request.app.state.requirements.set_analysis(req_id, analysis, meta)
     logger.info("需求 {} AI 分析完成：待确认 {} 项（{}）", req_id, len(analysis.get("open_questions") or []), meta["model"])
+    return _req_view(request, item)
+
+
+@router.post("/api/v1/requirements/{req_id}/analysis/confirm")
+async def confirm_requirement_analysis(request: Request, req_id: str) -> dict:
+    """人工确认当前 AI 分析结果：快照留存并沉淀到项目知识库（规则 / 边界 / 状态 / 权限 → 业务规则库，
+    功能 / 流程 / 前置 / 依赖 / 风险 → 需求文档库）；重新分析后需再次确认才会更新知识库。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    try:
+        item = request.app.state.requirements.confirm_analysis(req_id, _operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    _schedule_requirement_ingest(request.app, req_id, _operator(request))
+    return _req_view(request, item)
+
+
+@router.delete("/api/v1/requirements/{req_id}/analysis/confirm")
+async def unconfirm_requirement_analysis(request: Request, req_id: str) -> dict:
+    """取消确认：知识库中由该分析沉淀的文档一并移除。"""
+    _req(request, req_id, "requirement.edit")
+    item = request.app.state.requirements.unconfirm_analysis(req_id)
+    _schedule_requirement_ingest(request.app, req_id, _operator(request))
     return _req_view(request, item)
 
 

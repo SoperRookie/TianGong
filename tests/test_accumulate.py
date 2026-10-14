@@ -115,11 +115,45 @@ async def test_需求中心沉淀_附件与原文_删除恢复(client):
         import asyncio
         await asyncio.sleep(0.05)
     assert {d.source for d in _docs("B")} == {"需求 登录改版 · 原文", "需求 登录改版 · 附件.txt"}
+    # AI 分析结果：确认前不沉淀；确认后规则类进业务规则库、其余进需求文档库
+    from tests.test_requirements import ANALYSIS_REPLY
+
+    assert (await client.post(f"/api/v1/requirements/{rid}/analysis/confirm")).status_code == 409  # 还没分析
+    app.state.llm = StubLLM([ANALYSIS_REPLY])
+    await client.post(f"/api/v1/requirements/{rid}/analyze", json={})
+    await app.state.accumulator.drain()
+    assert len(_docs("B")) == 2
+    v = (await client.post(f"/api/v1/requirements/{rid}/analysis/confirm")).json()
+    assert v["analysis_confirmed"]["by"] == "anonymous" and v["analysis_confirmed_stale"] is False
+    await app.state.accumulator.drain()
+    by_src = {d.source: d for d in _docs("B")}
+    assert by_src["需求 登录改版 · 已确认分析（规则 / 边界 / 状态 / 权限）"].category == "business_rules"
+    assert by_src["需求 登录改版 · 已确认分析（功能 / 流程 / 依赖 / 风险）"].category == "requirement_docs"
+    rule_chunks = app.state.knowledge.store.iter_chunks(category="business_rules", space="B")
+    assert any("密码错误 5 次锁定 30 分钟" in c.text and "业务规则" in c.text for c in rule_chunks)
+    # 重新分析：已确认的是旧版本（知识库不动），再次确认后更新
+    app.state.llm = StubLLM([ANALYSIS_REPLY])
+    v = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
+    assert v["analysis_confirmed_stale"] is True
+    await app.state.accumulator.drain()
+    assert len(_docs("B")) == 4
+    v = (await client.post(f"/api/v1/requirements/{rid}/analysis/confirm")).json()
+    assert v["analysis_confirmed_stale"] is False
+    await app.state.accumulator.drain()
+    assert len(_docs("B")) == 4  # 按来源替换不堆积
+    # 取消确认 → 分析沉淀移除；删除 / 恢复需求联动
+    await client.delete(f"/api/v1/requirements/{rid}/analysis/confirm")
+    await app.state.accumulator.drain()
+    assert len(_docs("B")) == 2
+    await client.post(f"/api/v1/requirements/{rid}/analysis/confirm")
+    await app.state.accumulator.drain()
     await client.delete(f"/api/v1/requirements/{rid}")
     assert _docs("B") == []
     await client.post(f"/api/v1/requirements/{rid}/restore")
     await app.state.accumulator.drain()
-    assert len(_docs("B")) == 2
+    assert len(_docs("B")) == 4
+    actions = [x["action"] for x in (await client.get("/api/v1/audit?limit=50")).json()["items"]]
+    assert "确认需求分析结果" in actions and "取消需求分析确认" in actions
 
 
 async def test_项目画像_提炼_确认_全链路注入(client):
