@@ -100,6 +100,13 @@ async def test_AI分析_待确认事项_确认后才能测试设计_追溯(clien
     assert a["status"] == "pending_confirm" and a["open_questions"] == 2
     assert a["analysis"]["rules"] == ["密码错误 5 次锁定 30 分钟"] and set(a["analysis_labels"]) >= {"features", "open_questions"}
     assert a["raw_text"] == r["raw_text"]  # AI 结果不覆盖原文
+    assert a.get("analysis_history", []) == []
+    app.state.llm = StubLLM([ANALYSIS_REPLY])
+    a2 = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
+    assert len(a2["analysis_history"]) == 1 and a2["analysis_history"][0]["analysis"]["rules"] == a["analysis"]["rules"]
+    assert a2["analysis_history"][0]["meta"]["at"] == a["analysis_meta"]["at"]
+    assert "analysis_history" not in (await client.get("/api/v1/requirements")).json()["requirements"][0]
+    assert a2["open_questions"] == 2  # 重新分析：同样的问题不重复追加
     # 未确认不得发起测试设计（核心规则 4）
     assert (await client.post(f"/api/v1/requirements/{rid}/design", json={})).status_code == 409
     q1, q2 = [q["q_id"] for q in a["questions"]]

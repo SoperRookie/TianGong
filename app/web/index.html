@@ -5615,7 +5615,56 @@ function crumbForReqs() {
   if (curReq && _reqDetail) setCrumb(`<a onclick="curReq=null;renderRequirements()">需求列表</a><span class="sep">/</span>${esc(_reqDetail.title)}`);
   else setCrumb('需求列表');
 }
-function openRequirement(id, tab) { curReq = id; reqTab = tab || 'raw'; switchView('requirements'); }
+function openRequirement(id, tab) { if (id !== curReq) anReset(); curReq = id; reqTab = tab || 'raw'; switchView('requirements'); }
+// AI 需求分析页签：左侧 11 个分析项导航（带条数），右侧当前项逐条编号展示、关键词筛选、分页；可回看历次分析
+let anSec = 'features', anPage = 1, anSize = 20, anKw = '', anHist = -1;
+function anReset() { anSec = 'features'; anPage = 1; anKw = ''; anHist = -1; }
+function anSet(name, value) {
+  if (name === 'page') anPage = value;
+  else if (name === 'size') { anSize = value; anPage = 1; }
+  else if (name === 'sec') { anSec = value; anPage = 1; anKw = ''; }
+  else if (name === 'kw') { anKw = value; anPage = 1; }
+  else if (name === 'hist') { anHist = parseInt(value); anPage = 1; }
+  renderRequirementDetail();
+}
+function reqAnalysisHtml(r, labels, canAI) {
+  const hist = r.analysis_history || [];
+  const viewingOld = anHist >= 0 && anHist < hist.length;
+  const an = viewingOld ? hist[anHist].analysis : r.analysis;
+  const meta = viewingOld ? (hist[anHist].meta || {}) : (r.analysis_meta || {});
+  const openN = (r.questions || []).filter(q => q.status === 'open' && (q.level || 'must') === 'must').length;
+  const toolbar = `<div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap">
+      ${canAI?`<select id="rqAnalyzeModel" style="width:150px">${[...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('')}</select>
+      <button class="btn sm" id="rqAnalyzeBtn" onclick="analyzeReq()">${r.analysis?'重新 AI 分析':'AI 需求分析'}</button>`:''}
+      ${hist.length?`<select style="width:230px" onchange="anSet('hist', this.value)"><option value="-1" ${!viewingOld?'selected':''}>当前结果（${esc(fmtTime((r.analysis_meta||{}).at))}）</option>${hist.map((h,i)=>`<option value="${i}" ${anHist===i?'selected':''}>历史 ${hist.length-i}：${esc(fmtTime((h.meta||{}).at))} · ${esc((h.meta||{}).model||'')}</option>`).reverse().join('')}</select>`:''}
+      ${r.analysis?`<span class="hint">${viewingOld?'<b style="color:var(--warn)">正在查看历史结果</b> · ':''}${esc(meta.model||'')} · ${esc(meta.by||'')} · ${esc(fmtTime(meta.at))}${meta.chunks>1?` · 分 ${meta.chunks} 片分析后合并`:''}</span>`:'<span class="hint">尚未分析。AI 只整理需求已写明的内容，缺失规则会列入「待确认事项」而不是脑补</span>'}</div>`;
+  const intro = `<div class="hint" style="margin-bottom:10px">AI 需求分析把原文、附件与人工补充整理成 11 个结构化分析项，结果随需求保存在数据库（不覆盖原文，重新分析自动留档）；其中业务规则 / 边界条件 / 状态变化 / 权限要求会作为需求的一部分带入测试设计，待确认事项进入确认流。</div>`;
+  if (!an) return intro + toolbar + '<div class="empty">还没有分析结果</div>';
+  const keys = Object.keys(labels);
+  const count = k => (an[k] || []).length;
+  const total = keys.filter(k => k !== 'open_questions').reduce((n, k) => n + count(k), 0);
+  const nav = `<div style="min-width:170px;border-right:1px solid var(--line);padding-right:10px">
+      ${keys.map(k => k === 'open_questions'
+        ? `<button class="btn ghost sm" style="display:flex;width:100%;justify-content:space-between;margin-top:6px;border-top:1px dashed var(--line);padding-top:8px" onclick="reqTab='questions';renderRequirementDetail()"><span>${esc(labels[k])} →</span><span class="cnt ${openN?'hot':''}">${openN||count(k)}</span></button>`
+        : `<button class="btn ghost sm ${anSec===k?'on':''}" style="display:flex;width:100%;justify-content:space-between;${anSec===k?'background:var(--p1-bg,var(--well));color:var(--p1)':''}" onclick="anSet('sec', ${jsq(k)})"><span>${esc(labels[k])}</span><span class="cnt">${count(k)}</span></button>`).join('')}
+      <div class="hint" style="margin-top:8px;padding-top:6px;border-top:1px solid var(--line)">共 ${total} 条分析要点</div></div>`;
+  const sec = keys.includes(anSec) ? anSec : 'features';
+  const kw = anKw.trim().toLowerCase();
+  const all = an[sec] || [];
+  const items = all.map((x, i) => ({n: i + 1, text: x})).filter(x => !kw || String(x.text).toLowerCase().includes(kw));
+  const pages = Math.max(1, Math.ceil(items.length / anSize));
+  if (anPage > pages) anPage = pages;
+  const pageItems = items.slice((anPage - 1) * anSize, anPage * anSize);
+  const hiKw = t => kw ? esc(t).replace(new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), m => `<mark>${m}</mark>`) : esc(t);
+  const body = `<div style="flex:1;min-width:0">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><div class="section-t" style="margin:0">${esc(labels[sec])}<span class="cnt" style="margin-left:6px">${all.length}</span></div>
+        <div class="search" style="margin-left:auto;width:240px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="search" placeholder="在本项内筛选…" value="${esc(anKw)}" onchange="anSet('kw', this.value)" onkeydown="if(event.key==='Enter')anSet('kw', this.value)"></div></div>
+      ${all.length ? (items.length ? `<div class="tbl-wrap" style="margin-top:0"><table><thead><tr><th style="width:48px">#</th><th>${esc(labels[sec])}</th></tr></thead><tbody>
+        ${pageItems.map(x => `<tr><td class="hint">${x.n}</td><td style="white-space:pre-wrap;line-height:1.6">${hiKw(String(x.text))}</td></tr>`).join('')}</tbody></table></div>
+        ${items.length > anSize || anSize !== 20 ? pagerHtml(items.length, anPage, anSize, 'anSet') : `<div class="hint" style="margin-top:6px">共 ${items.length} 条${kw?'（已筛选）':''}</div>`}` : `<div class="empty">没有包含「${esc(anKw)}」的条目</div>`) : '<div class="empty">AI 没有从需求中整理出这一项的内容</div>'}</div>`;
+  const block = openN ? `<div class="hint" style="margin-bottom:10px;padding:8px 12px;border:1px solid var(--warn);border-radius:8px;color:var(--warn)">分析产出 ${openN} 项「必须确认」的待确认事项，确认后才能开始测试设计。<a onclick="reqTab='questions';renderRequirementDetail()">去确认 →</a></div>` : '';
+  return intro + toolbar + block + `<div style="display:flex;gap:16px;align-items:flex-start">${nav}${body}</div>`;
+}
 async function renderRequirements() { return (() => keepScroll('reqs', ['reqs', curReq, reqStatus, reqKw, reqDeleted, reqSource, reqCreator, reqPage, reqSize].join('|'), _renderRequirements__impl))(); }
 async function _renderRequirements__impl() {
   if (curReq) return renderRequirementDetail();
@@ -5758,15 +5807,7 @@ async function _renderRequirementDetail__impl() {
     <textarea id="rqDescEdit" rows="3" style="width:100%;box-sizing:border-box" ${canEdit?'':'disabled'}>${esc(r.description||'')}</textarea>
     ${canEdit?`<div class="toolbar" style="margin-top:6px"><button class="btn ghost sm" onclick="saveReqDesc()">保存补充</button></div>`:''}`;
 
-  const an = r.analysis;
-  const analysisTab = `<div class="toolbar" style="margin-bottom:10px">
-      ${canAI?`<select id="rqAnalyzeModel" style="width:150px">${[...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('')}</select>
-      <button class="btn sm" id="rqAnalyzeBtn" onclick="analyzeReq()">${an?'重新 AI 分析':'AI 需求分析'}</button>`:''}
-      ${r.analysis_meta?`<span class="hint">上次分析：${esc(r.analysis_meta.model||'')} · ${esc(r.analysis_meta.by||'')} · ${esc(fmtTime(r.analysis_meta.at))}</span>`:'<span class="hint">尚未分析。AI 只整理需求已写明的内容，缺失规则会列入「待确认事项」而不是脑补</span>'}</div>
-    ${an?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px 24px">
-      ${Object.keys(labels).filter(k=>k!=='open_questions').map(k=>`<div><div class="section-t">${esc(labels[k])}<span class="cnt" style="margin-left:6px">${(an[k]||[]).length}</span></div>
-        ${(an[k]||[]).length?`<ul style="margin:4px 0 0 18px;padding:0;line-height:1.7">${an[k].map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<div class="hint">无</div>'}</div>`).join('')}
-    </div>`:''}`;
+  const analysisTab = reqAnalysisHtml(r, labels, canAI);
 
   const qs = r.questions || [];
   const openAll = qs.filter(q=>q.status==='open');
@@ -5800,6 +5841,7 @@ async function _renderRequirementDetail__impl() {
         ${canEdit&&canDelete()?`<button class="btn ghost sm danger" onclick="deleteReq()">删除</button>`:''}
         ${canDesign?`<button class="btn sm" ${designDisabled?'disabled':''} title="${openN?`还有 ${openN} 项必须确认的事项`:''}" onclick="openDesignDlg()">开始测试设计</button>`:''}
       </div></div>
+    ${canDesign&&openN?`<div class="hint" style="padding:0 16px 8px;color:var(--warn)">还有 ${openN} 项「必须确认」的待确认事项，确认后才能开始测试设计（也可把不影响规则的事项「降为建议」）。<a onclick="reqTab='questions';renderRequirementDetail()">去确认 →</a></div>`:''}
     <div class="dtabs">
       <button class="${reqTab==='raw'?'on':''}" onclick="reqTab='raw';renderRequirementDetail()">原文与附件${r.parse_failed?`<span class="cnt hot">${r.parse_failed}</span>`:''}${r.parsing?` <span class="spin"></span>`:''}</button>
       <button class="${reqTab==='analysis'?'on':''}" onclick="reqTab='analysis';renderRequirementDetail()">AI 需求分析</button>
@@ -5878,7 +5920,7 @@ async function analyzeReq() {
   try {
     const r = await jpost(`/api/v1/requirements/${curReq}/analyze`, {model: $('rqAnalyzeModel').value || null});
     toast(r.open_questions ? `分析完成，${r.open_questions} 项待确认事项需要确认` : '分析完成，无待确认事项', r.open_questions ? 'warn' : 'ok');
-    reqTab = r.open_questions ? 'questions' : 'analysis'; renderRequirementDetail();
+    anHist = -1; anPage = 1; reqTab = r.open_questions ? 'questions' : 'analysis'; renderRequirementDetail();
   } catch (e) { toast(e.message, 'err'); btn.disabled = false; btn.textContent = 'AI 需求分析'; }
 }
 async function addReqQuestion() {

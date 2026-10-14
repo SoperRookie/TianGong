@@ -4774,6 +4774,7 @@ async def list_requirements(
         v = _req_view(request, item)
         v.pop("raw_text", None)
         v.pop("analysis", None)
+        v.pop("analysis_history", None)
         v["questions"] = len(item["questions"])
         out.append(v)
     total = len(out)

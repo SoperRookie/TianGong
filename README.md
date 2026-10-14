@@ -117,7 +117,7 @@ open http://localhost:8000/
 | GET/POST/PUT/DELETE | `/api/v1/projects/{name}/modules[/{id}]` | 模块树（≤5 级，逻辑删除/恢复/排序/移动） |
 | GET/PUT | `/api/v1/auth/me` | 当前用户（含所属项目角色、收藏/最近访问）/ 自助资料 |
 | GET/POST/PUT/DELETE | `/api/v1/requirements[/{id}]` | 需求中心：需求实体（原文/附件/人工补充/状态），详情含追溯与覆盖识别 |
-| POST | `/api/v1/requirements/{id}/analyze` | AI 需求分析（11 项结构化输出，待确认事项进入确认流） |
+| POST | `/api/v1/requirements/{id}/analyze` | AI 需求分析（11 项结构化输出，待确认事项进入确认流；重新分析自动留档最近 10 次 `analysis_history`，详情页按分析项导航、关键词筛选、分页展示并可回看历史） |
 | POST | `/api/v1/requirements/{id}/questions[/{qid}]` | 待确认事项：人工补充 / 确认结论 / 重新打开 |
 | POST | `/api/v1/requirements/{id}/design` | 从需求发起测试设计（任务回挂需求/模块/版本；未确认事项未清则 409） |
 | POST | `/api/v1/requirements/design` | 多条需求合并发起测试设计（`req_ids`，须同一项目、最多 20 条；合并为一份需求文本走同一链路，任务回挂全部需求，上下文 `requirement_ids` / `requirement_titles`） |
