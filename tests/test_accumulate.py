@@ -101,7 +101,7 @@ async def test_任务过程自动沉淀_需求_测试点_用例_删除联动(cli
 
 async def test_需求中心沉淀_附件与原文_删除恢复(client):
     await client.post("/api/v1/projects", json={"name": "B"})
-    r = await client.post("/api/v1/requirements", data={"project": "B", "title": "登录改版", "text": "登录 密码 规则原文"})
+    r = await client.post("/api/v1/requirements", data={"project": "B", "title": "登录改版", "text": "登录 密码 规则原文：密码错误 5 次锁定 30 分钟"})
     rid = r.json()["req_id"]
     await app.state.accumulator.drain()
     docs = _docs("B")
@@ -158,7 +158,7 @@ async def test_需求中心沉淀_附件与原文_删除恢复(client):
     # 存量需求批量确认：已分析未确认的确认并沉淀，未分析 / 已确认的跳过
     await client.post("/api/v1/projects", json={"name": "B2"})
     app.state.llm = StubLLM([ANALYSIS_REPLY])
-    r1 = (await client.post("/api/v1/requirements", data={"project": "B2", "title": "老需求一", "text": "登录 老原文一"})).json()["req_id"]
+    r1 = (await client.post("/api/v1/requirements", data={"project": "B2", "title": "老需求一", "text": "登录 老原文一：密码错误 5 次锁定 30 分钟"})).json()["req_id"]
     await client.post(f"/api/v1/requirements/{r1}/analyze", json={})
     await client.post("/api/v1/requirements", data={"project": "B2", "title": "老需求二", "text": "登录 老原文二"})
     await app.state.accumulator.drain()

@@ -56,11 +56,12 @@ ANALYSIS_DOC_KEYS = ("features", "preconditions", "normal_flows", "exception_flo
 
 def render_analysis_chunks(analysis: dict, keys: tuple[str, ...], title: str) -> list[str]:
     """已确认的分析结果按分析项渲染为知识切片：一个分析项一片。"""
+    from app.agents.analysis import item_text
     from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
 
     chunks = []
     for key in keys:
-        items = [str(x).strip() for x in (analysis.get(key) or []) if str(x).strip()]
+        items = [item_text(x) for x in (analysis.get(key) or []) if item_text(x)]
         if items:
             chunks.append(f"【需求「{title}」· {REQUIREMENT_ANALYSIS_LABELS[key]}】（AI 分析、人工确认）\n" + "\n".join(f"- {x}" for x in items))
     return chunks

@@ -2,7 +2,8 @@
 
 学习来源优先级（PRD 锁定）：审核通过后的人工修改（在线评审 review_log、
 离线终稿 diff、定点修改 Diff）；用户修订指令作为补充信号；
-计划执行中标记为「用例问题」的失败（步骤有误/预期有误）作为提示词优化信号。
+计划执行中标记为「用例问题」的失败（步骤有误/预期有误）作为提示词优化信号；
+需求分析结果的人工修改（改 / 删 / 增）作为 AI 理解需求偏差的信号。
 """
 
 from app.tasks.store import TaskStore
@@ -12,11 +13,13 @@ _MAX_SAMPLES = 80
 
 
 def collect_samples(
-    store: TaskStore, project: str | None = None, limit: int = 30, plans=None
+    store: TaskStore, project: str | None = None, limit: int = 30, plans=None, requirements=None
 ) -> list[dict]:
     samples: list[dict] = []
     if plans is not None:
         samples.extend(_exec_failure_samples(plans, project))
+    if requirements is not None:
+        samples.extend(_analysis_edit_samples(requirements, project))
     for record in store.list(limit=limit):
         ctx = record.context or {}
         if project and ctx.get("project") != project:
@@ -59,6 +62,29 @@ def collect_samples(
         if len(samples) >= _MAX_SAMPLES:
             break
     return samples[:_MAX_SAMPLES]
+
+
+def _analysis_edit_samples(requirements, project: str | None) -> list[dict]:
+    """需求分析结果的人工修改留痕（改文本 / 删除 / 新增）：AI 对需求理解的系统性偏差（术语、数值口径、
+    该拆不该拆、哪些推断不算规则）由此归纳；新近需求优先。"""
+    from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
+
+    samples: list[dict] = []
+    for item in requirements.list(project=project):
+        for log in item.get("analysis_edits") or []:
+            label = REQUIREMENT_ANALYSIS_LABELS.get(log.get("key"), log.get("key"))
+            if log.get("action") == "edit" and log.get("before") and log.get("after"):
+                samples.append({"来源": "需求分析人工修改", "项目": item.get("project", ""), "分析项": label,
+                                "修改前": str(log["before"])[:160], "修改后": str(log["after"])[:160]})
+            elif log.get("action") == "delete" and log.get("before"):
+                samples.append({"来源": "需求分析人工删除", "项目": item.get("project", ""), "分析项": label,
+                                "被删条目": str(log["before"])[:160]})
+            elif log.get("action") == "add" and log.get("after"):
+                samples.append({"来源": "需求分析人工新增", "项目": item.get("project", ""), "分析项": label,
+                                "新增条目": str(log["after"])[:160]})
+            if len(samples) >= _MAX_SAMPLES // 2:
+                return samples
+    return samples
 
 
 def _exec_failure_samples(plans, project: str | None) -> list[dict]:

@@ -1,6 +1,6 @@
 """Prompt 版本化管理（完整需求 15 章）。
 
-- 全部 Prompt 纳管：拆解/生成/评审/定点修正/查漏/查重/测试点修改/用例修改/需求变更/需求分析/学习分析/
+- 全部 Prompt 纳管：拆解/生成/评审/定点修正/查漏/查重/测试点修改/用例修改/需求变更/需求分析/需求分析复核/评测裁判/学习分析/
   测试点补充/图片理解，以及注入块（知识/规则/记忆）；
 - 每个 Prompt 一条记录：版本链 [{version_no, content, status: active/draft/archived, note, created_by, created_at}]，
   内置默认为 v1；新建版本为草稿，激活后生效（可随时回滚到任一历史版本=再激活）；
@@ -23,7 +23,12 @@ PROMPT_DEFS: list[dict] = [
     {"key": "blind_spot_verify", "name": "分片盲区复核", "kind": "system", "default": P.BLIND_SPOT_VERIFY_SYSTEM,
      "where": "长需求分片拆解后 → 用其他分片原文复核盲区（已说明的不算盲区）"},
     {"key": "requirement_analysis", "name": "需求分析（11 项）", "kind": "system", "default": P.REQUIREMENT_ANALYSIS_SYSTEM,
-     "where": "需求中心 → AI 需求分析"},
+     "where": "需求中心 → AI 需求分析（每条带原文依据 quote，程序逐条核验）"},
+    {"key": "requirement_analysis_review", "name": "需求分析独立复核", "kind": "system",
+     "default": P.REQUIREMENT_ANALYSIS_REVIEW_SYSTEM,
+     "where": "需求中心 → AI 需求分析后的第二轮：对照原文挑理解错 / 无依据 / 遗漏"},
+    {"key": "analysis_judge", "name": "需求分析评测裁判", "kind": "system", "default": P.ANALYSIS_JUDGE_SYSTEM,
+     "where": "需求分析评测 → 标准答案与 AI 输出逐条语义对齐"},
     {"key": "generator", "name": "用例生成", "kind": "system", "default": P.GENERATOR_SYSTEM,
      "where": "确认测试点 → 生成用例 / 定点修正", "placeholders": ["template_spec"]},
     {"key": "reviewer", "name": "用例评审", "kind": "system", "default": P.REVIEWER_SYSTEM,
