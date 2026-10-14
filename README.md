@@ -107,6 +107,7 @@ open http://localhost:8000/
 | POST | `/api/v1/tasks/{id}/final` | 离线终稿回传，计算差异与采纳率 |
 | GET | `/api/v1/tasks` | 任务列表与进度轮询 |
 | POST | `/api/v1/knowledge/docs` / `cases` | 知识文档入库 / 历史用例导入 |
+| GET | `/api/v1/knowledge/docs/{doc_id}` | 知识文档详情：台账元数据 + 全部切片原文（按切片顺序，含字数）；知识库页点文档名或「查看」弹出，支持切片内关键词筛选高亮与分页 |
 | GET/POST/DELETE | `/api/v1/projects/{name}/profile[/extract\|/confirm\|/draft]` | 项目画像：查看（生效版 / 草稿 / 注入文本）、AI 提炼草稿、管理员确认生效（可带编辑后的 `profile`）、丢弃草稿；项目 `PUT` 可传 `knowledge_auto` 开关自动沉淀 |
 | GET/POST | `/api/v1/projects/{name}/knowledge/backfill`、`/api/v1/knowledge/backfill` | 存量回溯：把项目（或全部项目，系统管理员）历史任务的需求原文 / 已审核测试点 / 评审通过用例 / 离线终稿与需求条目按自动沉淀规则补进知识库，后台串行执行，GET 查进度与上次结果；完成后按条件自动提炼一版画像草稿 |
 | GET/POST | `/api/v1/memories` | 记忆查看与维护 |

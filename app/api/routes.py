@@ -1340,6 +1340,25 @@ async def list_knowledge_docs(
             "levels": LEVELS, "origins": ORIGINS}
 
 
+@router.get("/api/v1/knowledge/docs/{doc_id}")
+async def get_knowledge_doc(request: Request, doc_id: str) -> dict:
+    """知识文档详情：台账元数据 + 全部切片原文（按切片顺序），看清楚入库的到底是什么、怎么切的。"""
+    from app.knowledge.schemas import CATEGORIES, LEVELS, ORIGINS
+
+    service = _knowledge_service(request.app)
+    doc = service.store.get_doc(doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail=f"知识文档不存在: {doc_id}")
+    if not _knowledge_visible(request, doc):
+        raise HTTPException(status_code=403, detail="无权查看该项目的知识")
+    chunks = service.store.doc_chunks(doc_id)
+    return {**doc.model_dump(), "level_label": LEVELS.get(doc.level, doc.level),
+            "category_label": CATEGORIES.get(doc.category, doc.category),
+            "origin_label": ORIGINS.get(doc.origin, doc.origin),
+            "chunks": [{"chunk_index": h.chunk_index, "text": h.text, "chars": len(h.text)} for h in chunks],
+            "total_chars": sum(len(h.text) for h in chunks)}
+
+
 @router.delete("/api/v1/knowledge/docs/{doc_id}")
 async def delete_knowledge_doc(request: Request, doc_id: str) -> dict:
     service = _knowledge_service(request.app)
