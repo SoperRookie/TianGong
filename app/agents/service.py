@@ -148,10 +148,13 @@ async def run_requirement_analysis(
     from app.agents.prompts import REQUIREMENT_ANALYSIS_KEYS
     from app.prompts import prompt_text
 
+    from app.agents.context import profile_block
+
     chunks = split_text(text, get_settings().chunk_max_chars)
+    profile = profile_block()
     outputs = await gather_or_cancel([
         _chat_json(llm, [{"role": "system", "content": prompt_text("requirement_analysis")},
-                         {"role": "user", "content": f"需求原文：\n{wrap_data('需求原文', chunk)}"}], model)
+                         {"role": "user", "content": f"需求原文：\n{wrap_data('需求原文', chunk)}{profile}"}], model)
         for chunk in chunks
     ])
     merged: dict = {k: [] for k in REQUIREMENT_ANALYSIS_KEYS}

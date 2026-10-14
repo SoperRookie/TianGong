@@ -60,6 +60,17 @@ class Settings(BaseSettings):
     # 学习规则注入预算（需求三十九）：已确认生效的团队/项目规则，独立于知识与记忆配额
     rules_budget_chars: int = 800
 
+    # 知识自动沉淀：任务 / 需求过程产物（需求原文与附件、审核通过的测试点、评审通过的用例、离线终稿）
+    # 自动入项目知识库，带来源标记；项目级可在项目设置里关闭（knowledge_auto）
+    knowledge_auto_ingest: bool = True
+
+    # 项目画像：AI 从已沉淀的需求 / 测试点 / 用例中提炼业务背景、角色、流程、术语与规则，管理员确认后
+    # 注入拆解 / 生成 / 查漏 / 评审全链路；每新增 profile_refresh_tasks 个任务自动生成一版待确认草稿
+    profile_auto_extract: bool = True
+    profile_refresh_tasks: int = 3
+    profile_material_chars: int = 40000
+    profile_budget_chars: int = 2500
+
     # 历史用例复用提示阈值（需求二十九）：向量相似度达到该值提示「高度相关，可复用」
     reuse_hint_score: float = 0.78
 

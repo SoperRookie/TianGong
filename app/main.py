@@ -68,6 +68,11 @@ async def lifespan(app: FastAPI):
     app.state.user_prefs = UserPrefStore()
     app.state.versions = VersionStore()
     app.state.modules = ModuleStore()
+    from app.knowledge.accumulate import KnowledgeAccumulator
+    from app.knowledge.profile import ProfileStore
+
+    app.state.profiles = ProfileStore()          # 项目画像（AI 提炼 → 管理员确认 → 全链路注入）
+    app.state.accumulator = KnowledgeAccumulator(app)  # 知识自动沉淀
     from app.plans import PlanStore, migrate_task_executions
 
     app.state.plans = PlanStore()

@@ -1,0 +1,201 @@
+"""知识自动沉淀：任务 / 需求过程中的产物自动进项目知识库，让下一次生成"认识这个业务"。
+
+沉淀节点（都在已有的人工确认动作之后，不需要用户多做任何操作）：
+- 需求原文（新建任务上传 / 粘贴的需求；需求中心的原文、附件与链接解析完成后）→ 需求文档库
+- 审核通过的测试点（连同设计需求页来源）→ 玩法与业务规则库：这是对业务最精炼的描述
+- 评审通过 / 人工定稿的用例、离线终稿 → 测试用例库（标记「任务沉淀」，与手动导入的历史用例同库）
+
+规则：
+- 按来源替换：同一任务 / 需求重复确认只覆盖自己那份，不堆积；任务 / 需求删除时联动清理，恢复时重新沉淀
+- 全部后台执行、任何故障只记日志，绝不阻塞确认 / 评审主链路
+- 项目设置 knowledge_auto=false 或全局 knowledge_auto_ingest=false 时不沉淀
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Awaitable, Callable
+
+from loguru import logger
+
+from app.config import get_settings
+
+
+def _ref_line(point: dict) -> str:
+    ref = str(point.get("ref") or "").strip()
+    return f"（需求来源：{ref}）" if ref else ""
+
+
+def render_point_chunks(test_points: list[dict]) -> list[str]:
+    """审核通过的测试点按模块渲染为知识切片：一个模块一片（短模块合并由切片器处理）。"""
+    chunks: list[str] = []
+    for entry in test_points:
+        pts = [p for p in entry.get("points") or [] if isinstance(p, dict) and str(p.get("point", "")).strip()]
+        if not pts:
+            continue
+        lines = [f"【模块】{entry.get('module', '')}（已确认的测试点，反映该模块的业务规则与验证要点）"]
+        for p in pts:
+            dim = f"[{p['dimension']}] " if p.get("dimension") else ""
+            lines.append(f"- {dim}{p['point']}{_ref_line(p)}")
+        chunks.append("\n".join(lines))
+    return chunks
+
+
+def approved_points(test_points: list[dict]) -> list[dict]:
+    """只取审核通过的测试点；没有审核状态的旧任务（确认即通过）全部视为通过。"""
+    out = []
+    for entry in test_points or []:
+        pts = [p for p in entry.get("points") or [] if isinstance(p, dict)]
+        keep = [p for p in pts if p.get("status") in (None, "", "approved")]
+        if keep:
+            out.append({"module": entry.get("module", ""), "points": keep})
+    return out
+
+
+def approved_cases(record) -> list[dict]:
+    cases = (record.result or {}).get("cases") or []
+    reviews = record.case_reviews or {}
+    return [c for c in cases if (reviews.get(str(c.get("uid") or "")) or {}).get("status") == "approved"]
+
+
+class KnowledgeAccumulator:
+    """沉淀编排：判定是否启用、解析模块路径、后台执行并跟踪作业（测试可 drain 等待）。"""
+
+    def __init__(self, app):
+        self.app = app
+        self.jobs: set[asyncio.Task] = set()
+
+    # ---- 开关与上下文 ----
+
+    def enabled(self, project: str | None) -> bool:
+        if not project or not get_settings().knowledge_auto_ingest:
+            return False
+        p = self.app.state.projects.get(project)
+        return bool(p) and bool(p.get("knowledge_auto", True))
+
+    def _service(self):
+        from app.api.routes import _knowledge_service
+
+        return _knowledge_service(self.app)
+
+    def module_path(self, module_id: str | None) -> str:
+        if not module_id:
+            return ""
+        try:
+            store = self.app.state.modules
+            return store.path(module_id) if store.get(module_id) else ""
+        except Exception:
+            return ""
+
+    def task_scope(self, record) -> tuple[str | None, str]:
+        ctx = record.context or {}
+        return ctx.get("project"), self.module_path(ctx.get("module_id"))
+
+    # ---- 后台调度 ----
+
+    def schedule(self, label: str, job: Callable[[], Awaitable[None]]) -> None:
+        async def _run() -> None:
+            try:
+                await job()
+            except Exception as e:  # 沉淀故障绝不影响主链路
+                logger.warning("知识沉淀失败（{}）：{}", label, e)
+
+        try:
+            task = asyncio.get_running_loop().create_task(_run())
+        except RuntimeError:  # 无事件循环（同步调用场景）：直接放弃，不阻塞
+            return
+        self.jobs.add(task)
+        task.add_done_callback(self.jobs.discard)
+
+    async def drain(self) -> None:
+        """等待全部沉淀作业结束（测试与关停用）。"""
+        while self.jobs:
+            await asyncio.gather(*list(self.jobs), return_exceptions=True)
+
+    # ---- 各类沉淀 ----
+
+    async def ingest_text(self, project: str, module: str, source: str, text: str, category: str,
+                          origin: str, origin_ref: str, by: str | None = None) -> None:
+        if not self.enabled(project) or not (text or "").strip():
+            return
+        doc = await self._service().ingest_text(
+            text, source=source, category=category, space=project, module=module,
+            created_by=by, origin=origin, origin_ref=origin_ref,
+        )
+        logger.info("知识沉淀：{}「{}」{} 片 → {}（{}）", project, source, doc.chunk_count, category, origin_ref)
+
+    async def ingest_requirement(self, record, by: str | None = None) -> None:
+        """任务的需求原文 → 需求文档库（需求中心发起的任务由需求实体沉淀，这里跳过避免重复）。"""
+        ctx = record.context or {}
+        if ctx.get("requirement_id"):
+            return
+        project, module = self.task_scope(record)
+        await self.ingest_text(project, module, f"任务 {record.task_id} · 需求原文", ctx.get("requirement", ""),
+                               "requirement_docs", "task", record.task_id, by)
+
+    async def ingest_points(self, record, by: str | None = None) -> None:
+        """审核通过的测试点 → 玩法与业务规则库（整任务按来源替换）。"""
+        project, module = self.task_scope(record)
+        if not self.enabled(project):
+            return
+        chunks = render_point_chunks(approved_points((record.analysis or {}).get("test_points") or []))
+        source = f"任务 {record.task_id} · 已确认测试点"
+        service = self._service()
+        if not chunks:
+            service._drop_same_source(project, "business_rules", source)
+            service.invalidate_cache()
+            return
+        doc = await service.ingest_chunks(chunks, source=source, category="business_rules", space=project,
+                                          module=module, created_by=by, origin="task", origin_ref=record.task_id)
+        logger.info("知识沉淀：{}「{}」{} 个模块的测试点（{}）", project, source, doc.chunk_count, record.task_id)
+
+    async def ingest_cases(self, record, by: str | None = None, cases: list[dict] | None = None,
+                           label: str = "评审通过用例") -> None:
+        """评审通过的用例（或离线终稿）→ 测试用例库（整任务按来源替换）。"""
+        from app.knowledge.importers import render_case_chunk
+
+        project, module = self.task_scope(record)
+        if not self.enabled(project):
+            return
+        cases = approved_cases(record) if cases is None else cases
+        source = f"任务 {record.task_id} · {label}"
+        service = self._service()
+        if not cases:
+            service._drop_same_source(project, "test_cases", source)
+            service.invalidate_cache()
+            return
+        doc = await service.ingest_chunks([render_case_chunk(c) for c in cases], source=source, category="test_cases",
+                                          space=project, module=module, created_by=by, origin="task",
+                                          origin_ref=record.task_id)
+        logger.info("知识沉淀：{}「{}」{} 条用例（{}）", project, source, doc.chunk_count, record.task_id)
+
+    async def ingest_requirement_entity(self, item: dict, by: str | None = None) -> None:
+        """需求中心的需求实体：原文 + 已解析附件 / 链接逐个入需求文档库。"""
+        project = item.get("project")
+        if not self.enabled(project) or item.get("deleted_at"):
+            return
+        module = self.module_path(item.get("module_id"))
+        rid = item["req_id"]
+        title = item.get("title") or rid
+        if (item.get("raw_text") or "").strip():
+            await self.ingest_text(project, module, f"需求 {title} · 原文", item["raw_text"], "requirement_docs",
+                                   "requirement", rid, by)
+        for att in item.get("attachments") or []:
+            if att.get("parsed") and (att.get("text") or "").strip():
+                name = att.get("source_url") or att.get("filename") or att.get("att_id")
+                await self.ingest_text(project, module, f"需求 {title} · {name}", att["text"], "requirement_docs",
+                                       "requirement", rid, by)
+
+    def forget(self, origin_ref: str) -> None:
+        try:
+            n = self._service().forget_origin(origin_ref)
+            if n:
+                logger.info("知识沉淀清理：{} 的 {} 篇自动沉淀文档已删除", origin_ref, n)
+        except Exception as e:
+            logger.warning("知识沉淀清理失败（{}）：{}", origin_ref, e)
+
+    async def reingest_task(self, record, by: str | None = None) -> None:
+        """任务恢复：需求原文、测试点、用例全部重新沉淀。"""
+        await self.ingest_requirement(record, by)
+        await self.ingest_points(record, by)
+        await self.ingest_cases(record, by)

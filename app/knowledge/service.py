@@ -46,11 +46,7 @@ class KnowledgeService:
 
         path = Path(path)
         chunks = [render_case_chunk(c) for c in parse_cases_file(path)]
-        vectors = await self.embedder.embed(chunks)
-        record = self._new_doc(source=path.name, category="test_cases", space=space, chunk_count=len(chunks), **meta)
-        self.store.upsert_chunks(record, chunks, vectors)
-        self.invalidate_cache()
-        return record
+        return await self.ingest_chunks(chunks, source=path.name, category="test_cases", space=space, **meta)
 
     async def ingest_bugs(self, path: str | Path, space: str = DEFAULT_SPACE, **meta) -> KnowledgeDoc:
         """历史缺陷入库：禅道 / Jira 导出表 → 历史缺陷库，每条缺陷一个切片。"""
@@ -58,11 +54,29 @@ class KnowledgeService:
 
         path = Path(path)
         chunks = [render_bug_chunk(b) for b in parse_bugs_file(path)]
+        return await self.ingest_chunks(chunks, source=path.name, category="bug_history", space=space, **meta)
+
+    async def ingest_chunks(
+        self, chunks: list[str], source: str, category: str, space: str = DEFAULT_SPACE, **meta
+    ) -> KnowledgeDoc:
+        """已切好的切片直接入库（每条用例 / 测试点一个切片）；同空间同分类同来源先删旧文档再写，重复导入不堆积。"""
+        if category not in CATEGORIES:
+            raise InvalidCategoryError(category)
+        chunks = [c for c in chunks if c and c.strip()]
+        if not chunks:
+            raise ValueError(f"{source} 无有效内容，未入库")
         vectors = await self.embedder.embed(chunks)
-        record = self._new_doc(source=path.name, category="bug_history", space=space, chunk_count=len(chunks), **meta)
+        self._check_dims(vectors)
+        self._drop_same_source(space, category, source)
+        record = self._new_doc(source=source, category=category, space=space, chunk_count=len(chunks), **meta)
         self.store.upsert_chunks(record, chunks, vectors)
         self.invalidate_cache()
         return record
+
+    def _drop_same_source(self, space: str, category: str, source: str) -> None:
+        for old in self.store.list_docs(space, category):
+            if old.source == source:
+                self.store.delete_doc(old.doc_id)
 
     async def _ingest(self, text: str, source: str, category: str, space: str, **meta) -> KnowledgeDoc:
         if category not in CATEGORIES:
@@ -73,9 +87,7 @@ class KnowledgeService:
         vectors = await self.embedder.embed(chunks)
         self._check_dims(vectors)
         # 同空间同分类同来源重复入库：先删旧文档，避免重复切片挤占检索配额
-        for old in self.store.list_docs(space, category):
-            if old.source == source:
-                self.store.delete_doc(old.doc_id)
+        self._drop_same_source(space, category, source)
         record = self._new_doc(source=source, category=category, space=space, chunk_count=len(chunks), **meta)
         self.store.upsert_chunks(record, chunks, vectors)
         self.invalidate_cache()
@@ -87,7 +99,8 @@ class KnowledgeService:
             raise ValueError(f"Embedding 返回维度 {len(vectors[0])} 与配置 {expected} 不一致，请检查模型配置")
 
     def _new_doc(self, source: str, category: str, space: str, chunk_count: int,
-                 level: str | None = None, module: str = "", created_by: str | None = None) -> KnowledgeDoc:
+                 level: str | None = None, module: str = "", created_by: str | None = None,
+                 origin: str = "manual", origin_ref: str = "") -> KnowledgeDoc:
         from app.knowledge.schemas import DEFAULT_SPACE as _DEF, PUBLIC_SPACE
 
         if level is None:
@@ -103,7 +116,20 @@ class KnowledgeService:
             chunk_count=chunk_count,
             embedding_model=self.embedder.registry.default_embedding,
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            origin=origin,
+            origin_ref=origin_ref,
         )
+
+    def forget_origin(self, origin_ref: str) -> int:
+        """删除某个来源（任务 / 需求）自动沉淀的全部知识文档，返回删除篇数。"""
+        n = 0
+        for doc in list(self.store.list_docs()):
+            if doc.origin != "manual" and doc.origin_ref == origin_ref:
+                self.store.delete_doc(doc.doc_id)
+                n += 1
+        if n:
+            self.invalidate_cache()
+        return n
 
     async def search(
         self,
