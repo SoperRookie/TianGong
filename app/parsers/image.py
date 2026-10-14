@@ -96,11 +96,12 @@ def split_tiles(raw: bytes, mime: str) -> list[tuple[bytes, str, tuple[int, int]
             rgb = img.convert("RGB")
             tiles: list[tuple[bytes, str, tuple[int, int]]] = []
             step = MAX_IMAGE_SIDE - TILE_OVERLAP
+            # 最后一块只取剩余部分、不往回对齐到边缘：回退对齐会让末块与上一块重叠几百像素，边界处的内容被两块各写一遍
             for r in range(ny):
-                top = min(r * step, max(0, h - MAX_IMAGE_SIDE)) if ny > 1 else 0
+                top = r * step
                 bottom = min(h, top + MAX_IMAGE_SIDE)
                 for c in range(nx):
-                    left = min(c * step, max(0, w - MAX_IMAGE_SIDE)) if nx > 1 else 0
+                    left = c * step
                     right = min(w, left + MAX_IMAGE_SIDE)
                     buf = io.BytesIO()
                     rgb.crop((left, top, right, bottom)).save(buf, format="PNG", optimize=True)

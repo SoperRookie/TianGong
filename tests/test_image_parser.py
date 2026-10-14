@@ -92,7 +92,7 @@ async def test_大图切块逐块理解后拼接():
     tiles = split_tiles(_png((1000, 5000)), "image/png")
     assert [pos for _, _, pos in tiles] == [(1, 1), (2, 1), (3, 1)]
     sizes = [Image.open(io.BytesIO(t[0])).size for t in tiles]
-    assert sizes[0] == (1000, 2000) and sizes[-1] == (1000, 2000)
+    assert sizes[0] == (1000, 2000) and sizes[-1] == (1000, 5000 - 2 * 1880)   # 末块只取剩余高度
     # 相邻块重叠：三块覆盖全高 5000 但总高 > 5000
     assert sum(h for _, h in sizes) > 5000
 
