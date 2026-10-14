@@ -146,13 +146,17 @@ def parse_members(files: list[tuple[str, Path]], source: str, depth: int) -> Par
         except (UnsupportedFormatError, UnsafeFileError, ValueError, UnicodeDecodeError) as e:
             sections.append(Section(level=0, content=f"（未读取：{e}）"))
             continue
-        # 合并：子文档的图片占位重新编号，避免与外层冲突
+        # 合并：子文档的图片占位重新编号，避免与外层冲突。
+        # 先算好全部旧 → 新映射再一次性替换：逐张边改边替会把刚改成 [[图片:5]] 的占位在处理子文档第 5 张图时再改一次，
+        # 连锁覆盖后前面几张图的理解结果找不到占位而丢失（只剩最后几张各重复多次）
+        mapping: dict[str, str] = {}
         for img in doc.embedded_images:
             new_ph = f"[[图片:{len(images) + 1}]]"
-            for s in doc.sections:
-                if s.content == img.placeholder:
-                    s.content = new_ph
+            mapping[img.placeholder] = new_ph
             images.append(EmbeddedImage(placeholder=new_ph, data=img.data, mime=img.mime))
+        for s in doc.sections:
+            if s.content in mapping:
+                s.content = mapping[s.content]
         for s in doc.sections:
             sections.append(Section(level=min(s.level + 1, 6) if s.title else 0, title=s.title, content=s.content))
         tables.extend(doc.tables)

@@ -68,3 +68,54 @@ async def test_混合上传_图片与文本(tmp_path):
     assert [d["doc_type"] for d in data["documents"]] == ["image", "txt"]
     assert "界面元素清单" in data["merged_text"]
     assert "微信登录" in data["merged_text"]
+
+
+def _png(size):
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, "white").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def test_大图切块逐块理解后拼接():
+    """整页原型长截图整体缩到 2000 像素内文字就糊了：改为按块理解，块与块之间有重叠，结果按顺序拼接。"""
+    import base64
+    import io
+
+    from PIL import Image
+
+    from app.parsers.image import split_tiles, understand_image_bytes
+
+    tiles = split_tiles(_png((1000, 5000)), "image/png")
+    assert [pos for _, _, pos in tiles] == [(1, 1), (2, 1), (3, 1)]
+    sizes = [Image.open(io.BytesIO(t[0])).size for t in tiles]
+    assert sizes[0] == (1000, 2000) and sizes[-1] == (1000, 2000)
+    # 相邻块重叠：三块覆盖全高 5000 但总高 > 5000
+    assert sum(h for _, h in sizes) > 5000
+
+    llm = StubLLM(["块一：顶部 Banner", "块二：排行榜表格", "块三：底部规则说明"])
+    text = await understand_image_bytes(_png((1000, 5000)), "image/png", llm, prompt="提取需求")
+    assert len(llm.calls) == 3
+    prompts = [c["messages"][0]["content"][1]["text"] for c in llm.calls]
+    assert "第 2 块" in prompts[1] and "3 行 × 1 列" in prompts[1] and prompts[0].startswith("提取需求")
+    assert text.index("【大图第 1/3 块】") < text.index("块二：排行榜表格") < text.index("【大图第 3/3 块】")
+    # 每块都以 data url 上送且不超过单块上限
+    for c in llm.calls:
+        url = c["messages"][0]["content"][0]["image_url"]["url"]
+        w, h = Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))).size
+        assert max(w, h) <= 2000
+
+    # 小图不切块、只调一次
+    llm2 = StubLLM(["单块"])
+    assert await understand_image_bytes(_png((800, 600)), "image/png", llm2, prompt="提取需求") == "单块"
+    assert len(llm2.calls) == 1
+
+
+def test_块数超限时整体缩小():
+    from app.parsers.image import split_tiles
+
+    tiles = split_tiles(_png((9000, 9000)), "image/png")   # 不缩小要 5×5=25 块
+    assert 1 < len(tiles) <= 16

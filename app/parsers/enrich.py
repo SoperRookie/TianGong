@@ -17,8 +17,12 @@ from app.parsers.image import understand_image_bytes
 MIN_IMAGE_SIDE = 100
 MIN_IMAGE_BYTES = 3 * 1024
 
-EMBED_PROMPT = """这张图片嵌在一份软件需求文档中。请提取图中与需求相关的信息（界面元素、交互逻辑、
-流程分支、数值规则、文字内容），用简洁的 Markdown 输出；只描述图中实际内容，不推测不存在的功能。"""
+# 文档内嵌图的提示词：与独立图片同一套框架（Prompt 管理里的「图片理解」），只加一句所处上下文。
+# 早先用的「简洁输出」版本会让整页原型截图被概括成几百字摘要，字段、文案、数值大量丢失
+def embed_prompt() -> str:
+    from app.prompts import prompt_text
+
+    return "这张图片嵌在一份软件需求文档中（Word / PDF / PPT 等的插图，可能是整页原型截图、流程图或表格截图）。\n\n" + prompt_text("vision_image")
 
 
 def _worth_vision(data: bytes) -> bool:
@@ -42,7 +46,7 @@ async def enrich_images(doc: ParsedDocument, llm: LLMClient) -> ParsedDocument:
         if not _worth_vision(img.data):
             return img.placeholder, f"（{img.placeholder} 为装饰性小图，已跳过）"
         try:
-            content = await understand_image_bytes(img.data, img.mime, llm, prompt=EMBED_PROMPT)
+            content = await understand_image_bytes(img.data, img.mime, llm, prompt=embed_prompt())
             return img.placeholder, f"【文档内图片理解 {img.placeholder}】\n{content}"
         except Exception as e:  # 单图失败不阻塞整体解析
             return img.placeholder, f"（{img.placeholder} 解析失败：{e}）"
