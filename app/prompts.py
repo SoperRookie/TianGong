@@ -128,6 +128,41 @@ class PromptStore:
                           "preview": active["content"][:160]})
         return out
 
+    STATES = {"builtin": "内置", "customized": "已定制", "draft": "有草稿"}
+
+    def _state_of(self, row: dict) -> set[str]:
+        states = {"customized" if row["customized"] else "builtin"}
+        if row["drafts"]:
+            states.add("draft")
+        return states
+
+    def _haystack(self, row: dict) -> str:
+        item = self._items[row["key"]]
+        texts = [row["key"], row["name"], row["where"], *row["placeholders"]]
+        texts += [v["content"] for v in item["versions"]] + [v.get("note") or "" for v in item["versions"]]
+        return "\n".join(texts).lower()
+
+    def query(self, kind: str = "", state: str = "", keyword: str = "", page: int = 1, page_size: int = 0) -> dict:
+        """列表筛选：类型 / 定制状态 / 关键词（名称、键、场景、占位符、各版本内容与说明），计数按全集统计。
+        page_size=0 不分页。"""
+        rows = self.list()
+        kind_counts = {k: sum(1 for r in rows if r["kind"] == k) for k in ("system", "user", "block")}
+        state_counts = {k: sum(1 for r in rows if k in self._state_of(r)) for k in self.STATES}
+        if kind:
+            rows = [r for r in rows if r["kind"] == kind]
+        if state:
+            rows = [r for r in rows if state in self._state_of(r)]
+        if keyword.strip():
+            kw = keyword.strip().lower()
+            rows = [r for r in rows if kw in self._haystack(r)]
+        total = len(rows)
+        if page_size:
+            pages = max(1, -(-total // page_size))
+            page = max(1, min(page, pages))
+            rows = rows[(page - 1) * page_size:page * page_size]
+        return {"prompts": rows, "total": total, "page": page if page_size else 1, "page_size": page_size,
+                "kind_counts": kind_counts, "state_counts": state_counts, "states": self.STATES}
+
     def get(self, key: str) -> dict:
         item = self._items.get(key)
         if item is None:

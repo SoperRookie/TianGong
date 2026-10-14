@@ -86,14 +86,31 @@ def note_prompt(key: str, version_no: int, purpose: str, kind: str = "system") -
     used_prompts.set(cur)
 
 
+def _message_text(m: dict) -> str:
+    content = m.get("content")
+    if isinstance(content, list):  # 多模态：只保留文本片段
+        content = " ".join(str(c.get("text", "")) if isinstance(c, dict) and c.get("type") == "text"
+                           else "[图片]" for c in content)
+    return f"[{m.get('role', '')}] {content}"
+
+
 def _messages_text(messages: list[dict]) -> str:
+    return "\n".join(_message_text(m) for m in messages)
+
+
+def _input_preview(messages: list[dict], limit: int = PREVIEW_CHARS) -> str:
+    """输入预览：按消息平均分配预览额度，长 system 提示词不会把用户消息（需求原文）挤出预览。"""
+    texts = [_message_text(m) for m in messages]
+    if sum(len(t) for t in texts) <= limit:
+        return "\n".join(texts)
+    budget = max(200, limit // max(1, len(texts)))
+    spare = sum(max(0, budget - len(t)) for t in texts)  # 短消息用不完的额度让给长消息
     parts = []
-    for m in messages:
-        content = m.get("content")
-        if isinstance(content, list):  # 多模态：只保留文本片段
-            content = " ".join(str(c.get("text", "")) if isinstance(c, dict) and c.get("type") == "text"
-                               else "[图片]" for c in content)
-        parts.append(f"[{m.get('role', '')}] {content}")
+    for t in texts:
+        cap = budget + (spare if len(t) > budget else 0)
+        if len(t) > cap:
+            t, spare = t[:cap] + f"…（省略 {len(t) - cap} 字）", 0
+        parts.append(t)
     return "\n".join(parts)
 
 
@@ -123,7 +140,7 @@ def record_call(messages: list[dict], result: Any = None, error: Exception | Non
             "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
             "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
             "input_chars": len(text_in), "output_chars": len(content),
-            "input_preview": text_in[:PREVIEW_CHARS], "output_preview": content[:PREVIEW_CHARS],
+            "input_preview": _input_preview(messages), "output_preview": content[:PREVIEW_CHARS],
         }
         from app.db import persist_async
 
@@ -141,17 +158,24 @@ def record_call(messages: list[dict], result: Any = None, error: Exception | Non
 def list_calls(project: str | None = None, task_id: str | None = None, requirement_id: str | None = None,
                purpose: str | None = None, model: str | None = None, status: str | None = None,
                by: str | None = None, since: str | None = None, visible: set[str] | None = None,
-               page: int = 1, page_size: int = 50) -> dict:
+               keyword: str | None = None, page: int = 1, page_size: int = 50) -> dict:
+    """查询调用日志。purpose_counts / status_counts / models / users / projects 按「范围」（项目、任务、需求、
+    时间、可见性）统计，不随用途 / 状态 / 模型 / 发起人 / 关键词变化，供筛选下拉显示次数与候选。"""
     from app.db import wait_persist
 
     wait_persist()  # 调用日志走后台写入：刚失败的调用立即查询也要能看到
-    conds = []
+    scope = []
     if project:
-        conds.append(ai_calls.c.project == project)
+        scope.append(ai_calls.c.project == project)
     if task_id:
-        conds.append(ai_calls.c.task_id == task_id)
+        scope.append(ai_calls.c.task_id == task_id)
     if requirement_id:
-        conds.append(ai_calls.c.requirement_id == requirement_id)
+        scope.append(ai_calls.c.requirement_id == requirement_id)
+    if since:
+        scope.append(ai_calls.c.at >= since)
+    if visible is not None:
+        scope.append(ai_calls.c.project.in_(sorted(visible)) if visible else ai_calls.c.project == "__none__")
+    conds = list(scope)
     if purpose:
         conds.append(ai_calls.c.purpose == purpose)
     if model:
@@ -160,18 +184,28 @@ def list_calls(project: str | None = None, task_id: str | None = None, requireme
         conds.append(ai_calls.c.status == status)
     if by:
         conds.append(ai_calls.c.by == by)
-    if since:
-        conds.append(ai_calls.c.at >= since)
-    if visible is not None:
-        conds.append(ai_calls.c.project.in_(sorted(visible)) if visible else ai_calls.c.project == "__none__")
+    if keyword:
+        kw = f"%{keyword}%"
+        conds.append(ai_calls.c.purpose.like(kw) | ai_calls.c.model.like(kw) | ai_calls.c.provider.like(kw)
+                     | ai_calls.c.project.like(kw) | ai_calls.c.task_id.like(kw) | ai_calls.c.requirement_id.like(kw)
+                     | ai_calls.c.by.like(kw) | ai_calls.c.error.like(kw) | ai_calls.c.prompt_key.like(kw))
     cols = [c for c in ai_calls.c if c.name not in ("input_preview", "output_preview")]
     with get_engine().begin() as conn:
         total = conn.execute(select(func.count()).select_from(ai_calls).where(*conds)).scalar_one()
+        page = max(1, min(page, -(-total // page_size) or 1))  # 超过总页数时收敛到最后一页
         rows = conn.execute(
             select(*cols).where(*conds).order_by(ai_calls.c.id.desc())
             .offset((page - 1) * page_size).limit(page_size)
         ).mappings().all()
-    return {"total": total, "page": page, "page_size": page_size,
+        purpose_counts = dict(conn.execute(
+            select(ai_calls.c.purpose, func.count()).where(*scope).group_by(ai_calls.c.purpose)).all())
+        status_counts = dict(conn.execute(
+            select(ai_calls.c.status, func.count()).where(*scope).group_by(ai_calls.c.status)).all())
+        distinct = lambda col: sorted(v for (v,) in conn.execute(select(col).where(*scope).distinct()).all() if v)
+        models, users = distinct(ai_calls.c.model), distinct(ai_calls.c.by)
+        projects = [] if project else distinct(ai_calls.c.project)
+    return {"total": total, "page": page, "page_size": page_size, "purpose_counts": purpose_counts,
+            "status_counts": status_counts, "models": models, "users": users, "projects": projects,
             "items": [{**dict(r), "prompt_versions": json.loads(r["prompt_versions"] or "{}")} for r in rows]}
 
 

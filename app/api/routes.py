@@ -452,35 +452,45 @@ class UserBody(BaseModel):
 
 @router.get("/api/v1/auth/users")
 async def auth_list_users(
-    request: Request, keyword: str = "", role: str = "", status: str = "", project: str = "",
+    request: Request, keyword: str = "", role: str = "", status: str = "", project: str = "", totp: str = "",
     page: int = 0, page_size: int = 20,
 ) -> dict:
     """用户列表（管理员）：含资料/状态/最后登录，并附所属项目与项目角色（3.1「查看所属项目」）。
 
-    keyword 匹配用户名 / 姓名 / 邮箱 / 手机；role / status / project 精确筛选；page 为 0 时返回全部（兼容内部调用）。
+    keyword 匹配用户名 / 姓名 / 邮箱 / 手机 / 所属项目；role / status / project 精确筛选；totp=on/off 按两步验证筛；
+    role_counts / status_counts / projects 按全集统计（不随筛选变化）；page 为 0 时返回全部（兼容内部调用）。
     """
     _require_admin(request)
+    if totp and totp not in ("on", "off"):
+        raise HTTPException(status_code=400, detail="totp 仅支持 on / off")
     pstore = request.app.state.projects
     users = request.app.state.auth.list_users()
     for u in users:
         u["projects"] = pstore.projects_of(u["username"])
+    role_counts = {r: sum(1 for u in users if u.get("role") == r) for r in ("admin", "member")}
+    status_counts = {st: sum(1 for u in users if u.get("status", "active") == st) for st in ("active", "disabled")}
+    projects = sorted({p["project"] for u in users for p in u["projects"]})
     kw = keyword.strip().lower()
     if kw:
-        users = [u for u in users if any(kw in str(u.get(k) or "").lower() for k in ("username", "name", "email", "phone"))]
+        users = [u for u in users if any(kw in str(u.get(k) or "").lower() for k in ("username", "name", "email", "phone"))
+                 or any(kw in p["project"].lower() for p in u["projects"])]
     if role:
         users = [u for u in users if u.get("role") == role]
     if status:
-        users = [u for u in users if u.get("status") == status]
+        users = [u for u in users if u.get("status", "active") == status]
     if project:
         users = [u for u in users if any(p["project"] == project for p in u["projects"])]
+    if totp:
+        users = [u for u in users if bool(u.get("totp_enabled")) == (totp == "on")]
     total = len(users)
+    meta = {"total": total, "role_counts": role_counts, "status_counts": status_counts, "projects": projects}
     if page <= 0:
-        return {"users": users, "total": total}
+        return {"users": users, **meta}
     page_size = min(max(1, page_size), 200)
     pages = max(1, -(-total // page_size))
     page = min(max(1, page), pages)
     start = (page - 1) * page_size
-    return {"users": users[start:start + page_size], "total": total, "page": page, "page_size": page_size, "pages": pages}
+    return {"users": users[start:start + page_size], **meta, "page": page, "page_size": page_size, "pages": pages}
 
 
 @router.get("/api/v1/auth/users/lookup")
@@ -1042,7 +1052,7 @@ async def _run_point_quality_checks(app, task_id: str, requirement: str, model: 
         added = add_points(
             modules,
             [{"module": a.get("module", ""), "point": a.get("point", ""),
-              "dimension": a.get("dimension", "")} for a in gap["additions"]],
+              "dimension": a.get("dimension", ""), "ref": a.get("ref", "")} for a in gap["additions"]],
             source="gap", seq_floor=tp_seq_of(record.analysis),
         )
         bump_tp_seq(record.analysis)
@@ -1795,7 +1805,8 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
         test_points = [
             {"module": e["module"],
              "points": [{"point": p["point"], "dimension": p.get("dimension", ""),
-                         **({"tp_id": p["tp_id"]} if p.get("tp_id") else {})} for p in e["points"]]}
+                         **({"tp_id": p["tp_id"]} if p.get("tp_id") else {}),
+                         **({"ref": p["ref"]} if p.get("ref") else {})} for p in e["points"]]}
             for e in test_points if e.get("points")
         ]
     else:
@@ -1845,7 +1856,8 @@ def _points_pending_generation(record: TaskRecord) -> list[dict]:
     out: dict[str, list[dict]] = {}
     for entry, p in iter_points((record.analysis or {}).get("test_points") or []):
         if p.get("status") == "approved" and p.get("tp_id") and p["tp_id"] not in generated:
-            out.setdefault(entry["module"], []).append({"point": p["point"], "dimension": p.get("dimension", ""), "tp_id": p["tp_id"]})
+            out.setdefault(entry["module"], []).append({"point": p["point"], "dimension": p.get("dimension", ""), "tp_id": p["tp_id"],
+                                                       **({"ref": p["ref"]} if p.get("ref") else {})})
     return [{"module": m, "points": pts} for m, pts in out.items()]
 
 
@@ -2660,6 +2672,7 @@ class PointReviewItem(BaseModel):
     action: str  # approve / reject / modify / delete / unlock
     point: str | None = None       # modify 时的新描述
     dimension: str | None = None
+    ref: str | None = None         # modify 时的设计需求页来源（页面或章节 › 需求点），None 表示不改
     comment: str = ""              # reject 时的驳回原因
     # 结构化驳回（完整需求 6.4）
     reject_types: list[str] = []   # 驳回类型，多选必填
@@ -2850,7 +2863,7 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
     added = add_points(
         modules,
         [{"module": a.get("module", ""), "point": a.get("point", ""),
-          "dimension": a.get("dimension", "")} for a in gap["additions"]],
+          "dimension": a.get("dimension", ""), "ref": a.get("ref", "")} for a in gap["additions"]],
         source="gap", seq_floor=tp_seq_of(record.analysis),
     )
     bump_tp_seq(record.analysis)
@@ -2877,30 +2890,15 @@ async def list_blind_spots(request: Request, task_id: str) -> dict:
     return {"task_id": task_id, "blind_spots": blind_spot_entities(record)}
 
 
-@router.post("/api/v1/tasks/{task_id}/blind-spots/{bs_id}")
-async def act_blind_spot(request: Request, task_id: str, bs_id: str, body: BlindSpotActionBody) -> dict:
-    """盲区闭环处置：转需求待确认事项 / 转测试点 / 标记需求已说明 / 忽略 / 重开。
-
-    盲区本身只是 AI 的提示；是否真是盲区、该去哪里由人工决定并留痕：
-    - to_question：写入任务来源需求的待确认事项（must 级会阻塞该需求后续发起设计，suggest 级可带假设继续）；
-    - to_point：以待审核测试点追加到拆解结果（来源「盲区转入」），进入正常的测试点审核与生成；
-    - explain：需求其他地方已经说明，不是盲区（note 记原文出处）；ignore：与本次无关；reopen：撤回处置。
-    """
-    from app.tasks.blind_spots import ACTIONS, find_blind_spot, record_blind_spot_action
+def _apply_blind_spot_action(request: Request, record: TaskRecord, entity: dict, body: "BlindSpotActionBody",
+                             operator: str) -> tuple[dict, dict]:
+    """单条盲区处置（不落盘）：返回 (处置后的盲区实体, 附加信息)。校验失败抛 HTTPException。"""
+    from app.tasks.blind_spots import record_blind_spot_action
     from app.tasks.points import add_points
 
-    if body.action not in ACTIONS:
-        raise HTTPException(status_code=400, detail=f"不支持的处置动作: {body.action}")
-    perm = "point.edit" if body.action in ("to_point", "to_question") else "point.review"
-    store = request.app.state.tasks
-    record = _task(request, task_id, perm)
-    entity = find_blind_spot(record, bs_id)
-    if entity is None:
-        raise HTTPException(status_code=404, detail=f"盲区不存在: {bs_id}")
+    task_id = record.task_id
     if body.action != "reopen" and entity["status"] != "open" and not entity.get("ai_resolved"):
         raise HTTPException(status_code=409, detail=f"该盲区已处置（{entity['status']}），请先重开")
-    operator = _operator(request)
-    request.state.audit_detail = f"{body.action} {entity['text'][:40]}"
     target: dict | None = None
     extra: dict = {}
     if body.action == "to_question":
@@ -2947,8 +2945,70 @@ async def act_blind_spot(request: Request, task_id: str, bs_id: str, body: Blind
     if record.result and record.quality:  # 质量摘要里的「待确认问题」随处置实时变化
         from app.tasks.blind_spots import open_blind_spots
         record.quality = {**record.quality, "待确认问题": len(open_blind_spots(record))}
+    return updated, extra
+
+
+class BlindSpotBatchBody(BlindSpotActionBody):
+    ids: list[str]
+
+
+@router.post("/api/v1/tasks/{task_id}/blind-spots/batch")
+async def act_blind_spots_batch(request: Request, task_id: str, body: BlindSpotBatchBody) -> dict:
+    """批量处置盲区（全选后一键忽略 / 说明 / 转测试点 / 转待确认 / 重开）：逐条套用单条规则，
+    已处置或校验不通过的条目跳过并带原因返回，其余生效；一次落盘。"""
+    from app.tasks.blind_spots import ACTIONS, blind_spot_entities, find_blind_spot
+
+    if body.action not in ACTIONS:
+        raise HTTPException(status_code=400, detail=f"不支持的处置动作: {body.action}")
+    ids = list(dict.fromkeys(i for i in body.ids if i))
+    if not ids:
+        raise HTTPException(status_code=400, detail="请先勾选盲区")
+    perm = "point.edit" if body.action in ("to_point", "to_question") else "point.review"
+    store = request.app.state.tasks
+    record = _task(request, task_id, perm)
+    operator = _operator(request)
+    applied, skipped = [], []
+    # 转测试点时每条用自己的原文做测试点描述（point 字段只对单条有意义）
+    per_item = body.model_copy(update={"point": ""}) if body.action == "to_point" else body
+    for bs_id in ids:
+        entity = find_blind_spot(record, bs_id)
+        if entity is None:
+            skipped.append({"id": bs_id, "reason": "盲区不存在"})
+            continue
+        try:
+            updated, _ = _apply_blind_spot_action(request, record, entity, per_item, operator)
+        except HTTPException as e:
+            skipped.append({"id": bs_id, "text": entity["text"], "reason": str(e.detail)})
+            continue
+        applied.append(updated)
+    request.state.audit_detail = f"{body.action} 批量 {len(applied)} 条，跳过 {len(skipped)}"
+    if applied:
+        store.save(record)
+    return {"task_id": task_id, "applied": applied, "skipped": skipped, "blind_spots": blind_spot_entities(record)}
+
+
+@router.post("/api/v1/tasks/{task_id}/blind-spots/{bs_id}")
+async def act_blind_spot(request: Request, task_id: str, bs_id: str, body: BlindSpotActionBody) -> dict:
+    """盲区闭环处置：转需求待确认事项 / 转测试点 / 标记需求已说明 / 忽略 / 重开。
+
+    盲区本身只是 AI 的提示；是否真是盲区、该去哪里由人工决定并留痕：
+    - to_question：写入任务来源需求的待确认事项（must 级会阻塞该需求后续发起设计，suggest 级可带假设继续）；
+    - to_point：以待审核测试点追加到拆解结果（来源「盲区转入」），进入正常的测试点审核与生成；
+    - explain：需求其他地方已经说明，不是盲区（note 记原文出处）；ignore：与本次无关；reopen：撤回处置。
+    """
+    from app.tasks.blind_spots import ACTIONS, blind_spot_entities, find_blind_spot
+
+    if body.action not in ACTIONS:
+        raise HTTPException(status_code=400, detail=f"不支持的处置动作: {body.action}")
+    perm = "point.edit" if body.action in ("to_point", "to_question") else "point.review"
+    store = request.app.state.tasks
+    record = _task(request, task_id, perm)
+    entity = find_blind_spot(record, bs_id)
+    if entity is None:
+        raise HTTPException(status_code=404, detail=f"盲区不存在: {bs_id}")
+    request.state.audit_detail = f"{body.action} {entity['text'][:40]}"
+    updated, extra = _apply_blind_spot_action(request, record, entity, body, _operator(request))
     store.save(record)
-    from app.tasks.blind_spots import blind_spot_entities
     return {"task_id": task_id, "blind_spot": updated, "blind_spots": blind_spot_entities(record), **extra}
 
 
@@ -3021,6 +3081,41 @@ async def dup_check_points(request: Request, task_id: str) -> dict:
 class DupPairActionBody(BaseModel):
     action: str        # ignore（人工判定不重复 / 无需处理）/ reopen
     note: str = ""
+
+
+class DupPairBatchBody(DupPairActionBody):
+    keys: list[str]
+
+
+@router.post("/api/v1/tasks/{task_id}/points/dup-pairs/batch")
+async def act_dup_pairs_batch(request: Request, task_id: str, body: DupPairBatchBody) -> dict:
+    """批量忽略 / 重开疑似重复对：逐条套用单条规则，不满足的跳过并带原因返回；一次落盘。"""
+    from app.tasks.points import dup_pair_entities, record_dup_pair_action
+
+    keys = list(dict.fromkeys(k for k in body.keys if k))
+    if not keys:
+        raise HTTPException(status_code=400, detail="请先勾选重复对")
+    store = request.app.state.tasks
+    record = _task(request, task_id, "point.review")
+    by_key = {e["key"]: e for e in dup_pair_entities(record)}
+    applied, skipped = [], []
+    for key in keys:
+        entity = by_key.get(key)
+        if entity is None:
+            skipped.append({"key": key, "reason": "疑似重复对不存在"})
+        elif body.action == "ignore" and entity["status"] != "open":
+            skipped.append({"key": key, "reason": f"已处置（{entity['status']}）"})
+        elif body.action == "reopen" and entity["status"] == "resolved":
+            skipped.append({"key": key, "reason": "测试点已删除，无法重开"})
+        else:
+            try:
+                applied.append(record_dup_pair_action(record, key, body.action, _operator(request), body.note))
+            except ValueError as e:
+                skipped.append({"key": key, "reason": str(e)})
+    request.state.audit_detail = f"{body.action} 批量 {len(applied)} 组，跳过 {len(skipped)}"
+    if applied:
+        store.save(record)
+    return {"task_id": task_id, "applied": applied, "skipped": skipped, "dup_pairs": dup_pair_entities(record)}
 
 
 @router.post("/api/v1/tasks/{task_id}/points/dup-pairs/{key}")
@@ -3727,11 +3822,14 @@ async def list_plans(
     request: Request, project: str | None = None, mine: bool = False,
     task_id: str | None = None, keyword: str | None = None, status: str | None = None,
     owner: str | None = None, page: int = 0, page_size: int = 20, business_line: str = "",
+    run_state: str = "",
 ) -> dict:
     """计划列表（可按项目过滤）；mine=true 只看分配给我的；task_id 只看引用该任务快照的计划。
 
-    查询条件：keyword（名称 / 项目 / 负责人模糊）、status（计划状态）、owner（负责人精确）。
+    查询条件：keyword（名称 / 项目 / 负责人 / 创建人 / 轮次名模糊）、status（计划状态）、owner（负责人精确）、
+    run_state（最近执行：none 未执行 / running 执行中 / finished 已结束）。
     分页：page ≥ 1 时返回该页并附 total / pages，page=0（默认）返回全部（任务概览、项目概览等内部调用）。
+    status_counts 按筛选前范围（项目 / 业务线 / mine）统计供下拉。
     """
     from app.plans import PLAN_STATUSES, plan_summary
 
@@ -3740,9 +3838,12 @@ async def list_plans(
         _require_project(request, project, "plan.view")
     if status and status not in PLAN_STATUSES:
         raise HTTPException(status_code=400, detail=f"未知计划状态: {status}")
+    if run_state and run_state not in ("none", "running", "finished"):
+        raise HTTPException(status_code=400, detail="run_state 仅支持 none / running / finished")
     kw = (keyword or "").strip().lower()
     out = []
     owners: set[str] = set()
+    status_counts: dict[str, int] = {}
     line_projects = _line_projects(request, business_line)
     for plan in request.app.state.plans.list(project=project):
         if line_projects is not None and plan.get("project") not in line_projects:
@@ -3757,13 +3858,20 @@ async def list_plans(
             continue
         if plan.get("owner"):
             owners.add(plan["owner"])
+        status_counts[plan["status"]] = status_counts.get(plan["status"], 0) + 1
         if status and plan["status"] != status:
             continue
         if owner and plan.get("owner", "") != owner:
             continue
-        if kw and kw not in f"{plan['name']} {plan.get('project', '')} {plan.get('owner', '')}".lower():
-            continue
         latest = plan["runs"][-1] if plan["runs"] else None
+        state = "none" if latest is None else ("finished" if latest.get("finished_at") else "running")
+        if run_state and state != run_state:
+            continue
+        if kw:
+            hay = " ".join(str(x) for x in [plan["name"], plan.get("project", ""), plan.get("owner", ""),
+                                             plan.get("created_by", ""), *(r.get("name", "") for r in plan["runs"])] if x).lower()
+            if kw not in hay:
+                continue
         out.append({
             "task_cases": len(task_items),
             **{k: plan[k] for k in ("plan_id", "name", "project", "owner",
@@ -3780,7 +3888,8 @@ async def list_plans(
         })
     total = len(out)
     if page <= 0:
-        return {"plans": out, "total": total, "owners": sorted(owners)}
+        return {"plans": out, "total": total, "owners": sorted(owners), "status_counts": status_counts,
+                "statuses": PLAN_STATUSES}
     page_size = min(max(1, page_size), 200)
     pages = max(1, -(-total // page_size))
     page = min(max(1, page), pages)
@@ -3788,7 +3897,7 @@ async def list_plans(
     return {
         "plans": out[start:start + page_size], "total": total, "page": page,
         "page_size": page_size, "pages": pages, "owners": sorted(owners),
-        "statuses": PLAN_STATUSES,
+        "statuses": PLAN_STATUSES, "status_counts": status_counts,
     }
 
 
@@ -6111,9 +6220,16 @@ async def upload_final_cases(
 async def list_tasks(
     request: Request, status: str | None = None, project: str | None = None,
     created_by: str | None = None, limit: int = 50, business_line: str = "",
+    include_deleted: bool = False,
 ) -> dict:
-    """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人/业务线过滤。"""
-    records = request.app.state.tasks.list(status=status, limit=100000, projects=_visible_projects(request))
+    """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人/业务线过滤。
+
+    include_deleted=true 连已删除的任务一起返回（带 deleted_at / deleted_by，供「已删除」筛选与恢复），仅有删除权限者可用。
+    """
+    if include_deleted:
+        _require_delete(request)
+    records = request.app.state.tasks.list(status=status, limit=100000, projects=_visible_projects(request),
+                                           deleted=None if include_deleted else False)
     if project is not None:
         records = [r for r in records if (r.context or {}).get("project") == project]
     line_projects = _line_projects(request, business_line)
@@ -6140,10 +6256,63 @@ async def list_tasks(
                                       if isinstance(p, dict) and p.get("status") == "approved"),
                 "revision_count": len(r.revisions),
                 "error": r.error,
+                **({"deleted_at": r.deleted_at, "deleted_by": r.deleted_by} if r.deleted_at else {}),
             }
             for r in records
         ]
     }
+
+
+def _delete_task(request: Request, task_id: str) -> TaskRecord:
+    """删除任务的统一校验：存在且可见 → 项目内 case.edit → 删除权限（仅管理员）→ 不在执行中。"""
+    record = _task(request, task_id, "case.edit")
+    _require_delete(request)
+    if record.status in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="任务正在执行中，请先取消再删除")
+    deleted = request.app.state.tasks.delete(task_id, by=_operator(request))
+    if deleted is None:
+        raise HTTPException(status_code=409, detail="任务当前不可删除")
+    return deleted
+
+
+class TaskBatchDeleteBody(BaseModel):
+    ids: list[str]
+
+
+@router.post("/api/v1/tasks/batch-delete")
+async def batch_delete_tasks(request: Request, body: TaskBatchDeleteBody) -> dict:
+    """任务列表批量删除：逐个套用单条规则，不存在 / 无权限 / 执行中的跳过并带原因返回，其余逻辑删除（可恢复）。"""
+    deleted: list[str] = []
+    skipped: list[dict] = []
+    for task_id in dict.fromkeys(body.ids):
+        try:
+            _delete_task(request, task_id)
+            deleted.append(task_id)
+        except HTTPException as e:
+            skipped.append({"task_id": task_id, "reason": str(e.detail)})
+    request.state.audit_detail = f"删除 {len(deleted)} 个，跳过 {len(skipped)} 个"
+    return {"deleted": deleted, "skipped": skipped}
+
+
+@router.delete("/api/v1/tasks/{task_id}")
+async def delete_task(request: Request, task_id: str) -> dict:
+    """逻辑删除任务（任务列表「删除」）：任务及其测试点 / 用例从列表与详情隐藏，不再进入用例中心、报表与知识统计；
+    版本历史、回收站与审计留档保留；有删除权限者可在任务列表「已删除」里恢复。测试计划里的用例快照独立于任务，不受影响。"""
+    record = _delete_task(request, task_id)
+    return {"task_id": task_id, "deleted": True, "deleted_at": record.deleted_at}
+
+
+@router.post("/api/v1/tasks/{task_id}/restore")
+async def restore_task(request: Request, task_id: str) -> dict:
+    """恢复已删除的任务：回到列表与详情，用例重新计入用例中心与统计。"""
+    store = request.app.state.tasks
+    record = store.get(task_id, include_deleted=True)
+    if record is None or not record.deleted_at:
+        raise HTTPException(status_code=404, detail=f"已删除的任务不存在: {task_id}")
+    _require_project(request, (record.context or {}).get("project"), "case.edit")
+    _require_delete(request)
+    store.restore(task_id)
+    return {"task_id": task_id, "deleted": False}
 
 
 @router.post("/api/v1/tasks/{task_id}/cancel")
@@ -6493,7 +6662,7 @@ async def ai_tasks(request: Request, status: str = "", project: str = "", mine: 
 @router.get("/api/v1/ai/calls")
 async def ai_calls_list(
     request: Request, project: str = "", task_id: str = "", requirement_id: str = "", purpose: str = "",
-    model: str = "", status: str = "", by: str = "", days: int = 0, page: int = 1, page_size: int = 50,
+    model: str = "", status: str = "", by: str = "", keyword: str = "", days: int = 0, page: int = 1, page_size: int = 50,
 ) -> dict:
     from app.llm.calllog import list_calls
 
@@ -6505,7 +6674,8 @@ async def ai_calls_list(
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
     return list_calls(project=project or None, task_id=task_id or None, requirement_id=requirement_id or None,
                       purpose=purpose or None, model=model or None, status=status or None, by=by or None,
-                      since=since, visible=_visible_projects(request), page=max(1, page), page_size=min(200, max(1, page_size)))
+                      keyword=keyword.strip() or None, since=since, visible=_visible_projects(request),
+                      page=max(1, page), page_size=min(200, max(1, page_size)))
 
 
 @router.get("/api/v1/ai/calls/{call_id}")
@@ -6567,8 +6737,15 @@ async def ai_stats(request: Request, days: int = 30, project: str = "") -> dict:
 
 
 @router.get("/api/v1/ai/prompts")
-async def list_prompts(request: Request) -> dict:
-    return {"prompts": request.app.state.prompts.list()}
+async def list_prompts(request: Request, kind: str = "", state: str = "", keyword: str = "",
+                       page: int = 1, page_size: int = 0) -> dict:
+    """Prompt 列表：kind=system/user/block，state=builtin/customized/draft；page_size=0 不分页。"""
+    store = request.app.state.prompts
+    if kind and kind not in ("system", "user", "block"):
+        raise HTTPException(status_code=400, detail="kind 仅支持 system / user / block")
+    if state and state not in store.STATES:
+        raise HTTPException(status_code=400, detail=f"state 仅支持 {' / '.join(store.STATES)}")
+    return store.query(kind=kind, state=state, keyword=keyword, page=max(1, page), page_size=min(200, max(0, page_size)))
 
 
 @router.get("/api/v1/ai/prompts/{key}")

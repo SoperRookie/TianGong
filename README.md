@@ -35,6 +35,8 @@ flowchart LR
 ```
 
 - 编排采用 LangGraph 有向图，生成与评审强制分离；上下文按 Agent 职责隔离（历史用例只进拆解与评审，不进生成）。
+- 测试点按需求文档的页面 / 功能点组织输出：模块与文档的页面 / 功能点一致，每个测试点带设计需求页来源（字段 `ref`，格式「页面或章节 › 条目编号或原文摘录」），测试点表「需求来源」列、脑图节点、用例评审的来源测试点行与测试点导出都展示，修改测试点时可人工修正；确认生成时随测试点交给生成 Agent 作为用例边界。
+- 生成范围只到业务结果：拆解、生成、评审、查漏四个 Prompt 均不产出 UI 检查类（布局 / 样式 / 字体 / 颜色 / 图标 / 间距 / 适配等外观）测试点与用例，界面元素只作为操作与结果的载体；生成节点另按标题做保守兜底过滤并在调用链路中留痕。
 - 每次任务记录完整 Agent 调用链路、知识快照与记忆快照，为后续效果归因与自动调优积累数据。
 
 ## 快速开始
@@ -95,6 +97,8 @@ open http://localhost:8000/
 |---|---|---|
 | POST | `/api/v1/tasks` | 创建生成任务（文件/文本，支持异步与拆解确认） |
 | POST | `/api/v1/tasks/{id}/confirm` | 确认测试点，继续生成（`async_mode: true` 投入后台队列并立即返回，页面轮询，可取消；确认后的失败一律从已确认测试点续跑，不重新拆解） |
+| POST | `/api/v1/tasks/{id}/blind-spots/batch`、`/api/v1/tasks/{id}/points/dup-pairs/batch` | 盲区 / 疑似重复对批量处置（全选后一键忽略 / 说明 / 转测试点 / 重开，不满足条件的跳过并带原因） |
+| DELETE / POST | `/api/v1/tasks/{id}`、`/api/v1/tasks/batch-delete`、`/api/v1/tasks/{id}/restore` | 任务逻辑删除（仅有删除权限者；执行中的先取消）、批量删除（跳过项带原因）与恢复；任务列表 `?include_deleted=true` 连已删除一起返回 |
 | GET/POST | `/api/v1/tasks/{id}/blind-spots[/{bs_id}]` | 需求盲区闭环：条目（状态 / 去向 / 处置人）与处置（`to_question` 转来源需求待确认事项、`to_point` 转待审核测试点、`explain` 需求已说明、`ignore`、`reopen`） |
 | POST | `/api/v1/tasks/{id}/revise` | 对话式多轮修订 |
 | POST | `/api/v1/tasks/{id}/review` | 在线评审：逐条采纳/修改/删除留痕 |

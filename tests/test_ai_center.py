@@ -308,3 +308,70 @@ async def test_确认后生成被服务重启打断_继续完成不重新拆解�
     approved = [p for m in t["analysis"]["test_points"] for p in m["points"] if p["status"] == "approved"]
     assert [p["tp_id"] for p in approved] == [first]  # 审核记录未被新拆解覆盖
     assert [c["module"] for c in t["result"]["cases"]] == [points[0]["module"]]  # 只为已通过的点生成
+
+
+async def test_调用日志_用途状态计数_候选与关键词_分页收敛(client):
+    await client.post("/api/v1/projects", json={"name": "P"})
+    await client.post("/api/v1/projects", json={"name": "Q"})
+    case = make_case()
+    for project in ["P", "P", "Q"]:
+        app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(case), review_reply(True)])
+        assert (await client.post("/api/v1/tasks", data={"text": "登录需求", "project": project})).status_code == 200
+
+    class FailLLM:
+        async def chat(self, messages, model=None, **kw):
+            from app.llm.calllog import record_call
+            err = AllModelsFailedError("余额不足")
+            record_call(messages, None, error=err, model_name="gpt-x", provider="openai")
+            raise err
+
+    app.state.llm = FailLLM()
+    assert (await client.post("/api/v1/tasks", data={"text": "登录需求", "project": "Q"})).status_code == 502
+    logs = (await client.get("/api/v1/ai/calls")).json()
+    assert logs["total"] == 10 and logs["status_counts"] == {"ok": 9, "error": 1}
+    assert logs["purpose_counts"]["用例生成"] == 3 and logs["purpose_counts"]["用例评审"] == 3
+    assert logs["models"] == ["gpt-x", "stub"] and logs["users"] == ["anonymous"] and logs["projects"] == ["P", "Q"]
+    # 计数与候选按范围统计，不随用途 / 状态 / 关键词变化；指定项目后不再返回项目候选
+    gen = (await client.get("/api/v1/ai/calls", params={"purpose": "用例生成"})).json()
+    assert gen["total"] == 3 and gen["purpose_counts"] == logs["purpose_counts"] and gen["models"] == logs["models"]
+    err = (await client.get("/api/v1/ai/calls", params={"status": "error", "keyword": "余额"})).json()
+    assert err["total"] == 1 and err["items"][0]["model"] == "gpt-x" and err["status_counts"] == logs["status_counts"]
+    scoped = (await client.get("/api/v1/ai/calls", params={"project": "Q"})).json()
+    assert scoped["total"] == 4 and scoped["projects"] == [] and scoped["status_counts"] == {"ok": 3, "error": 1}
+    # 关键词覆盖项目 / 模型 / 用途 / 发起人；无命中为 0
+    assert (await client.get("/api/v1/ai/calls", params={"keyword": "Q"})).json()["total"] == 4
+    assert (await client.get("/api/v1/ai/calls", params={"keyword": "stub"})).json()["total"] == 9
+    assert (await client.get("/api/v1/ai/calls", params={"keyword": "评审"})).json()["total"] == 3
+    assert (await client.get("/api/v1/ai/calls", params={"keyword": "不存在"})).json()["total"] == 0
+    # 分页：页码超过总页数时收敛到最后一页
+    page2 = (await client.get("/api/v1/ai/calls", params={"page": 2, "page_size": 4})).json()
+    assert page2["page"] == 2 and len(page2["items"]) == 4
+    over = (await client.get("/api/v1/ai/calls", params={"page": 9, "page_size": 4})).json()
+    assert over["page"] == 3 and len(over["items"]) == 2
+
+
+async def test_prompt列表_类型状态计数_关键词与分页(client):
+    base = (await client.get("/api/v1/ai/prompts")).json()
+    n = len(base["prompts"])
+    assert base["total"] == n and base["page_size"] == 0 and sum(base["kind_counts"].values()) == n
+    assert base["state_counts"] == {"builtin": n, "customized": 0, "draft": 0}
+    # 定制 + 草稿后计数变化；按状态 / 类型筛选时计数仍按全集统计
+    await client.post("/api/v1/ai/prompts/analyst/versions", json={"content": "拆解 v2：按页面功能点拆", "note": "试验", "activate": True})
+    await client.post("/api/v1/ai/prompts/reviewer/versions", json={"content": "评审草稿内容", "note": "草稿说明甲"})
+    cust = (await client.get("/api/v1/ai/prompts", params={"state": "customized"})).json()
+    assert [p["key"] for p in cust["prompts"]] == ["analyst"] and cust["state_counts"] == {"builtin": n - 1, "customized": 1, "draft": 1}
+    draft = (await client.get("/api/v1/ai/prompts", params={"state": "draft", "kind": "system"})).json()
+    assert [p["key"] for p in draft["prompts"]] == ["reviewer"] and draft["kind_counts"] == base["kind_counts"]
+    blocks = (await client.get("/api/v1/ai/prompts", params={"kind": "block"})).json()
+    assert blocks["total"] == base["kind_counts"]["block"] and all(p["kind"] == "block" for p in blocks["prompts"])
+    # 关键词覆盖名称 / 键 / 场景 / 各版本内容与说明
+    assert [p["key"] for p in (await client.get("/api/v1/ai/prompts", params={"keyword": "草稿说明甲"})).json()["prompts"]] == ["reviewer"]
+    assert [p["key"] for p in (await client.get("/api/v1/ai/prompts", params={"keyword": "页面功能点"})).json()["prompts"]] == ["analyst"]
+    assert (await client.get("/api/v1/ai/prompts", params={"keyword": "GAP_CHECK"})).json()["total"] == 1
+    assert (await client.get("/api/v1/ai/prompts", params={"keyword": "不存在的词"})).json()["total"] == 0
+    assert (await client.get("/api/v1/ai/prompts", params={"kind": "xx"})).status_code == 400
+    # 分页：越界页码收敛到最后一页
+    p2 = (await client.get("/api/v1/ai/prompts", params={"page": 2, "page_size": 5})).json()
+    assert p2["page"] == 2 and [p["key"] for p in p2["prompts"]] == [p["key"] for p in base["prompts"][5:10]]
+    over = (await client.get("/api/v1/ai/prompts", params={"page": 99, "page_size": 5})).json()
+    assert over["page"] == -(-n // 5) and over["prompts"][-1]["key"] == base["prompts"][-1]["key"]

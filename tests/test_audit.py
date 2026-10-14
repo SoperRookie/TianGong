@@ -85,3 +85,32 @@ async def test_安全日志_登录失败_权限变更_可见范围(client, auth_
     assert ("新建模块", "P") in acts and ("新建模块", "Q") not in acts
     assert all(x["security"] == 0 for x in mine["items"]) and ("修改个人资料", None) not in acts  # 个人资料属安全类
     assert (await client.get("/api/v1/audit?days=0&failed_only=true", headers=admin)).json()["total"] >= 1
+
+
+async def test_操作日志_类型计数_候选与关键词_分页收敛(client):
+    await client.post("/api/v1/projects", json={"name": "P", "code": "P1"})
+    await client.post("/api/v1/projects", json={"name": "Q", "code": "Q1"})
+    for name in ["登录", "注册", "支付"]:
+        await client.post("/api/v1/projects/P/modules", json={"name": name})
+    await client.post("/api/v1/projects/Q/modules", json={"name": "M"})
+    assert (await client.post("/api/v1/projects/Q/modules", json={"name": "M"})).status_code >= 400  # 重名失败留痕
+    logs = (await client.get("/api/v1/audit?days=0")).json()
+    assert logs["kind_counts"]["project"] == logs["total"] >= 7
+    assert logs["users"] == ["anonymous"] and logs["projects"] == ["P", "Q"]
+    # 类型计数 / 候选按范围统计，不随关键词、类型、只看失败筛选变化；指定项目后不再返回项目候选
+    by_kw = (await client.get("/api/v1/audit?days=0&keyword=模块")).json()
+    assert by_kw["total"] == 5 and by_kw["kind_counts"] == logs["kind_counts"] and by_kw["projects"] == ["P", "Q"]
+    failed = (await client.get("/api/v1/audit?days=0&failed_only=true")).json()
+    assert failed["total"] == 1 and failed["items"][0]["project"] == "Q" and failed["kind_counts"] == logs["kind_counts"]
+    scoped = (await client.get("/api/v1/audit?days=0&project=P")).json()
+    assert scoped["total"] == 3 and scoped["projects"] == [] and scoped["kind_counts"] == {"project": 3}  # 创建项目本身不归属项目
+    # 关键词覆盖操作人 / 项目 / 类型中文名
+    assert (await client.get("/api/v1/audit?days=0&keyword=anonymous")).json()["total"] == logs["total"]
+    assert (await client.get("/api/v1/audit?days=0&keyword=Q")).json()["total"] == 2
+    assert (await client.get("/api/v1/audit?days=0&keyword=项目")).json()["total"] == logs["total"]
+    assert (await client.get("/api/v1/audit?days=0&keyword=不存在的关键词")).json()["total"] == 0
+    # 分页：页码超过总页数时收敛到最后一页
+    page2 = (await client.get("/api/v1/audit?days=0&page=2&page_size=5")).json()
+    assert page2["page"] == 2 and len(page2["items"]) == logs["total"] - 5
+    over = (await client.get("/api/v1/audit?days=0&page=99&page_size=5")).json()
+    assert over["page"] == 2 and over["items"] == page2["items"]

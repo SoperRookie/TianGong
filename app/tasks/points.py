@@ -108,6 +108,14 @@ _POINTS_KEYS = ("points", "test_points", "testPoints", "items", "children", "测
 _POINT_KEYS = ("point", "test_point", "testPoint", "description", "desc", "content", "text", "title", "name",
                "测试点", "描述")
 _DIMENSION_KEYS = ("dimension", "dim", "type", "category", "维度", "测试维度")
+_REF_KEYS = ("ref", "source_ref", "requirement_ref", "req_ref", "section", "来源需求点", "需求点", "来源")
+REF_MAX_CHARS = 120
+
+
+def point_ref(item: dict) -> str:
+    """测试点的来源需求点（章节 / 条目 / 原文摘录），兼容别名；过长截断。"""
+    ref = _first(item, _REF_KEYS)
+    return str(ref).strip()[:REF_MAX_CHARS] if isinstance(ref, (str, int, float)) else ""
 
 
 def _first(d: dict, keys: tuple[str, ...]):
@@ -142,6 +150,8 @@ def normalize_points(modules: list[dict]) -> list[dict]:
                     continue
                 dim = _first(p, _DIMENSION_KEYS)
                 item = {"point": text.strip(), "dimension": str(dim).strip() if isinstance(dim, (str, int, float)) else ""}
+                if (ref := point_ref(p)):
+                    item["ref"] = ref
                 # 保留实体字段（已实体化的测试点二次归一化时不丢状态）
                 for key in ("tp_id", "status", "locked", "comment", "reject_count", "source", "warnings",
                             "version", *REJECT_FIELDS):
@@ -295,6 +305,8 @@ def apply_point_review(modules: list[dict], items: list[dict]) -> dict:
             point["version"] = int(point.get("version", 1)) + 1
             if item.get("dimension") is not None:
                 point["dimension"] = str(item.get("dimension", ""))
+            if item.get("ref") is not None:
+                point["ref"] = point_ref(item)
             point["status"], point["locked"] = "pending", False
             clear_reject_fields(point)
             point["warnings"] = coarse_warnings(text)
@@ -328,7 +340,8 @@ def confirmable_points(modules: list[dict]) -> list[dict]:
     for entry in modules:
         wanted = [
             {"point": p["point"], "dimension": p.get("dimension", ""),
-             **({"tp_id": p["tp_id"]} if p.get("tp_id") else {})}
+             **({"tp_id": p["tp_id"]} if p.get("tp_id") else {}),
+             **({"ref": p["ref"]} if p.get("ref") else {})}
             for p in entry["points"]
             if (p.get("status") == "approved" if any_approved else p.get("status") != "rejected")
         ]
@@ -362,6 +375,7 @@ def add_points(modules: list[dict], additions: list[dict], source: str, seq_floo
         point = {
             "tp_id": f"TP{seq:03d}", "point": text,
             "dimension": str(item.get("dimension", "")).strip(),
+            **({"ref": ref} if (ref := point_ref(item)) else {}),
             "status": "pending", "locked": False, "comment": "",
             "reject_count": 0, "source": source, "version": 1,
             "warnings": coarse_warnings(text),
