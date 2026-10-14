@@ -5952,6 +5952,98 @@ async def discard_project_profile_draft(request: Request, name: str) -> dict:
     return _profile_view(request, name)
 
 
+# ---- 存量回溯：把上线前的历史任务 / 需求按自动沉淀规则补进知识库 ----
+
+
+def _backfill_view(request: Request, name: str) -> dict:
+    acc = _accumulator(request.app)
+    p = request.app.state.projects.get(name) or {}
+    return {"project": name, "knowledge_auto": bool(p.get("knowledge_auto", True)),
+            "targets": acc.backfill_targets(name), "last": acc.backfill_status(name)}
+
+
+def _schedule_backfill(app, projects: list[str], by: str | None) -> None:
+    """多个项目串行回溯（向量化走外部 Embedding，串行避免并发打爆配额）；每个项目完成后按条件自动提炼一版画像草稿。"""
+    acc = _accumulator(app)
+    for name in projects:  # 先占位为 running，避免重复触发
+        acc.backfills[name] = {"project": name, "status": "running", "by": by, "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                               "finished_at": None, "total": 0, "done": 0, "tasks": 0, "requirements": 0, "docs": 0,
+                               "errors": 0, "error": None, "current": "排队中"}
+
+    async def _job() -> None:
+        for name in projects:
+            await acc.backfill_project(name, by)
+            _maybe_auto_profile(app, name, by)
+
+    acc.schedule("backfill:" + ",".join(projects), _job)
+
+
+@router.get("/api/v1/projects/{name}/knowledge/backfill")
+async def get_project_backfill(request: Request, name: str) -> dict:
+    _require_project(request, name, "project.view")
+    if request.app.state.projects.get(name) is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {name}")
+    return _backfill_view(request, name)
+
+
+@router.post("/api/v1/projects/{name}/knowledge/backfill")
+async def backfill_project_knowledge(request: Request, name: str) -> dict:
+    """回溯沉淀（管理员）：项目全部历史任务的需求原文 / 已确认测试点 / 评审通过用例 / 离线终稿与需求中心条目，
+    后台按来源替换入库（可重复执行不堆积）；完成后按条件自动提炼一版画像草稿。"""
+    _require_profile_admin(request, name)
+    p = request.app.state.projects.get(name)
+    if p is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {name}")
+    if not p.get("knowledge_auto", True) or not get_settings().knowledge_auto_ingest:
+        raise HTTPException(status_code=409, detail="本项目已关闭自动沉淀，请先在项目设置中开启")
+    acc = _accumulator(request.app)
+    if acc.backfill_running(name):
+        raise HTTPException(status_code=409, detail="该项目正在回溯中，请稍候")
+    targets = acc.backfill_targets(name)
+    if not (targets["tasks"] or targets["requirements"]):
+        raise HTTPException(status_code=400, detail="项目还没有可回溯的历史任务或需求")
+    _schedule_backfill(request.app, [name], _operator(request))
+    request.state.audit_detail = f"任务 {targets['tasks']} / 需求 {targets['requirements']}"
+    return _backfill_view(request, name)
+
+
+@router.get("/api/v1/knowledge/backfill")
+async def list_knowledge_backfill(request: Request) -> dict:
+    """全部项目的回溯状态（系统管理员）。"""
+    _require_admin(request)
+    acc = _accumulator(request.app)
+    items = []
+    for p in request.app.state.projects.list(include_archived=False):
+        items.append({"project": p["name"], "knowledge_auto": bool(p.get("knowledge_auto", True)),
+                      "targets": acc.backfill_targets(p["name"]), "last": acc.backfill_status(p["name"])})
+    return {"items": items, "running": any((x["last"] or {}).get("status") == "running" for x in items)}
+
+
+@router.post("/api/v1/knowledge/backfill")
+async def backfill_all_knowledge(request: Request) -> dict:
+    """一键回溯全部项目（系统管理员）：跳过已关闭自动沉淀、没有历史产物、正在回溯中的项目，其余串行执行。"""
+    _require_admin(request)
+    if not get_settings().knowledge_auto_ingest:
+        raise HTTPException(status_code=409, detail="全局已关闭知识自动沉淀（knowledge_auto_ingest）")
+    acc = _accumulator(request.app)
+    picked, skipped = [], []
+    for p in request.app.state.projects.list(include_archived=False):
+        name = p["name"]
+        t = acc.backfill_targets(name)
+        if not p.get("knowledge_auto", True):
+            skipped.append({"project": name, "reason": "已关闭自动沉淀"})
+        elif acc.backfill_running(name):
+            skipped.append({"project": name, "reason": "正在回溯中"})
+        elif not (t["tasks"] or t["requirements"]):
+            skipped.append({"project": name, "reason": "没有历史任务或需求"})
+        else:
+            picked.append(name)
+    if picked:
+        _schedule_backfill(request.app, picked, _operator(request))
+    request.state.audit_detail = f"回溯 {len(picked)} 个项目，跳过 {len(skipped)} 个"
+    return {"projects": picked, "skipped": skipped}
+
+
 @router.get("/api/v1/cases")
 async def list_all_cases(
     request: Request, project: str | None = None, module: str = "", priority: str = "",
@@ -6405,6 +6497,7 @@ async def upload_final_cases(
     uploads = _upload_list(files, file, "终稿文件")
     final_cases: list[dict] = []
     names: list[str] = []
+    paths: list[str] = []  # 落盘相对路径：回溯沉淀时重新解析终稿
     for upload in uploads:
         name = _safe_filename(upload.filename)
         saved = await _read_upload(upload, store.output_dir / task_id / "final", settings.max_upload_size_mb * 1024 * 1024)
@@ -6413,12 +6506,14 @@ async def upload_final_cases(
         except (CaseImportError, UnsafeFileError, UnicodeDecodeError, ValueError) as e:
             raise HTTPException(status_code=400, detail=f"{name}：{e}" if len(uploads) > 1 else str(e))
         names.append(name)
+        paths.append(str(saved.relative_to(store.output_dir)))
 
     diff = diff_cases(record.result["cases"], final_cases)
     logger.info("任务 {} 终稿回传 diff：{}", task_id, diff["stats"])
     record.offline_review = {
         "filename": "、".join(names),
         "files": names,
+        "paths": paths,
         "by": _operator(request),
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         **diff,

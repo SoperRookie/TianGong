@@ -5140,6 +5140,15 @@ function kbSet(name, value) {
 }
 let kbMode = 'docs', depKind = 'requirement', depModule = '', depFocus = null, _depGraph = null;
 async function renderKnowledge() { return (() => keepScroll('kb', 'kb', _renderKnowledge__impl))(); }
+async function kbBackfillAll() {
+  if (!await uiConfirm('回溯全部项目', '把所有项目的历史任务（需求原文 / 已审核测试点 / 评审通过用例 / 离线终稿）与需求补进各自的项目知识库？已关闭自动沉淀或没有历史的项目自动跳过；后台串行执行，会调用 Embedding 模型。')) return;
+  try {
+    const r = await api('/api/v1/knowledge/backfill', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const skipped = r.skipped.length ? `，跳过 ${r.skipped.length} 个（${r.skipped.slice(0, 3).map(x=>`${x.project}：${x.reason}`).join('；')}${r.skipped.length>3?'…':''}）` : '';
+    toast(r.projects.length ? `已开始回溯 ${r.projects.length} 个项目${skipped}，完成后刷新本页查看` : `没有需要回溯的项目${skipped}`, r.projects.length ? 'ok' : 'warn');
+    if (r.projects.length) setTimeout(() => { if (currentView === 'knowledge') renderKnowledge(); }, 4000);
+  } catch (e) { toast(e.message, 'err'); }
+}
 async function _renderKnowledge__impl() {
   setCrumb('知识库');
   if (kbMode === 'deps') return renderDependencies();
@@ -5172,6 +5181,7 @@ async function _renderKnowledge__impl() {
   $('knowledgeArea').innerHTML = `<div class="card">
     <div class="card-h"><h3>知识库<span class="cnt" style="margin-left:6px">${all.length}</span></h3>${kbModeSeg()}<span class="meta">公共知识库可跨项目使用（须显式标记，仅管理员维护）；项目 / 模块知识只在本项目检索，禁止跨项目污染。需求原文、审核通过的测试点、评审通过的用例自动沉淀到项目知识库（项目设置可关闭）</span>
       <div class="grow">
+        ${isSysAdmin()?`<button class="btn ghost" onclick="kbBackfillAll()" title="把所有项目上线前的历史任务 / 需求按自动沉淀规则补进知识库（后台串行执行）">回溯全部项目</button>`:''}
         ${canUpload?`<button class="btn" onclick="openKbDlg()">＋ 上传知识</button>`:''}</div></div>
     <div class="card-b">
       <div class="toolbar" style="margin-bottom:10px"><input type="text" id="kbQ" placeholder="检索测试：输入关键词看命中切片（范围 = ${curProjectName?esc(curProjectName)+' + 公共':'公共'}）" value="${esc(kbQuery)}" style="flex:1" onkeydown="if(event.key==='Enter')kbSearch()"><button class="btn ghost sm" onclick="kbSearch()">检索</button></div>
@@ -6326,8 +6336,9 @@ async function _renderProjectWorkspace__impl() {
 /* ---- 项目画像：AI 提炼 → 管理员确认 → 注入拆解 / 生成 / 查漏 / 评审全链路 ---- */
 let _profileView = null;
 async function projProfileHtml() {
-  let d; try { d = await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/profile'); } catch (e) { return `<div class="empty">${esc(e.message)}</div>`; }
+  let d, bf; try { [d, bf] = await Promise.all([api('/api/v1/projects/' + encodeURIComponent(curProject) + '/profile'), api('/api/v1/projects/' + encodeURIComponent(curProject) + '/knowledge/backfill')]); } catch (e) { return `<div class="empty">${esc(e.message)}</div>`; }
   _profileView = d;
+  profileBackfillWatch(bf);
   const S = d.sections, canAi = can(curProject, 'point.ai');
   const listHtml = arr => arr && arr.length ? `<ul style="margin:4px 0 0 18px;padding:0">${arr.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>` : '<div class="hint">—</div>';
   const section = (key, pf) => `<div style="margin-top:12px"><div class="section-t" style="margin-top:0">${S[key]}</div>${key==='background'?(pf.background?`<div style="white-space:pre-wrap">${esc(pf.background)}</div>`:'<div class="hint">—</div>'):key==='glossary'?(pf.glossary.length?`<table style="margin-top:4px"><tbody>${pf.glossary.map(g=>`<tr><td style="width:180px"><b>${esc(g.term)}</b></td><td>${esc(g.meaning)}</td></tr>`).join('')}</tbody></table>`:'<div class="hint">—</div>'):listHtml(pf[key])}</div>`;
@@ -6356,7 +6367,31 @@ async function projProfileHtml() {
   if (d.has_active) active = `<div id="pfActive" style="margin-top:14px">${d.draft?'<div class="section-t">当前生效版本</div>':''}${Object.keys(S).map(k=>section(k, d.active)).join('')}
       ${d.history&&d.history.length>1?`<div class="hint" style="margin-top:10px">历史：${d.history.slice().reverse().map(h=>`v${h.version} ${esc(h.by||'')} ${relTime(h.at)}`).join(' · ')}</div>`:''}</div>`;
   else if (!d.draft) active = `<div class="empty" style="margin-top:12px">还没有项目画像。${canAi?'点击「AI 提炼画像」从本项目的需求与用例中生成草稿；':''}${d.auto_due?'已有素材，下一个任务完成后也会自动提炼。':''}</div>`;
-  return intro + head + draft + active + (d.rendered ? `<details class="fold" style="margin-top:14px"><summary class="hint">查看注入 AI 的画像文本（${d.rendered.length} 字）</summary><pre style="white-space:pre-wrap;font-size:12px;padding:8px 12px;margin:0">${esc(d.rendered)}</pre></details>` : '');
+  return intro + head + draft + active + (d.rendered ? `<details class="fold" style="margin-top:14px"><summary class="hint">查看注入 AI 的画像文本（${d.rendered.length} 字）</summary><pre style="white-space:pre-wrap;font-size:12px;padding:8px 12px;margin:0">${esc(d.rendered)}</pre></details>` : '') + profileBackfillHtml(bf, d.can_confirm);
+}
+// 存量回溯：把上线前的历史任务 / 需求按自动沉淀规则补进知识库（后台执行，这里轮询进度）
+let _bfTimer = null;
+function profileBackfillHtml(bf, canRun) {
+  const last = bf.last, t = bf.targets || {};
+  const running = last && last.status === 'running';
+  let status = '';
+  if (running) status = `<span class="hint"><span class="spin"></span> 回溯中 ${last.done} / ${last.total}${last.current?` · ${esc(last.current)}`:''}</span>`;
+  else if (last && last.status === 'done') status = `<span class="hint">上次回溯：${relTime(last.finished_at)} · ${esc(last.by||'')} · 任务 ${last.tasks} / 需求 ${last.requirements} → 入库 ${last.docs} 篇${last.errors?`，<span style="color:var(--danger)">失败 ${last.errors}（详见服务日志）</span>`:''}</span>`;
+  else if (last && last.status === 'failed') status = `<span class="hint" style="color:var(--danger)">上次回溯失败：${esc(last.error||'')}</span>`;
+  else status = `<span class="hint">尚未回溯过</span>`;
+  const btn = canRun && !running ? `<button class="btn ghost sm" id="pfBackfillBtn" onclick="profileBackfill()" ${bf.knowledge_auto&&(t.tasks||t.requirements)?'':'disabled'} title="${!bf.knowledge_auto?'本项目已关闭自动沉淀':''}">回溯沉淀历史任务</button>` : '';
+  return `<div class="card" style="margin-top:14px"><div class="card-b"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>存量回溯</b><span class="hint">自动沉淀只覆盖上线后的确认 / 评审动作；点一次把本项目已有的 ${t.tasks||0} 个任务（需求原文 / 已审核测试点 / 评审通过用例 / 离线终稿）与 ${t.requirements||0} 条需求补进知识库，按来源替换可重复执行；完成后会自动提炼一版画像草稿</span><span style="margin-left:auto">${btn}</span></div><div style="margin-top:6px">${status}</div></div></div>`;
+}
+function profileBackfillWatch(bf) {
+  clearTimeout(_bfTimer); _bfTimer = null;
+  if (bf && bf.last && bf.last.status === 'running') _bfTimer = setTimeout(() => { if (currentView === 'projects' && projTab === 'profile') renderProjectWorkspace(); }, 2000);
+}
+async function profileBackfill() {
+  if (!await uiConfirm('回溯沉淀', '把本项目全部历史任务与需求补进知识库？后台执行，会调用 Embedding 模型，耗时与历史数量成正比。')) return;
+  const btn = $('pfBackfillBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 启动中'; }
+  try { await api('/api/v1/projects/' + encodeURIComponent(curProject) + '/knowledge/backfill', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); toast('已开始回溯，完成后知识库页可见「任务沉淀 / 需求沉淀」文档', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+  renderProjectWorkspace();
 }
 function profileCollect() {
   const S = _profileView.sections, out = {};

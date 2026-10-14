@@ -65,6 +65,8 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [(m, re.compile(p), k, a) for m
     ("POST", r"^/api/v1/projects/(?P<target>[^/]+)/profile/extract$", "project", "提炼项目画像"),
     ("POST", r"^/api/v1/projects/(?P<target>[^/]+)/profile/confirm$", "project", "确认项目画像"),
     ("DELETE", r"^/api/v1/projects/(?P<target>[^/]+)/profile/draft$", "project", "丢弃项目画像草稿"),
+    ("POST", r"^/api/v1/projects/(?P<target>[^/]+)/knowledge/backfill$", "knowledge", "回溯沉淀历史知识"),
+    ("POST", r"^/api/v1/knowledge/backfill$", "knowledge", "回溯沉淀全部项目"),
     ("DELETE", r"^/api/v1/projects/(?P<target>[^/]+)$", "project", "删除项目"),
     ("PUT", r"^/api/v1/projects/(?P<target>[^/]+)/members$", "member", "设置成员角色"),
     ("DELETE", r"^/api/v1/projects/(?P<target>[^/]+)/members/[^/]+$", "member", "移出成员"),

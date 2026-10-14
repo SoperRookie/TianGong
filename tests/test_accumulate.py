@@ -189,3 +189,58 @@ async def test_项目画像自动提炼_达到任务阈值后生成草稿(client
     await app.state.accumulator.drain()
     assert (await client.get("/api/v1/projects/E/profile")).json()["draft"]
     assert app.state.llm.replies == []
+
+
+async def test_存量项目回溯沉淀_历史任务与需求补入知识库(client, tmp_path):
+    from app.exporters import export_excel
+    from app.templates import TestCase
+
+    settings = get_settings()
+    # 模拟上线前：自动沉淀关闭时已经产生了历史任务 / 需求（评审通过 + 离线终稿）
+    settings.knowledge_auto_ingest = False
+    await client.post("/api/v1/projects", json={"name": "F"})
+    case = make_case()
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(case), review_reply(True)])
+    t1 = (await client.post("/api/v1/tasks", data={"text": "登录 密码 历史需求一", "project": "F"})).json()["task_id"]
+    await client.post(f"/api/v1/tasks/{t1}/review", json={"items": [{"case_id": case["case_id"], "action": "accept"}]})
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(case), review_reply(True)])
+    t2 = (await client.post("/api/v1/tasks", data={"text": "登录 密码 历史需求二", "project": "F"})).json()["task_id"]
+    path = export_excel([TestCase.model_validate(make_case(case_id="TC-登录-009", title="验证断线重连"))], tmp_path / "终稿.xlsx")
+    assert (await client.post(f"/api/v1/tasks/{t2}/final", files={"file": ("终稿.xlsx", path.read_bytes(), "application/octet-stream")})).status_code == 200
+    await client.post("/api/v1/requirements", data={"project": "F", "title": "历史需求", "text": "登录 密码 历史原文"})
+    await app.state.accumulator.drain()
+    assert _docs("F") == []  # 关闭期间什么都没沉淀
+    settings.knowledge_auto_ingest = True
+
+    view = (await client.get("/api/v1/projects/F/knowledge/backfill")).json()
+    assert view["targets"] == {"tasks": 2, "requirements": 1} and view["last"] is None
+    view = (await client.post("/api/v1/projects/F/knowledge/backfill")).json()
+    assert view["last"]["status"] == "running"
+    assert (await client.post("/api/v1/projects/F/knowledge/backfill")).status_code == 409  # 进行中不重复触发
+    await app.state.accumulator.drain()
+    last = (await client.get("/api/v1/projects/F/knowledge/backfill")).json()["last"]
+    assert last["status"] == "done" and last["done"] == last["total"] == 3 and last["errors"] == 0
+    sources = sorted(d.source for d in _docs("F"))  # 直接生成的任务没有审核环节，测试点不进规则库
+    assert sources == sorted([f"任务 {t1} · 需求原文", f"任务 {t1} · 评审通过用例",
+                              f"任务 {t2} · 需求原文", f"任务 {t2} · 离线终稿", "需求 历史需求 · 原文"])
+    assert last["docs"] == 5
+    final_chunks = app.state.knowledge.store.iter_chunks(category="test_cases", space="F")
+    assert any("验证断线重连" in c.text for c in final_chunks)
+    # 重复回溯按来源替换，不堆积；旧记录没存终稿路径时按文件名在终稿目录里找
+    rec = app.state.tasks.get(t2)
+    rec.offline_review.pop("paths")
+    app.state.tasks.save(rec)
+    await client.post("/api/v1/projects/F/knowledge/backfill")
+    await app.state.accumulator.drain()
+    assert len(_docs("F")) == 5
+    # 全部项目一键回溯（系统管理员）：关闭自动沉淀 / 无历史的项目跳过
+    await client.post("/api/v1/projects", json={"name": "G"})
+    await client.put("/api/v1/projects/F", json={"knowledge_auto": False})
+    assert (await client.post("/api/v1/projects/F/knowledge/backfill")).status_code == 409
+    out = (await client.post("/api/v1/knowledge/backfill")).json()
+    assert {x["project"]: x["reason"] for x in out["skipped"]}["F"] == "已关闭自动沉淀"
+    assert {x["project"]: x["reason"] for x in out["skipped"]}["G"] == "没有历史任务或需求"
+    await app.state.accumulator.drain()
+    assert "F" in {x["project"] for x in (await client.get("/api/v1/knowledge/backfill")).json()["items"]}
+    actions = [x["action"] for x in (await client.get("/api/v1/audit?limit=50")).json()["items"]]
+    assert "回溯沉淀历史知识" in actions and "回溯沉淀全部项目" in actions
