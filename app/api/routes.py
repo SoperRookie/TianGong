@@ -4671,12 +4671,9 @@ def _req_dir(req_id: str) -> Path:
 
 def _review_pending(analysis: dict | None) -> int:
     """独立复核标出、尚未人工处理（采纳 / 修改 / 忽略）的条目数。"""
-    from app.agents.analysis import ITEM_KEYS
+    from app.agents.analysis import review_pending_count
 
-    if not analysis:
-        return 0
-    return sum(1 for k in ITEM_KEYS for x in analysis.get(k) or []
-               if isinstance(x, dict) and (x.get("review") or {}).get("verdict") in ("wrong", "unsupported"))
+    return review_pending_count(analysis)
 
 
 def _eval_sample_of(app, req_id: str) -> dict | None:
@@ -5160,12 +5157,14 @@ def _batch_confirm_scope(request: Request, project: str | None) -> list[dict]:
 
 def _batch_confirm_classify(request: Request, items: list[dict]) -> dict:
     rstore = request.app.state.requirements
-    out = {"pending": [], "confirmed": [], "no_analysis": []}
+    out = {"pending": [], "confirmed": [], "no_analysis": [], "review_pending": []}
     for item in items:
         if not item.get("analysis"):
             out["no_analysis"].append(item)
         elif item.get("analysis_confirmed") and not rstore.analysis_confirmed_stale(item):
             out["confirmed"].append(item)
+        elif _review_pending(item.get("analysis")):
+            out["review_pending"].append(item)   # 与单条确认同一规则：复核质疑没处理完的不能确认、不能沉淀
         else:
             out["pending"].append(item)
     return out
@@ -5173,7 +5172,7 @@ def _batch_confirm_classify(request: Request, items: list[dict]) -> dict:
 
 @router.get("/api/v1/requirements/analysis/batch-confirm")
 async def preview_batch_confirm_analysis(request: Request, project: str | None = None) -> dict:
-    """批量确认前预览：待确认（含已确认旧版本）/ 已确认 / 未分析 的需求数。"""
+    """批量确认前预览：待确认（含已确认旧版本）/ 已确认 / 未分析 / 复核质疑未处理 的需求数。"""
     groups = _batch_confirm_classify(request, _batch_confirm_scope(request, project))
     return {"project": project, **{k: len(v) for k, v in groups.items()},
             "pending_titles": [x.get("title") or x["req_id"] for x in groups["pending"][:20]]}
@@ -5192,7 +5191,8 @@ async def batch_confirm_requirement_analysis(request: Request, body: AnalysisBat
         rstore.confirm_analysis(item["req_id"], by)
         confirmed.append({"req_id": item["req_id"], "title": item.get("title") or item["req_id"], "project": item["project"]})
     skipped = ([{"req_id": x["req_id"], "title": x.get("title") or x["req_id"], "reason": "未分析"} for x in groups["no_analysis"]]
-               + [{"req_id": x["req_id"], "title": x.get("title") or x["req_id"], "reason": "已确认"} for x in groups["confirmed"]])
+               + [{"req_id": x["req_id"], "title": x.get("title") or x["req_id"], "reason": "已确认"} for x in groups["confirmed"]]
+               + [{"req_id": x["req_id"], "title": x.get("title") or x["req_id"], "reason": "复核质疑未处理"} for x in groups["review_pending"]])
     if confirmed:
         acc = _accumulator(request.app)
         ids = [x["req_id"] for x in confirmed]

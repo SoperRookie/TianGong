@@ -5916,9 +5916,9 @@ async function reqBatchConfirmAnalysis() {
   let pv;
   try { pv = await api('/api/v1/requirements/analysis/batch-confirm' + (curProjectName ? '?project=' + encodeURIComponent(curProjectName) : '')); }
   catch (e) { return toast(e.message, 'err'); }
-  if (!pv.pending) return toast(`${scope}没有待确认的分析结果（已确认 ${pv.confirmed} 条，未分析 ${pv.no_analysis} 条）`, 'warn');
+  if (!pv.pending) return toast(`${scope}没有待确认的分析结果（已确认 ${pv.confirmed} 条，未分析 ${pv.no_analysis} 条${pv.review_pending?`，复核质疑未处理 ${pv.review_pending} 条需先处理`:''}）`, 'warn');
   const names = pv.pending_titles.slice(0, 8).map(esc).join('、') + (pv.pending > 8 ? ` 等 ${pv.pending} 条` : '');
-  if (!await uiConfirm('批量确认分析结果', `${scope}有 ${pv.pending} 条需求的分析结果待确认：${names}。确认后将沉淀到各自项目知识库（后台执行）。已确认 ${pv.confirmed} 条、未分析 ${pv.no_analysis} 条会跳过。确定？`)) return;
+  if (!await uiConfirm('批量确认分析结果', `${scope}有 ${pv.pending} 条需求的分析结果待确认：${names}。确认后将沉淀到各自项目知识库（后台执行）。已确认 ${pv.confirmed} 条、未分析 ${pv.no_analysis} 条${pv.review_pending?`、复核质疑未处理 ${pv.review_pending} 条`:""}会跳过。确定？`)) return;
   try {
     const r = await jpost('/api/v1/requirements/analysis/batch-confirm', {project: curProjectName || null});
     toast(`已确认 ${r.confirmed.length} 条，正在沉淀到知识库；跳过 ${r.skipped.length} 条`, 'ok');

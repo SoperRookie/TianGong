@@ -42,6 +42,17 @@ _STRIP_RE = re.compile(r"[\W_]+")
 _SEG_SPLIT_RE = re.compile(r"[，。；：、,.;:!?！？\n\r()（）「」『』【】\[\]<>《》\"'“”‘’]+")
 
 
+def review_pending(x) -> bool:
+    """条目带独立复核质疑（理解错 / 无依据）且尚未人工处理（采纳改正 / 修改 / 删除 / 标记没问题）。"""
+    return isinstance(x, dict) and (x.get("review") or {}).get("verdict") in ("wrong", "unsupported")
+
+
+def review_pending_count(analysis: dict | None) -> int:
+    if not analysis:
+        return 0
+    return sum(1 for k in ITEM_KEYS for x in analysis.get(k) or [] if review_pending(x))
+
+
 def item_text(x) -> str:
     """分析条目的文本：兼容旧数据（纯字符串）与新结构（{text, quote, …}）。"""
     if isinstance(x, dict):

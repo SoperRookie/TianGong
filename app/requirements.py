@@ -440,7 +440,7 @@ def _analysis_id(item: dict) -> str | None:
 
 def design_brief(item: dict) -> str:
     """发起测试设计时喂给拆解/生成 Agent 的需求文本：原文 + 人工补充 + 已确认结论（原文不改）。"""
-    from app.agents.analysis import item_text
+    from app.agents.analysis import item_text, review_pending
     from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
 
     parts = [item["raw_text"].strip()]
@@ -459,10 +459,14 @@ def design_brief(item: dict) -> str:
         parts.append("【未确认的建议级事项（按下列假设处理，并在用例 remark 中注明假设）】\n" + "\n".join(
             f"- 问：{q['question']}\n  假设：{q.get('assumption') or '按行业惯例处理'}" for q in assumed))
     analysis = item.get("analysis") or {}
-    keep = [k for k in ("rules", "boundaries", "state_changes", "permissions") if analysis.get(k)]
-    if keep:
-        parts.append("【AI 需求分析要点（已经人工过目）】\n" + "\n".join(
-            f"{REQUIREMENT_ANALYSIS_LABELS[k]}：" + "；".join(item_text(x) for x in analysis[k] if item_text(x)) for k in keep))
+    # 独立复核标了理解错 / 无依据、人还没处理的条目不进上下文：拆解 Agent 会把它当「人工过目」的事实
+    lines = []
+    for k in ("rules", "boundaries", "state_changes", "permissions"):
+        vals = [item_text(x) for x in analysis.get(k) or [] if item_text(x) and not review_pending(x)]
+        if vals:
+            lines.append(f"{REQUIREMENT_ANALYSIS_LABELS[k]}：" + "；".join(vals))
+    if lines:
+        parts.append("【AI 需求分析要点（已经人工过目）】\n" + "\n".join(lines))
     return "\n\n".join(p for p in parts if p)
 
 

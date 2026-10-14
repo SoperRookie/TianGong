@@ -230,3 +230,30 @@ async def test_评测集_加入_修订_回归评测_计分(client):
 async def test_需求编写规范接口(client):
     g = (await client.get("/api/v1/requirements/writing-guide")).json()
     assert g["markdown"].startswith("# 需求文档编写规范") and "R1" in g["markdown"] and g["filename"].endswith(".md")
+
+
+def test_设计上下文_复核质疑未处理的条目不进_已处理的进():
+    from app.requirements import design_brief
+
+    item = {"raw_text": "密码错误 5 次锁定 30 分钟。", "attachments": [], "questions": [],
+            "analysis": {"rules": [{"text": "密码错误 5 次锁定 30 分钟", "quote": "密码错误 5 次锁定 30 分钟"},
+                                   {"text": "锁定 15 分钟", "quote": "锁定 30 分钟", "review": {"verdict": "wrong", "fix": "锁定 30 分钟", "note": ""}},
+                                   {"text": "复核补充的条目", "quote": "", "review": {"verdict": "added", "fix": "", "note": ""}}],
+                         "boundaries": [{"text": "无依据的边界", "quote": "", "review": {"verdict": "unsupported", "fix": "", "note": ""}}]}}
+    brief = design_brief(item)
+    assert "密码错误 5 次锁定 30 分钟" in brief and "复核补充的条目" in brief
+    assert "锁定 15 分钟" not in brief and "无依据的边界" not in brief and "边界条件" not in brief
+
+
+async def test_批量确认_复核质疑未处理的跳过(client, monkeypatch):
+    monkeypatch.setenv("TIANGONG_ANALYSIS_REVIEW", "true")
+    get_settings.cache_clear()
+    rid = await _req(client, title="带质疑")
+    app.state.llm = StubLLM([ANALYSIS_REPLY, REVIEW_REPLY])
+    a = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
+    assert a["review_pending"] == 1
+    pv = (await client.get("/api/v1/requirements/analysis/batch-confirm", params={"project": "P"})).json()
+    assert pv["review_pending"] == 1 and pv["pending"] == 0
+    r = (await client.post("/api/v1/requirements/analysis/batch-confirm", json={"project": "P"})).json()
+    assert r["confirmed"] == [] and [x["reason"] for x in r["skipped"] if x["req_id"] == rid] == ["复核质疑未处理"]
+    assert (await client.get(f"/api/v1/requirements/{rid}")).json()["analysis_confirmed"] is None

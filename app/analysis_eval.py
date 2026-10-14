@@ -254,6 +254,19 @@ def aggregate(samples: list[dict]) -> tuple[dict, dict]:
     return finalize_metrics(total), {k: finalize_metrics(v) for k, v in per_key.items()}
 
 
+def _set_profile(app, project: str | None) -> None:
+    """项目画像进入 Agent 上下文（与 routes._set_profile_context 同样逻辑；故障降级为无画像）。"""
+    from app.agents.context import set_profile
+    from app.config import get_settings
+
+    try:
+        desc = (app.state.projects.get(project) or {}).get("description", "") if project else ""
+        set_profile(app.state.profiles.render(project, get_settings().profile_budget_chars, description=desc))
+    except Exception as e:
+        logger.warning("评测加载项目画像失败，降级为无画像：{}", e)
+        set_profile(None)
+
+
 async def run_eval(app, run_id: str, knowledge_fn=None) -> None:
     """后台执行一次评测：逐样本跑分析流水线 → 裁判对齐 → 计分；串行执行避免并发打爆模型配额。"""
     from app.agents.analysis import run_requirement_analysis
@@ -271,6 +284,7 @@ async def run_eval(app, run_id: str, knowledge_fn=None) -> None:
             continue
         try:
             set_ai_context(project=sample.get("project"), requirement_id=sample.get("req_id"), by=run.get("by"), purpose="需求分析评测")
+            _set_profile(app, sample.get("project"))   # 与线上分析同样带项目画像，评出来的数字才可比
             refs = None
             if knowledge_fn is not None:
                 try:
