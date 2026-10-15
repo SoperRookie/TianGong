@@ -640,7 +640,8 @@ async def auth_delete_user(request: Request, username: str) -> dict:
 async def list_models(request: Request) -> dict:
     """模型清单（不含密钥信息），供前端任务创建时选择（F-1-4）。"""
     registry = request.app.state.registry
-    return {"default_model": registry.default_model, "models": registry.list_public()}
+    return {"default_model": registry.default_model, "models": registry.list_public(),
+            "requirement_extract_model": get_settings().requirement_extract_model or registry.default_model}
 
 
 @router.get("/api/v1/models/config")
@@ -4711,6 +4712,7 @@ async def _run_extraction(app, req_id: str, model: str | None, by: str | None, a
         rstore.set_extracting(req_id, False, error="需求原文与附件都没有可用文本")
         raise ValueError("需求原文与附件都没有可用文本")
     inputs = attachment_fingerprint(item)
+    model = model or get_settings().requirement_extract_model or None
     try:
         data = await run_requirement_extraction(materials, app.state.llm, model=model)
     except Exception as e:
@@ -4743,8 +4745,11 @@ async def _auto_extract(app, req_id: str) -> None:
     if _content_warnings(item):
         logger.info("需求 {} 附件疑似非需求文本，跳过自动提取（可在需求页确认后手动提取）", req_id)
         return
+    from app.llm.calllog import ai_scope
+
     try:
-        await _run_extraction(app, req_id, None, None, auto=True)
+        with ai_scope(project=item.get("project"), requirement_id=req_id, task_id=None, by=None):
+            await _run_extraction(app, req_id, None, None, auto=True)
     except Exception as e:
         logger.warning("需求 {} 自动提取失败：{}", req_id, e)
 

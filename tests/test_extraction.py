@@ -164,3 +164,52 @@ async def test_开关关闭时不自动提取也不在分析前提取(client):
     assert r["extraction_wanted"] is True and r["extraction_status"] == "none"
     a = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
     assert a["analysis"] and len(app.state.llm.calls) == 1 and "版权所有" in app.state.llm.calls[0]["messages"][1]["content"]
+
+
+def test_分片标题路径_切在章节中间的片带上文件与页面():
+    from app.agents.extraction import chunk_contexts
+    from app.parsers.chunking import split_text
+
+    page1 = "## 页面：活动详情页\n" + "\n".join(f"规则 {i}：报名费 {i} 元" for i in range(60))
+    page2 = "## 页面：活动入口\n### 游戏内入口\n" + "\n".join(f"入口规则 {i}：固定位置不可拖动" for i in range(60))
+    materials = "需求原文一句话\n\n【文件：连赢挑战.zip】\n# Axure 原型：连赢挑战.zip\n" + page1 + "\n" + page2
+    chunks = split_text(materials, 700)
+    assert len(chunks) >= 3
+    ctx = chunk_contexts(materials, chunks)
+    assert ctx[0] == ""                                   # 第一片从原文开头起，没有上级标题
+    mid = [c for c in ctx if c.startswith("连赢挑战.zip › Axure 原型")]
+    assert mid and any(c.endswith("页面：活动详情页") for c in mid)   # 切在活动详情页中间的片
+    assert any(c.endswith("页面：活动入口 › 游戏内入口") for c in ctx)   # 三级路径
+    # 片自身开头就是标题时，路径只到它的上一级
+    for c, ch in zip(ctx, chunks):
+        if ch.startswith("## 页面：活动入口"):
+            assert c == "连赢挑战.zip › Axure 原型：连赢挑战.zip"
+
+
+async def test_自动提取调用日志带需求归属_提取模型可单独配置(client, extract_on, monkeypatch):
+    from app.llm import calllog
+
+    await client.post("/api/v1/projects", json={"name": "P"})
+    monkeypatch.setenv("TIANGONG_REQUIREMENT_EXTRACT_MODEL", "stub-extract")
+    get_settings.cache_clear()
+    app.state.llm = StubLLM([EXTRACT_REPLY])
+    r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "活动后台"},
+                           files=[("files", ("原型.txt", NOISY.encode(), "text/plain"))])).json()
+    rid = r["req_id"]
+    r = await _wait_parsed(client, rid)
+    for _ in range(200):
+        if r["extraction_status"] == "current":
+            break
+        await asyncio.sleep(0.02)
+        r = (await client.get(f"/api/v1/requirements/{rid}")).json()
+    assert r["extraction_status"] == "current" and r["extraction"]["meta"]["model"] == "stub-extract"
+    assert app.state.llm.calls[0]["model"] == "stub-extract"        # 没指定模型时用配置的提取模型，不跟默认模型降档
+    rows = calllog.list_calls(requirement_id=rid)["items"]
+    assert rows and rows[0]["project"] == "P" and rows[0]["purpose"] == "需求提取（分析前置）"   # 自动提取也能按需求筛到
+    # 手动提取页面选了模型时以页面为准
+    app.state.llm = StubLLM([EXTRACT_REPLY])
+    r = (await client.post(f"/api/v1/requirements/{rid}/extract", json={"model": "stub-manual"})).json()
+    assert r["extraction"]["meta"]["model"] == "stub-manual"
+    m = (await client.get("/api/v1/models")).json()
+    assert m["requirement_extract_model"] == "stub-extract"
+    monkeypatch.delenv("TIANGONG_REQUIREMENT_EXTRACT_MODEL"); get_settings.cache_clear()

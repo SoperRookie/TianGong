@@ -379,3 +379,44 @@ def test_解析内容体检_源码样式判为疑似非需求文本():
     assert content_warning("short {}") is None
     moji = ("# 文件：Φ┐₧Φ╡óµîæµêÿ/data.js\nabcdefghijklmnopqrstuvwxyz 0123456789 " * 60)
     assert "乱码" in (content_warning(moji) or "")
+
+
+def test_zip内中文文件名没有UTF8标志位_还原后Axure页面名与说明备注不丢(tmp_path):
+    """Windows / Axure 打的 zip 条目名常不带 UTF-8 标志位，Python 按 cp437 解码成「µ┤╗σè¿」乱码：
+    站点地图里的页面 url 对不上包内文件，页面名退回乱码、每页 data.js 的说明备注全部找不到。"""
+    import json
+    import zipfile
+
+    class LegacyInfo(zipfile.ZipInfo):
+        def _encodeFilenameFlags(self):   # 原始 UTF-8 字节直接落盘，不打 0x800 标志（旧版压缩工具的行为）
+            return self.filename.encode("utf-8"), self.flag_bits & ~0x800
+
+    sitemap = {"sitemap": {"rootNodes": [{"pageName": "pc-活动详情页界面说明", "type": "Wireframe", "url": "pc-活动详情页界面说明.html"}]}}
+    page = ("<html><head><title>pc-活动详情页界面说明</title></head><body><div id='base'>"
+            "<div id='u0' class='ax_default label'><div id='u0_text' class='text'><p><span>报名费 68 元</span></p></div></div></div></body></html>")
+    z = tmp_path / "原型.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for name, data in [("data/document.js", "$axure.loadDocument(" + json.dumps(sitemap, ensure_ascii=False) + ");"),
+                           ("pc-活动详情页界面说明.html", page),
+                           ("files/pc-活动详情页界面说明/data.js",
+                            '$axure.loadCurrentPage((function() { var a="<p><span>盈利报名未结清时不能再次报名</span></p>"; return a; })());')]:
+            zf.writestr(LegacyInfo(name), data.encode("utf-8"))
+    with zipfile.ZipFile(z) as zf:   # 前提成立：Python 原生读出来确实是乱码
+        assert any("µ" in i.filename for i in zf.infolist())
+    text = parse_file(z).full_text
+    assert "页面：pc-活动详情页界面说明" in text and "µ" not in text
+    assert "报名费 68 元" in text and "【说明 / 备注】" in text and "盈利报名未结清时不能再次报名" in text
+
+
+def test_zip条目名GBK编码也能还原(tmp_path):
+    import zipfile
+
+    class GbkInfo(zipfile.ZipInfo):
+        def _encodeFilenameFlags(self):
+            return self.filename.encode("gb18030"), self.flag_bits & ~0x800
+
+    z = tmp_path / "包.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr(GbkInfo("需求/登录需求.md"), "# 登录\n密码错误 5 次锁定 30 分钟".encode("utf-8"))
+    text = parse_file(z).full_text
+    assert "登录需求.md" in text and "密码错误 5 次锁定 30 分钟" in text

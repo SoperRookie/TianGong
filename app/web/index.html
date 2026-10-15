@@ -2123,6 +2123,7 @@ async function init() {
     m.models.forEach(x => sel.add(new Option(x.name, x.name)));
   }
   $('barInfo').textContent = m.default_model ? '默认模型 ' + m.default_model : '尚未配置模型（系统设置 → 模型配置）';
+  _extractDefaultModel = m.requirement_extract_model || m.default_model || '';
   fetch('/health').then(r => r.json()).then(h => { if (h.version) $('appVer').textContent = `v${h.version} · `; }).catch(() => {});
   const t = await api('/api/v1/templates');
   $('templateSel').innerHTML = '';
@@ -5701,12 +5702,12 @@ function anSet(name, value) {
 const AN_EVIDENCE_KEYS = ['rules','boundaries','state_changes','permissions'];
 const anItem = x => (x && typeof x === 'object') ? {text: x.text || '', quote: x.quote || '', verified: x.verified, review: x.review || null, manual: !!x.manual} : {text: String(x ?? ''), quote: '', verified: null, review: null, manual: false};
 const anModelOpts = () => [...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('');
-let _exEditing = false;
+let _exEditing = false, _extractDefaultModel = '';
 function reqExtractionHtml(r, canAI, canEdit) {
   const ex = r.extraction, m = (ex && ex.meta) || {}, st = r.extraction_status;
   const intro = `<div class="hint" style="margin-bottom:10px">需求提取是 AI 分析的前置步骤：从原文与<b>全部附件</b>（文档、原型导出页、截图的图片理解结果、链接）里<b>逐字摘录</b>需求内容，剔除导航 / 框架 / 样式等噪音，同一事实多处出现只留一条并标来源，按模块归整成整理稿。附件解析完成后自动提取一次；<b>AI 需求分析与测试设计以整理稿为准</b>，原始材料仍在「原文与附件」页可查。每条摘录都程序对照过材料，没逐字找到的加 ⚠ 请人工核对；整理稿可直接修改，改后需重新分析。</div>`;
   const toolbar = `<div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap">
-      ${canAI?`<select id="rqExtractModel" style="width:150px" title="提取模型">${anModelOpts()}</select>
+      ${canAI?`<select id="rqExtractModel" style="width:150px" title="提取模型（默认：${esc(_extractDefaultModel||'未配置')}。提取是逐字摘录、输出量大，低档模型会压成摘要，建议用 GPT-6 旗舰或中档）">${anModelOpts().replace('>默认模型<', `>默认（${esc(_extractDefaultModel||'未配置')}）<`)}</select>
       <button class="btn sm" id="rqExtractBtn" onclick="extractReq()" ${st==='running'?'disabled':''}>${st==='running'?'<span class="spin"></span> 提取中':ex?'重新提取':'提取需求'}</button>`:''}
       ${ex?`<span class="hint">${esc(m.model||'')} · ${m.auto?'自动':esc(m.by||'')} · ${esc(fmtTime(m.at))}${m.chunks>1?` · 分 ${m.chunks} 片提取后合并`:''} · 材料 ${m.source_chars||0} 字 → 整理稿 ${m.chars||0} 字 · ${m.modules||0} 个模块 ${m.checked||0} 条${m.unverified?`，<b style="color:var(--warn)">${m.unverified} 条未在材料中逐字找到</b>`:'，全部逐字核验通过'}${ex.edited?` · <b>人工修改</b> ${esc(ex.edited.by||'')} ${relTime(ex.edited.at)}`:''}</span>`:''}
       ${canEdit&&ex&&st!=='running'?`<span style="margin-left:auto;display:flex;gap:6px">${_exEditing?'':`<button class="btn ghost sm" onclick="_exEditing=true;renderRequirementDetail()">修改整理稿</button>`}<button class="btn ghost sm danger" onclick="deleteReqExtraction()" title="删除后分析与设计退回使用原始材料">删除整理稿</button></span>`:''}</div>`;

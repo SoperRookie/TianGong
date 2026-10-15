@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import re
+
 from loguru import logger
 
 from app.agents.analysis import normalize, quote_found
@@ -111,6 +113,47 @@ def extraction_markdown(modules: list[dict], dropped: list[str] | None = None) -
     return "\n".join(lines).strip()
 
 
+_FILE_HEAD = re.compile(r"^【(文件|链接)：(.+?)】\s*$")
+_MD_HEAD = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+
+def _heading_of(line: str) -> tuple[int, str] | None:
+    """材料里的标题行：【文件：…】/【链接：…】为第 0 级，Markdown # 标题按井号数分级。"""
+    m = _FILE_HEAD.match(line.strip())
+    if m:
+        return 0, m.group(2).strip()
+    m = _MD_HEAD.match(line.strip())
+    if m:
+        return len(m.group(1)), m.group(2).strip()
+    return None
+
+
+def chunk_contexts(materials: str, chunks: list[str]) -> list[str]:
+    """每片开头所处的标题路径（文件 › 页面 › 章节）。分片切在章节中间时，后面的片不知道自己属于哪个文件哪个页面，
+    来源只能写「需求材料」、模块也只能猜；把路径随片送给模型。片自身开头就是标题的，路径只到它的上一级。"""
+    lines = materials.split("\n")
+    stack: dict[int, str] = {}
+    cursor = 0
+    out: list[str] = []
+    for chunk in chunks:
+        first = next((l.strip() for l in chunk.split("\n") if l.strip()), "")
+        idx = next((i for i in range(cursor, len(lines)) if lines[i].strip() == first), None) if first else None
+        if idx is None:
+            out.append("")
+            continue
+        for line in lines[cursor:idx]:
+            h = _heading_of(line)
+            if h:
+                stack[h[0]] = h[1]
+                for lv in [k for k in stack if k > h[0]]:
+                    del stack[lv]
+        cursor = idx
+        own = _heading_of(first)
+        limit = own[0] if own else 99
+        out.append(" › ".join(stack[k] for k in sorted(stack) if k < limit))
+    return out
+
+
 async def run_requirement_extraction(materials: str, llm: LLMClient, model: str | None = None) -> dict:
     """提取流水线：材料分片 → 各片并行摘录 → 按模块合并去重 → 逐条对照材料核验 → 整理稿。
 
@@ -121,11 +164,14 @@ async def run_requirement_extraction(materials: str, llm: LLMClient, model: str 
     system = prompt_text("requirement_extract")
     extra = profile_block()
 
+    contexts = chunk_contexts(materials, chunks) if len(chunks) > 1 else [""]
+
     def _user(i: int, chunk: str) -> str:
         head = ""
         if len(chunks) > 1:
-            head = (f"这是全部材料的第 {i + 1}/{len(chunks)} 片，只摘录本片实际包含的内容，本片未涉及的模块不要生成；"
-                    f"模块命名尽量沿用材料里的页面 / 章节名，便于各片合并。\n\n")
+            where = f"本片开头的内容位于「{contexts[i]}」之下（上一片在这个标题下切开）；" if contexts[i] else ""
+            head = (f"这是全部材料的第 {i + 1}/{len(chunks)} 片，{where}只摘录本片实际包含的内容，本片未涉及的模块不要生成；"
+                    f"模块命名与来源沿用材料里的文件名 / 页面名 / 章节名，便于各片合并。\n\n")
         return f"{head}需求材料：\n{wrap_data('需求材料', chunk)}{extra}"
 
     from app.agents.service import gather_or_cancel
