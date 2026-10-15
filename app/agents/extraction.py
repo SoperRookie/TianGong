@@ -265,9 +265,11 @@ def structure_units(materials: str, max_chars: int) -> list[dict]:
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _NOISE_RE = re.compile(r"(状态[:：]\s*可见|颜色|色值|样式|描边|填充|高亮|加粗|图中未|图片未|截图|遮挡|无法辨认|无法确定|看不清|图标|背景|字体|字号|"
-                       r"布局|位置[:：]|像素|\bpx\b|以设计输出为准|实际效果|仅为.*示例|示例参考|版权|©|按从.*整理|可辨认|这是一[张个].*(界面|截图|原型)|"
+                       r"布局|位置[:：]|像素|\bpx\b|以设计输出为准|实际效果|仅为.*示例|示例参考|版权|©|按从.*(整理|转录)|可辨认|这是一[张个].*(界面|截图|原型)|"
+                       r"截断|装饰|未在图中|图中(没有|未)|图片边[缘界]|箭头|分隔条|结构相似|当前可见|本块内|界面中换行|"
                        r"^[\s\-•·]*(时间|日期|单号|账号|昵称)[:：]?\s*[\dA-Za-z:\-\. ]+$)")
 _SEG_RE = re.compile(r"[，。；：！？,.;:!?、()（）「」【】\[\]]+")
+_HEADER_LINE_RE = re.compile(r"([:：]\s*$|^[^，。；,.;]{0,24}(示例|说明|参考图例|清单|区域|入口位)[：:]?\s*$)")   # 「未报名用户B面展开示例：」「入口设计要求说明」这类小标题
 
 
 def uncovered_lines(materials: str, text: str) -> tuple[list[dict], dict]:
@@ -291,7 +293,7 @@ def uncovered_lines(materials: str, text: str) -> tuple[list[dict], dict]:
             continue
         if not s or _IMG_HEAD.match(s) or s.startswith(("[[图片", ">", "```", "|---")):
             continue
-        if len(_CJK_RE.findall(s)) < MIN_CJK or _NOISE_RE.search(s):
+        if len(_CJK_RE.findall(s)) < MIN_CJK or _NOISE_RE.search(s) or _HEADER_LINE_RE.search(s):
             continue
         total += 1
         n = normalize(s)
@@ -332,13 +334,15 @@ def _gap_batches(missing: list[dict]) -> list[str]:
 
 
 def _strip_bullet(s: str) -> str:
-    return re.sub(r"^[\s\-•·*]+|^\s*\d+[.、)]\s*", "", s).strip()
+    return re.sub(r"^[\s\-•·*、，,。.；;]+|^\s*\d+[.、)]\s*", "", s).strip()
 
 
 async def _gap_fill(materials: str, modules: list[dict], llm: LLMClient, model: str | None, extra: str) -> dict:
     """补漏：找出未覆盖的需求句送回模型判「补进 / 跳过」，最多 GAP_ROUNDS 轮。原地改 modules，返回统计。"""
     from app.agents.service import gather_or_cancel
+    from app.llm.calllog import used_prompts
 
+    used_prompts.set({})   # 上一步提取的 Prompt 登记还留在当前上下文，不清掉补漏调用会被记成「需求提取（分析前置）」
     system = prompt_text("requirement_extract_gap")
     missing, before = uncovered_lines(materials, extraction_markdown(modules))
     stats = {"rounds": 0, "before": before, "after": before, "added": 0, "skipped": 0}

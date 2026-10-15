@@ -339,3 +339,21 @@ async def test_逐条审核_核对修改删除_审核完成_版本历史对比�
     r = (await client.put(f"/api/v1/requirements/{rid}/extraction", json={"text": "## 活动后台\n- 活动名称最长 30 个字符"})).json()
     assert r["extraction"]["modules"] is None
     assert (await client.post(f"/api/v1/requirements/{rid}/extraction/items", json={"item_id": "x", "action": "ok"})).status_code == 400
+
+
+async def test_补漏调用日志记为需求提取补漏(client, extract_on):
+    from app.llm import calllog
+
+    await client.post("/api/v1/projects", json={"name": "P"})
+    app.state.llm = StubLLM([GAP_FIRST, GAP_REPLY, json.dumps({"add": [], "skip": []})])
+    r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "报名"},
+                           files=[("files", ("原型.txt", GAP_MATERIAL.encode(), "text/plain"))])).json()
+    rid = r["req_id"]
+    r = await _wait_parsed(client, rid)
+    for _ in range(200):
+        if r["extraction_status"] == "current":
+            break
+        await asyncio.sleep(0.02)
+        r = (await client.get(f"/api/v1/requirements/{rid}")).json()
+    purposes = sorted(x["purpose"] for x in calllog.list_calls(requirement_id=rid)["items"])
+    assert purposes == ["需求提取补漏", "需求提取补漏", "需求提取（分析前置）"]
