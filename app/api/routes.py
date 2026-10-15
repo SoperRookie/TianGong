@@ -4696,7 +4696,8 @@ def _analysis_inputs(item: dict) -> list[str]:
     inputs = attachment_fingerprint(item)
     if extraction_current(item):
         ex = item["extraction"]
-        inputs.append(f"extraction@{(ex.get('meta') or {}).get('id')}@{(ex.get('edited') or {}).get('at') or ''}")
+        meta = ex.get("meta") or {}
+        inputs.append(f"extraction@{meta.get('id')}@{meta.get('rev', 0)}@{(ex.get('edited') or {}).get('at') or ''}")
     return inputs
 
 
@@ -4725,7 +4726,7 @@ async def _run_extraction(app, req_id: str, model: str | None, by: str | None, a
             "by": by, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "auto": auto,
             "source_chars": data.get("source_chars"), "chars": len(data["text"]), "modules": len(data.get("modules") or []),
             "checked": data.get("checked"), "verified": data.get("verified"), "unverified": data.get("unverified"),
-            "dropped": data.get("dropped") or []}
+            "dropped": data.get("dropped") or [], "gap": data.get("gap")}
     return rstore.set_extraction(req_id, data, meta)
 
 
@@ -4856,6 +4857,7 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
         "analysis_outdated": _analysis_outdated(item),
         "extraction_status": extraction_status(item),
         "extraction_wanted": extraction_wanted(item),
+        "extraction_history_count": len(item.get("extraction_history") or []),
     }
     mstore = request.app.state.modules
     if item.get("module_id"):
@@ -5269,6 +5271,99 @@ async def edit_requirement_extraction(request: Request, req_id: str, body: Extra
     _req(request, req_id, "requirement.edit")
     try:
         item = request.app.state.requirements.edit_extraction(req_id, body.text, _operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _req_view(request, item)
+
+
+class ExtractionItemBody(BaseModel):
+    item_id: str
+    action: str            # ok 核对通过 / edit 修改 / delete 删除
+    text: str | None = None
+
+
+@router.post("/api/v1/requirements/{req_id}/extraction/items")
+async def review_requirement_extraction_item(request: Request, req_id: str, body: ExtractionItemBody) -> dict:
+    """整理稿逐条审核：核对通过 / 修改（改后重新对照材料核验）/ 删除。改动后正文按结构重生成，已有分析标过期。"""
+    from app.agents.analysis import normalize
+    from app.agents.extraction import verify_text
+    from app.requirements import RequirementError, source_materials
+
+    item = _req(request, req_id, "requirement.edit")
+    verified = None
+    if body.action == "edit" and (body.text or "").strip():
+        verified = verify_text(body.text.strip(), normalize(source_materials(item)))
+    try:
+        item = request.app.state.requirements.review_extraction_item(req_id, body.item_id, body.action, body.text, verified, _operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    request.state.audit_detail = f"{body.action} {body.item_id}"
+    return _req_view(request, item)
+
+
+@router.post("/api/v1/requirements/{req_id}/extraction/review-done")
+async def finish_requirement_extraction_review(request: Request, req_id: str) -> dict:
+    """标记整理稿已审核（⚠ 条目都处理过才允许）。之后逐条改动会取消该标记。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    try:
+        item = request.app.state.requirements.finish_extraction_review(req_id, _operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _req_view(request, item)
+
+
+def _extraction_version_brief(ex: dict, index: int | None) -> dict:
+    m = ex.get("meta") or {}
+    return {"index": index, "id": m.get("id"), "at": m.get("at"), "by": m.get("by"), "auto": m.get("auto"), "model": m.get("model"),
+            "rev": m.get("rev", 0), "chars": len(ex.get("text") or ""), "modules": m.get("modules"), "checked": m.get("checked"),
+            "unverified": m.get("unverified"), "edited": ex.get("edited"), "reviewed": ex.get("reviewed"),
+            "restored_from": m.get("restored_from"), "has_items": bool(ex.get("modules"))}
+
+
+@router.get("/api/v1/requirements/{req_id}/extraction/history")
+async def list_requirement_extraction_history(request: Request, req_id: str) -> dict:
+    """整理稿版本：当前版 + 历史版（最新在前），各版元数据；正文与差异用 /history/{index} 取。"""
+    item = _req(request, req_id, "requirement.view")
+    hist = item.get("extraction_history") or []
+    return {"current": _extraction_version_brief(item["extraction"], None) if item.get("extraction") else None,
+            "history": [_extraction_version_brief(ex, i) for i, ex in reversed(list(enumerate(hist)))]}
+
+
+@router.get("/api/v1/requirements/{req_id}/extraction/history/{index}")
+async def get_requirement_extraction_version(request: Request, req_id: str, index: int) -> dict:
+    """某个历史版本的正文，以及与当前版的逐行差异（added：当前有、历史没有；removed：历史有、当前没有）。"""
+    import difflib
+
+    item = _req(request, req_id, "requirement.view")
+    hist = item.get("extraction_history") or []
+    if index < 0 or index >= len(hist):
+        raise HTTPException(status_code=404, detail="历史版本不存在")
+    old = hist[index]
+    cur_lines = ((item.get("extraction") or {}).get("text") or "").split("\n")
+    old_lines = (old.get("text") or "").split("\n")
+    added, removed = [], []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old_lines, cur_lines, autojunk=False).get_opcodes():
+        if tag in ("replace", "delete"):
+            removed.extend(l for l in old_lines[i1:i2] if l.strip())
+        if tag in ("replace", "insert"):
+            added.extend(l for l in cur_lines[j1:j2] if l.strip())
+    return {**_extraction_version_brief(old, index), "text": old.get("text") or "", "diff": {"added": added, "removed": removed}}
+
+
+class ExtractionRestoreBody(BaseModel):
+    index: int
+
+
+@router.post("/api/v1/requirements/{req_id}/extraction/restore")
+async def restore_requirement_extraction(request: Request, req_id: str, body: ExtractionRestoreBody) -> dict:
+    """恢复某个历史版本为当前整理稿（当前版进历史）；已有分析标过期。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    try:
+        item = request.app.state.requirements.restore_extraction(req_id, body.index, _operator(request))
     except RequirementError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return _req_view(request, item)

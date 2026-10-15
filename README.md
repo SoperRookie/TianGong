@@ -81,7 +81,7 @@ open http://localhost:8000/
 - **模型密钥**只能通过形如 `XXX_API_KEY` 的环境变量引用，配置样例见 `.env.example`。
 - 上传限制：单文件 `TIANGONG_MAX_UPLOAD_SIZE_MB`（默认 100）、执行附件 200MB、PDF 300 页、zip 类文档解压后 300MB（压缩包内文件数不限）。所有上传入口（需求文件 / 附件、知识库、用例导入、执行附件、终稿回传）均支持一次选择多个文件。
 - 上传格式不限。可自动读取：Word / Excel / PowerPoint 全系（含 doc / xls / ppt 老版、docm / xlsm / pptm 等宏与模板格式）、WPS（wps / et / dps）、OpenDocument、RTF、PDF（含扫描版，无文本层的页整页送图片理解）、Markdown / TXT / JSON / XML / YAML / 日志等文本、网页、图片（png / jpg / webp / gif / bmp / tiff / ico / heic / avif / psd / svg / emf / wmf，走 Vision）、压缩包（zip / tar / gz / bz2 / xz / 7z / rar，递归解析内含文件，zip 内无 UTF-8 标志的中文文件名按 UTF-8 / GBK 还原；包内 js / css 等脚本样式资源不参与解析）、Axure 原型导出包（zip，按站点地图顺序逐页提取页面文字与说明备注，页面里的整幅设计稿 / 截图送 Vision）、邮件（eml / msg，正文与附件）。视频、字体等保留可下载但不参与解析。Word 表格内图片、PPT 页内图片按位置提取并送 Vision；解析文本几乎全是代码 / 样式 / 乱码时附件标「疑似非需求文本」，分析前需确认。老版 Office / WPS / 矢量图（含 PPT 内矢量图）需服务器安装 LibreOffice（Docker 镜像已内置）。
-- 需求提取（分析前置）：附件解析完成后自动从原文与全部附件逐字摘录需求内容、剔除导航 / 框架 / 样式噪音、按模块归整成整理稿，每条程序对照材料核验（没逐字找到的标 ⚠）；AI 分析与测试设计以整理稿为准，整理稿可人工修改 / 删除，需求详情「需求提取」页查看。`TIANGONG_REQUIREMENT_EXTRACT`（默认 true）关掉则只能手动提取；`TIANGONG_REQUIREMENT_EXTRACT_MODEL` 单独钉住提取用的模型（提取是逐字摘录、输出量大，低档模型会压成摘要）。
+- 需求提取（分析前置）：附件解析完成后自动按「文件 › 页面」分层从原文与全部附件逐字摘录需求内容、剔除导航 / 框架 / 样式噪音、按「页面-区块」归整成整理稿，每条程序对照材料核验（没逐字找到的标 ⚠），再由程序找出没进整理稿的需求句送回模型自动补漏（标〔补漏〕，页面显示覆盖率）；AI 分析与测试设计以整理稿为准；需求详情「需求提取」页逐条审核（核对通过 / 修改 / 删除、完成审核）、查看历史版本差异并恢复。`TIANGONG_REQUIREMENT_EXTRACT`（默认 true）关掉则只能手动提取；`TIANGONG_REQUIREMENT_EXTRACT_MODEL` 单独钉住提取用的模型（提取是逐字摘录、输出量大，低档模型会压成摘要）。
 - 需求分析准确率防线：`TIANGONG_ANALYSIS_REVIEW`（默认 true，第二个独立 Agent 对照原文复核）、`TIANGONG_ANALYSIS_EVAL_AUTO_SAMPLE`（默认 true，人工改过的分析结果确认时自动进评测集）；管理员侧栏「需求分析评测」页维护评测集与回归评测。
 - 日志留存：AI 调用日志与操作日志默认保留 90 天（`TIANGONG_LOG_RETENTION_DAYS`，启动时与之后每天清理）；文件日志默认 INFO、每日零点或超过 50MB 轮转、gzip、保留 7 天（`TIANGONG_LOG_FILE_LEVEL / _MAX_MB / _RETENTION_DAYS`）；`scripts/server.sh` 启动时关闭控制台副本，`logs/server.out` 只收进程输出。
 
@@ -122,7 +122,7 @@ open http://localhost:8000/
 | GET/POST/PUT/DELETE | `/api/v1/projects/{name}/modules[/{id}]` | 模块树（≤5 级，逻辑删除/恢复/排序/移动） |
 | GET/PUT | `/api/v1/auth/me` | 当前用户（含所属项目角色、收藏/最近访问）/ 自助资料 |
 | GET/POST/PUT/DELETE | `/api/v1/requirements[/{id}]` | 需求中心：需求实体（原文/附件/人工补充/状态），详情含追溯与覆盖识别 |
-| POST | `/api/v1/requirements/{id}/extract` | 需求提取（分析前置）：从原文与全部附件逐字摘录需求内容按模块归整成整理稿，逐条对照材料核验；`PUT/DELETE .../extraction` 人工修改 / 删除整理稿；附件解析完成后自动提取一次，分析与发起设计前没有或过期时先提 |
+| POST | `/api/v1/requirements/{id}/extract` | 需求提取（分析前置）：按「文件 › 页面」分层从原文与全部附件逐字摘录需求内容，逐条对照材料核验（⚠），程序找出没进整理稿的需求句送回模型自动补漏（〔补漏〕，显示覆盖率）；`POST .../extraction/items` 逐条审核（核对通过 / 修改 / 删除）、`POST .../extraction/review-done` 完成审核、`GET .../extraction/history[/{index}]` 版本历史与逐行差异、`POST .../extraction/restore` 恢复版本、`PUT/DELETE .../extraction` 整篇改写 / 删除；附件解析完成后自动提取一次，分析与发起设计前没有或过期时先提 |
 | POST | `/api/v1/requirements/{id}/analyze` | AI 需求分析（以需求整理稿为输入，没有整理稿时用原文与附件；11 项结构化输出，每条带原文依据 `quote` 并逐条程序核验，规则 / 边界 / 状态 / 权限四项无依据的降级为待确认事项；独立复核 Agent 对照原文标出理解错 / 无依据并补入遗漏（`reviewer_model` 可指定不同模型，`review` 开关，默认 `TIANGONG_ANALYSIS_REVIEW`）；注入项目画像与知识库中的历史需求 / 业务规则；待确认事项进入确认流；重新分析自动留档最近 10 次 `analysis_history`，详情页按分析项导航、关键词筛选、分页展示并可回看历史） |
 | POST/DELETE | `/api/v1/requirements/{id}/analysis/confirm` | 人工确认 AI 分析结果 / 取消确认：确认后快照沉淀到项目知识库（规则 / 边界 / 状态 / 权限 → 业务规则库，功能 / 流程 / 前置 / 依赖 / 风险 → 需求文档库），重新分析后需再次确认才更新；取消确认或删除需求时移除 |
 | GET/POST | `/api/v1/requirements/analysis/batch-confirm` | 存量需求分析结果批量确认（`project` 指定项目须有需求编辑权限，不指定则系统管理员对全部项目）：GET 预览待确认 / 已确认 / 未分析条数，POST 把已分析未确认（含确认的是旧版本）的全部确认并后台串行沉淀，未分析 / 已确认的跳过并带原因；需求列表页「批量确认分析结果」按钮 |
