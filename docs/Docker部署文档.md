@@ -68,6 +68,7 @@ MYSQL_ROOT_PASSWORD=<强密码>
 MYSQL_PASSWORD=<强密码>
 # HTTP_PORT=80
 # TZ=Asia/Shanghai
+# TIANGONG_TASK_MAX_CONCURRENCY=2    # 同时执行的测试设计任务数，超出的排队，默认 2
 ```
 
 不用填 `TIANGONG_DB_URL` 和 `TIANGONG_TRUSTED_PROXIES`，compose 文件已按容器网络写死。`MYSQL_PASSWORD` 会被拼进连接串，密码含 `@ # / % ?` 等符号也可以，应用会自动编码；但 compose 自身对 `$` 有特殊解释，密码里避免用 `$`。
@@ -158,6 +159,8 @@ docker compose logs -f app
 ```
 
 表结构变更与数据迁移在应用启动时自动执行。回滚：切回旧标签重新 `up -d --build app`，必要时用备份恢复数据库。
+
+升级到 v2.1.2 后：无新增依赖与表结构变更；早先解析失真的附件（Axure 导出包、表格里放截图的 Word、扫描版 PDF、带矢量图的 PPT）在需求详情里点「重新解析」即可按新逻辑重识别，之后分析页会提示结果基于旧输入，再点一次 AI 分析。镜像已内置 LibreOffice，PPT 矢量图会栅格化后送图片理解。
 
 ## 7. 日常运维
 
