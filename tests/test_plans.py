@@ -475,3 +475,21 @@ async def test_计划列表_状态计数_执行进度与关键词筛选(client):
     assert names((await client.get("/api/v1/plans", params={"project": "P端", "keyword": "第一轮冒烟"})).json()) == ["冒烟 A"]
     assert names((await client.get("/api/v1/plans", params={"project": "P端", "keyword": "bob"})).json()) == ["回归 B"]
     assert (await client.get("/api/v1/plans", params={"project": "P端", "page": 5, "page_size": 20})).json()["page"] == 1
+
+
+async def test_结束轮次_全部执行完计划完成_再开一轮退回进行中(client):
+    task_id = await _task_with_approved(client, make_case(), make_case(case_id="TC-登录-002", title="验证错误密码登录失败"))
+    plan = await _plan(client)
+    pid = plan["plan_id"]
+    assert (await client.post(f"/api/v1/plans/{pid}/cases", json={"task_id": task_id})).json()["added"] == 2
+    item_ids = [x["item_id"] for x in (await client.get(f"/api/v1/plans/{pid}")).json()["items"]]
+    rid = (await client.post(f"/api/v1/plans/{pid}/runs", json={})).json()["run_id"]
+    for iid in item_ids:
+        await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results", json={"items": [{"item_id": iid, "status": "pass"}]})
+    r = (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/finish")).json()
+    assert r["plan_status"] == "done"
+    assert (await client.get(f"/api/v1/plans/{pid}")).json()["status"] == "done"
+    run2 = (await client.post(f"/api/v1/plans/{pid}/runs", json={})).json()
+    assert (await client.get(f"/api/v1/plans/{pid}")).json()["status"] == "in_progress"
+    r = (await client.post(f"/api/v1/plans/{pid}/runs/{run2['run_id']}/finish")).json()   # 这轮一条没执行 → 仍进行中
+    assert r["plan_status"] == "in_progress"

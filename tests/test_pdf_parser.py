@@ -38,12 +38,18 @@ def test_pdf解析标题与正文(tmp_path):
     assert "password is wrong" in doc.full_text
 
 
-def test_扫描版pdf报错(tmp_path):
+def test_扫描版pdf整页栅格化送图片理解_超页数上限才报错(tmp_path, monkeypatch):
     path = tmp_path / "scan.pdf"
     doc = fitz.open()
-    doc.new_page()  # 空白页无文本层，模拟扫描件
+    doc.new_page(); doc.new_page()  # 空白页无文本层，模拟扫描件
     doc.save(str(path))
     doc.close()
 
-    with pytest.raises(ScannedPDFError, match="扫描"):
+    parsed = parse_file(path)
+    assert len(parsed.embedded_images) == 2 and "[[图片:1]]" in parsed.full_text and "2 页没有文本层" in parsed.full_text
+    assert parsed.embedded_images[0].mime == "image/png" and parsed.embedded_images[0].data.startswith(b"\x89PNG")
+
+    import app.parsers.pdf as pdfmod
+    monkeypatch.setattr(pdfmod, "SCANNED_PAGE_LIMIT", 1)
+    with pytest.raises(ScannedPDFError, match="扫描版"):
         parse_file(path)

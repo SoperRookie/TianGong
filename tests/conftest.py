@@ -28,6 +28,8 @@ os.environ["TIANGONG_KNOWLEDGE_AUTO_INGEST"] = "false"
 os.environ["TIANGONG_PROFILE_AUTO_EXTRACT"] = "false"
 # 需求分析独立复核默认关闭：桩 LLM 按调用顺序回包，开启会多消耗一次预置回复；专项测试显式开启
 os.environ["TIANGONG_ANALYSIS_REVIEW"] = "false"
+# 需求提取（分析前置）默认关闭：开着会在附件解析完成后 / 分析前多消耗一次预置回复；专项测试（test_extraction.py）显式开启
+os.environ["TIANGONG_REQUIREMENT_EXTRACT"] = "false"
 
 # 数据库隔离：测试用临时 SQLite（持久化层同一套 SQLAlchemy 代码，生产为 MySQL）
 os.environ["TIANGONG_DB_URL"] = f"sqlite:///{_TEST_STORAGE / 'test.db'}"

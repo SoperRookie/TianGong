@@ -211,7 +211,7 @@ def new_run(plan: dict, name: str, by: str, executor: str | None = None) -> dict
         "attachments": [],  # {att_id, item_id?, filename, stored, content_type, size, by, at}
     }
     plan["runs"].append(run)
-    if plan["status"] == "not_started":
+    if plan["status"] in ("not_started", "done"):   # 已完成的计划再开一轮（回归 / 复测）退回进行中
         plan["status"] = "in_progress"
     return run
 

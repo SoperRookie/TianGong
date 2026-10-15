@@ -5701,6 +5701,47 @@ function anSet(name, value) {
 const AN_EVIDENCE_KEYS = ['rules','boundaries','state_changes','permissions'];
 const anItem = x => (x && typeof x === 'object') ? {text: x.text || '', quote: x.quote || '', verified: x.verified, review: x.review || null, manual: !!x.manual} : {text: String(x ?? ''), quote: '', verified: null, review: null, manual: false};
 const anModelOpts = () => [...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('');
+let _exEditing = false;
+function reqExtractionHtml(r, canAI, canEdit) {
+  const ex = r.extraction, m = (ex && ex.meta) || {}, st = r.extraction_status;
+  const intro = `<div class="hint" style="margin-bottom:10px">需求提取是 AI 分析的前置步骤：从原文与<b>全部附件</b>（文档、原型导出页、截图的图片理解结果、链接）里<b>逐字摘录</b>需求内容，剔除导航 / 框架 / 样式等噪音，同一事实多处出现只留一条并标来源，按模块归整成整理稿。附件解析完成后自动提取一次；<b>AI 需求分析与测试设计以整理稿为准</b>，原始材料仍在「原文与附件」页可查。每条摘录都程序对照过材料，没逐字找到的加 ⚠ 请人工核对；整理稿可直接修改，改后需重新分析。</div>`;
+  const toolbar = `<div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap">
+      ${canAI?`<select id="rqExtractModel" style="width:150px" title="提取模型">${anModelOpts()}</select>
+      <button class="btn sm" id="rqExtractBtn" onclick="extractReq()" ${st==='running'?'disabled':''}>${st==='running'?'<span class="spin"></span> 提取中':ex?'重新提取':'提取需求'}</button>`:''}
+      ${ex?`<span class="hint">${esc(m.model||'')} · ${m.auto?'自动':esc(m.by||'')} · ${esc(fmtTime(m.at))}${m.chunks>1?` · 分 ${m.chunks} 片提取后合并`:''} · 材料 ${m.source_chars||0} 字 → 整理稿 ${m.chars||0} 字 · ${m.modules||0} 个模块 ${m.checked||0} 条${m.unverified?`，<b style="color:var(--warn)">${m.unverified} 条未在材料中逐字找到</b>`:'，全部逐字核验通过'}${ex.edited?` · <b>人工修改</b> ${esc(ex.edited.by||'')} ${relTime(ex.edited.at)}`:''}</span>`:''}
+      ${canEdit&&ex&&st!=='running'?`<span style="margin-left:auto;display:flex;gap:6px">${_exEditing?'':`<button class="btn ghost sm" onclick="_exEditing=true;renderRequirementDetail()">修改整理稿</button>`}<button class="btn ghost sm danger" onclick="deleteReqExtraction()" title="删除后分析与设计退回使用原始材料">删除整理稿</button></span>`:''}</div>`;
+  let bar = '';
+  if (st === 'running') bar = `<div class="hint" style="margin-bottom:10px"><span class="spin"></span> 正在从原文与附件提取需求内容，可离开页面，完成后自动刷新</div>`;
+  else if (r.extraction_error) bar = `<div class="hint" style="margin-bottom:10px;color:var(--danger)">上次提取失败：${esc(r.extraction_error)}</div>`;
+  if (st === 'outdated') bar += `<div class="hint" style="margin-bottom:10px;color:var(--warn)">⚠ 提取之后附件有追加或重新解析，整理稿基于旧材料：AI 分析与测试设计会先重新提取（或点「重新提取」）</div>`;
+  else if (st === 'none' && r.extraction_wanted) bar += `<div class="hint" style="margin-bottom:10px;color:var(--warn)">有已解析的附件但还没有整理稿${r.content_warnings&&r.content_warnings.length?'（附件疑似非需求文本，自动提取已跳过）':''}：点「提取需求」，或直接 AI 分析时会先自动提取</div>`;
+  else if (st === 'none') bar += `<div class="hint" style="margin-bottom:10px">没有附件的需求直接用原文分析，不需要整理稿；原文很长或夹杂无关内容时也可以提取</div>`;
+  if (m.dropped && m.dropped.length) bar += `<div class="hint" style="margin-bottom:10px">已剔除：${m.dropped.map(esc).join('、')}</div>`;
+  if (!ex) return intro + toolbar + bar + '<div class="empty">还没有整理稿</div>';
+  const body = _exEditing && canEdit
+    ? `<textarea id="rqExtractEdit" rows="24" style="width:100%;box-sizing:border-box;font:inherit;line-height:1.6">${esc(ex.text)}</textarea>
+       <div class="toolbar" style="margin-top:6px"><button class="btn sm" onclick="saveReqExtraction()">保存整理稿</button><button class="btn ghost sm" onclick="_exEditing=false;renderRequirementDetail()">取消</button><span class="hint">保存后已有分析结果会标为基于旧输入，需重新分析</span></div>`
+    : `<pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:560px;overflow:auto;font:inherit;line-height:1.6">${esc(ex.text).replace(/^(## .+)$/gm, '<b>$1</b>').replace(/^- ⚠ (.+)$/gm, '- <span style="color:var(--warn)" title="未在材料中逐字找到，请核对">⚠</span> $1')}</pre>`;
+  return intro + toolbar + bar + body;
+}
+async function extractReq() {
+  const btn = $('rqExtractBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 提取中';
+  try {
+    const r = await withContentWarning(ignore => jpost(`/api/v1/requirements/${curReq}/extract`, {model: ($('rqExtractModel')||{}).value || null, ignore_warnings: ignore}));
+    const m = (r.extraction && r.extraction.meta) || {};
+    toast(`提取完成：${m.modules||0} 个模块 ${m.checked||0} 条${m.unverified?`，${m.unverified} 条未逐字找到请核对`:''}`, m.unverified ? 'warn' : 'ok');
+    _exEditing = false; renderRequirementDetail();
+  } catch (e) { if (e.message !== '已取消') toast(e.message, 'err'); renderRequirementDetail(); }
+}
+async function saveReqExtraction() {
+  try { await api(`/api/v1/requirements/${curReq}/extraction`, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text: $('rqExtractEdit').value})}); toast('整理稿已保存', 'ok'); _exEditing = false; renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function deleteReqExtraction() {
+  if (!await uiConfirm('删除整理稿？', 'AI 分析与测试设计将退回使用原始材料（原文 + 附件解析文本）；开着自动提取时下次分析会再提一次。', true)) return;
+  try { await api(`/api/v1/requirements/${curReq}/extraction`, {method:'DELETE'}); toast('整理稿已删除', 'ok'); _exEditing = false; renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
 function reqAnalysisHtml(r, labels, canAI) {
   const hist = r.analysis_history || [];
   const viewingOld = anHist >= 0 && anHist < hist.length;
@@ -5713,7 +5754,10 @@ function reqAnalysisHtml(r, labels, canAI) {
       <button class="btn sm" id="rqAnalyzeBtn" onclick="analyzeReq()">${r.analysis?'重新 AI 分析':'AI 需求分析'}</button>`:''}
       ${hist.length?`<select style="width:230px" onchange="anSet('hist', this.value)"><option value="-1" ${!viewingOld?'selected':''}>当前结果（${esc(fmtTime((r.analysis_meta||{}).at))}）</option>${hist.map((h,i)=>`<option value="${i}" ${anHist===i?'selected':''}>历史 ${hist.length-i}：${esc(fmtTime((h.meta||{}).at))} · ${esc((h.meta||{}).model||'')}</option>`).reverse().join('')}</select>`:''}
       ${r.analysis?`<span class="hint">${viewingOld?'<b style="color:var(--warn)">正在查看历史结果</b> · ':''}${esc(meta.model||'')} · ${esc(meta.by||'')} · ${esc(fmtTime(meta.at))}${meta.chunks>1?` · 分 ${meta.chunks} 片分析后合并`:''}${meta.knowledge?` · 注入知识库 ${meta.knowledge} 片`:''}</span>`:'<span class="hint">尚未分析。AI 只整理需求已写明的内容，每条带原文依据并逐条程序核验，无依据的降级为「待确认事项」而不是脑补</span>'}</div>`;
-  const intro = `<div class="hint" style="margin-bottom:10px">AI 需求分析把原文、附件与人工补充整理成 11 个结构化分析项。三道防线：① 每条要点带<b>原文依据</b>，程序逐条核验，规则 / 边界 / 状态 / 权限四项没依据的自动降级为待确认事项；② 第二个<b>独立复核</b> Agent 对照原文挑理解错、无依据与遗漏，意见标在条目上由人拍板；③ 人工可逐条<b>修改 / 删除 / 补充</b>，修改留痕进评测集与学习规则。<b>确认</b>后规则 / 边界 / 状态 / 权限 → 业务规则库，其余 → 需求文档库。</div>`;
+  const basis = r.extraction_status === 'current' ? `<b>分析输入：需求整理稿</b>（${(r.extraction.meta||{}).chars||0} 字${r.extraction.edited?'，人工修改过':''}）+ 人工补充。<a onclick="reqTab='extract';renderRequirementDetail()">查看整理稿 →</a>`
+    : r.extraction_wanted ? `<b>分析输入：原始材料</b>（原文 + 附件解析文本）。${r.extraction_status==='running'?'需求提取进行中，完成后分析将以整理稿为准。':r.extraction_status==='outdated'?'整理稿已过期，点分析时会先重新提取。':'点分析时会先自动提取需求整理稿。'}`
+    : '<b>分析输入：需求原文</b> + 人工补充。';
+  const intro = `<div class="hint" style="margin-bottom:6px">${basis}</div><div class="hint" style="margin-bottom:10px">AI 需求分析把需求内容整理成 11 个结构化分析项。三道防线：① 每条要点带<b>原文依据</b>，程序逐条核验，规则 / 边界 / 状态 / 权限四项没依据的自动降级为待确认事项；② 第二个<b>独立复核</b> Agent 对照原文挑理解错、无依据与遗漏，意见标在条目上由人拍板；③ 人工可逐条<b>修改 / 删除 / 补充</b>，修改留痕进评测集与学习规则。<b>确认</b>后规则 / 边界 / 状态 / 权限 → 业务规则库，其余 → 需求文档库。</div>`;
   if (!an) return intro + toolbar + '<div class="empty">还没有分析结果</div>';
   const canEdit = can(r.project, 'requirement.edit'), c = r.analysis_confirmed, pending = r.review_pending || 0;
   const v = meta.verification, rv = meta.review;
@@ -5721,6 +5765,7 @@ function reqAnalysisHtml(r, labels, canAI) {
       ${v?`<span>原文核验：核对 ${v.checked} 条，通过 <b>${v.verified}</b>，不符 ${v.unverified}${v.demoted?`，<b style="color:var(--warn)">${v.demoted} 条无依据已降级为待确认</b>`:''}</span>`:''}
       ${rv?(rv.error?`<span style="color:var(--danger)">独立复核失败：${esc(rv.error)}</span>`:rv.skipped?`<span>独立复核跳过：${esc(rv.skipped)}</span>`:`<span>独立复核（${esc(rv.model||'')}）：理解错 <b style="color:${rv.wrong?'var(--danger)':'inherit'}">${rv.wrong}</b>，无依据 <b>${rv.unsupported}</b>，补充 <b>${rv.added}</b>${rv.unverified_added?`，补充未通过核验 ${rv.unverified_added}（已转待确认）`:''}</span>`):'<span>未做独立复核</span>'}
       ${r.analysis_edit_count?`<span>人工修改 ${r.analysis_edit_count} 处</span>`:''}</div>` : '';
+  const outdatedBar = !viewingOld && r.analysis_outdated ? `<div class="hint" style="margin-bottom:10px;color:var(--warn)">⚠ 分析之后附件或整理稿有变化（追加 / 重新解析附件、重新提取或修改整理稿），当前结果基于旧输入，建议重新分析</div>` : '';
   let confirmBar = '';
   if (!viewingOld) {
     const status = pending ? `<span class="st rejected">复核质疑 ${pending} 条未处理</span><span class="hint">逐条采纳改正 / 手动修改 / 删除 / 标记没问题后才能确认与沉淀</span>`
@@ -5767,7 +5812,7 @@ function reqAnalysisHtml(r, labels, canAI) {
         ${items.length > anSize || anSize !== 20 ? pagerHtml(items.length, anPage, anSize, 'anSet') : `<div class="hint" style="margin-top:6px">共 ${items.length} 条${kw?'（已筛选）':''}</div>`}` : `<div class="empty">没有包含「${esc(anKw)}」的条目</div>`) : '<div class="empty">AI 没有从需求中整理出这一项的内容</div>'}
       ${editable?`<div style="margin-top:8px"><button class="btn ghost sm" onclick="anAddItem(${jsq(sec)})">＋ 人工补充一条${esc(labels[sec])}</button></div>`:''}</div>`;
   const block = openN ? `<div class="hint" style="margin-bottom:10px;padding:8px 12px;border:1px solid var(--warn);border-radius:8px;color:var(--warn)">分析产出 ${openN} 项「必须确认」的待确认事项，确认后才能开始测试设计。<a onclick="reqTab='questions';renderRequirementDetail()">去确认 →</a></div>` : '';
-  return intro + toolbar + statsBar + confirmBar + block + `<div style="display:flex;gap:16px;align-items:flex-start">${nav}${body}</div>`;
+  return intro + toolbar + statsBar + outdatedBar + confirmBar + block + `<div style="display:flex;gap:16px;align-items:flex-start">${nav}${body}</div>`;
 }
 async function anItemOp(body) {
   try { await jpost(`/api/v1/requirements/${curReq}/analysis/items`, body); renderRequirementDetail(); }
@@ -5916,9 +5961,9 @@ async function reqBatchConfirmAnalysis() {
   let pv;
   try { pv = await api('/api/v1/requirements/analysis/batch-confirm' + (curProjectName ? '?project=' + encodeURIComponent(curProjectName) : '')); }
   catch (e) { return toast(e.message, 'err'); }
-  if (!pv.pending) return toast(`${scope}没有待确认的分析结果（已确认 ${pv.confirmed} 条，未分析 ${pv.no_analysis} 条）`, 'warn');
+  if (!pv.pending) return toast(`${scope}没有待确认的分析结果（已确认 ${pv.confirmed} 条，未分析 ${pv.no_analysis} 条${pv.review_pending?`，复核质疑未处理 ${pv.review_pending} 条需先处理`:''}）`, 'warn');
   const names = pv.pending_titles.slice(0, 8).map(esc).join('、') + (pv.pending > 8 ? ` 等 ${pv.pending} 条` : '');
-  if (!await uiConfirm('批量确认分析结果', `${scope}有 ${pv.pending} 条需求的分析结果待确认：${names}。确认后将沉淀到各自项目知识库（后台执行）。已确认 ${pv.confirmed} 条、未分析 ${pv.no_analysis} 条会跳过。确定？`)) return;
+  if (!await uiConfirm('批量确认分析结果', `${scope}有 ${pv.pending} 条需求的分析结果待确认：${names}。确认后将沉淀到各自项目知识库（后台执行）。已确认 ${pv.confirmed} 条、未分析 ${pv.no_analysis} 条${pv.review_pending?`、复核质疑未处理 ${pv.review_pending} 条`:""}会跳过。确定？`)) return;
   try {
     const r = await jpost('/api/v1/requirements/analysis/batch-confirm', {project: curProjectName || null});
     toast(`已确认 ${r.confirmed.length} 条，正在沉淀到知识库；跳过 ${r.skipped.length} 条`, 'ok');
@@ -6037,7 +6082,7 @@ async function _renderRequirementDetail__impl() {
   try { r = await api('/api/v1/requirements/' + curReq); } catch (e) { toast(e.message, 'err'); curReq = null; return renderRequirements(); }
   if (stale('reqs', _s)) return;
   _reqDetail = r; crumbForReqs();
-  if (r.parsing) {  // 附件后台解析中：3 秒后自动刷新（仍停留在本需求时）
+  if (r.parsing || r.extraction_status === 'running') {  // 附件后台解析 / 需求提取进行中：3 秒后自动刷新（仍停留在本需求时）
     clearTimeout(window._reqParsePoll);
     window._reqParsePoll = setTimeout(() => { if (curReq === r.req_id && currentView === 'requirements') renderRequirementDetail(); }, 3000);
   }
@@ -6065,7 +6110,7 @@ async function _renderRequirementDetail__impl() {
   const attRows = r.attachments.map(a => `<tr>
     <td>${a.stored?`<a onclick="downloadFile(${jsq('/api/v1/requirements/'+r.req_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a>`:esc(a.filename)}${a.source_url?`<div class="hint" style="word-break:break-all"><span class="tag">链接</span> <a href="${esc(a.source_url)}" target="_blank" rel="noopener">${esc(a.source_url.length>70?a.source_url.slice(0,70)+'…':a.source_url)}</a></div>`:''}</td>
     <td class="hint">${a.size?(a.size/1024).toFixed(1)+' KB':'—'}</td>
-    <td>${a.parsing?`<span class="st candidate">${a.source_url&&!a.stored?'抓取中':'解析中'}</span> <span class="spin"></span><div class="hint">${a.source_url?'链接下载与解析在后台进行':'PDF 提取 / 图片理解在后台进行'}，可离开页面</div>`:a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>`:`<span class="st rejected">${a.source_url&&!a.stored?'抓取失败':'解析失败'}</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
+    <td>${a.parsing?`<span class="st candidate">${a.source_url&&!a.stored?'抓取中':'解析中'}</span> <span class="spin"></span><div class="hint">${a.source_url?'链接下载与解析在后台进行':'PDF 提取 / 图片理解在后台进行'}，可离开页面</div>`:a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>${a.warning?`<div class="hint" style="color:var(--warn)">⚠ ${esc(a.warning)}</div>`:''}`:`<span class="st rejected">${a.source_url&&!a.stored?'抓取失败':'解析失败'}</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
     <td>${canEdit&&(a.stored||a.source_url)&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">${a.source_url&&!a.stored?'重新抓取':'重新解析'}</button>`:''}</td>
     <td class="hint" style="white-space:pre-wrap;max-width:420px">${a.parsed?esc((a.preview||'').slice(0,300))+((a.preview||'').length>300?'…':''):''}</td></tr>`).join('');
   const rawTab = `<div class="section-t">需求原文<span class="hint">（永久保留，AI 结果不覆盖）</span></div>
@@ -6096,7 +6141,8 @@ async function _renderRequirementDetail__impl() {
     </table></div>`:'<div class="empty">暂无待确认事项</div>'}
     ${suggestN?`<div class="hint" style="margin-top:8px">${suggestN} 项建议级事项未确认，不阻塞测试设计，将按各自假设处理</div>`:''}`;
 
-  const body = reqTab==='raw' ? rawTab : reqTab==='analysis' ? analysisTab : reqTab==='questions' ? qTab : trace;
+  const extractTab = reqExtractionHtml(r, canAI, canEdit);
+  const body = reqTab==='raw' ? rawTab : reqTab==='extract' ? extractTab : reqTab==='analysis' ? analysisTab : reqTab==='questions' ? qTab : trace;
   const designDisabled = openN>0 || r.status==='archived';
   $('reqArea').innerHTML = `<div class="card">
     <div class="card-h" style="border-bottom:none">
@@ -6114,6 +6160,7 @@ async function _renderRequirementDetail__impl() {
     ${canDesign&&openN?`<div class="hint" style="padding:0 16px 8px;color:var(--warn)">还有 ${openN} 项「必须确认」的待确认事项，确认后才能开始测试设计（也可把不影响规则的事项「降为建议」）。<a onclick="reqTab='questions';renderRequirementDetail()">去确认 →</a></div>`:''}
     <div class="dtabs">
       <button class="${reqTab==='raw'?'on':''}" onclick="reqTab='raw';renderRequirementDetail()">原文与附件${r.parse_failed?`<span class="cnt hot">${r.parse_failed}</span>`:''}${r.parsing?` <span class="spin"></span>`:''}</button>
+      <button class="${reqTab==='extract'?'on':''}" onclick="reqTab='extract';renderRequirementDetail()">需求提取${r.extraction_status==='running'?' <span class="spin"></span>':r.extraction_status==='outdated'||(r.extraction_wanted&&r.extraction_status==='none')?'<span class="cnt hot">!</span>':r.extraction&&r.extraction.meta&&r.extraction.meta.unverified?`<span class="cnt hot" title="${r.extraction.meta.unverified} 条未在材料中逐字找到">${r.extraction.meta.unverified}</span>`:''}</button>
       <button class="${reqTab==='analysis'?'on':''}" onclick="reqTab='analysis';renderRequirementDetail()">AI 需求分析</button>
       <button class="${reqTab==='questions'?'on':''}" onclick="reqTab='questions';renderRequirementDetail()">待确认事项<span class="cnt ${openN?'hot':''}">${openN}</span></button>
       <button class="${reqTab==='trace'?'on':''}" onclick="reqTab='trace';renderRequirementDetail()">测试设计与追溯<span class="cnt">${r.task_count}</span></button>
@@ -6185,13 +6232,23 @@ async function reparseAtt(attId) {
   try { await jpost(`/api/v1/requirements/${curReq}/attachments/${attId}/reparse`, {}); toast('已开始重新解析'); renderRequirementDetail(); }
   catch (e) { toast(e.message, 'err'); }
 }
+async function withContentWarning(fn) {
+  // 附件解析结果疑似非需求文本（源码 / 乱码）时后端 409 拦截：人看过告警确认后带 ignore_warnings 重试
+  try { return await fn(false); }
+  catch (e) {
+    if (!/疑似非需求文本/.test(e.message)) throw e;
+    if (!await uiConfirm('附件内容疑似不是需求', e.message.replace(/。确认要按这些内容继续.*$/, '') + '。\n\n仍要按这些内容继续吗？（会消耗大量模型调用，结果大概率不可用）')) throw new Error('已取消');
+    return await fn(true);
+  }
+}
 async function analyzeReq() {
-  const btn = $('rqAnalyzeBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 分析中';
+  const needExtract = (_reqDetail||{}).extraction_wanted && (_reqDetail||{}).extraction_status !== 'current';
+  const btn = $('rqAnalyzeBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> ' + (needExtract ? '先提取需求再分析' : '分析中');
   try {
-    const r = await jpost(`/api/v1/requirements/${curReq}/analyze`, {model: $('rqAnalyzeModel').value || null, reviewer_model: ($('rqReviewerModel')||{}).value || null});
+    const r = await withContentWarning(ignore => jpost(`/api/v1/requirements/${curReq}/analyze`, {model: $('rqAnalyzeModel').value || null, reviewer_model: ($('rqReviewerModel')||{}).value || null, ignore_warnings: ignore}));
     toast(r.open_questions ? `分析完成，${r.open_questions} 项待确认事项需要确认` : '分析完成，无待确认事项', r.open_questions ? 'warn' : 'ok');
     anHist = -1; anPage = 1; reqTab = r.open_questions ? 'questions' : 'analysis'; renderRequirementDetail();
-  } catch (e) { toast(e.message, 'err'); btn.disabled = false; btn.textContent = 'AI 需求分析'; }
+  } catch (e) { if (e.message !== '已取消') toast(e.message, 'err'); btn.disabled = false; btn.textContent = 'AI 需求分析'; }
 }
 async function addReqQuestion() {
   const q = $('rqNewQ').value.trim(); if (!q) return;
@@ -6235,13 +6292,13 @@ async function submitDesign() {
   const body = {model: $('dsModel').value || null, reviewer_model: $('dsReviewer').value || null,
     template_id: $('dsTemplate').value, confirm_points: $('dsConfirm').checked, async_mode: $('dsAsync').checked};
   try {
-    const r = _designReqIds
-      ? await jpost('/api/v1/requirements/design', {...body, req_ids: _designReqIds})
-      : await jpost(`/api/v1/requirements/${curReq}/design`, body);
+    const r = await withContentWarning(ignore => _designReqIds
+      ? jpost('/api/v1/requirements/design', {...body, req_ids: _designReqIds, ignore_warnings: ignore})
+      : jpost(`/api/v1/requirements/${curReq}/design`, {...body, ignore_warnings: ignore}));
     $('designDlg').close(); toast(_designReqIds && _designReqIds.length > 1 ? `已合并 ${_designReqIds.length} 条需求创建测试设计任务` : '测试设计任务已创建', 'ok');
     _reqSel.clear(); _designReqIds = null;
     await refreshList(); openTaskFromProject(r.task_id);
-  } catch (e) { toast(e.message, 'err'); }
+  } catch (e) { if (e.message !== '已取消') toast(e.message, 'err'); }
   btn.disabled = false; btn.textContent = '开始';
 }
 
