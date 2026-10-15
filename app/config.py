@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     # 需求分析准确率防线：第二个独立 Agent 对照原文复核首轮分析（理解错 / 无依据 / 遗漏），可指定不同模型；
     # 人工确认分析结果时若有过修改，自动把修改后的结果作为标准答案加入需求分析评测集
     analysis_review: bool = True
+    # 需求提取（分析前置）：附件解析完成后自动从全部材料逐字摘录需求内容归整为整理稿，AI 分析与测试设计以整理稿为准；
+    # 关掉则只能在需求页手动提取，没有整理稿时直接用原始材料
+    requirement_extract: bool = True
     analysis_eval_auto_sample: bool = True
 
     # 历史用例复用提示阈值（需求二十九）：向量相似度达到该值提示「高度相关，可复用」

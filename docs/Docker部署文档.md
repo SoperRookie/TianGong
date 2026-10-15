@@ -1,6 +1,6 @@
 # 天工 Docker 部署文档
 
-适用版本：v2.1.2。用 `docker compose` 在一台 Linux 服务器上拉起 MySQL、应用、Nginx 三个容器。传统裸机部署见 `docs/服务器部署文档.md`，两者的环境变量、数据迁移与运维事项一致，本文只写 Docker 相关部分。
+适用版本：v2.1.3。用 `docker compose` 在一台 Linux 服务器上拉起 MySQL、应用、Nginx 三个容器。传统裸机部署见 `docs/服务器部署文档.md`，两者的环境变量、数据迁移与运维事项一致，本文只写 Docker 相关部分。
 
 ## 1. 架构
 
@@ -48,7 +48,7 @@
 sudo mkdir -p /opt/tiangong && sudo chown $USER /opt/tiangong
 cd /opt/tiangong
 git clone <仓库地址> .
-git checkout v2.1.2
+git checkout v2.1.3
 ```
 
 ### 3.2 写 `.env`
@@ -69,6 +69,7 @@ MYSQL_PASSWORD=<强密码>
 # HTTP_PORT=80
 # TZ=Asia/Shanghai
 # TIANGONG_TASK_MAX_CONCURRENCY=2    # 同时执行的测试设计任务数，超出的排队，默认 2
+# TIANGONG_REQUIREMENT_EXTRACT=true  # 附件解析完成后自动提取需求整理稿，默认开
 ```
 
 不用填 `TIANGONG_DB_URL` 和 `TIANGONG_TRUSTED_PROXIES`，compose 文件已按容器网络写死。`MYSQL_PASSWORD` 会被拼进连接串，密码含 `@ # / % ?` 等符号也可以，应用会自动编码；但 compose 自身对 `$` 有特殊解释，密码里避免用 `$`。
@@ -153,12 +154,14 @@ find backups -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
 ```bash
 cd /opt/tiangong
 bash backups/daily.sh                  # 先备份
-git fetch --tags && git checkout v2.1.2
+git fetch --tags && git checkout v2.1.3
 docker compose up -d --build app       # 只重建应用镜像，mysql / nginx 不动
 docker compose logs -f app
 ```
 
 表结构变更与数据迁移在应用启动时自动执行。回滚：切回旧标签重新 `up -d --build app`，必要时用备份恢复数据库。
+
+升级到 v2.1.3 后：已有需求不会自动补整理稿，下次 AI 分析或发起测试设计前会先提取一次；不想要可关 `TIANGONG_REQUIREMENT_EXTRACT`。
 
 升级到 v2.1.2 后：无新增依赖与表结构变更；早先解析失真的附件（Axure 导出包、表格里放截图的 Word、扫描版 PDF、带矢量图的 PPT）在需求详情里点「重新解析」即可按新逻辑重识别，之后分析页会提示结果基于旧输入，再点一次 AI 分析。镜像已内置 LibreOffice，PPT 矢量图会栅格化后送图片理解。
 

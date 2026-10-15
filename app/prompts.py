@@ -22,6 +22,8 @@ PROMPT_DEFS: list[dict] = [
      "where": "长需求分片拆解前 → 全文模块大纲"},
     {"key": "blind_spot_verify", "name": "分片盲区复核", "kind": "system", "default": P.BLIND_SPOT_VERIFY_SYSTEM,
      "where": "长需求分片拆解后 → 用其他分片原文复核盲区（已说明的不算盲区）"},
+    {"key": "requirement_extract", "name": "需求提取（分析前置）", "kind": "system", "default": P.REQUIREMENT_EXTRACT_SYSTEM,
+     "where": "需求中心 → 附件解析完成后自动 / 手动提取：从全部材料逐字摘录需求内容归整为整理稿，AI 分析与测试设计以整理稿为准"},
     {"key": "requirement_analysis", "name": "需求分析（11 项）", "kind": "system", "default": P.REQUIREMENT_ANALYSIS_SYSTEM,
      "where": "需求中心 → AI 需求分析（每条带原文依据 quote，程序逐条核验）"},
     {"key": "requirement_analysis_review", "name": "需求分析独立复核", "kind": "system",

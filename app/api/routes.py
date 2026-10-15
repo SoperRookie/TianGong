@@ -4598,6 +4598,7 @@ def _schedule_link_fetch(request: Request, req_id: str, atts: list[dict]) -> Non
             except RequirementError:
                 return  # 需求已被删除
         _schedule_requirement_ingest(app, req_id)
+        await _auto_extract(app, req_id)
 
     jobs = getattr(app.state, "bg_jobs", None)
     if jobs is None:
@@ -4641,6 +4642,7 @@ def _schedule_attachment_parse(request: Request, req_id: str, atts: list[dict]) 
             logger.info("需求 {} 附件 {} 解析{}：{}", req_id, path.name, "完成" if parsed["parsed"] else "失败",
                         f"{parsed['chars']} 字" if parsed["parsed"] else parsed.get("error"))
         _schedule_requirement_ingest(app, req_id)
+        await _auto_extract(app, req_id)
 
     jobs = getattr(app.state, "bg_jobs", None)
     if jobs is None:
@@ -4686,8 +4688,81 @@ def _content_warnings(item: dict) -> list[dict]:
 
 
 def _analysis_inputs(item: dict) -> list[str]:
-    """分析输入指纹：已解析附件的 id@解析时间（追加 / 重新解析 / 删除附件都会变）。"""
-    return sorted(f"{a['att_id']}@{a.get('parsed_at') or ''}" for a in item.get("attachments", []) if a.get("parsed"))
+    """分析输入指纹：已解析附件的 id@解析时间（追加 / 重新解析 / 删除附件都会变）+ 当前生效的整理稿版本
+    （重新提取 / 人工修改整理稿 / 删除整理稿都会变）。"""
+    from app.requirements import attachment_fingerprint, extraction_current
+
+    inputs = attachment_fingerprint(item)
+    if extraction_current(item):
+        ex = item["extraction"]
+        inputs.append(f"extraction@{(ex.get('meta') or {}).get('id')}@{(ex.get('edited') or {}).get('at') or ''}")
+    return inputs
+
+
+async def _run_extraction(app, req_id: str, model: str | None, by: str | None, auto: bool = False) -> dict:
+    """需求提取：从全部原始材料逐字摘录需求内容归整成整理稿并落库。失败时记 extraction_error 供页面提示。"""
+    from app.agents import run_requirement_extraction
+    from app.requirements import RequirementError, attachment_fingerprint, source_materials
+
+    rstore = app.state.requirements
+    item = rstore.set_extracting(req_id, True)
+    materials = source_materials(item)
+    if not materials.strip():
+        rstore.set_extracting(req_id, False, error="需求原文与附件都没有可用文本")
+        raise ValueError("需求原文与附件都没有可用文本")
+    inputs = attachment_fingerprint(item)
+    try:
+        data = await run_requirement_extraction(materials, app.state.llm, model=model)
+    except Exception as e:
+        try:
+            rstore.set_extracting(req_id, False, error=str(e)[:300])
+        except RequirementError:
+            pass
+        raise
+    meta = {"id": uuid.uuid4().hex[:8], "model": data.get("model_name"), "chunks": data.get("chunks"), "inputs": inputs,
+            "by": by, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "auto": auto,
+            "source_chars": data.get("source_chars"), "chars": len(data["text"]), "modules": len(data.get("modules") or []),
+            "checked": data.get("checked"), "verified": data.get("verified"), "unverified": data.get("unverified"),
+            "dropped": data.get("dropped") or []}
+    return rstore.set_extraction(req_id, data, meta)
+
+
+async def _auto_extract(app, req_id: str) -> None:
+    """附件解析完成后的自动提取：开关开、有已解析附件、整理稿不是基于当前材料、没有内容告警、没有附件还在解析。"""
+    from app.requirements import extraction_current, extraction_wanted
+
+    if not get_settings().requirement_extract:
+        return
+    item = app.state.requirements.get(req_id)
+    if item is None or item.get("deleted_at") or item.get("extracting"):
+        return
+    if any(a.get("parsing") for a in item.get("attachments") or []):
+        return  # 还有附件在解析：等最后一条解析完的那次再提
+    if not extraction_wanted(item) or extraction_current(item):
+        return
+    if _content_warnings(item):
+        logger.info("需求 {} 附件疑似非需求文本，跳过自动提取（可在需求页确认后手动提取）", req_id)
+        return
+    try:
+        await _run_extraction(app, req_id, None, None, auto=True)
+    except Exception as e:
+        logger.warning("需求 {} 自动提取失败：{}", req_id, e)
+
+
+async def _ensure_extraction(request: Request, item: dict, model: str | None) -> dict:
+    """AI 分析 / 发起设计前：需要整理稿而当前没有（或已过期）时先提取；提取失败直接报错，不悄悄退回原始材料。"""
+    from app.requirements import extraction_current, extraction_wanted
+
+    if not get_settings().requirement_extract or not extraction_wanted(item) or extraction_current(item):
+        return item
+    if item.get("extracting"):
+        raise HTTPException(status_code=409, detail="需求提取正在进行中，完成后再操作")
+    try:
+        return await _run_extraction(request.app, item["req_id"], model, _operator(request))
+    except UnknownModelError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError, ValueError) as e:
+        raise HTTPException(status_code=502, detail=f"需求提取失败：{e}")
 
 
 def _analysis_outdated(item: dict) -> bool:
@@ -4754,11 +4829,11 @@ async def _eval_knowledge(app, text: str, project: str | None, req_id: str | Non
 
 def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
     from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
-    from app.requirements import REQ_STATUSES, SOURCE_TYPES
+    from app.requirements import REQ_STATUSES, SOURCE_TYPES, extraction_status, extraction_wanted
 
     rstore = request.app.state.requirements
     view = {
-        **{k: v for k, v in item.items() if k != "attachments"},
+        **{k: v for k, v in item.items() if k not in ("attachments", "extraction_history")},
         "attachments": [{k: v for k, v in a.items() if k != "text"} for a in item["attachments"]],
         "status_label": REQ_STATUSES.get(item["status"], item["status"]),
         "source_label": SOURCE_TYPES.get(item["source_type"], item["source_type"]),
@@ -4774,6 +4849,8 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
         "parsing": sum(1 for a in item["attachments"] if a.get("parsing")),
         "content_warnings": _content_warnings(item),
         "analysis_outdated": _analysis_outdated(item),
+        "extraction_status": extraction_status(item),
+        "extraction_wanted": extraction_wanted(item),
     }
     mstore = request.app.state.modules
     if item.get("module_id"):
@@ -5148,6 +5225,58 @@ async def download_requirement_attachment(request: Request, req_id: str, att_id:
     return FileResponse(att["stored"], filename=att["filename"])
 
 
+class ExtractBody(BaseModel):
+    model: str | None = None
+    ignore_warnings: bool = False
+
+
+class ExtractionTextBody(BaseModel):
+    text: str
+
+
+@router.post("/api/v1/requirements/{req_id}/extract")
+async def extract_requirement(request: Request, req_id: str, body: ExtractBody | None = None) -> dict:
+    """需求提取（分析前置）：从原文与全部附件逐字摘录需求内容，按模块归整为整理稿；AI 分析与测试设计以整理稿为准。
+    附件解析完成后会自动提取一次；这里是手动（重新）提取，可指定模型。"""
+    item = _req(request, req_id, "requirement.ai")
+    _require_attachments_ready(item)
+    body = body or ExtractBody()
+    _require_content_ok(item, body.ignore_warnings)
+    if item.get("extracting"):
+        raise HTTPException(status_code=409, detail="需求提取正在进行中")
+    _ai_ctx(request, project=item["project"], requirement_id=req_id)
+    try:
+        item = await _run_extraction(request.app, req_id, body.model, _operator(request))
+    except UnknownModelError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError, ValueError) as e:
+        raise HTTPException(status_code=502, detail=f"需求提取失败：{e}")
+    m = item["extraction"]["meta"]
+    request.state.audit_detail = f"整理稿 {m.get('chars')} 字 / {m.get('modules')} 模块 {m.get('checked')} 条，未逐字找到 {m.get('unverified')}"
+    return _req_view(request, item)
+
+
+@router.put("/api/v1/requirements/{req_id}/extraction")
+async def edit_requirement_extraction(request: Request, req_id: str, body: ExtractionTextBody) -> dict:
+    """人工修改整理稿（AI 版本留档）；改后已有分析结果标过期。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    try:
+        item = request.app.state.requirements.edit_extraction(req_id, body.text, _operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _req_view(request, item)
+
+
+@router.delete("/api/v1/requirements/{req_id}/extraction")
+async def delete_requirement_extraction(request: Request, req_id: str) -> dict:
+    """删除整理稿：分析与设计退回使用原始材料（下次分析若开着自动提取会再提一次）。"""
+    _req(request, req_id, "requirement.edit")
+    item = request.app.state.requirements.clear_extraction(req_id, _operator(request))
+    return _req_view(request, item)
+
+
 class AnalyzeBody(BaseModel):
     model: str | None = None
     reviewer_model: str | None = None   # 独立复核用的模型；空则与分析模型相同
@@ -5166,6 +5295,7 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
     body = body or AnalyzeBody()
     _require_content_ok(item, body.ignore_warnings)
     _ai_ctx(request, project=item["project"], requirement_id=req_id)
+    item = await _ensure_extraction(request, item, body.model)
     text = design_brief({**item, "analysis": None, "questions": []})
     if not text.strip():
         raise HTTPException(status_code=400, detail="需求原文为空（文件解析失败时请先重新解析）")
@@ -5566,6 +5696,7 @@ async def _design_from_requirements(request: Request, items: list[dict], body: D
         n = len(rstore.blocking_questions(it))
         if n:
             blocked.append(f"「{it['title']}」{n} 项")
+    items = [await _ensure_extraction(request, it, body.model) for it in items]
     if blocked:
         raise HTTPException(status_code=409, detail="仍有必须确认的事项未确认，确认后才能开始测试设计（建议级事项可带假设继续）："
                             + "；".join(blocked))

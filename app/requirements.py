@@ -52,6 +52,9 @@ class RequirementStore:
                 if att.get("parsing"):
                     att.update(parsing=False, parsed=False, error="服务重启导致解析中断，请点「重新解析」")
                     dirty = True
+            if item.get("extracting"):
+                item["extracting"] = False
+                dirty = True
             if dirty:
                 self._persist(item)
 
@@ -139,6 +142,52 @@ class RequirementStore:
                 break
         else:
             raise RequirementError(f"附件不存在: {att_id}")
+        self._persist(item)
+        return item
+
+    # ---- 需求提取（分析前置的整理稿）----
+
+    def set_extracting(self, req_id: str, flag: bool, error: str | None = None) -> dict:
+        item = self._get_alive(req_id)
+        item["extracting"] = bool(flag)
+        item["extraction_error"] = error
+        self._persist(item)
+        return item
+
+    def set_extraction(self, req_id: str, data: dict, meta: dict) -> dict:
+        """写入 AI 提取的整理稿；上一版留档（最近 5 版）。整理稿换版后分析指纹变化，分析结果标过期。"""
+        item = self._get_alive(req_id)
+        if item.get("extraction"):
+            hist = item.setdefault("extraction_history", [])
+            hist.append(item["extraction"])
+            del hist[:-5]
+        item["extraction"] = {"text": data["text"], "meta": meta, "edited": None}
+        item["extracting"], item["extraction_error"] = False, None
+        self._persist(item)
+        return item
+
+    def edit_extraction(self, req_id: str, text: str, operator: str | None = None) -> dict:
+        """人工修改整理稿：原 AI 版本留在 meta 里，edited 记录改动者与时间。"""
+        item = self._get_alive(req_id)
+        if not item.get("extraction"):
+            raise RequirementError("还没有整理稿可修改，请先提取需求")
+        text = (text or "").strip()
+        if not text:
+            raise RequirementError("整理稿不能为空；不需要整理稿请点「删除整理稿」")
+        item["extraction"]["text"] = text
+        item["extraction"]["edited"] = {"by": operator, "at": _now()}
+        item["updated_by"], item["updated_at"] = operator, _now()
+        self._persist(item)
+        return item
+
+    def clear_extraction(self, req_id: str, operator: str | None = None) -> dict:
+        item = self._get_alive(req_id)
+        if item.get("extraction"):
+            hist = item.setdefault("extraction_history", [])
+            hist.append(item["extraction"])
+            del hist[:-5]
+        item["extraction"] = None
+        item["updated_by"], item["updated_at"] = operator, _now()
         self._persist(item)
         return item
 
@@ -442,16 +491,54 @@ def _analysis_id(item: dict) -> str | None:
     return f"{base}+{edits}" if base and edits else base
 
 
-def design_brief(item: dict) -> str:
-    """发起测试设计时喂给拆解/生成 Agent 的需求文本：原文 + 人工补充 + 已确认结论（原文不改）。"""
-    from app.agents.analysis import item_text, review_pending
-    from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
-
+def source_materials(item: dict) -> str:
+    """用户上传的全部原始材料：原文 + 每个已解析附件 / 链接的文本（需求提取的输入；没有整理稿时也是分析与设计的输入）。"""
     parts = [item["raw_text"].strip()]
     for att in item.get("attachments", []):
         if att.get("text"):
             label = f"链接：{att['source_url']}" if att.get("source_url") else f"文件：{att['filename']}"
             parts.append(f"【{label}】\n{att['text']}")
+    return "\n\n".join(p for p in parts if p)
+
+
+def attachment_fingerprint(item: dict) -> list[str]:
+    """已解析附件的 id@解析时间：追加 / 重新解析 / 删除附件都会变（整理稿与分析结果的过期判定依据）。"""
+    return sorted(f"{a['att_id']}@{a.get('parsed_at') or ''}" for a in item.get("attachments", []) if a.get("parsed"))
+
+
+def extraction_wanted(item: dict) -> bool:
+    """需要先提取再分析的需求：有已解析出文本的附件（材料散落在多份文件 / 原型 / 截图里）。纯手填原文的直接用原文。"""
+    return any(a.get("parsed") and a.get("text") for a in item.get("attachments", []))
+
+
+def extraction_current(item: dict) -> bool:
+    """整理稿是否基于当前材料：附件指纹一致才算；追加 / 重新解析 / 删除附件后整理稿过期，分析与设计退回原始材料。"""
+    ex = item.get("extraction") or {}
+    return bool(ex.get("text")) and (ex.get("meta") or {}).get("inputs") == attachment_fingerprint(item)
+
+
+def extraction_status(item: dict) -> str:
+    if item.get("extracting"):
+        return "running"
+    if not item.get("extraction"):
+        return "none"
+    return "current" if extraction_current(item) else "outdated"
+
+
+def design_brief(item: dict) -> str:
+    """发起测试设计 / AI 分析时喂给 Agent 的需求文本：整理稿（或原始材料）+ 人工补充 + 已确认结论（原文不改）。
+
+    有基于当前材料的整理稿时以整理稿代替原文与附件文本：噪音已剔除、重复已合并，分析的 quote 核验也对照整理稿。
+    """
+    from app.agents.analysis import item_text, review_pending
+    from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
+
+    if extraction_current(item):
+        n = len([a for a in item.get("attachments", []) if a.get("parsed") and a.get("text")])
+        head = f"【需求整理稿】（AI 从原文与 {n} 份附件逐字摘录并按模块归整" + ("，人工修改过" if item["extraction"].get("edited") else "") + "）"
+        parts = [f"{head}\n{item['extraction']['text']}"]
+    else:
+        parts = [source_materials(item)]
     if item.get("description", "").strip():
         parts.append(f"【人工补充说明】\n{item['description'].strip()}")
     confirmed = [q for q in item.get("questions", []) if q["status"] == "confirmed" and q.get("answer")]
