@@ -326,3 +326,56 @@ def test_压缩包内文档图片多于外层图片_占位重新编号不连锁�
     placeholders = [s.content for s in parsed.sections if s.content.startswith("[[图片:")]
     assert placeholders == ["[[图片:1]]", "[[图片:2]]", "[[图片:3]]", "[[图片:4]]"]
     assert [img.placeholder for img in parsed.embedded_images] == placeholders
+
+
+def test_docx表格单元格内图片按位置提取_合并单元格不重复(tmp_path):
+    from docx import Document
+
+    d = tmp_path / "表格图.docx"
+    doc = Document()
+    doc.add_paragraph("页面说明")
+    img = tmp_path / "shot.png"; img.write_bytes(_png_bytes((200, 200)))
+    t = doc.add_table(rows=1, cols=2)
+    t.cell(0, 0).paragraphs[0].add_run().add_picture(str(img))
+    t.cell(0, 1).text = "右侧说明"
+    t2 = doc.add_table(rows=1, cols=2)
+    t2.cell(0, 0).merge(t2.cell(0, 1)).paragraphs[0].add_run().add_picture(str(img))   # 合并单元格：同一图只算一次
+    doc.add_paragraph("结尾")
+    doc.save(d)
+    parsed = parse_file(d)
+    contents = [s.content for s in parsed.sections if s.content]
+    assert len(parsed.embedded_images) == 2
+    assert contents.index("页面说明") < contents.index("[[图片:1]]") < contents.index("[[图片:2]]") < contents.index("结尾")
+    assert "右侧说明" in parsed.full_text
+
+
+def test_Axure原型包_整幅设计稿送图片理解_切图碎片跳过(tmp_path):
+    import os
+    import zipfile
+
+    import io
+
+    from PIL import Image
+
+    z = tmp_path / "proto.zip"
+    big = io.BytesIO(); Image.frombytes("RGB", (900, 700), os.urandom(900 * 700 * 3)).save(big, format="PNG")
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("proto/data/document.js", '$axure.loadDocument({"sitemap":{"rootNodes":[{"pageName":"首页","url":"home.html"}]}});')
+        zf.writestr("proto/home.html", "<html><body><div>登录入口</div></body></html>")
+        zf.writestr("proto/images/home/u1.png", big.getvalue())          # 整幅设计稿
+        zf.writestr("proto/images/home/u2.png", _png_bytes((40, 40)))      # 按钮切图
+        zf.writestr("proto/images/home/u3.svg", "<svg/>")                  # 矢量切片
+    parsed = parse_file(z)
+    assert "Axure 原型" in parsed.full_text and "登录入口" in parsed.full_text
+    assert len(parsed.embedded_images) == 1 and "[[图片:1]]" in parsed.full_text
+
+
+def test_解析内容体检_源码样式判为疑似非需求文本():
+    from app.parsers.sanity import content_warning
+
+    css = "\n".join(f"#u{i} {{\n  position:absolute;\n  left:{i}px;\n  width:100px;\n}}" for i in range(200))
+    assert "代码 / 样式类行" in (content_warning(css) or "")
+    assert content_warning("# 登录需求\n密码错误 5 次锁定 30 分钟。" * 100) is None
+    assert content_warning("short {}") is None
+    moji = ("# 文件：Φ┐₧Φ╡óµîæµêÿ/data.js\nabcdefghijklmnopqrstuvwxyz 0123456789 " * 60)
+    assert "乱码" in (content_warning(moji) or "")

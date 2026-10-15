@@ -12,6 +12,13 @@ from app.tasks.store import TaskStore
 _MAX_SAMPLES = 80
 
 
+def _point_text(record, tp_id: str | None) -> str:
+    from app.tasks.points import find_point
+
+    found = find_point((record.analysis or {}).get("test_points") or [], tp_id) if tp_id else None
+    return (found[1].get("point") or "")[:160] if found else (tp_id or "")
+
+
 def collect_samples(
     store: TaskStore, project: str | None = None, limit: int = 30, plans=None, requirements=None
 ) -> list[dict]:
@@ -54,6 +61,14 @@ def collect_samples(
                 "来源": "离线终稿人工新增", "项目": task_project,
                 "新增用例": _case_brief(item.get("case", {})),
             })
+        # 测试点驳回：驳回类型 + 原因是对拆解 Agent 最直接的反馈
+        for entry in record.point_review_log:
+            if entry.get("action") == "reject" and (entry.get("comment") or entry.get("reject_types")):
+                samples.append({
+                    "来源": "测试点驳回", "项目": task_project, "测试点": _point_text(record, entry.get("tp_id")),
+                    "驳回类型": entry.get("reject_types") or [], "驳回原因": entry.get("comment", ""),
+                    "修改要求": entry.get("fix_request", ""),
+                })
         # 修订指令：用户反复提出的要求
         for rev in record.revisions:
             samples.append({

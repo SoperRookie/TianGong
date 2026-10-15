@@ -211,3 +211,12 @@ async def test_confirm_flow_records_template_usage(client, tmp_path):
     data = (await client.get("/api/v1/memories")).json()
     assert data["defaults"] == {"template_id": "builtin-default", "model": "deepseek-chat"}
     assert any(m["kind"] == "pref:template" for m in data["memories"])
+
+
+def test_修订指令按任务去重_同一任务重复提交不计数(store):
+    store.record_usage("revision", "补充兼容性用例", ref="t1")
+    store.record_usage("revision", "补充兼容性用例", ref="t1")
+    store.record_usage("revision", "补充兼容性用例。", ref="t1")
+    assert store.list() == []            # 同一任务里反复提只算 1 次
+    store.record_usage("revision", "补充兼容性用例", ref="t2")
+    assert len(store.list()) == 1        # 跨任务第 2 次才固化

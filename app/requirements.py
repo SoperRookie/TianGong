@@ -52,6 +52,9 @@ class RequirementStore:
                 if att.get("parsing"):
                     att.update(parsing=False, parsed=False, error="服务重启导致解析中断，请点「重新解析」")
                     dirty = True
+            if item.get("extracting"):
+                item["extracting"] = False
+                dirty = True
             if dirty:
                 self._persist(item)
 
@@ -142,6 +145,52 @@ class RequirementStore:
         self._persist(item)
         return item
 
+    # ---- 需求提取（分析前置的整理稿）----
+
+    def set_extracting(self, req_id: str, flag: bool, error: str | None = None) -> dict:
+        item = self._get_alive(req_id)
+        item["extracting"] = bool(flag)
+        item["extraction_error"] = error
+        self._persist(item)
+        return item
+
+    def set_extraction(self, req_id: str, data: dict, meta: dict) -> dict:
+        """写入 AI 提取的整理稿；上一版留档（最近 5 版）。整理稿换版后分析指纹变化，分析结果标过期。"""
+        item = self._get_alive(req_id)
+        if item.get("extraction"):
+            hist = item.setdefault("extraction_history", [])
+            hist.append(item["extraction"])
+            del hist[:-5]
+        item["extraction"] = {"text": data["text"], "meta": meta, "edited": None}
+        item["extracting"], item["extraction_error"] = False, None
+        self._persist(item)
+        return item
+
+    def edit_extraction(self, req_id: str, text: str, operator: str | None = None) -> dict:
+        """人工修改整理稿：原 AI 版本留在 meta 里，edited 记录改动者与时间。"""
+        item = self._get_alive(req_id)
+        if not item.get("extraction"):
+            raise RequirementError("还没有整理稿可修改，请先提取需求")
+        text = (text or "").strip()
+        if not text:
+            raise RequirementError("整理稿不能为空；不需要整理稿请点「删除整理稿」")
+        item["extraction"]["text"] = text
+        item["extraction"]["edited"] = {"by": operator, "at": _now()}
+        item["updated_by"], item["updated_at"] = operator, _now()
+        self._persist(item)
+        return item
+
+    def clear_extraction(self, req_id: str, operator: str | None = None) -> dict:
+        item = self._get_alive(req_id)
+        if item.get("extraction"):
+            hist = item.setdefault("extraction_history", [])
+            hist.append(item["extraction"])
+            del hist[:-5]
+        item["extraction"] = None
+        item["updated_by"], item["updated_at"] = operator, _now()
+        self._persist(item)
+        return item
+
     def set_analysis(self, req_id: str, analysis: dict, meta: dict) -> dict:
         """写入 AI 分析结果（不触碰原文）；待确认事项合并：已确认的保留，新问题追加。"""
         item = self._get_alive(req_id)
@@ -208,10 +257,10 @@ class RequirementStore:
         return bool(c) and _analysis_id(item) != c.get("analysis_id")
 
     def edit_analysis_item(self, req_id: str, key: str, action: str, index: int | None = None,
-                           text: str | None = None, operator: str | None = None) -> dict:
+                           text: str | None = None, operator: str | None = None, quote: str | None = None) -> dict:
         """人工修改分析结果（edit / delete / add）：条目文本改了就留痕（analysis_edits），
         修改后的结果是评测集标准答案与学习规则的素材；修改会让已确认的版本变为「旧版本」需重新确认。"""
-        from app.agents.analysis import ITEM_KEYS, as_item
+        from app.agents.analysis import ITEM_KEYS, as_item, normalize, quote_found
 
         item = self._get_alive(req_id)
         analysis = item.get("analysis")
@@ -225,7 +274,9 @@ class RequirementStore:
         if action == "add":
             if not text:
                 raise RequirementError("内容不能为空")
-            items.append({"text": text, "quote": "", "verified": None, "manual": True})
+            quote = (quote or "").strip()   # 采纳降级事项时带回原 quote，并按原文重新核验，不丢溯源
+            verified = quote_found(quote, normalize(design_brief({**item, "analysis": None, "questions": []}))) if quote else None
+            items.append({"text": text, "quote": quote, "verified": verified, "manual": True})
             log["after"] = text
         else:
             if index is None or not (0 <= index < len(items)):
@@ -249,9 +300,10 @@ class RequirementStore:
                 items[index] = {**before, "text": fix, "manual": True}
                 items[index].pop("review", None)
                 log.update(action="edit", after=fix, via="review")
-            elif action == "dismiss_review":  # 人工看过复核意见，认为原条目没问题
+            elif action == "dismiss_review":  # 人工看过复核意见，认为原条目没问题：留痕（谁、何时、驳回了什么意见）
+                review = before.get("review") or {}
                 items[index] = {k: v for k, v in before.items() if k != "review"}
-                log = None
+                log.update(review_verdict=review.get("verdict"), review_note=review.get("note"))
             else:
                 raise RequirementError(f"未知操作: {action}")
         analysis[key] = items
@@ -271,7 +323,7 @@ class RequirementStore:
             raise RequirementError("该事项不是从分析条目降级来的，无法采纳")
         if not item.get("analysis"):
             raise RequirementError("还没有分析结果")
-        self.edit_analysis_item(req_id, q["key"], "add", text=q["text"], operator=operator)
+        self.edit_analysis_item(req_id, q["key"], "add", text=q["text"], operator=operator, quote=q.get("quote"))
         q.update({"status": "confirmed", "answer": "确认成立，已采纳回分析结果", "by": operator, "at": _now()})
         self._refresh_status(item)
         self._persist(item)
@@ -434,20 +486,59 @@ def _analysis_id(item: dict) -> str | None:
     """标识某一版分析结果：优先 meta.id，旧记录退化为分析时间；人工修改过 n 次则带上 +n（修改即新版本）。"""
     meta = item.get("analysis_meta") or {}
     base = meta.get("id") or meta.get("at")
-    edits = len(item.get("analysis_edits") or [])
+    # 只数改了内容的操作：看过复核意见认为原条目没问题（dismiss_review）只留痕，不算新版本
+    edits = sum(1 for x in item.get("analysis_edits") or [] if x.get("action") in ("edit", "delete", "add"))
     return f"{base}+{edits}" if base and edits else base
 
 
-def design_brief(item: dict) -> str:
-    """发起测试设计时喂给拆解/生成 Agent 的需求文本：原文 + 人工补充 + 已确认结论（原文不改）。"""
-    from app.agents.analysis import item_text
-    from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
-
+def source_materials(item: dict) -> str:
+    """用户上传的全部原始材料：原文 + 每个已解析附件 / 链接的文本（需求提取的输入；没有整理稿时也是分析与设计的输入）。"""
     parts = [item["raw_text"].strip()]
     for att in item.get("attachments", []):
         if att.get("text"):
             label = f"链接：{att['source_url']}" if att.get("source_url") else f"文件：{att['filename']}"
             parts.append(f"【{label}】\n{att['text']}")
+    return "\n\n".join(p for p in parts if p)
+
+
+def attachment_fingerprint(item: dict) -> list[str]:
+    """已解析附件的 id@解析时间：追加 / 重新解析 / 删除附件都会变（整理稿与分析结果的过期判定依据）。"""
+    return sorted(f"{a['att_id']}@{a.get('parsed_at') or ''}" for a in item.get("attachments", []) if a.get("parsed"))
+
+
+def extraction_wanted(item: dict) -> bool:
+    """需要先提取再分析的需求：有已解析出文本的附件（材料散落在多份文件 / 原型 / 截图里）。纯手填原文的直接用原文。"""
+    return any(a.get("parsed") and a.get("text") for a in item.get("attachments", []))
+
+
+def extraction_current(item: dict) -> bool:
+    """整理稿是否基于当前材料：附件指纹一致才算；追加 / 重新解析 / 删除附件后整理稿过期，分析与设计退回原始材料。"""
+    ex = item.get("extraction") or {}
+    return bool(ex.get("text")) and (ex.get("meta") or {}).get("inputs") == attachment_fingerprint(item)
+
+
+def extraction_status(item: dict) -> str:
+    if item.get("extracting"):
+        return "running"
+    if not item.get("extraction"):
+        return "none"
+    return "current" if extraction_current(item) else "outdated"
+
+
+def design_brief(item: dict) -> str:
+    """发起测试设计 / AI 分析时喂给 Agent 的需求文本：整理稿（或原始材料）+ 人工补充 + 已确认结论（原文不改）。
+
+    有基于当前材料的整理稿时以整理稿代替原文与附件文本：噪音已剔除、重复已合并，分析的 quote 核验也对照整理稿。
+    """
+    from app.agents.analysis import item_text, review_pending
+    from app.agents.prompts import REQUIREMENT_ANALYSIS_LABELS
+
+    if extraction_current(item):
+        n = len([a for a in item.get("attachments", []) if a.get("parsed") and a.get("text")])
+        head = f"【需求整理稿】（AI 从原文与 {n} 份附件逐字摘录并按模块归整" + ("，人工修改过" if item["extraction"].get("edited") else "") + "）"
+        parts = [f"{head}\n{item['extraction']['text']}"]
+    else:
+        parts = [source_materials(item)]
     if item.get("description", "").strip():
         parts.append(f"【人工补充说明】\n{item['description'].strip()}")
     confirmed = [q for q in item.get("questions", []) if q["status"] == "confirmed" and q.get("answer")]
@@ -459,10 +550,14 @@ def design_brief(item: dict) -> str:
         parts.append("【未确认的建议级事项（按下列假设处理，并在用例 remark 中注明假设）】\n" + "\n".join(
             f"- 问：{q['question']}\n  假设：{q.get('assumption') or '按行业惯例处理'}" for q in assumed))
     analysis = item.get("analysis") or {}
-    keep = [k for k in ("rules", "boundaries", "state_changes", "permissions") if analysis.get(k)]
-    if keep:
-        parts.append("【AI 需求分析要点（已经人工过目）】\n" + "\n".join(
-            f"{REQUIREMENT_ANALYSIS_LABELS[k]}：" + "；".join(item_text(x) for x in analysis[k] if item_text(x)) for k in keep))
+    # 独立复核标了理解错 / 无依据、人还没处理的条目不进上下文：拆解 Agent 会把它当「人工过目」的事实
+    lines = []
+    for k in ("rules", "boundaries", "state_changes", "permissions"):
+        vals = [item_text(x) for x in analysis.get(k) or [] if item_text(x) and not review_pending(x)]
+        if vals:
+            lines.append(f"{REQUIREMENT_ANALYSIS_LABELS[k]}：" + "；".join(vals))
+    if lines:
+        parts.append("【AI 需求分析要点（已经人工过目）】\n" + "\n".join(lines))
     return "\n\n".join(p for p in parts if p)
 
 

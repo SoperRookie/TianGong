@@ -186,25 +186,37 @@ class TaskStore:
         logger.info("任务 {} 已被用户取消", task_id)
         return True
 
+    def _slots(self) -> "asyncio.Semaphore":
+        """任务并发闸门（按事件循环懒建）：超过 task_max_concurrency 的任务保持 queued 排队，而不是全部同时打向模型。"""
+        from app.config import get_settings
+
+        loop = asyncio.get_running_loop()
+        if getattr(self, "_sem_loop", None) is not loop:
+            self._sem = asyncio.Semaphore(max(1, get_settings().task_max_concurrency))
+            self._sem_loop = loop
+        return self._sem
+
     def submit(self, task_id: str, job: Callable[[], Awaitable[None]]) -> None:
-        """将任务放入后台执行；job 自身负责更新最终状态。"""
+        """将任务放入后台执行；job 自身负责更新最终状态。排队中（queued）的任务同样可取消。"""
         self.set_progress(task_id, status="queued")
+        sem = self._slots()
 
         async def _run() -> None:
-            self.set_progress(task_id, status="running")
-            logger.info("后台任务开始执行：{}", task_id)
-            try:
-                await job()
-                logger.info("后台任务完成：{}", task_id)
-            except Exception as e:  # 后台任务兜底：任何未捕获异常标记失败
-                logger.exception("后台任务失败：{}（{}）", task_id, e)
-                record = self.get(task_id)
-                if record is not None:
-                    record.status = "failed"
-                    record.error = str(e)
-                    record.progress = None
-                    self.save(record)
-            finally:
-                self._jobs.pop(task_id, None)
+            async with sem:
+                self.set_progress(task_id, status="running")
+                logger.info("后台任务开始执行：{}", task_id)
+                try:
+                    await job()
+                    logger.info("后台任务完成：{}", task_id)
+                except Exception as e:  # 后台任务兜底：任何未捕获异常标记失败
+                    logger.exception("后台任务失败：{}（{}）", task_id, e)
+                    record = self.get(task_id)
+                    if record is not None:
+                        record.status = "failed"
+                        record.error = str(e)
+                        record.progress = None
+                        self.save(record)
+                finally:
+                    self._jobs.pop(task_id, None)
 
         self._jobs[task_id] = asyncio.create_task(_run())

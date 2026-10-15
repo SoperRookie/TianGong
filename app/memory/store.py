@@ -156,14 +156,22 @@ class MemoryStore:
 
     # ---- 使用习惯沉淀（F-8-2 确定性部分）----
 
-    def record_usage(self, kind: str, value: str) -> None:
-        """记录一次模板/模型/修订指令的使用，达到阈值自动固化为偏好记忆。"""
+    def record_usage(self, kind: str, value: str, ref: str | None = None) -> None:
+        """记录一次模板/模型/修订指令的使用，达到阈值自动固化为偏好记忆。
+        ref（如任务 id）给出时按来源去重：同一任务里反复提同一条修订指令只算一次，「跨任务重复」才算习惯。"""
         value = (value or "").strip()
         if kind not in self._thresholds or not value:
             return
         key = _normalize(value) if kind == "revision" else value
         counter = self._usage.setdefault(kind, {})
-        counter[key] = counter.get(key, 0) + 1
+        if ref:
+            refs = self._usage.setdefault(f"{kind}_refs", {}).setdefault(key, [])
+            if ref in refs:
+                return
+            refs.append(ref)
+            counter[key] = len(refs)
+        else:
+            counter[key] = counter.get(key, 0) + 1
         count = counter[key]
         if count < self._thresholds[kind]:
             self._persist()
