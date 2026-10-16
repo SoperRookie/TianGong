@@ -70,6 +70,7 @@ MYSQL_PASSWORD=<强密码>
 # TZ=Asia/Shanghai
 # TIANGONG_TASK_MAX_CONCURRENCY=2    # 同时执行的测试设计任务数，超出的排队，默认 2
 # TIANGONG_REQUIREMENT_EXTRACT=true  # 附件解析完成后自动提取需求整理稿，默认开
+# TIANGONG_REQUIREMENT_EXTRACT_MODEL=gpt-6-astra  # 需求提取用的模型，空则用默认模型
 ```
 
 不用填 `TIANGONG_DB_URL` 和 `TIANGONG_TRUSTED_PROXIES`，compose 文件已按容器网络写死。`MYSQL_PASSWORD` 会被拼进连接串，密码含 `@ # / % ?` 等符号也可以，应用会自动编码；但 compose 自身对 `$` 有特殊解释，密码里避免用 `$`。
@@ -160,6 +161,8 @@ docker compose logs -f app
 ```
 
 表结构变更与数据迁移在应用启动时自动执行。回滚：切回旧标签重新 `up -d --build app`，必要时用备份恢复数据库。
+
+升级到 v2.1.4 后：低档模型自动提取的整理稿偏薄，需求页「重新提取」（选 gpt-6-astra / gpt-6-sol）后重新分析；默认模型改成低档时加 `TIANGONG_REQUIREMENT_EXTRACT_MODEL`；压缩包内中文文件名乱码的存量需求「重新解析」可补回 Axure 页面名与说明备注。
 
 升级到 v2.1.3 后：已有需求不会自动补整理稿，下次 AI 分析或发起测试设计前会先提取一次；不想要可关 `TIANGONG_REQUIREMENT_EXTRACT`。
 

@@ -2123,6 +2123,7 @@ async function init() {
     m.models.forEach(x => sel.add(new Option(x.name, x.name)));
   }
   $('barInfo').textContent = m.default_model ? '默认模型 ' + m.default_model : '尚未配置模型（系统设置 → 模型配置）';
+  _extractDefaultModel = m.requirement_extract_model || m.default_model || '';
   fetch('/health').then(r => r.json()).then(h => { if (h.version) $('appVer').textContent = `v${h.version} · `; }).catch(() => {});
   const t = await api('/api/v1/templates');
   $('templateSel').innerHTML = '';
@@ -5701,36 +5702,116 @@ function anSet(name, value) {
 const AN_EVIDENCE_KEYS = ['rules','boundaries','state_changes','permissions'];
 const anItem = x => (x && typeof x === 'object') ? {text: x.text || '', quote: x.quote || '', verified: x.verified, review: x.review || null, manual: !!x.manual} : {text: String(x ?? ''), quote: '', verified: null, review: null, manual: false};
 const anModelOpts = () => [...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('');
-let _exEditing = false;
+let _exEditing = false, _extractDefaultModel = '', _exFilter = 'all', _exEditItem = null, _exHist = null, _exHistSel = null, _exHistView = null;
+function _exItemsOf(r) { return ((r.extraction && r.extraction.modules) || []).flatMap(m => m.items.map(it => ({...it, module: m.name}))); }
 function reqExtractionHtml(r, canAI, canEdit) {
-  const ex = r.extraction, m = (ex && ex.meta) || {}, st = r.extraction_status;
-  const intro = `<div class="hint" style="margin-bottom:10px">需求提取是 AI 分析的前置步骤：从原文与<b>全部附件</b>（文档、原型导出页、截图的图片理解结果、链接）里<b>逐字摘录</b>需求内容，剔除导航 / 框架 / 样式等噪音，同一事实多处出现只留一条并标来源，按模块归整成整理稿。附件解析完成后自动提取一次；<b>AI 需求分析与测试设计以整理稿为准</b>，原始材料仍在「原文与附件」页可查。每条摘录都程序对照过材料，没逐字找到的加 ⚠ 请人工核对；整理稿可直接修改，改后需重新分析。</div>`;
+  const ex = r.extraction, m = (ex && ex.meta) || {}, st = r.extraction_status, gap = m.gap || null;
+  const intro = `<div class="hint" style="margin-bottom:10px">需求提取是 AI 分析的前置步骤：从原文与<b>全部附件</b>（文档、原型导出页、截图的图片理解结果、链接）里<b>逐字摘录</b>需求内容。流程：按「文件 › 页面」分层提取 → 逐条对照材料核验（没逐字找到的标 ⚠）→ 程序找出没进整理稿的需求句送回模型<b>自动补漏</b>（标〔补漏〕）→ 人工逐条审核 → 版本存档。<b>AI 需求分析与测试设计以整理稿为准</b>，原始材料仍在「原文与附件」页可查；整理稿改动后需重新分析。</div>`;
+  const cov = gap && gap.after && gap.after.lines ? `需求句覆盖 <b>${Math.round(gap.after.covered*100/gap.after.lines)}%</b>（${gap.after.covered}/${gap.after.lines}${gap.added?`，补漏 +${gap.added} 条`:''}${gap.before&&gap.before.lines&&gap.added?`，补漏前 ${Math.round(gap.before.covered*100/gap.before.lines)}%`:''}）` : '';
   const toolbar = `<div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap">
-      ${canAI?`<select id="rqExtractModel" style="width:150px" title="提取模型">${anModelOpts()}</select>
+      ${canAI?`<select id="rqExtractModel" style="width:150px" title="提取模型（默认：${esc(_extractDefaultModel||'未配置')}。提取是逐字摘录、输出量大，低档模型会压成摘要，建议用 GPT-6 旗舰或中档）">${anModelOpts().replace('>默认模型<', `>默认（${esc(_extractDefaultModel||'未配置')}）<`)}</select>
       <button class="btn sm" id="rqExtractBtn" onclick="extractReq()" ${st==='running'?'disabled':''}>${st==='running'?'<span class="spin"></span> 提取中':ex?'重新提取':'提取需求'}</button>`:''}
-      ${ex?`<span class="hint">${esc(m.model||'')} · ${m.auto?'自动':esc(m.by||'')} · ${esc(fmtTime(m.at))}${m.chunks>1?` · 分 ${m.chunks} 片提取后合并`:''} · 材料 ${m.source_chars||0} 字 → 整理稿 ${m.chars||0} 字 · ${m.modules||0} 个模块 ${m.checked||0} 条${m.unverified?`，<b style="color:var(--warn)">${m.unverified} 条未在材料中逐字找到</b>`:'，全部逐字核验通过'}${ex.edited?` · <b>人工修改</b> ${esc(ex.edited.by||'')} ${relTime(ex.edited.at)}`:''}</span>`:''}
-      ${canEdit&&ex&&st!=='running'?`<span style="margin-left:auto;display:flex;gap:6px">${_exEditing?'':`<button class="btn ghost sm" onclick="_exEditing=true;renderRequirementDetail()">修改整理稿</button>`}<button class="btn ghost sm danger" onclick="deleteReqExtraction()" title="删除后分析与设计退回使用原始材料">删除整理稿</button></span>`:''}</div>`;
+      ${ex?`<span class="hint">${esc(m.model||'')} · ${m.auto?'自动':esc(m.by||'')} · ${esc(fmtTime(m.at))}${m.chunks>1?` · 分 ${m.chunks} 份提取后合并`:''} · 材料 ${m.source_chars||0} 字 → 整理稿 ${m.chars||0} 字 · ${m.modules||0} 个模块 ${m.checked||0} 条${m.unverified?`，<b style="color:var(--warn)">${m.unverified} 条未逐字找到</b>`:'，全部逐字核验通过'}${cov?' · '+cov:''}${ex.edited?` · <b>整篇改写</b> ${esc(ex.edited.by||'')} ${relTime(ex.edited.at)}`:''}${m.restored_from?` · 从历史版本恢复`:''}${ex.reviewed?` · <span class="st approved">已审核</span> ${esc(ex.reviewed.by||'')} ${relTime(ex.reviewed.at)}`:''}</span>`:''}
+      ${ex&&st!=='running'?`<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
+        ${r.extraction_history_count?`<button class="btn ghost sm" onclick="exHistoryToggle()">${_exHist?'收起历史':`历史版本（${r.extraction_history_count}）`}</button>`:''}
+        ${canEdit&&ex.modules&&!ex.reviewed?`<button class="btn sm" onclick="finishReqExtractionReview()" title="⚠ 条目都处理过后才能标已审核">完成审核</button>`:''}
+        ${canEdit&&!_exEditing?`<button class="btn ghost sm" onclick="_exEditing=true;renderRequirementDetail()" title="整篇改写后逐条结构失效，不能再逐条审核">整篇改写</button>`:''}
+        ${canEdit?`<button class="btn ghost sm danger" onclick="deleteReqExtraction()" title="删除后分析与设计退回使用原始材料">删除整理稿</button>`:''}</span>`:''}</div>`;
   let bar = '';
-  if (st === 'running') bar = `<div class="hint" style="margin-bottom:10px"><span class="spin"></span> 正在从原文与附件提取需求内容，可离开页面，完成后自动刷新</div>`;
+  if (st === 'running') bar = `<div class="hint" style="margin-bottom:10px"><span class="spin"></span> 正在从原文与附件提取需求内容（分层提取 → 核验 → 自动补漏），可离开页面，完成后自动刷新</div>`;
   else if (r.extraction_error) bar = `<div class="hint" style="margin-bottom:10px;color:var(--danger)">上次提取失败：${esc(r.extraction_error)}</div>`;
   if (st === 'outdated') bar += `<div class="hint" style="margin-bottom:10px;color:var(--warn)">⚠ 提取之后附件有追加或重新解析，整理稿基于旧材料：AI 分析与测试设计会先重新提取（或点「重新提取」）</div>`;
   else if (st === 'none' && r.extraction_wanted) bar += `<div class="hint" style="margin-bottom:10px;color:var(--warn)">有已解析的附件但还没有整理稿${r.content_warnings&&r.content_warnings.length?'（附件疑似非需求文本，自动提取已跳过）':''}：点「提取需求」，或直接 AI 分析时会先自动提取</div>`;
   else if (st === 'none') bar += `<div class="hint" style="margin-bottom:10px">没有附件的需求直接用原文分析，不需要整理稿；原文很长或夹杂无关内容时也可以提取</div>`;
   if (m.dropped && m.dropped.length) bar += `<div class="hint" style="margin-bottom:10px">已剔除：${m.dropped.map(esc).join('、')}</div>`;
   if (!ex) return intro + toolbar + bar + '<div class="empty">还没有整理稿</div>';
-  const body = _exEditing && canEdit
-    ? `<textarea id="rqExtractEdit" rows="24" style="width:100%;box-sizing:border-box;font:inherit;line-height:1.6">${esc(ex.text)}</textarea>
-       <div class="toolbar" style="margin-top:6px"><button class="btn sm" onclick="saveReqExtraction()">保存整理稿</button><button class="btn ghost sm" onclick="_exEditing=false;renderRequirementDetail()">取消</button><span class="hint">保存后已有分析结果会标为基于旧输入，需重新分析</span></div>`
-    : `<pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:560px;overflow:auto;font:inherit;line-height:1.6">${esc(ex.text).replace(/^(## .+)$/gm, '<b>$1</b>').replace(/^- ⚠ (.+)$/gm, '- <span style="color:var(--warn)" title="未在材料中逐字找到，请核对">⚠</span> $1')}</pre>`;
-  return intro + toolbar + bar + body;
+  if (_exHist) bar += exHistoryHtml(r, canEdit);
+  if (_exEditing && canEdit) {
+    return intro + toolbar + bar + `<textarea id="rqExtractEdit" rows="24" style="width:100%;box-sizing:border-box;font:inherit;line-height:1.6">${esc(ex.text)}</textarea>
+       <div class="toolbar" style="margin-top:6px"><button class="btn sm" onclick="saveReqExtraction()">保存整理稿</button><button class="btn ghost sm" onclick="_exEditing=false;renderRequirementDetail()">取消</button><span class="hint">整篇改写后逐条结构失效；保存后已有分析结果会标为基于旧输入，需重新分析</span></div>`;
+  }
+  if (!ex.modules) {
+    return intro + toolbar + bar + `<div class="hint" style="margin-bottom:6px">这份整理稿没有逐条结构（整篇改写过或旧版本提取），只能整篇查看 / 改写；重新提取后可逐条审核</div>
+      <pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:560px;overflow:auto;font:inherit;line-height:1.6">${esc(ex.text).replace(/^(## .+)$/gm, '<b>$1</b>').replace(/^- ⚠ (.+)$/gm, '- <span style="color:var(--warn)" title="未在材料中逐字找到，请核对">⚠</span> $1')}</pre>`;
+  }
+  const all = _exItemsOf(r);
+  const nUnv = all.filter(it => it.verified === false).length, nPend = all.filter(it => it.verified === false && !it.review).length, nGap = all.filter(it => it.gap).length, nRev = all.filter(it => it.review).length;
+  const filt = `<div class="toolbar" style="margin-bottom:8px;flex-wrap:wrap">
+      ${[['all',`全部 ${all.length}`],['unverified',`⚠ 待核对 ${nPend}`],['gap',`补漏 ${nGap}`],['reviewed',`已处理 ${nRev}`]].map(([k,t])=>`<button class="btn ghost sm ${_exFilter===k?'on':''}" style="${_exFilter===k?'font-weight:600':''}" onclick="_exFilter='${k}';renderRequirementDetail()">${t}</button>`).join('')}
+      <span class="hint">⚠ = 没在材料里逐字找到（多半是模型改了写法），请对照原文核对通过、改成原句或删除；〔补漏〕= 程序对照后由模型补进的原句</span></div>`;
+  const keep = it => _exFilter==='all' || (_exFilter==='unverified' && it.verified===false && !it.review) || (_exFilter==='gap' && it.gap) || (_exFilter==='reviewed' && it.review);
+  const rows = ex.modules.map(mod => {
+    const items = mod.items.filter(keep);
+    if (!items.length) return '';
+    return `<div style="margin:10px 0 4px"><b>${esc(mod.name)}</b> <span class="hint">${mod.items.length} 条</span></div>` + items.map(it => {
+      const editing = _exEditItem === it.id;
+      const badge = `${it.verified===false?'<span style="color:var(--warn)" title="未在材料中逐字找到">⚠</span> ':''}${it.gap?'<span class="st candidate" title="自动补漏进来的原句">补漏</span> ':''}${it.review?`<span class="st approved" title="${esc(it.review.by||'')} ${esc(fmtTime(it.review.at))}">${it.review.status==='ok'?'已核对':'已修改'}</span> `:''}`;
+      const src = (it.sources||[]).length ? `<span class="hint" style="margin-left:6px">〔${esc((it.sources||[]).join('；'))}〕</span>` : '';
+      const ops = canEdit && !editing ? `<span style="margin-left:auto;display:flex;gap:2px;flex-shrink:0">
+          ${it.verified===false&&!it.review?`<button class="ibtn" title="核对通过：原文确有此意" onclick="reviewExItem('${it.id}','ok')">${IC.check||'✓'}</button>`:''}
+          <button class="ibtn" title="修改（改成材料里的原句会重新核验）" onclick="_exEditItem='${it.id}';renderRequirementDetail()">${IC.edit}</button>
+          <button class="ibtn" title="删除此条" onclick="reviewExItem('${it.id}','delete')">${IC.x}</button></span>` : '';
+      const body = editing ? `<div style="flex:1"><textarea id="exItemEdit" rows="2" style="width:100%;box-sizing:border-box;font:inherit">${esc(it.text)}</textarea>
+          <div class="toolbar" style="margin-top:4px"><button class="btn sm" onclick="reviewExItem('${it.id}','edit',$('exItemEdit').value)">保存</button><button class="btn ghost sm" onclick="_exEditItem=null;renderRequirementDetail()">取消</button></div></div>`
+        : `<span style="flex:1;line-height:1.6">${badge}${esc(it.text)}${src}</span>`;
+      return `<div style="display:flex;gap:6px;align-items:flex-start;padding:4px 6px;border-bottom:1px solid var(--line)">${body}${ops}</div>`;
+    }).join('');
+  }).join('');
+  return intro + toolbar + bar + filt + `<div style="max-height:600px;overflow:auto;background:var(--line-2);padding:4px 10px;border-radius:8px">${rows || '<div class="empty">没有符合筛选的条目</div>'}</div>` +
+    (ex.dropped && ex.dropped.length ? `<div class="hint" style="margin-top:6px">（已剔除：${ex.dropped.map(esc).join('、')}）</div>` : '');
+}
+function exHistoryHtml(r, canEdit) {
+  const h = _exHist;
+  if (!h || !h.history.length) return `<div class="hint" style="margin-bottom:10px">没有历史版本</div>`;
+  const brief = v => `${esc(fmtTime(v.at))} · ${esc(v.model||'')} · ${v.checked||0} 条${v.unverified?` · ⚠ ${v.unverified}`:''}${v.edited?' · 整篇改写':''}${v.reviewed?' · 已审核':''}${v.restored_from?' · 恢复版':''}${v.rev?` · 改动 ${v.rev} 次`:''}`;
+  let out = `<div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:10px"><div class="toolbar" style="flex-wrap:wrap">
+      <span><b>当前版</b> ${h.current?brief(h.current):''}</span>
+      <select style="width:360px" onchange="exHistoryView(this.value)"><option value="">选择历史版本查看差异…</option>${h.history.map(v=>`<option value="${v.index}" ${_exHistSel===v.index?'selected':''}>历史 ${v.index+1}：${brief(v)}</option>`).join('')}</select>
+      ${_exHistView&&canEdit?`<button class="btn ghost sm" onclick="restoreReqExtraction(${_exHistView.index})">恢复此版本为当前</button>`:''}</div>`;
+  if (_exHistView) {
+    const d = _exHistView.diff || {added:[],removed:[]};
+    out += `<div class="hint" style="margin:6px 0">与当前版相比：当前多出 <b style="color:var(--ok,#1a7f37)">${d.added.length}</b> 行，历史多出 <b style="color:var(--danger)">${d.removed.length}</b> 行</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;max-height:320px;overflow:auto">
+        <div><div class="hint">当前有、历史没有</div><pre style="white-space:pre-wrap;font:inherit;line-height:1.5;background:#eefbf0;padding:6px;border-radius:6px">${d.added.map(l=>'+ '+esc(l)).join('\n')||'（无）'}</pre></div>
+        <div><div class="hint">历史有、当前没有</div><pre style="white-space:pre-wrap;font:inherit;line-height:1.5;background:#fdeeee;padding:6px;border-radius:6px">${d.removed.map(l=>'- '+esc(l)).join('\n')||'（无）'}</pre></div></div>
+      <details style="margin-top:6px"><summary class="hint">历史版本全文</summary><pre style="white-space:pre-wrap;font:inherit;line-height:1.6;max-height:300px;overflow:auto">${esc(_exHistView.text)}</pre></details>`;
+  }
+  return out + '</div>';
+}
+async function exHistoryToggle() {
+  if (_exHist) { _exHist = _exHistSel = _exHistView = null; renderRequirementDetail(); return; }
+  try { _exHist = await api(`/api/v1/requirements/${curReq}/extraction/history`); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function exHistoryView(idx) {
+  if (idx === '') { _exHistSel = _exHistView = null; renderRequirementDetail(); return; }
+  try { _exHistSel = Number(idx); _exHistView = await api(`/api/v1/requirements/${curReq}/extraction/history/${idx}`); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function restoreReqExtraction(idx) {
+  if (!await uiConfirm('恢复历史版本？', '当前整理稿会进入历史，恢复的版本成为当前版；已有分析结果会标为基于旧输入。', false)) return;
+  try { await jpost(`/api/v1/requirements/${curReq}/extraction/restore`, {index: idx}); toast('已恢复', 'ok'); _exHist = _exHistSel = _exHistView = null; renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function reviewExItem(id, action, text) {
+  if (action === 'delete' && !await uiConfirm('删除这条摘录？', '删除后整理稿正文同步更新，已有分析结果会标为基于旧输入。', true)) return;
+  try {
+    const r = await jpost(`/api/v1/requirements/${curReq}/extraction/items`, {item_id: id, action, text: text ?? null});
+    if (action === 'edit') { const it = _exItemsOf(r).find(x => x.id === id); toast(it && it.verified === false ? '已修改，但改后的文字仍没在材料里逐字找到' : '已修改，逐字核验通过', it && it.verified === false ? 'warn' : 'ok'); }
+    _exEditItem = null; renderRequirementDetail();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function finishReqExtractionReview() {
+  try { await jpost(`/api/v1/requirements/${curReq}/extraction/review-done`, {}); toast('整理稿已标记为已审核', 'ok'); renderRequirementDetail(); }
+  catch (e) { toast(e.message, 'err'); }
 }
 async function extractReq() {
   const btn = $('rqExtractBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 提取中';
   try {
     const r = await withContentWarning(ignore => jpost(`/api/v1/requirements/${curReq}/extract`, {model: ($('rqExtractModel')||{}).value || null, ignore_warnings: ignore}));
-    const m = (r.extraction && r.extraction.meta) || {};
-    toast(`提取完成：${m.modules||0} 个模块 ${m.checked||0} 条${m.unverified?`，${m.unverified} 条未逐字找到请核对`:''}`, m.unverified ? 'warn' : 'ok');
-    _exEditing = false; renderRequirementDetail();
+    const m = (r.extraction && r.extraction.meta) || {}, g = m.gap || {};
+    toast(`提取完成：${m.modules||0} 个模块 ${m.checked||0} 条${g.added?`，补漏 +${g.added} 条`:''}${m.unverified?`，${m.unverified} 条未逐字找到请核对`:''}`, m.unverified ? 'warn' : 'ok');
+    _exEditing = false; _exHist = _exHistSel = _exHistView = null; _exFilter = 'all'; renderRequirementDetail();
   } catch (e) { if (e.message !== '已取消') toast(e.message, 'err'); renderRequirementDetail(); }
 }
 async function saveReqExtraction() {
@@ -5739,7 +5820,7 @@ async function saveReqExtraction() {
 }
 async function deleteReqExtraction() {
   if (!await uiConfirm('删除整理稿？', 'AI 分析与测试设计将退回使用原始材料（原文 + 附件解析文本）；开着自动提取时下次分析会再提一次。', true)) return;
-  try { await api(`/api/v1/requirements/${curReq}/extraction`, {method:'DELETE'}); toast('整理稿已删除', 'ok'); _exEditing = false; renderRequirementDetail(); }
+  try { await api(`/api/v1/requirements/${curReq}/extraction`, {method:'DELETE'}); toast('整理稿已删除', 'ok'); _exEditing = false; _exHist = null; renderRequirementDetail(); }
   catch (e) { toast(e.message, 'err'); }
 }
 function reqAnalysisHtml(r, labels, canAI) {
