@@ -9,11 +9,14 @@
 
 from __future__ import annotations
 
+import json as _json
+
 import re
 
 import uuid
 from datetime import datetime, timezone
 
+EXTRACTION_HISTORY = 10   # 整理稿历史版本数（页面可查看 / 对比 / 恢复）
 REQ_STATUSES = {
     "draft": "草稿",              # 已录入，尚未 AI 分析
     "analyzed": "已分析",         # AI 分析完成，无待确认事项
@@ -154,38 +157,122 @@ class RequirementStore:
         self._persist(item)
         return item
 
-    def set_extraction(self, req_id: str, data: dict, meta: dict) -> dict:
-        """写入 AI 提取的整理稿；上一版留档（最近 5 版）。整理稿换版后分析指纹变化，分析结果标过期。"""
-        item = self._get_alive(req_id)
+    def _archive_extraction(self, item: dict) -> None:
+        """当前整理稿进历史（最近 EXTRACTION_HISTORY 版），供版本页面查看 / 对比 / 恢复。"""
         if item.get("extraction"):
             hist = item.setdefault("extraction_history", [])
             hist.append(item["extraction"])
-            del hist[:-5]
-        item["extraction"] = {"text": data["text"], "meta": meta, "edited": None}
+            del hist[:-EXTRACTION_HISTORY]
+
+    def set_extraction(self, req_id: str, data: dict, meta: dict) -> dict:
+        """写入 AI 提取的整理稿（正文 + 逐条结构）；上一版留档。整理稿换版后分析指纹变化，分析结果标过期。"""
+        item = self._get_alive(req_id)
+        self._archive_extraction(item)
+        meta = {**meta, "rev": 0}
+        item["extraction"] = {"text": data["text"], "meta": meta, "edited": None,
+                              "modules": data.get("modules"), "dropped": data.get("dropped") or [], "reviewed": None}
         item["extracting"], item["extraction_error"] = False, None
         self._persist(item)
         return item
 
     def edit_extraction(self, req_id: str, text: str, operator: str | None = None) -> dict:
-        """人工修改整理稿：原 AI 版本留在 meta 里，edited 记录改动者与时间。"""
+        """整篇人工改写整理稿：逐条结构失效（modules 清空），edited 记录改动者与时间。"""
         item = self._get_alive(req_id)
         if not item.get("extraction"):
             raise RequirementError("还没有整理稿可修改，请先提取需求")
         text = (text or "").strip()
         if not text:
             raise RequirementError("整理稿不能为空；不需要整理稿请点「删除整理稿」")
-        item["extraction"]["text"] = text
-        item["extraction"]["edited"] = {"by": operator, "at": _now()}
+        ex = item["extraction"]
+        ex["text"] = text
+        ex["modules"], ex["reviewed"] = None, None
+        ex["edited"] = {"by": operator, "at": _now()}
+        ex["meta"]["rev"] = int(ex["meta"].get("rev") or 0) + 1
+        item["updated_by"], item["updated_at"] = operator, _now()
+        self._persist(item)
+        return item
+
+    def review_extraction_item(self, req_id: str, item_id: str, action: str, text: str | None = None,
+                               verified: bool | None = None, operator: str | None = None) -> dict:
+        """逐条审核：ok 核对通过 / edit 修改文本（调用方传入重新核验结果）/ delete 删除。改动后整理稿正文按结构重生成，
+        rev +1（分析指纹变化），已完成的审核标记作废。"""
+        from app.agents.extraction import extraction_markdown
+
+        item = self._get_alive(req_id)
+        ex = item.get("extraction") or {}
+        if not ex.get("modules"):
+            raise RequirementError("这份整理稿没有逐条结构（整篇改写过或旧版本提取），不能逐条审核；可重新提取")
+        hit = None
+        for mod in ex["modules"]:
+            for it in mod["items"]:
+                if it.get("id") == item_id:
+                    hit = (mod, it)
+        if hit is None:
+            raise RequirementError("条目不存在，可能已被删除")
+        mod, it = hit
+        if action == "ok":
+            it["review"] = {"status": "ok", "by": operator, "at": _now()}
+        elif action == "edit":
+            text = (text or "").strip()
+            if not text:
+                raise RequirementError("条目内容不能为空；不需要请删除")
+            it["text"] = text
+            if verified is not None:
+                it["verified"] = verified
+            it["review"] = {"status": "edited", "by": operator, "at": _now()}
+        elif action == "delete":
+            mod["items"].remove(it)
+            if not mod["items"]:
+                ex["modules"].remove(mod)
+        else:
+            raise RequirementError(f"未知操作：{action}")
+        ex["text"] = extraction_markdown(ex["modules"], ex.get("dropped"))
+        ex["meta"]["rev"] = int(ex["meta"].get("rev") or 0) + 1
+        ex["meta"]["checked"] = sum(len(m["items"]) for m in ex["modules"])
+        ex["meta"]["unverified"] = sum(1 for m in ex["modules"] for x in m["items"] if x.get("verified") is False)
+        ex["meta"]["verified"] = ex["meta"]["checked"] - ex["meta"]["unverified"]
+        ex["meta"]["modules"] = len(ex["modules"])
+        ex["meta"]["chars"] = len(ex["text"])
+        ex["reviewed"] = None
+        item["updated_by"], item["updated_at"] = operator, _now()
+        self._persist(item)
+        return item
+
+    def finish_extraction_review(self, req_id: str, operator: str | None = None) -> dict:
+        """标记整理稿已审核：⚠ 条目都得有核对结论（通过 / 修改 / 删除）。"""
+        item = self._get_alive(req_id)
+        ex = item.get("extraction") or {}
+        if not ex:
+            raise RequirementError("还没有整理稿")
+        pending = sum(1 for m in ex.get("modules") or [] for x in m["items"] if x.get("verified") is False and not x.get("review"))
+        if pending:
+            raise RequirementError(f"还有 {pending} 条未逐字找到的条目没有核对，请先逐条处理（核对通过 / 修改 / 删除）")
+        ex["reviewed"] = {"by": operator, "at": _now(), "rev": ex["meta"].get("rev", 0)}
+        item["updated_by"], item["updated_at"] = operator, _now()
+        self._persist(item)
+        return item
+
+    def restore_extraction(self, req_id: str, index: int, operator: str | None = None) -> dict:
+        """把历史版本恢复为当前整理稿：当前版本进历史，恢复的版本记 restored_from 并换新 meta.id（分析指纹变化）。"""
+        item = self._get_alive(req_id)
+        hist = item.get("extraction_history") or []
+        if index < 0 or index >= len(hist):
+            raise RequirementError("历史版本不存在")
+        old = hist[index]
+        self._archive_extraction(item)
+        restored = _json.loads(_json.dumps(old))
+        restored["meta"] = {**restored.get("meta", {}), "id": uuid.uuid4().hex[:8],
+                            "restored_from": old.get("meta", {}).get("id"), "restored_by": operator, "restored_at": _now(),
+                            "rev": int(restored.get("meta", {}).get("rev") or 0) + 1}
+        restored["reviewed"] = None
+        item["extraction"] = restored
         item["updated_by"], item["updated_at"] = operator, _now()
         self._persist(item)
         return item
 
     def clear_extraction(self, req_id: str, operator: str | None = None) -> dict:
         item = self._get_alive(req_id)
-        if item.get("extraction"):
-            hist = item.setdefault("extraction_history", [])
-            hist.append(item["extraction"])
-            del hist[:-5]
+        self._archive_extraction(item)
         item["extraction"] = None
         item["updated_by"], item["updated_at"] = operator, _now()
         self._persist(item)

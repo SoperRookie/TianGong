@@ -32,6 +32,24 @@ def _safe_member(name: str) -> bool:
     return not (p.is_absolute() or ".." in p.parts)
 
 
+def zip_member_name(info: zipfile.ZipInfo) -> str:
+    """zip 条目的真实文件名。没有 UTF-8 标志位（0x800）的条目 Python 一律按 cp437 解码，Windows 资源管理器 / Axure /
+    WinRAR 打出来的中文名就成了「µ┤╗σè¿」这类乱码；后果不只是难看：Axure 站点地图里的页面 url 对不上包内文件，页面名退回
+    乱码、每页 data.js 的说明备注全部找不到。按原字节依次试 utf-8、gb18030 还原，都不行才保留原样。"""
+    if info.flag_bits & 0x800:
+        return info.filename
+    try:
+        raw = info.filename.encode("cp437")
+    except UnicodeEncodeError:
+        return info.filename
+    for enc in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return info.filename
+
+
 def _extract(path: Path, dest: Path) -> list[Path]:
     """解压到 dest，返回成员文件列表（按名称排序）；超限 / 危险路径直接拒绝。"""
     suffix = path.suffix.lower()
@@ -40,12 +58,18 @@ def _extract(path: Path, dest: Path) -> list[Path]:
     out: list[Path] = []
     if suffix == ".zip":
         with zipfile.ZipFile(path) as zf:
-            infos = [i for i in zf.infolist() if not i.is_dir() and _safe_member(i.filename)]
-            for i in infos:
+            infos = [(i, zip_member_name(i)) for i in zf.infolist() if not i.is_dir()]
+            for i, name in infos:
+                if not _safe_member(name):
+                    continue
                 total += i.file_size
                 if total > limit:
                     raise UnsafeFileError(f"{path.name} 解压后超过 {limit // (1024 * 1024)}MB 上限")
-                out.append(Path(zf.extract(i, dest)))
+                target = dest / name   # 不用 zf.extract：它会按乱码名落盘
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(i) as src, target.open("wb") as w:
+                    shutil.copyfileobj(src, w, 1024 * 1024)
+                out.append(target)
     elif suffix in (".tar", ".gz", ".tgz", ".bz2", ".xz", ".tbz2", ".txz"):
         try:
             tf = tarfile.open(path)

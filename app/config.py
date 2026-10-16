@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     # 需求提取（分析前置）：附件解析完成后自动从全部材料逐字摘录需求内容归整为整理稿，AI 分析与测试设计以整理稿为准；
     # 关掉则只能在需求页手动提取，没有整理稿时直接用原始材料
     requirement_extract: bool = True
+    # 需求提取用的模型：空则用默认模型。提取是逐字摘录、输出量大，低档模型会压成摘要（gpt-5.6-sol 的输出只有 gpt-6-astra 的三分之一）；
+    # 默认模型为省钱改成低档时，这里单独钉住提取模型（手动提取页面选了模型时以页面为准）
+    requirement_extract_model: str = ""
     analysis_eval_auto_sample: bool = True
 
     # 历史用例复用提示阈值（需求二十九）：向量相似度达到该值提示「高度相关，可复用」
