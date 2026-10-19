@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>天工前端交互原型 v2.2</title>
+<style>
+:root{--primary:#2f54c9;--primary-50:#eef2fd;--primary-100:#dde6fb;--ok:#158249;--ok-bg:#e5f6ec;--danger:#c2372e;--danger-bg:#fdecea;--warn:#b26a08;--warn-bg:#fdf3e2;
+--ink:#1c2430;--ink-2:#5f6b7a;--ink-3:#7a8594;--line:#e4e8ee;--line-2:#eef1f5;--bg:#f3f5f8;--card:#fff;--well:#f8fafc;--p0:#29418f;--p1:#4b69c6;--p2:#7d97e0;--p3:#a2b4e6}
+*{box-sizing:border-box}body{margin:0;font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink)}
+button{font:inherit;cursor:pointer}
+/* 原型切换条 */
+.proto{position:fixed;top:0;left:0;right:0;height:36px;background:#0b1226;color:#cbd5e1;display:flex;align-items:center;gap:6px;padding:0 14px;font-size:12.5px;z-index:99}
+.proto b{color:#7cf5c2;margin-right:8px}.proto button{background:transparent;border:1px solid #2b3d6b;color:#cbd5e1;border-radius:6px;padding:3px 10px}.proto button.on{background:#2f54c9;border-color:#2f54c9;color:#fff}
+.proto .tip{margin-left:auto;color:#7484a0}
+/* 壳 */
+.shell{display:flex;min-height:100vh;padding-top:36px}
+.sidebar{width:200px;flex:none;background:#151d2e;color:#9aa6bd;display:flex;flex-direction:column;position:sticky;top:36px;height:calc(100vh - 36px)}
+.sidebar.mini{width:56px}.sidebar.mini .txt,.sidebar.mini .pj b,.sidebar.mini .pj .sub{display:none}
+.pj{margin:12px 10px;background:#1e293e;border-radius:8px;padding:8px 10px;color:#fff;display:flex;align-items:center;gap:8px;cursor:pointer}
+.pj .ic{width:24px;height:24px;border-radius:6px;background:linear-gradient(135deg,#4c6fe8,#7a4ce8);display:grid;place-items:center;font-size:11px;flex:none}
+.pj b{font-size:13px;display:block;line-height:1.2}.pj .sub{font-size:11px;color:#7484a0}
+.menu{display:flex;flex-direction:column;gap:2px;padding:4px 10px}
+.menu a{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;color:#9aa6bd;text-decoration:none;font-size:13.5px}
+.menu a .ic{width:18px;height:18px;border-radius:5px;background:#2a3550;flex:none}
+.menu a.on{background:linear-gradient(90deg,#2f54c9,#4a48bd);color:#fff;font-weight:600}.menu a.on .ic{background:rgba(255,255,255,.25)}
+.menu a .n{margin-left:auto;background:#c2372e;color:#fff;font-size:11px;border-radius:9px;padding:0 6px}
+.s-foot{margin-top:auto;padding:12px 16px;font-size:11.5px;color:#5d6b84;border-top:1px solid #222c42}
+.content{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{position:sticky;top:36px;z-index:40;height:48px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 20px;gap:12px}
+.crumb{font-size:14px;color:var(--ink-3)}.crumb b{color:var(--ink);font-weight:600}.crumb span{margin:0 6px}
+.search{margin-left:auto;border:1px solid var(--line);background:var(--well);border-radius:8px;padding:5px 10px;width:260px;color:var(--ink-3);font-size:13px;display:flex;justify-content:space-between}
+.search kbd{font-size:11px;background:#fff;border:1px solid var(--line);border-radius:4px;padding:0 5px}
+.bell{position:relative;width:32px;height:32px;border-radius:8px;display:grid;place-items:center;border:1px solid var(--line);background:#fff}
+.bell i{position:absolute;top:-5px;right:-5px;background:var(--danger);color:#fff;font-style:normal;font-size:10.5px;border-radius:8px;padding:0 5px}
+.avatar{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#4c6fe8,#7a4ce8);color:#fff;display:grid;place-items:center;font-size:12px;font-weight:600}
+.pagehead{background:#fff;border-bottom:1px solid var(--line);padding:14px 24px 0}
+.ph-row{display:flex;align-items:center;gap:12px}
+.ph-row h1{font-size:18px;margin:0;font-weight:650}
+.ph-row .meta{color:var(--ink-3);font-size:13px}
+.ph-row .acts{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:inline-block;padding:1px 8px;border-radius:6px;font-size:12px;font-weight:600}
+.chip.warn{background:var(--warn-bg);color:var(--warn)}.chip.ok{background:var(--ok-bg);color:var(--ok)}.chip.info{background:var(--primary-100);color:var(--primary)}.chip.bad{background:var(--danger-bg);color:var(--danger)}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:8px;border:1px solid var(--primary);background:var(--primary);color:#fff;font-weight:600;font-size:13.5px}
+.btn.ghost{background:#fff;color:var(--ink-2);border-color:var(--line)}.btn.ghost:hover{border-color:#c9d2df;color:var(--ink)}
+.btn.sm{padding:4px 10px;font-size:12.5px}.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.text{background:transparent;border-color:transparent;color:var(--primary);padding:4px 8px}
+.btn.soft{background:var(--primary-50);color:var(--primary);border-color:var(--primary-50)}
+.reason{font-size:12.5px;color:var(--warn)}
+.more{position:relative}.more .dd{display:none;position:absolute;right:0;top:36px;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 10px 32px rgba(16,24,40,.16);min-width:160px;padding:6px;z-index:50}
+.more:hover .dd{display:block}.more .dd div{padding:7px 10px;border-radius:6px;font-size:13px}.more .dd div:hover{background:var(--well)}.more .dd .danger{color:var(--danger);border-top:1px solid var(--line);margin-top:4px;padding-top:9px}
+/* 流程条 */
+.flow{display:flex;gap:0;margin-top:12px;overflow:auto}
+.flow .st{flex:1;min-width:120px;padding:8px 10px 10px;border-bottom:3px solid transparent;cursor:pointer;color:var(--ink-2);font-size:13px;display:flex;flex-direction:column;gap:2px}
+.flow .st b{font-size:13px;color:var(--ink);display:flex;align-items:center;gap:6px}
+.flow .st .num{width:18px;height:18px;border-radius:50%;background:var(--line);display:inline-grid;place-items:center;font-size:11px;color:var(--ink-2);flex:none}
+.flow .st.done .num{background:var(--ok);color:#fff}.flow .st.cur{border-bottom-color:var(--primary);background:var(--primary-50)}.flow .st.cur .num{background:var(--primary);color:#fff}
+.flow .st.block .num{background:var(--warn);color:#fff}.flow .st .sub{font-size:12px;color:var(--ink-3)}
+.flow .st:hover{background:var(--well)}
+/* 内容 */
+.main{padding:20px 24px 80px;flex:1}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px}
+.card .h{padding:12px 16px;border-bottom:1px solid var(--line-2);font-weight:650;display:flex;align-items:center;gap:8px}.card .h .cnt{color:var(--ink-3);font-weight:500}
+.card .b{padding:12px 16px}
+.todo{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line-2);font-size:13.5px}.todo:last-child{border:none}
+.todo .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.todo .m{color:var(--ink-3);font-size:12.5px}
+h2.sec{font-size:14px;color:var(--ink-2);margin:22px 0 10px;font-weight:600}
+.prog{display:flex;align-items:center;gap:10px;font-size:13.5px;padding:8px 0;border-bottom:1px solid var(--line-2)}
+.prog .bar{width:160px;height:6px;background:var(--line-2);border-radius:3px;overflow:hidden}.prog .bar i{display:block;height:100%;background:var(--primary);width:50%}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--primary);display:inline-block}.dot.ok{background:var(--ok)}
+/* 分栏 */
+.split{display:grid;grid-template-columns:7fr 3fr;gap:16px;align-items:start}
+.side .card{margin-bottom:12px}.side pre{white-space:pre-wrap;font:12.5px/1.6 inherit;margin:0;color:var(--ink-2)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
+.seg button{border:none;background:transparent;padding:5px 12px;font-size:13px;color:var(--ink-2)}.seg button.on{background:var(--primary-50);color:var(--primary);font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:13.5px}th{text-align:left;font-weight:600;color:var(--ink-2);font-size:12.5px;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--well)}
+td{padding:9px 10px;border-bottom:1px solid var(--line-2);vertical-align:middle;height:44px}
+tr:hover td{background:#fafbfd}
+input.inl{border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit;font-size:13px;width:100%}
+.help{display:inline-grid;place-items:center;width:16px;height:16px;border-radius:50%;border:1px solid var(--ink-3);color:var(--ink-3);font-size:11px;margin-left:4px;cursor:help;position:relative}
+.help:hover::after{content:attr(data-t);position:absolute;left:20px;top:-6px;background:#1c2430;color:#fff;font-size:12px;padding:6px 10px;border-radius:6px;width:260px;z-index:9;font-weight:400;line-height:1.5}
+/* 工作台（主从） */
+.ws{display:grid;grid-template-columns:340px 1fr;gap:0;border:1px solid var(--line);border-radius:8px;background:#fff;min-height:calc(100vh - 230px);overflow:hidden}
+.ws .list{border-right:1px solid var(--line);display:flex;flex-direction:column}
+.ws .filters{padding:10px 12px;border-bottom:1px solid var(--line-2);display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.ws .filters input{flex:1;min-width:80px;border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:12.5px}
+.ws .grp{padding:6px 12px;font-size:12px;color:var(--ink-3);background:var(--well);border-bottom:1px solid var(--line-2);display:flex;justify-content:space-between}
+.ws .it{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line-2);cursor:pointer;font-size:13px}
+.ws .it:hover{background:var(--well)}.ws .it.sel{background:var(--primary-50);box-shadow:inset 3px 0 0 var(--primary)}
+.ws .it .id{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--ink-3);width:46px;flex:none}
+.ws .it .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ws .it .s{width:8px;height:8px;border-radius:50%;background:#c9d2df;flex:none}.ws .it.ok .s{background:var(--ok)}.ws .it.rej .s{background:var(--danger)}
+.ws .it input{margin:0}
+.ws .detail{padding:20px 24px;display:flex;flex-direction:column;gap:14px}
+.ws .detail .hd{display:flex;align-items:center;gap:10px}.ws .detail .hd .id{font-family:ui-monospace,Menlo,monospace;color:var(--ink-3)}
+.ws .detail h3{margin:0;font-size:17px;font-weight:650}
+.kv{display:grid;grid-template-columns:72px 1fr;gap:6px 12px;font-size:13.5px}.kv .k{color:var(--ink-3)}
+.quote{background:var(--well);border-left:3px solid var(--primary-100);padding:8px 12px;border-radius:0 6px 6px 0;color:var(--ink-2);font-size:13px}
+.acts{display:flex;gap:8px;align-items:center}
+.acts kbd{font-size:11px;background:rgba(0,0,0,.08);border-radius:4px;padding:0 5px;margin-right:4px}
+.btn.okb{background:var(--ok);border-color:var(--ok)}.btn.rejb{background:#fff;color:var(--danger);border-color:var(--danger)}
+.reject{display:none;border:1px solid var(--line);border-radius:8px;padding:12px 14px;background:var(--well)}
+.reject.open{display:block}
+.pills{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 10px}.pills span{border:1px solid var(--line);border-radius:14px;padding:2px 10px;font-size:12.5px;cursor:pointer;background:#fff}.pills span.on{background:var(--danger-bg);border-color:var(--danger);color:var(--danger)}
+.reject textarea{width:100%;border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit;font-size:13px;resize:vertical}
+.statusbar{position:fixed;left:200px;right:0;bottom:0;height:40px;background:#fff;border-top:1px solid var(--line);display:flex;align-items:center;padding:0 24px;gap:16px;font-size:13px;color:var(--ink-2);z-index:30}
+.statusbar .u{margin-left:auto;color:var(--primary);cursor:pointer}
+.batch{position:fixed;left:50%;transform:translateX(-50%);bottom:52px;background:#1c2430;color:#fff;border-radius:10px;padding:8px 14px;display:none;gap:10px;align-items:center;font-size:13px;box-shadow:0 10px 32px rgba(16,24,40,.3);z-index:35}
+.batch.show{display:flex}.batch button{background:#2a3550;border:none;color:#fff;border-radius:6px;padding:4px 10px}.batch button.ok{background:var(--ok)}.batch button.rej{background:var(--danger)}
+.toast{position:fixed;right:20px;bottom:60px;background:#1c2430;color:#fff;padding:10px 14px;border-radius:8px;font-size:13px;display:none;gap:12px;align-items:center;z-index:60}
+.toast.show{display:flex}.toast a{color:#7cf5c2;cursor:pointer}
+.banner{background:var(--warn-bg);border:1px solid #f0d9ad;color:var(--warn);padding:8px 12px;border-radius:8px;font-size:13px;display:flex;align-items:center;gap:10px}
+.banner .btn{margin-left:auto}
+/* 执行面板 */
+.step{display:grid;grid-template-columns:40px 1fr 1fr;gap:8px;padding:10px;border:1px solid var(--line);border-radius:8px;font-size:13.5px}
+.step .n{color:var(--ink-3)}.step .k{font-size:12px;color:var(--ink-3)}
+.result{display:flex;gap:8px}.result .btn{flex:1;justify-content:center}
+.btn.p{background:var(--ok);border-color:var(--ok)}.btn.f{background:var(--danger);border-color:var(--danger)}.btn.bk{background:var(--warn);border-color:var(--warn)}.btn.sk{background:#fff;color:var(--ink-2);border-color:var(--line)}
+.drop{border:1px dashed var(--line);border-radius:8px;padding:14px;text-align:center;color:var(--ink-3);font-size:13px}
+.hide{display:none}
+.pr{font-weight:700;font-size:12px}.P0{color:var(--p0)}.P1{color:var(--p1)}.P2{color:var(--p2)}.P3{color:#6c7fb8}
+.skel{height:12px;background:linear-gradient(90deg,var(--line-2),#f6f7f9,var(--line-2));border-radius:4px;margin:8px 0}
+.empty{text-align:center;padding:32px;color:var(--ink-3)}.empty .ic{font-size:28px}.empty b{display:block;color:var(--ink);margin:6px 0 10px;font-weight:600}
+</style>
+</head>
+<body>
+<div class="proto"><b>原型 v2.2</b>
+  <button class="on" data-p="wb" onclick="show('wb')">① 工作台</button>
+  <button data-p="req" onclick="show('req')">② 需求详情 · 流程条</button>
+  <button data-p="rev" onclick="show('rev')">③ 测试点审核工作台</button>
+  <button data-p="run" onclick="show('run')">④ 执行面板</button>
+  <span class="tip">审核页可用 j / k 移动，a 通过，r 驳回，space 勾选</span>
+</div>
+
+<div class="shell">
+<aside class="sidebar" id="sb">
+  <div class="pj"><span class="ic">LY</span><div><b>连赢活动后台</b><div class="sub">切换项目 ▾</div></div></div>
+  <nav class="menu">
+    <a id="m-wb" href="#/"><span class="ic"></span><span class="txt">工作台</span></a>
+    <a id="m-req" href="#/p/LY/requirements"><span class="ic"></span><span class="txt">需求</span><span class="n">9</span></a>
+    <a id="m-rev" href="#/p/LY/design"><span class="ic"></span><span class="txt">测试设计</span><span class="n">8</span></a>
+    <a href="#/p/LY/cases"><span class="ic"></span><span class="txt">用例库</span></a>
+    <a id="m-run" href="#/p/LY/plans"><span class="ic"></span><span class="txt">测试计划</span><span class="n">2</span></a>
+    <a href="#/ai"><span class="ic"></span><span class="txt">AI 中心</span></a>
+    <a href="#/reports"><span class="ic"></span><span class="txt">报表</span></a>
+    <a href="#/settings"><span class="ic"></span><span class="txt">设置</span></a>
+  </nav>
+  <div class="s-foot"><span class="txt">admin · 管理员<br>v2.2 原型</span></div>
+</aside>
+
+<div class="content">
+<div class="topbar">
+  <div class="crumb" id="crumb"><b>工作台</b></div>
+  <div class="search"><span>搜索需求 / 用例 / 计划…</span><kbd>⌘K</kbd></div>
+  <div class="bell">🔔<i>3</i></div>
+  <div class="avatar">A</div>
+</div>
+
+<!-- ① 工作台 -->
+<section id="p-wb">
+  <div class="pagehead"><div class="ph-row" style="padding-bottom:12px"><h1>今天要做的</h1><span class="meta">10 月 16 日 · 星期五</span><div class="acts"><div class="seg"><button class="on">当前项目</button><button>全部项目</button></div></div></div></div>
+  <div class="main">
+    <div class="grid3">
+      <div class="card"><div class="h">待我审核 <span class="cnt">2</span></div><div class="b">
+        <div class="todo"><span class="dot"></span><span class="t">连赢前端活动页 · 第 1 次设计</span><span class="m">8 测试点</span></div>
+        <div class="todo"><span class="dot"></span><span class="t">会员等级规则 · 第 1 次设计</span><span class="m">8 用例</span></div>
+        <div style="margin-top:10px"><button class="btn" onclick="show('rev')">去审核</button></div></div></div>
+      <div class="card"><div class="h">待我确认 <span class="cnt">1</span></div><div class="b">
+        <div class="todo"><span class="dot" style="background:var(--warn)"></span><span class="t">连赢活动后台 v1.2</span><span class="m">9 项 · 2 项必须</span></div>
+        <div style="margin-top:10px"><button class="btn" onclick="show('req')">去确认</button></div></div></div>
+      <div class="card"><div class="h">分配给我执行 <span class="cnt">2</span></div><div class="b">
+        <div class="todo"><span class="dot"></span><span class="t">连赢活动 10 月冒烟 · 第 1 轮</span><span class="m">2 / 5 待执行</span></div>
+        <div style="margin-top:10px"><button class="btn" onclick="show('run')">开始执行</button></div></div></div>
+    </div>
+    <h2 class="sec">进行中</h2>
+    <div class="card"><div class="b">
+      <div class="prog"><span class="dot"></span><span style="flex:1">连赢前端活动页 · AI 拆解测试点</span><span class="bar"><i></i></span><span style="color:var(--ink-3);font-size:12.5px">第 2 / 4 步 · 约 1 分钟</span></div>
+      <div class="prog"><span class="dot ok"></span><span style="flex:1">会员等级规则 · 用例生成完成</span><span style="color:var(--ink-3);font-size:12.5px">8 用例 · 3 分钟前</span><button class="btn text sm">查看</button></div>
+    </div></div>
+    <h2 class="sec">我的项目</h2>
+    <div class="grid3">
+      <div class="card"><div class="b"><b>连赢活动后台</b><div style="color:var(--ink-3);font-size:12.5px;margin-top:4px">需求 2 · 设计 2 · 用例 8 · 计划 1</div></div></div>
+      <div class="card"><div class="b"><b>会员中心</b><div style="color:var(--ink-3);font-size:12.5px;margin-top:4px">需求 1 · 设计 1 · 用例 8</div></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ② 需求详情 -->
+<section id="p-req" class="hide">
+  <div class="pagehead">
+    <div class="ph-row"><a href="#" style="color:var(--ink-3);text-decoration:none">← 需求</a><h1>连赢活动后台 v1.2</h1><span class="chip warn">待确认</span><span class="meta">手工录入 · admin · 3 分钟前</span>
+      <div class="acts"><span class="reason">还有 2 项「必须确认」</span><button class="btn" onclick="setFlow(4)">去确认</button>
+        <div class="more"><button class="btn ghost">更多 ▾</button><div class="dd"><div>编辑原文</div><div>上传附件</div><div>合并到…</div><div>归档</div><div class="danger">删除（入回收站）</div></div></div></div></div>
+    <div class="flow" id="flow">
+      <div class="st done" onclick="setFlow(1)"><b><span class="num">1</span>原文与附件</b><span class="sub">1 附件已解析</span></div>
+      <div class="st done" onclick="setFlow(2)"><b><span class="num">2</span>整理稿</b><span class="sub">覆盖 82% · 0 ⚠</span></div>
+      <div class="st done" onclick="setFlow(3)"><b><span class="num">3</span>AI 分析</b><span class="sub">11 项 · 已核验</span></div>
+      <div class="st cur block" onclick="setFlow(4)"><b><span class="num">4</span>待确认</b><span class="sub">2 必须 · 7 建议</span></div>
+      <div class="st" onclick="setFlow(5)"><b><span class="num">5</span>测试点</b><span class="sub">—</span></div>
+      <div class="st" onclick="setFlow(6)"><b><span class="num">6</span>用例</b><span class="sub">—</span></div>
+      <div class="st" onclick="setFlow(7)"><b><span class="num">7</span>计划</b><span class="sub">—</span></div>
+    </div>
+  </div>
+  <div class="main split">
+    <div>
+      <div id="f4">
+        <div class="card"><div class="h">待确认事项 <span class="cnt">9</span><span class="help" data-t="「必须确认」未确认前不能发起测试设计；「建议确认」可带假设继续。AI 已把建议结论预填在输入框，直接「采纳」即可。">?</span>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center"><div class="seg"><button class="on">全部 9</button><button>必须 2</button><button>建议 7</button><button>已确认 0</button></div><button class="btn soft sm" onclick="toastMsg('已采纳 7 条建议级事项')">批量采纳建议</button></div></div>
+          <table><thead><tr><th style="width:28px"><input type="checkbox"></th><th>问题</th><th style="width:70px">等级</th><th style="width:300px">确认结论</th><th style="width:120px"></th></tr></thead><tbody>
+            <tr><td><input type="checkbox"></td><td>进行中修改配置是否影响已参与用户？</td><td><span class="chip bad">必须</span></td><td><input class="inl" value="不影响，以用户参与时的配置为准"></td><td><button class="btn sm" onclick="toastMsg('已确认 1 项 · 还剩 1 项必须确认')">采纳并确认</button></td></tr>
+            <tr><td><input type="checkbox"></td><td>奖励发放失败的重试策略？</td><td><span class="chip bad">必须</span></td><td><input class="inl" value="自动重试 3 次，仍失败转人工补发"></td><td><button class="btn sm">采纳并确认</button></td></tr>
+            <tr><td><input type="checkbox"></td><td>业务规则「连赢场次 3～20」原文已明确，是否按此执行？</td><td><span class="chip info">建议</span></td><td><input class="inl" value="是"></td><td><button class="btn ghost sm">采纳</button></td></tr>
+            <tr><td><input type="checkbox"></td><td>边界条件「场次 2 / 3 / 20 / 21」是否需要全部覆盖？</td><td><span class="chip info">建议</span></td><td><input class="inl" value="是，四个值都覆盖"></td><td><button class="btn ghost sm">采纳</button></td></tr>
+            <tr><td><input type="checkbox"></td><td>状态变化「未开始 → 进行中 → 已结束」是否允许回退？</td><td><span class="chip info">建议</span></td><td><input class="inl" value="不允许"></td><td><button class="btn ghost sm">采纳</button></td></tr>
+          </tbody></table>
+          <div class="b" style="color:var(--ink-3);font-size:12.5px">还有 4 条建议级事项 · <a href="#" style="color:var(--primary)">展开</a></div>
+        </div>
+      </div>
+      <div id="f3" class="hide">
+        <div class="card"><div class="h">AI 分析结果 <span class="cnt">11 项 · gpt-6-astra · 已核验 10 / 10</span><div style="margin-left:auto;display:flex;gap:8px"><button class="btn ghost sm">重新分析</button><button class="btn soft sm">沉淀到知识库</button></div></div>
+          <div class="b">
+            <details open><summary style="font-weight:600;cursor:pointer">功能点 3</summary>
+              <table><tr><td style="width:30px;color:var(--ink-3)">1</td><td>活动列表查询与筛选</td><td style="width:90px;text-align:right"><button class="btn text sm">改</button><button class="btn text sm" style="color:var(--ink-3)">删</button></td></tr>
+              <tr><td style="color:var(--ink-3)">2</td><td>活动配置新增 / 编辑</td><td style="text-align:right"><button class="btn text sm">改</button><button class="btn text sm" style="color:var(--ink-3)">删</button></td></tr>
+              <tr><td style="color:var(--ink-3)">3</td><td>连赢奖励自动发放</td><td style="text-align:right"><button class="btn text sm">改</button><button class="btn text sm" style="color:var(--ink-3)">删</button></td></tr></table></details>
+            <details><summary style="font-weight:600;cursor:pointer;margin-top:10px">业务规则 3 · 前置条件 2</summary></details>
+            <details><summary style="font-weight:600;cursor:pointer;margin-top:10px">正常流程 1 · 异常流程 1 · 边界条件 2 · 状态变化 1</summary></details>
+            <details><summary style="font-weight:600;cursor:pointer;margin-top:10px">权限 1 · 外部依赖 2 · 风险 1</summary></details>
+          </div></div>
+      </div>
+      <div id="f2" class="hide"><div class="card"><div class="h">整理稿 <span class="cnt">需求句覆盖 82% · 补漏 +12 · ⚠ 0</span><div style="margin-left:auto"><div class="seg"><button class="on">全部 46</button><button>⚠ 待核对 0</button><button>补漏 12</button></div></div></div>
+        <div class="b"><div class="skel" style="width:60%"></div><div class="skel"></div><div class="skel" style="width:80%"></div><div style="color:var(--ink-3);font-size:12.5px;margin-top:8px">（逐条列表，交互同审核工作台：a 通过 / e 修改 / d 删除）</div></div></div></div>
+      <div id="f1" class="hide"><div class="card"><div class="h">原文与附件</div><div class="b"><pre style="white-space:pre-wrap;margin:0;font:13.5px/1.7 inherit"># 连赢活动后台
+## 活动列表
+活动状态分为未开始、进行中、已结束，列表按创建时间倒序。
+…</pre></div></div></div>
+      <div id="f5" class="hide"><div class="card"><div class="empty"><div class="ic">◎</div><b>还没有测试点</b>确认 2 项必须确认事项后即可发起测试设计<br><button class="btn" style="margin-top:10px" disabled>发起测试设计</button> <span class="reason">还有 2 项必须确认</span></div></div></div>
+      <div id="f6" class="hide"><div class="card"><div class="empty"><div class="ic">▤</div><b>还没有用例</b>测试点审核通过后自动生成</div></div></div>
+      <div id="f7" class="hide"><div class="card"><div class="empty"><div class="ic">▦</div><b>还没有加入计划</b>用例通过后可加入测试计划<br><button class="btn ghost" style="margin-top:10px" disabled>加入计划</button></div></div></div>
+    </div>
+    <div class="side">
+      <div class="card"><div class="h">需求原文 <span class="cnt">可折叠</span></div><div class="b"><pre># 连赢活动后台
+## 活动列表
+活动状态分为未开始、进行中、已结束，列表按创建时间倒序。
+支持按活动名称模糊搜索，无结果显示「暂无数据」。
+## 活动配置
+连赢场次下限 3、上限 20，超出范围提示「场次需在 3～20 之间」。
+奖励金额必须大于 0，为 0 时不可保存。
+…</pre></div></div>
+      <div class="card"><div class="h">信息</div><div class="b kv"><span class="k">项目</span><span>连赢活动后台</span><span class="k">版本</span><span>v1.2</span><span class="k">模块</span><span>活动后台</span><span class="k">负责人</span><span>admin</span><span class="k">附件</span><span>后台需求.zip · 已解析</span><span class="k">设计记录</span><span>—</span></div></div>
+      <div class="card"><div class="h">变更记录</div><div class="b" style="font-size:12.5px;color:var(--ink-2)">10-16 13:05 AI 分析完成（11 项）<br>10-16 13:04 创建需求 · admin</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ③ 审核工作台 -->
+<section id="p-rev" class="hide">
+  <div class="pagehead"><div class="ph-row" style="padding-bottom:12px"><a href="#" style="color:var(--ink-3);text-decoration:none">← 测试设计</a><h1>连赢前端活动页 · 第 1 次设计</h1><span class="chip info">审核测试点</span><span class="meta" id="revmeta">测试点 8 · 待审 8 · 通过 0 · 驳回 0</span>
+    <div class="acts"><span class="reason" id="revreason">还有 8 条待审</span><button class="btn" id="finishBtn" disabled>完成审核 → 生成用例</button>
+      <div class="more"><button class="btn ghost">⋯</button><div class="dd"><div>查漏补缺</div><div>重复检查</div><div>AI 补充测试点</div><div>人工测试点对比</div><div>导出 xlsx</div><div>脑图视图</div><div class="danger">删除本次设计</div></div></div></div></div></div>
+  <div class="main">
+    <div class="banner">2 条需求盲区待处置：「未说明活动进行中修改配置是否影响已参与用户」等 <button class="btn ghost sm">处理盲区</button></div>
+    <div class="ws" style="margin-top:12px">
+      <div class="list">
+        <div class="filters"><div class="seg"><button class="on">待审 <span id="cntPending">8</span></button><button>通过</button><button>驳回</button></div><input placeholder="搜索测试点"><button class="btn ghost sm">模块 ▾</button><button class="btn ghost sm">维度 ▾</button></div>
+        <div id="items"></div>
+      </div>
+      <div class="detail" id="detail"></div>
+    </div>
+  </div>
+  <div class="statusbar"><span>本次已处理 <b id="done">0</b> / 8</span><span>用时 0:42</span><span style="color:var(--ink-3)">按 <kbd>?</kbd> 查看快捷键</span><span class="u" onclick="undo()">撤销上一步</span></div>
+  <div class="batch" id="batch"><span>已选 <b id="bn">0</b> 条</span><button class="ok" onclick="batchDo('ok')">通过</button><button class="rej" onclick="batchDo('rej')">驳回</button><button>改模块</button><button>删除</button><button onclick="clearSel()" style="background:transparent">取消</button></div>
+</section>
+
+<!-- ④ 执行面板 -->
+<section id="p-run" class="hide">
+  <div class="pagehead"><div class="ph-row" style="padding-bottom:12px"><a href="#" style="color:var(--ink-3);text-decoration:none">← 连赢活动 10 月冒烟</a><h1>第 1 轮执行</h1><span class="chip info">进行中</span><span class="meta">执行人 admin · 2 / 5 · 开始于 13:06</span><div class="acts"><button class="btn ghost">暂停</button><button class="btn">结束本轮</button></div></div></div>
+  <div class="main">
+    <div class="ws" style="grid-template-columns:300px 1fr">
+      <div class="list">
+        <div class="filters"><div class="seg"><button class="on">我的 5</button><button>全部 5</button></div><input placeholder="搜索"></div>
+        <div class="grp"><span>活动列表</span><span>3</span></div>
+        <div class="it ok"><span class="s"></span><span class="id">001</span><span class="t">验证活动列表按状态筛选</span><span class="pr P1">P1</span></div>
+        <div class="it ok"><span class="s"></span><span class="id">002</span><span class="t">验证活动名称模糊搜索</span><span class="pr P2">P2</span></div>
+        <div class="it sel"><span class="s"></span><span class="id">003</span><span class="t">验证列表为空时的空状态</span><span class="pr P3">P3</span></div>
+        <div class="grp"><span>活动配置</span><span>2</span></div>
+        <div class="it"><span class="s"></span><span class="id">001</span><span class="t">验证连赢场次边界值</span><span class="pr P0">P0</span></div>
+        <div class="it"><span class="s"></span><span class="id">002</span><span class="t">验证奖励金额为 0 不可保存</span><span class="pr P1">P1</span></div>
+      </div>
+      <div class="detail">
+        <div class="hd"><span class="id">TC-活动列表-003</span><span class="pr P3">P3</span><span class="chip" style="background:var(--line-2);color:var(--ink-2)">活动列表</span><span style="margin-left:auto;color:var(--ink-3);font-size:12.5px">v2 · 快照于 10-16</span></div>
+        <h3>验证列表为空时的空状态</h3>
+        <div class="kv"><span class="k">前置</span><span>已登录后台且有活动管理权限</span></div>
+        <div class="step"><span class="n">步骤 1</span><div><div class="k">操作</div>切换到无活动的项目</div><div><div class="k">预期</div>显示空状态插画与「新建活动」入口</div></div>
+        <div class="result"><button class="btn p" onclick="toastMsg('TC-活动列表-003 通过 · 已跳到下一条')"><kbd style="background:rgba(255,255,255,.25)">P</kbd>通过</button><button class="btn f" onclick="document.getElementById('fail').classList.toggle('open')"><kbd style="background:rgba(255,255,255,.25)">F</kbd>失败</button><button class="btn bk"><kbd style="background:rgba(255,255,255,.25)">B</kbd>阻塞</button><button class="btn sk"><kbd>S</kbd>跳过</button></div>
+        <div class="reject" id="fail"><b style="font-size:13px">失败原因</b><textarea rows="2" placeholder="实际结果与预期不符之处…"></textarea><div class="drop" style="margin-top:8px">拖入截图 / 录屏，或粘贴</div><div style="margin-top:8px;text-align:right"><button class="btn f sm">记录失败并下一条 ⌘⏎</button></div></div>
+        <div style="color:var(--ink-3);font-size:12.5px">上次执行：无 · 关联缺陷：无</div>
+      </div>
+    </div>
+  </div>
+</section>
+</div></div>
+
+<div class="toast" id="toast"><span id="toastMsg"></span><a onclick="undo()">撤销</a></div>
+
+<script>
+const PTS=[
+ {id:'TP001',m:'活动列表',t:'活动状态为未开始 / 进行中 / 已结束时列表正确展示',dim:'功能',ref:'活动列表 › 状态',q:'活动状态分为未开始、进行中、已结束，列表按创建时间倒序。',st:''},
+ {id:'TP002',m:'活动列表',t:'按活动名称模糊搜索',dim:'功能',ref:'活动列表 › 搜索',q:'支持按活动名称模糊搜索，无结果显示「暂无数据」。',st:''},
+ {id:'TP003',m:'活动列表',t:'列表为空时显示空状态提示',dim:'异常',ref:'活动列表 › 空数据',q:'无结果显示「暂无数据」。',st:''},
+ {id:'TP004',m:'活动配置',t:'连赢场次下限 3、上限 20，超出范围提示',dim:'边界',ref:'活动配置 › 场次',q:'连赢场次下限 3、上限 20，超出范围提示「场次需在 3～20 之间」。',st:''},
+ {id:'TP005',m:'活动配置',t:'奖励金额为 0 时不可保存',dim:'边界',ref:'活动配置 › 奖励',q:'奖励金额必须大于 0，为 0 时不可保存。',st:''},
+ {id:'TP006',m:'活动配置',t:'开始时间晚于结束时间校验',dim:'异常',ref:'活动配置 › 时间',q:'结束时间必须晚于开始时间。',st:''},
+ {id:'TP007',m:'奖励发放',t:'达到连赢条件后自动发放奖励',dim:'功能',ref:'奖励发放 › 自动',q:'用户达到连赢条件后自动发放奖励，并写入钱包流水。',st:''},
+ {id:'TP008',m:'奖励发放',t:'同一用户同一活动只发放一次',dim:'业务规则',ref:'奖励发放 › 去重',q:'同一用户同一活动只发放一次。',st:''},
+];
+let sel=3, checked=new Set(), hist=[];
+function renderList(){
+  let h='',lastM='';
+  PTS.forEach((p,i)=>{ if(p.m!==lastM){lastM=p.m;h+=`<div class="grp"><span>${p.m}</span><span>${PTS.filter(x=>x.m===p.m).length}</span></div>`}
+    h+=`<div class="it ${p.st} ${i===sel?'sel':''}" onclick="sel=${i};render()"><input type="checkbox" ${checked.has(i)?'checked':''} onclick="event.stopPropagation();tog(${i})"><span class="s"></span><span class="id">${p.id}</span><span class="t">${p.t}</span></div>`});
+  document.getElementById('items').innerHTML=h;
+}
+function renderDetail(){
+  const p=PTS[sel];
+  document.getElementById('detail').innerHTML=`
+   <div class="hd"><span class="id">${p.id}</span><span class="chip" style="background:var(--line-2);color:var(--ink-2)">${p.m}</span><span class="chip info">${p.dim}</span>${p.st==='ok'?'<span class="chip ok">已通过</span>':p.st==='rej'?'<span class="chip bad">已驳回</span>':'<span class="chip warn">待审核</span>'}<span style="margin-left:auto;color:var(--ink-3);font-size:12.5px">AI 拆解 · gpt-6-astra</span></div>
+   <h3>${p.t}</h3>
+   <div class="kv"><span class="k">需求来源</span><span>${p.ref}</span><span class="k">原文</span><span class="quote">「${p.q}」</span><span class="k">关联</span><span style="color:var(--ink-3)">盲区 无 · 重复 无 · 依赖 无</span></div>
+   <div class="acts"><button class="btn okb" onclick="act('ok')"><kbd>A</kbd>通过</button><button class="btn rejb" onclick="toggleRej()"><kbd>R</kbd>驳回</button><button class="btn ghost"><kbd>E</kbd>修改</button><button class="btn ghost" style="color:var(--ink-3)"><kbd>D</kbd>删除</button></div>
+   <div class="reject" id="rej"><b style="font-size:13px">驳回类型</b><div class="pills" onclick="if(event.target.tagName==='SPAN')event.target.classList.toggle('on')"><span>内容错误</span><span>场景遗漏</span><span>颗粒度过粗</span><span>颗粒度过细</span><span>重复</span><span>预期不可验证</span><span>超出需求</span><span>需求理解错误</span><span>描述不清晰</span><span>其他</span></div>
+     <b style="font-size:13px">原因</b><textarea rows="2" placeholder="为什么不通过"></textarea><b style="font-size:13px;display:block;margin-top:6px">修改要求（给 AI）</b><textarea rows="2" placeholder="应该怎么改，优先级最高"></textarea>
+     <div style="margin-top:8px;display:flex;justify-content:flex-end;gap:8px"><button class="btn ghost sm" onclick="toggleRej()">取消 Esc</button><button class="btn sm" style="background:var(--danger);border-color:var(--danger)" onclick="act('rej')">确认驳回 ⌘⏎</button></div></div>`;
+}
+function render(){renderList();renderDetail();const d=PTS.filter(p=>p.st).length;document.getElementById('done').textContent=d;
+  const pend=PTS.filter(p=>!p.st).length;document.getElementById('cntPending').textContent=pend;
+  document.getElementById('revmeta').textContent=`测试点 8 · 待审 ${pend} · 通过 ${PTS.filter(p=>p.st==='ok').length} · 驳回 ${PTS.filter(p=>p.st==='rej').length}`;
+  document.getElementById('finishBtn').disabled=pend>0;document.getElementById('revreason').textContent=pend?`还有 ${pend} 条待审`:'';
+  document.getElementById('bn').textContent=checked.size;document.getElementById('batch').classList.toggle('show',checked.size>0);}
+function act(s){hist.push({i:sel,prev:PTS[sel].st});PTS[sel].st=s;toastMsg(`${PTS[sel].id} 已${s==='ok'?'通过':'驳回'}`);const n=PTS.findIndex((p,i)=>i>sel&&!p.st);if(n>=0)sel=n;render();}
+function toggleRej(){document.getElementById('rej').classList.toggle('open');}
+function tog(i){checked.has(i)?checked.delete(i):checked.add(i);render();}
+function clearSel(){checked.clear();render();}
+function batchDo(s){checked.forEach(i=>{hist.push({i,prev:PTS[i].st});PTS[i].st=s});toastMsg(`已${s==='ok'?'通过':'驳回'} ${checked.size} 条`);checked.clear();render();}
+function undo(){const h=hist.pop();if(!h)return;PTS[h.i].st=h.prev;sel=h.i;render();toastMsg('已撤销',true);}
+let tt;function toastMsg(m,noUndo){document.getElementById('toastMsg').textContent=m;const t=document.getElementById('toast');t.querySelector('a').style.display=noUndo?'none':'';t.classList.add('show');clearTimeout(tt);tt=setTimeout(()=>t.classList.remove('show'),8000);}
+document.addEventListener('keydown',e=>{if(cur!=='rev'||['INPUT','TEXTAREA'].includes(e.target.tagName))return;
+  if(e.key==='j'){sel=Math.min(PTS.length-1,sel+1);render()}else if(e.key==='k'){sel=Math.max(0,sel-1);render()}
+  else if(e.key==='a'){act('ok')}else if(e.key==='r'){toggleRej()}else if(e.key===' '){e.preventDefault();tog(sel)}else if(e.key==='Escape'){document.getElementById('rej').classList.remove('open')}
+  else if(e.key==='z'&&(e.metaKey||e.ctrlKey)){undo()}});
+let cur='wb';
+const CRUMB={wb:'<b>工作台</b>',req:'需求<span>/</span><b>连赢活动后台 v1.2</b>',rev:'测试设计<span>/</span>连赢前端活动页<span>/</span><b>测试点审核</b>',run:'测试计划<span>/</span>连赢活动 10 月冒烟<span>/</span><b>第 1 轮执行</b>'};
+function show(p){cur=p;['wb','req','rev','run'].forEach(k=>{document.getElementById('p-'+k).classList.toggle('hide',k!==p);const m=document.getElementById('m-'+k);if(m)m.classList.toggle('on',k===p);});
+  document.querySelectorAll('.proto button').forEach(b=>b.classList.toggle('on',b.dataset.p===p));document.getElementById('crumb').innerHTML=CRUMB[p];
+  document.getElementById('sb').classList.toggle('mini',p==='rev'||p==='run');document.querySelector('.statusbar').style.left=(p==='rev'||p==='run')?'56px':'200px';
+  location.hash={wb:'#/',req:'#/p/LY/requirements/67cc1c74/questions',rev:'#/p/LY/design/97571bd28eac/points?sel=TP004',run:'#/p/LY/plans/3518fc5a/run/c23c115e'}[p];window.scrollTo(0,0);}
+function setFlow(n){[1,2,3,4,5,6,7].forEach(i=>document.getElementById('f'+i).classList.toggle('hide',i!==n));document.querySelectorAll('#flow .st').forEach((s,i)=>s.classList.toggle('cur',i===n-1));}
+render();
+const h=location.hash;if(h.includes('/design/'))show('rev');else if(h.includes('/requirements/'))show('req');else if(h.includes('/run/'))show('run');else show('wb');
+</script>
+</body>
+</html>

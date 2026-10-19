@@ -7,7 +7,7 @@ from app.llm.schemas import MissingAPIKeyError, ModelConfig
 
 def test_从项目配置文件加载():
     registry = ModelRegistry.from_yaml(get_settings().models_example_path)
-    assert registry.default_model == "gpt-6-astra"
+    assert registry.default_model == "gpt-6-sol"  # 模版默认：性价比最高的均衡组合
     cfg = registry.get()
     assert cfg.provider == "openai"
     assert cfg.supports_vision is True
