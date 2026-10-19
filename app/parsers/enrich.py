@@ -47,7 +47,7 @@ async def enrich_images(doc: ParsedDocument, llm: LLMClient) -> ParsedDocument:
             return img.placeholder, f"（{img.placeholder} 为装饰性小图，已跳过）"
         try:
             content = await understand_image_bytes(img.data, img.mime, llm, prompt=embed_prompt())
-            return img.placeholder, f"【文档内图片理解 {img.placeholder}】\n{content}"
+            return img.placeholder, f"【文档内图片理解 {img.placeholder}】\n{content}\n【图片理解结束 {img.placeholder}】"
         except Exception as e:  # 单图失败不阻塞整体解析
             return img.placeholder, f"（{img.placeholder} 解析失败：{e}）"
 

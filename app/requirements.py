@@ -184,7 +184,7 @@ class RequirementStore:
         ex = item["extraction"]
         led = ex.setdefault("ledger", {"stats": None, "decisions": {}})
         acct = account(build_units(source_materials(item)), ex.get("text") or "", led.get("decisions") or {})
-        led["stats"] = acct["stats"]
+        led["stats"], led["image"] = acct["stats"], acct["image"]
         return acct
 
     def ledger_view(self, req_id: str) -> dict:
@@ -198,27 +198,42 @@ class RequirementStore:
         flags = {it["unit"]: ("forced" if it.get("forced") else "manual") for m in item["extraction"].get("modules") or []
                  for it in m["items"] if it.get("unit") and (it.get("forced") or it.get("manual"))}
         for u in acct["units"]:
-            if u["uid"] in flags:
-                u[flags[u["uid"]]] = True
-        return {"stats": acct["stats"], "pages": group_by_page(acct["units"]), "rev": item["extraction"]["meta"].get("rev", 0)}
+            for x in u["uids"]:
+                if x in flags:
+                    u[flags[x]] = True
+        return {"stats": acct["stats"], "image": acct["image"], "pages": group_by_page(acct["units"]),
+                "rev": item["extraction"]["meta"].get("rev", 0)}
 
     def review_ledger_unit(self, req_id: str, uid: str, action: str, reason: str | None = None,
                            operator: str | None = None) -> dict:
         """底稿核对：include 把排除 / 待处理的单元按原句收进整理稿（标人工收录）；exclude 把兜底 / 人工收录 / 待处理的单元
-        记为人工排除并撤掉对应条目。整理稿里本来就逐字有的单元不能排除（它确实在稿里，要删得删那条摘录）。"""
+        记为人工排除并撤掉对应条目；confirm 把模型排除的「需复核」单元标为人已看过（维持排除）。
+        整理稿里本来就逐字有的单元不能排除（它确实在稿里，要删得删那条摘录）。"""
         from app.agents.extraction import extraction_markdown
-        from app.agents.ledger import STATUS_IN, build_units, page_of, source_of
+        from app.agents.ledger import STATUS_EX, STATUS_IN, build_units, page_of, source_of
 
         item = self._get_alive(req_id)
         ex = item.get("extraction") or {}
         if not ex.get("modules"):
             raise RequirementError("这份整理稿没有逐条结构（整篇改写过或旧版本提取），不能按底稿核对；可重新提取")
-        unit = next((u for u in build_units(source_materials(item)) if u["uid"] == uid), None)
+        unit = next((u for u in build_units(source_materials(item)) if uid in u["uids"]), None)
         if unit is None:
             raise RequirementError("底稿里没有这个单元（材料可能已变化）")
+        uid = unit["uid"]   # 去重单元用首次出现的编号做键
         led = ex.setdefault("ledger", {"stats": None, "decisions": {}})
         decisions = led.setdefault("decisions", {})
-        own = [(m, it) for m in ex["modules"] for it in m["items"] if it.get("unit") == uid]
+        own = [(m, it) for m in ex["modules"] for it in m["items"] if it.get("unit") in unit["uids"]]
+        if action == "confirm":
+            row = next((u for u in self._refresh_ledger(item)["units"] if u["uid"] == uid), None)
+            if not row or row["status"] != STATUS_EX:
+                raise RequirementError("只有排除的单元需要确认")
+            key = next((x for x in unit["uids"] if x in decisions), uid)
+            decisions[key] = {**decisions.get(key, {"r": row.get("reason") or "", "by": row.get("by") or "model"}),
+                              "checked": {"by": operator, "at": _now()}}
+            led["stats"], led["image"] = (acct := self._refresh_ledger(item))["stats"], acct["image"]
+            item["updated_by"], item["updated_at"] = operator, _now()
+            self._persist(item)
+            return item
         if action == "include":
             if not own:
                 name = f"{page_of(unit['path'])}-人工收录"
@@ -229,7 +244,8 @@ class RequirementStore:
                 mod["items"].append({"text": unit["text"], "sources": [source_of(unit["path"])], "manual": True, "unit": uid,
                                      "verified": True, "id": self._unit_item_id(name, unit["text"]),
                                      "review": {"status": "included", "by": operator, "at": _now()}})
-            decisions.pop(uid, None)
+            for x in unit["uids"]:
+                decisions.pop(x, None)
         elif action == "exclude":
             status = next((u["status"] for u in self._refresh_ledger(item)["units"] if u["uid"] == uid), None)
             if status == STATUS_IN and not own:
@@ -238,6 +254,8 @@ class RequirementStore:
                 mod["items"].remove(it)
                 if not mod["items"]:
                     ex["modules"].remove(mod)
+            for x in unit["uids"]:
+                decisions.pop(x, None)
             decisions[uid] = {"r": (reason or "").strip()[:80] or "人工排除", "by": "user", "who": operator, "at": _now()}
         else:
             raise RequirementError(f"未知操作：{action}")
@@ -330,9 +348,11 @@ class RequirementStore:
         pending = sum(1 for m in ex.get("modules") or [] for x in m["items"] if x.get("verified") is False and not x.get("review"))
         if pending:
             raise RequirementError(f"还有 {pending} 条未逐字找到的条目没有核对，请先逐条处理（核对通过 / 修改 / 删除）")
-        todo = (self._refresh_ledger(item)["stats"] or {}).get("todo") or 0
-        if todo:
-            raise RequirementError(f"底稿里还有 {todo} 句材料原句既没收录也没有排除原因，请在「底稿核对」里处理（收录 / 排除）")
+        st = self._refresh_ledger(item)["stats"] or {}
+        if st.get("todo"):
+            raise RequirementError(f"底稿里还有 {st['todo']} 句材料原句既没收录也没有排除原因，请在「底稿核对」里处理（收录 / 排除）")
+        if st.get("review_open"):
+            raise RequirementError(f"底稿里还有 {st['review_open']} 句模型排除的需复核句没有看过，请在「底稿核对 › 需复核」里逐条确认或收录")
         ex["reviewed"] = {"by": operator, "at": _now(), "rev": ex["meta"].get("rev", 0)}
         item["updated_by"], item["updated_at"] = operator, _now()
         self._persist(item)
