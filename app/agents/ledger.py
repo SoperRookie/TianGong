@@ -25,7 +25,7 @@ UNIT_ID_RE = re.compile(r"^\[(u\d+)\]\s?")           # Axure 控件编号前缀
 _FILE_HEAD = re.compile(r"^【(文件|链接)：(.+?)】\s*$")
 _MD_HEAD = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _MARK_LINE = re.compile(r"^【[^】]{1,40}】\s*$")        # 【大图第 1/2 块】【说明 / 备注】这类结构标记
-IMG_BEGIN = re.compile(r"^【文档内图片理解 \[\[图片:\d+\]\]】\s*$")
+IMG_BEGIN = re.compile(r"^【文档内图片理解 \[\[图片:(\d+)\]\]】\s*$")
 IMG_END = re.compile(r"^【图片理解结束 \[\[图片:\d+\]\]】\s*$")
 _IMG_FILE = re.compile(r"\.(png|jpe?g|gif|webp|bmp|tiff?)$", re.I)
 _VISION_SECTIONS = ("图片类型与整体说明", "界面元素清单", "交互与流程逻辑", "业务规则与约束", "图中文字原文")
@@ -91,16 +91,18 @@ def build_units(materials: str) -> list[dict]:
     file_name, file_no, line_no = "需求原文", 0, 0
     seen_uid: dict[str, int] = {}
     in_img = img_text = img_file = False
+    img_no = 0   # 当前图片理解块是第几张图（材料里的 [[图片:N]] 编号；独立图片附件为 0，页面显示文件名）
     for raw in materials.split("\n"):
         s = raw.strip()
         m = _FILE_HEAD.match(s)
         if m:
             file_name, stack, file_no, line_no = m.group(2).strip(), {}, file_no + 1, 0
             img_file = bool(_IMG_FILE.search(file_name))   # 独立图片附件：整个文件都是图片理解结果
-            in_img, img_text = img_file, False
+            in_img, img_text, img_no = img_file, False, 0
             continue
-        if IMG_BEGIN.match(s):
-            in_img, img_text = True, False
+        m = IMG_BEGIN.match(s)
+        if m:
+            in_img, img_text, img_no = True, False, int(m.group(1))
             continue
         if IMG_END.match(s):
             in_img, img_text = img_file, False
@@ -143,7 +145,10 @@ def build_units(materials: str) -> list[dict]:
         if not text:
             continue
         path = " › ".join([file_name] + [stack[k] for k in sorted(stack) if k <= UNIT_LEVEL])
-        raw_units.append({"uid": uid, "path": path, "text": text, "kind": KIND_IMAGE if in_img else KIND_SOURCE})
+        unit = {"uid": uid, "path": path, "text": text, "kind": KIND_IMAGE if in_img else KIND_SOURCE}
+        if in_img:
+            unit["image"] = img_no   # 图中文字：来自哪一页的第几张图，底稿页按「页面 › 图片 N」分组
+        raw_units.append(unit)
     # 去重：同一句（规范化后相同）只记一个单元，原文行优先于图中文字
     units: list[dict] = []
     index: dict[str, dict] = {}
@@ -223,6 +228,8 @@ def account(units: list[dict], draft_text: str, decisions: dict | None = None) -
     stats, img = _empty_stats(), _empty_stats()
     for u in units:
         row = {k: u[k] for k in ("uid", "uids", "path", "pages", "count", "kind", "text")}
+        if "image" in u:
+            row["image"] = u["image"]
         ratio = coverage(u["text"], draft_norm, items)
         d = next((decisions[x] for x in u["uids"] if x in decisions), None)
         if ratio >= _FULL_RATIO:

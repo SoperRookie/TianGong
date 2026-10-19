@@ -395,6 +395,7 @@ def test_底稿单元_编号与来源_程序规则只判三类():
     assert [u["uid"] for u in units] == ["F0-0001", "u12", "u12.2", "u15", "u15.2", "F1-0005", "F1-0006", "F1-0007", "u30", "F1-0009"]
     assert rows["u12"]["count"] == 2 and rows["u12"]["uids"] == ["u12", "u19"] and rows["u30"]["path"] == "原型.zip › Axure 原型：原型.zip › 页面：规则"
     assert rows["F1-0009"]["kind"] == "image" and rows["F1-0009"]["text"] == "报名后当日不可撤销，次日生效" and rows["u30"]["kind"] == "source"
+    assert rows["F1-0009"]["image"] == 1 and rows["F1-0009"]["path"] == "原型.zip › Axure 原型：原型.zip › 页面：报名" and "image" not in rows["u30"]   # 图中文字记是哪一页的第几张图
     assert rows["F0-0001"]["path"] == "需求原文" and rows["u15"]["path"] == "原型.zip › Axure 原型：原型.zip › 页面：报名"
     assert rows["u15"]["text"] == "剩余应占位金额 ≤ 0，则不再需要占位"   # 去掉编号
     assert rows["u12"]["auto"] == AUTO_HEADING and rows["u12.2"]["auto"] == AUTO_LABEL and rows["F1-0005"]["auto"] == AUTO_SAMPLE

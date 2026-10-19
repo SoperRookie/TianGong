@@ -5776,7 +5776,7 @@ function exLedgerHtml(r, canEdit) {
   const byMap = {model:'模型', auto:'程序', user:'人工'};
   const row = u => {
     const badge = u.status==='in' ? `<span class="st approved">${u.forced?'兜底收录':u.manual?'人工收录':'收录'}</span>` : u.status==='ex' ? `<span class="st rejected" title="${esc(u.reason||'')}">排除</span> <span class="hint">${esc(u.reason||'')}（${byMap[u.by]||esc(u.by||'')}${u.checked?`，${esc(u.checked.by||'')} 已确认`:''}）</span>` : `<span class="st candidate" style="color:var(--danger)">待处理</span>${u.partial?` <span class="hint">整理稿已有其中 ${Math.round(u.partial*100)}%</span>`:''}`;
-    const times = u.count>1 ? `<span class="hint" title="${esc((u.pages||[]).join('\n'))}">×${u.count}${(u.pages||[]).length>1?`，${u.pages.length} 页`:''}</span>` : '';
+    const times = (u.count>1 ? `<span class="hint" title="${esc((u.pages||[]).join('\n'))}">×${u.count}${(u.pages||[]).length>1?`，${u.pages.length} 页`:''}</span>` : '') + (u.kind==='image' ? ` <span class="hint" title="${esc(u.path)}">〔${esc(u.path.split(' › ').pop())}${u.image?` · 图片 ${u.image}`:''}〕</span>` : '');
     const asking = _exLedgerReasonFor === u.uid;
     const ops = canEdit && !asking ? `<span style="margin-left:auto;display:flex;gap:4px;flex-shrink:0">
         ${u.status!=='in'?`<button class="btn ghost sm" title="按原句收进整理稿（标人工收录）" onclick="exLedgerAct('${esc(u.uid)}','include')">收录</button>`:''}
@@ -5791,7 +5791,12 @@ function exLedgerHtml(r, canEdit) {
   if (f === 'review') body = byPage(src.filter(u => u.review && !u.checked)) + fold('已确认', src.filter(u => u.review && u.checked), false);
   else if (f === 'todo') body = byPage(src.filter(u => u.status === 'todo'));
   else if (f === 'in') body = byPage(src.filter(u => u.status === 'in'));
-  else if (f === 'image') body = ['todo','ex','in'].map(k => fold({todo:'未收录（可手动收录）', ex:'排除', in:'已在整理稿'}[k], img.filter(u => u.status === k), k==='todo')).join('');
+  else if (f === 'image') {
+    // 图中文字按「页面 › 图片 N」分组：每句都能对回是哪一页的哪张图
+    const byImg = units => { const m = new Map(); units.forEach(u => { const k = `${u.path} › ${u.image ? `图片 ${u.image}` : '（独立图片附件）'}`; if (!m.has(k)) m.set(k, []); m.get(k).push(u); }); return [...m].map(([k, us]) => `<div style="margin:10px 0 4px"><b>${esc(k)}</b> <span class="hint">${us.length} 句</span></div>` + us.map(row).join('')).join(''); };
+    const foldImg = (title, units, open) => units.length ? `<details ${open?'open':''} style="margin:6px 0"><summary style="cursor:pointer"><b>${esc(title)}</b> <span class="hint">${units.length} 句</span></summary>${byImg(units)}</details>` : '';
+    body = ['todo','ex','in'].map(k => foldImg({todo:'未收录（可手动收录）', ex:'排除', in:'已在整理稿'}[k], img.filter(u => u.status === k), k==='todo')).join('');
+  }
   else if (f === 'ex') {
     const ex = src.filter(u => u.status === 'ex');
     const groups = new Map(); ex.forEach(u => { const k = `${byMap[u.by]||u.by}：${u.reason||''}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(u); });
