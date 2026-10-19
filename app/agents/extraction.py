@@ -9,10 +9,11 @@
    切片不会落在页面中间，每次调用都知道自己在哪个文件哪个页面；
 2. 分层摘录：每次调用先列出页面的区块清单，再按区块逐字摘录，模块名「页面-区块」直接来自材料；
 3. 合并核验：按模块合并、条目去重、每条用与分析相同的 quote_found 对照材料，没逐字找到的标 ⚠；
-4. 自动补漏 `uncovered_lines`：程序找出材料里还没进整理稿的需求句（剔除外观描述 / 样例数据），送回模型判「补进 / 跳过」，
-   最多两轮；覆盖率写进 meta 供页面显示。
+4. 底稿双向核验 `app.agents.ledger`：材料的每一行是一个带编号的单元（Axure 行带控件编号），程序核算每个单元的去向；
+   还没进整理稿、程序规则也判不了的单元送回模型逐句判「补进 / 排除（写原因）」，最多两轮；模型没判的按原句直接收进
+   整理稿（〔兜底〕）。提取完成时每个单元要么收录要么有排除原因，待处理为 0；覆盖率与底稿统计写进 meta 供页面显示。
 
-整理稿可逐条审核（核对通过 / 修改 / 删除），改过之后分析结果标过期。
+整理稿可逐条审核（核对通过 / 修改 / 删除），底稿页可把排除的翻回收录、把兜底的改成排除；改过之后分析结果标过期。
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from loguru import logger
 from app.agents.analysis import normalize, quote_found
 from app.agents.context import profile_block
 from app.agents.graph import _chat_json
+from app.agents import ledger as ledger_mod
 from app.agents.prompts import wrap_data
 from app.config import get_settings
 from app.llm.client import LLMClient
@@ -35,8 +37,8 @@ MAX_SOURCES = 5
 MAX_DROPPED = 10   # 各片都会报一遍剔除类型，去重后最多列这么多
 UNVERIFIED_MARK = "⚠"
 GAP_MARK = "〔补漏〕"
-GAP_ROUNDS = 2            # 补漏最多轮数
-GAP_MIN_CHARS = 300       # 未覆盖的需求句累计不到这么多字就不补（零星几句不值一次调用）
+FORCED_MARK = "〔兜底〕"     # 模型没判定去向、程序按原句直接收进整理稿的单元
+GAP_ROUNDS = 2            # 补漏最多轮数（有待处理单元就问模型，不设最少字数门槛：每句都要有去向）
 GAP_BATCH_CHARS = 15000   # 一次补漏调用最多送这么多字的未覆盖句
 MIN_CJK = 8               # 少于这么多汉字的行不算需求句（按钮名 / 表头 / 样例数据）
 
@@ -66,7 +68,7 @@ def _merge_modules(outputs) -> tuple[list[dict], list[str], str]:
                     it = {"text": it}
                 if not isinstance(it, dict):
                     continue
-                text = str(it.get("text") or "").strip()
+                text = ledger_mod.UNIT_ID_RE.sub("", str(it.get("text") or "").strip()).strip()
                 if not text:
                     continue
                 srcs = it.get("sources") or []
@@ -81,7 +83,7 @@ def _merge_modules(outputs) -> tuple[list[dict], list[str], str]:
                             prev["sources"].append(sx)
                     continue
                 entry = {"text": text, "sources": srcs[:MAX_SOURCES]}
-                for k in ("gap", "verified", "id", "review"):
+                for k in ("gap", "forced", "manual", "unit", "verified", "id", "review"):
                     if it.get(k) is not None:
                         entry[k] = it[k]
                 mod["_seen"][key] = entry
@@ -140,7 +142,7 @@ def extraction_markdown(modules: list[dict], dropped: list[str] | None = None) -
             mark = "" if it.get("verified", True) else f"{UNVERIFIED_MARK} "
             others = [sx for sx in it.get("sources") or [] if sx != main]
             src = f" 〔来源：{'；'.join(others)}〕" if others else ""
-            gap = f" {GAP_MARK}" if it.get("gap") else ""
+            gap = f" {FORCED_MARK}" if it.get("forced") else (f" {GAP_MARK}" if it.get("gap") else "")
             lines.append(f"- {mark}{it['text']}{gap}{src}")
         lines.append("")
     if dropped:
@@ -293,6 +295,7 @@ def uncovered_lines(materials: str, text: str) -> tuple[list[dict], dict]:
             continue
         if not s or _IMG_HEAD.match(s) or s.startswith(("[[图片", ">", "```", "|---")):
             continue
+        s = ledger_mod.UNIT_ID_RE.sub("", s).strip()
         if len(_CJK_RE.findall(s)) < MIN_CJK or _NOISE_RE.search(s) or _HEADER_LINE_RE.search(s):
             continue
         total += 1
@@ -314,20 +317,21 @@ def uncovered_lines(materials: str, text: str) -> tuple[list[dict], dict]:
 
 
 def _gap_batches(missing: list[dict]) -> list[str]:
-    """未覆盖句按页面分组、按字数分批，每批一次调用。"""
+    """待判定单元按页面分组、按字数分批，每批一次调用。每句带单元编号，模型回 add / skip 时可以只回编号。"""
     batches: list[str] = []
     buf: list[str] = []
     size = 0
     last_path = None
     for m in missing:
-        if buf and size + len(m["line"]) + 40 > GAP_BATCH_CHARS:
+        if buf and size + len(m["text"]) + 40 > GAP_BATCH_CHARS:
             batches.append("\n".join(buf))
             buf, size, last_path = [], 0, None
         if m["path"] != last_path:
             buf.append(f"〔{m['path']}〕")
             last_path = m["path"]
-        buf.append(f"- {m['line']}")
-        size += len(m["line"]) + 2
+        part = f"　〔整理稿已有其中 {int(m['partial'] * 100)}%，缺的部分多半是句尾条件，要么按原句整句补进要么判排除〕" if m.get("partial") else ""
+        buf.append(f"- [{m['uid']}] {m['text']}{part}")
+        size += len(m["text"]) + len(part) + 2
     if buf:
         batches.append("\n".join(buf))
     return batches
@@ -337,64 +341,110 @@ def _strip_bullet(s: str) -> str:
     return re.sub(r"^[\s\-•·*、，,。.；;]+|^\s*\d+[.、)]\s*", "", s).strip()
 
 
-async def _gap_fill(materials: str, modules: list[dict], llm: LLMClient, model: str | None, extra: str) -> dict:
-    """补漏：找出未覆盖的需求句送回模型判「补进 / 跳过」，最多 GAP_ROUNDS 轮。原地改 modules，返回统计。"""
+def _decide(units_sent: list[dict], entries, by: str) -> dict:
+    """模型回的 add / skip 条目对到单元：优先按编号（uid 字段或 text 里的 [uNNN]），否则按原句对。返回 {uid: 条目}。"""
+    by_uid = {u["uid"]: u for u in units_sent}
+    out: dict = {}
+    loose: list[dict] = []
+    for e in entries or []:
+        if not isinstance(e, dict):
+            continue
+        uid = str(e.get("uid") or "").strip()
+        t = str(e.get("text") or "").strip()
+        m = ledger_mod.UNIT_ID_RE.match(t)
+        if not uid and m:
+            uid = m.group(1)
+        if uid in by_uid:
+            out[uid] = e
+        else:
+            loose.append(e)
+    if loose:   # 没带编号的：按原句对（逐字等于，或 ≥ 8 字且互为子串）；模型自己概括的一句对不上就不算判定
+        index = [(u["uid"], normalize(u["text"])) for u in units_sent]
+        for e in loose:
+            t = normalize(ledger_mod.UNIT_ID_RE.sub("", _strip_bullet(str(e.get("text") or ""))))
+            if len(t) < 2:
+                continue
+            for uid, n in index:
+                if t == n or (len(t) >= 8 and len(n) >= 8 and (t in n or n in t)):
+                    out.setdefault(uid, e)
+    return out
+
+
+async def _gap_fill(materials: str, modules: list[dict], llm: LLMClient, model: str | None, extra: str) -> tuple[dict, dict]:
+    """底稿核验 + 补漏：核算每个单元去向，待处理的送回模型逐句判「补进 / 排除」，最多 GAP_ROUNDS 轮；模型没判的按原句
+    收进整理稿（〔兜底〕）。原地改 modules，返回 (补漏统计, 底稿 {stats, decisions})。"""
     from app.agents.service import gather_or_cancel
     from app.llm.calllog import used_prompts
 
     used_prompts.set({})   # 上一步提取的 Prompt 登记还留在当前上下文，不清掉补漏调用会被记成「需求提取（分析前置）」
     system = prompt_text("requirement_extract_gap")
-    missing, before = uncovered_lines(materials, extraction_markdown(modules))
-    stats = {"rounds": 0, "before": before, "after": before, "added": 0, "skipped": 0}
+    units = ledger_mod.build_units(materials)
+    decisions: dict = {}
+    _missing, before = uncovered_lines(materials, extraction_markdown(modules))
+    stats = {"rounds": 0, "before": before, "after": before, "added": 0, "skipped": 0, "forced": 0}
+    acct = ledger_mod.account(units, extraction_markdown(modules), decisions)
     for _ in range(GAP_ROUNDS):
-        if sum(len(m["line"]) for m in missing) < GAP_MIN_CHARS:
+        todo = ledger_mod.todo_units(acct)
+        if not todo:
             break
         names = [mod["name"] for mod in modules]
         user_head = ("已有整理稿的模块清单：\n" + "\n".join(f"- {n}" for n in names) +
-                     "\n\n下面是程序对照发现尚未进入整理稿的材料原句（按「文件 › 页面」分组）：\n")
+                     "\n\n下面是程序对照发现尚未进入整理稿的材料原句（按「文件 › 页面」分组，行首方括号是单元编号）。"
+                     "每一句都必须出现在 add 或 skip 里：\n")
         outputs = await gather_or_cancel([
             _chat_json(llm, [{"role": "system", "content": system},
                              {"role": "user", "content": user_head + wrap_data("未覆盖原句", b) + extra}],
                        model, reasoning_effort="medium")
-            for b in _gap_batches(missing)
+            for b in _gap_batches(todo)
         ])
         stats["rounds"] += 1
-        known_norm = [normalize(_strip_bullet(m["line"])) for m in missing]
+        by_uid = {u["uid"]: u for u in todo}
         adds: list[dict] = []
+        new_decisions: dict = {}
         for data, _r in outputs:
-            stats["skipped"] += len(data.get("skip") or [])
-            for a in data.get("add") or []:
-                if not isinstance(a, dict):
-                    continue
-                t = _strip_bullet(str(a.get("text") or ""))
-                tn = normalize(t)
-                if len(tn) < 4 or not any(tn == k or (len(tn) >= 8 and tn in k) for k in known_norm):
-                    continue   # 只认我们送过去的原句（可去掉列表符号、可取其中一段），模型自己编的不要
+            for uid, e in _decide(todo, data.get("skip") or [], ledger_mod.BY_MODEL).items():
+                new_decisions[uid] = {"r": (str(e.get("reason") or "").strip() or "模型判定不是需求")[:80], "by": ledger_mod.BY_MODEL}
+            for uid, a in _decide(todo, data.get("add") or [], ledger_mod.BY_MODEL).items():
+                u = by_uid[uid]
+                t = ledger_mod.UNIT_ID_RE.sub("", _strip_bullet(str(a.get("text") or ""))).strip()
+                tn, un = normalize(t), normalize(u["text"])
+                if len(tn) < 4 or not (tn == un or (len(tn) >= 8 and tn in un)):
+                    t = u["text"]   # 模型改了写法 / 只回了编号：按原句收
                 srcs = a.get("sources") or []
                 if isinstance(srcs, str):
                     srcs = [srcs]
-                adds.append({"name": str(a.get("module") or "").strip() or "未归类",
-                             "items": [{"text": t, "sources": srcs, "gap": True}]})
-        if not adds:
+                adds.append({"name": str(a.get("module") or "").strip() or f"{ledger_mod.page_of(u['path'])}-待归类",
+                             "items": [{"text": t, "sources": srcs or [ledger_mod.source_of(u["path"])], "gap": True, "unit": uid}]})
+        stats["skipped"] += len(new_decisions)
+        decisions.update(new_decisions)
+        if adds:
+            before_n = sum(len(m["items"]) for m in modules)
+            merged, _d, _m = _merge_modules([({"modules": [{"name": mod["name"], "items": mod["items"]} for mod in modules] + adds}, None)])
+            stats["added"] += sum(len(m["items"]) for m in merged) - before_n
+            modules[:] = merged
+        acct = ledger_mod.account(units, extraction_markdown(modules), decisions)
+        if not adds and not new_decisions:
             break
-        before_n = sum(len(m["items"]) for m in modules)
+    # 兜底：模型没判定去向的单元按原句直接收进整理稿，保证每个单元都有去向
+    todo = ledger_mod.todo_units(acct)
+    if todo:
+        adds = [{"name": f"{ledger_mod.page_of(u['path'])}-待归类",
+                 "items": [{"text": u["text"], "sources": [ledger_mod.source_of(u["path"])], "gap": True, "forced": True, "unit": u["uid"]}]}
+                for u in todo]
         merged, _d, _m = _merge_modules([({"modules": [{"name": mod["name"], "items": mod["items"]} for mod in modules] + adds}, None)])
-        added_now = sum(len(m["items"]) for m in merged) - before_n
         modules[:] = merged
-        stats["added"] += added_now
-        if added_now == 0:
-            break
-        missing, _after = uncovered_lines(materials, extraction_markdown(modules))
+        stats["forced"] = len(todo)
+        acct = ledger_mod.account(units, extraction_markdown(modules), decisions)
     stats["after"] = uncovered_lines(materials, extraction_markdown(modules))[1]
-    return stats
+    return stats, {"stats": acct["stats"], "decisions": decisions}
 
 
 # ---------- 主流程 ----------
 
 async def run_requirement_extraction(materials: str, llm: LLMClient, model: str | None = None) -> dict:
-    """提取流水线：结构分层切单元 → 各单元并行分层摘录 → 按模块合并去重 → 自动补漏 → 逐条对照材料核验 → 整理稿。
+    """提取流水线：结构分层切单元 → 各单元并行分层摘录 → 按模块合并去重 → 底稿核验 + 补漏 + 兜底 → 逐条对照材料核验 → 整理稿。
 
-    返回 {text, modules, dropped, model_name, chunks, checked, verified, unverified, source_chars, gap}。
+    返回 {text, modules, dropped, model_name, chunks, checked, verified, unverified, source_chars, gap, ledger}。
     """
     settings = get_settings()
     units = structure_units(materials, settings.chunk_max_chars)
@@ -419,13 +469,16 @@ async def run_requirement_extraction(materials: str, llm: LLMClient, model: str 
     modules, dropped, model_name = _merge_modules(outputs)
     if not modules:
         raise ValueError("模型没有从材料里提取出任何需求内容（材料可能不是需求文档）")
-    gap = await _gap_fill(materials, modules, llm, model, extra)
+    gap, ledger = await _gap_fill(materials, modules, llm, model, extra)
     stats = verify_modules(modules, materials)
     assign_ids(modules)
     text = extraction_markdown(modules, dropped)
     cov = gap["after"]
-    logger.info("需求提取：材料 {} 字 → 整理稿 {} 字，{} 个模块 {} 条；逐字核验通过 {}，未找到 {}；补漏 {} 轮 +{} 条，需求句覆盖 {}/{}（分 {} 份，{}）",
+    ls = ledger["stats"]
+    logger.info("需求提取：材料 {} 字 → 整理稿 {} 字，{} 个模块 {} 条；逐字核验通过 {}，未找到 {}；补漏 {} 轮 +{} 条、兜底 {} 条，"
+                "需求句覆盖 {}/{}；底稿 {} 行：收录 {} 排除 {}（模型 {} / 程序 {}）待处理 {}（分 {} 份，{}）",
                 len(materials), len(text), len(modules), stats["checked"], stats["verified"], stats["unverified"],
-                gap["rounds"], gap["added"], cov["covered"], cov["lines"], len(units), model_name)
+                gap["rounds"], gap["added"], gap["forced"], cov["covered"], cov["lines"],
+                ls["total"], ls["in"], ls["ex"], ls["ex_by"].get("model", 0), ls["ex_by"].get("auto", 0), ls["todo"], len(units), model_name)
     return {"text": text, "modules": modules, "dropped": dropped, "model_name": model_name, "chunks": len(units),
-            "source_chars": len(materials), "gap": gap, **stats}
+            "source_chars": len(materials), "gap": gap, "ledger": ledger, **stats}

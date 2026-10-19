@@ -286,7 +286,8 @@ def test_Axure原型导出包_按站点地图逐页提取文字与说明_跳过�
     assert "欢迎使用" in text and "密码错误 5 次锁定" in text and "修改密码" in text
     assert text.count("登录按钮") == 1  # 同页重复文字去重
     assert "点击登录后跳转首页" in text and "【说明 / 备注】" in text
-    assert text.count("请输入手机号") == 1  # data.js 中与页面正文相同的文字不重复
+    assert text.count("请输入手机号") == 1  # data.js 中与页面正文相同的文字不重复（正文行带控件编号，比对时去掉）
+    assert "[u0] 请输入手机号" in text and "- 点击登录后跳转首页" in text    # 页面行带编号，说明备注不带
     assert "$axure" not in text and "axQuery" not in text and "player" not in text and "u0.png" not in text
 
 
@@ -420,3 +421,43 @@ def test_zip条目名GBK编码也能还原(tmp_path):
         zf.writestr(GbkInfo("需求/登录需求.md"), "# 登录\n密码错误 5 次锁定 30 分钟".encode("utf-8"))
     text = parse_file(z).full_text
     assert "登录需求.md" in text and "密码错误 5 次锁定 30 分钟" in text
+
+
+def test_网页转文本_按字体拆开的span不拆行_br处断行():
+    from app.parsers.link import html_to_markdown
+
+    html = ("<html><body><div id='base'><div id='u1_text' class='text'>"
+            "<p><span>先判断未覆盖基础奖金是否</span><span style='font-family:Helvetica'>≤</span><span>0，是则正常结算</span></p>"
+            "<p><span>第一行</span><br><span>第二行</span></p></div></div></body></html>")
+    _, body = html_to_markdown(html)
+    lines = body.splitlines()
+    assert "先判断未覆盖基础奖金是否≤0，是则正常结算" in lines   # 一句话里的运算符不被拆成单独一行
+    assert "第一行" in lines and "第二行" in lines
+
+
+def test_Axure页面文字_按控件整块去重_不按行去重(tmp_path):
+    """同页重复的是整个控件（母版 / 面板状态）；两个控件共用的短行（编号、运算符、「各字段详细说明如下」）不能被后一个控件丢掉。"""
+    import zipfile
+
+    from app.parsers.base import parse_file
+
+    box = lambda i, *paras: (f"<div id='u{i}' class='ax_default'><div id='u{i}_text' class='text'>"
+                             + "".join(f"<p>{p}</p>" for p in paras) + "</div></div>")
+    page = ("<html><head><title>需求</title></head><body><div id='base'>"
+            + box(1, "<span>2.5.1 字段说明</span>", "<span>各字段详细说明如下</span>")
+            + box(2, "<span>2.6.1 字段说明</span>", "<span>各字段详细说明如下</span>")
+            + box(3, "<span>剩余应占位金额 </span><span>≤</span><span> 0，则不再需要占位</span>")
+            + box(4, "<span>剩余应占位金额 </span><span>≤</span><span> 0，则不再需要占位</span>")  # 面板另一状态整块重复
+            + "</div></body></html>")
+    z = tmp_path / "原型.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("原型/index.html", "<html><body><iframe src='start.html'></iframe></body></html>")
+        zf.writestr("原型/需求.html", page)
+        zf.writestr("原型/data/document.js", '$axure.loadDocument({"sitemap":{"rootNodes":[{"pageName":"需求","url":"需求.html"}]}});')
+        zf.writestr("原型/resources/scripts/axure/axure.js", "var $axure = {};")
+    text = parse_file(z).full_text
+    assert text.count("各字段详细说明如下") == 2     # 两个控件各自保留
+    assert text.count("剩余应占位金额 ≤ 0，则不再需要占位") == 1   # 整块重复的控件只留一份，且运算符在句子里
+    assert "\n≤\n" not in text
+    # 每行带控件编号，需求提取的底稿按编号逐控件核对去向；一个控件多段每段都带同一编号
+    assert "[u1] 2.5.1 字段说明\n[u1] 各字段详细说明如下\n[u2] 2.6.1 字段说明" in text and "[u3] 剩余应占位金额 ≤ 0" in text and "[u4]" not in text

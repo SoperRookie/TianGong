@@ -44,6 +44,13 @@ EXTRACT_REPLY = json.dumps({
 }, ensure_ascii=False)
 
 
+# 补漏审核：NOISY 里首尾的导航与版权行第一轮没进整理稿，程序把它们送回模型逐句判定，模型判「不是需求」并给原因
+NOISY_GAP = json.dumps({"add": [], "skip": [{"text": "首页 | 活动管理 | 用户管理 | 退出", "reason": "页面导航"},
+                                           {"text": "版权所有 © 2026", "reason": "版权信息"},
+                                           {"text": "活动列表页面：活动状态分为未开始、进行中、已结束。", "reason": "重复（只差页面名前缀）"}]}, ensure_ascii=False)
+NO_GAP = json.dumps({"add": [], "skip": []})
+
+
 class _R:
     model_name = "stub"
 
@@ -70,7 +77,7 @@ def test_合并去重_逐字核验_整理稿格式():
 
 async def test_附件解析完成自动提取_分析与设计以整理稿为准_修改整理稿分析标过期(client, extract_on):
     await client.post("/api/v1/projects", json={"name": "P"})
-    app.state.llm = StubLLM([EXTRACT_REPLY, ANALYSIS_REPLY])
+    app.state.llm = StubLLM([EXTRACT_REPLY, NOISY_GAP, ANALYSIS_REPLY])
     r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "活动后台"},
                            files=[("files", ("原型.txt", NOISY.encode(), "text/plain"))])).json()
     rid = r["req_id"]
@@ -84,12 +91,16 @@ async def test_附件解析完成自动提取_分析与设计以整理稿为准_
     m = r["extraction"]["meta"]
     assert m["auto"] is True and m["modules"] == 1 and m["checked"] == 3 and m["unverified"] == 1 and m["dropped"] == ["页面导航", "版权信息"]
     assert "⚠ 活动删除后不可恢复" in r["extraction"]["text"] and "版权所有" not in r["extraction"]["text"]
+    # 底稿：材料 5 行全有去向——1 行整句收录；导航 2 行、版权、只差页面名前缀的那行（整理稿命中 71%，不足 90% 不算收录）由模型排除并记原因；待处理 0
+    led = r["extraction"]["ledger"]["stats"]
+    assert led["total"] == 5 and led["in"] == 1 and led["ex"] == 4 and led["todo"] == 0 and led["ex_by"]["model"] == 4
+    assert "〔整理稿已有其中 71%" in app.state.llm.calls[1]["messages"][1]["content"]
     # 提取 Prompt 收到的是全部材料（原文 + 附件文本），最高推理强度
     call = app.state.llm.calls[0]
     assert call["reasoning_effort"] == "medium" and "需求材料" in call["messages"][1]["content"] and "版权所有" in call["messages"][1]["content"]
     # 分析输入 = 整理稿，不再是原始材料
     a = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
-    user = app.state.llm.calls[1]["messages"][1]["content"]
+    user = app.state.llm.calls[2]["messages"][1]["content"]
     assert "【需求整理稿】" in user and "活动状态分为未开始、进行中、已结束" in user and "版权所有" not in user
     assert a["analysis"] and a["analysis_outdated"] is False
     item = app.state.requirements.get(rid)
@@ -99,8 +110,8 @@ async def test_附件解析完成自动提取_分析与设计以整理稿为准_
     assert r["extraction"]["edited"]["by"] and r["analysis_outdated"] is True and r["extraction_status"] == "current"
     assert "人工修改过" in design_brief(app.state.requirements.get(rid))
     assert (await client.put(f"/api/v1/requirements/{rid}/extraction", json={"text": "  "})).status_code == 400
-    # 追加附件 → 整理稿过期；分析时先自动重新提取（桩按顺序：提取 → 分析）
-    app.state.llm = StubLLM([EXTRACT_REPLY, ANALYSIS_REPLY])
+    # 追加附件 → 整理稿过期；自动重新提取（材料两个文件 → 两次并行摘录 → 补漏两轮；新附件那句模型没判，程序兜底收录）
+    app.state.llm = StubLLM([EXTRACT_REPLY, json.dumps({"modules": []}), NOISY_GAP, NO_GAP])
     await client.post(f"/api/v1/requirements/{rid}/attachments",
                       files=[("files", ("补充.txt", "活动最多同时进行 5 个".encode(), "text/plain"))])
     r = await _wait_parsed(client, rid)
@@ -111,6 +122,7 @@ async def test_附件解析完成自动提取_分析与设计以整理稿为准_
         r = (await client.get(f"/api/v1/requirements/{rid}")).json()
     assert r["extraction_status"] == "current" and r["extraction"]["edited"] is None   # 自动重提，人工修改随旧版留档
     assert len(app.state.requirements.get(rid)["extraction_history"]) == 1
+    assert "活动最多同时进行 5 个 〔兜底〕" in r["extraction"]["text"] and r["extraction"]["meta"]["gap"]["forced"] == 1
     # 删除整理稿 → 退回原始材料
     r = (await client.delete(f"/api/v1/requirements/{rid}/extraction")).json()
     assert r["extraction_status"] == "none" and r["extraction"] is None
@@ -192,7 +204,7 @@ async def test_自动提取调用日志带需求归属_提取模型可单独配�
     await client.post("/api/v1/projects", json={"name": "P"})
     monkeypatch.setenv("TIANGONG_REQUIREMENT_EXTRACT_MODEL", "stub-extract")
     get_settings.cache_clear()
-    app.state.llm = StubLLM([EXTRACT_REPLY])
+    app.state.llm = StubLLM([EXTRACT_REPLY, NOISY_GAP])
     r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "活动后台"},
                            files=[("files", ("原型.txt", NOISY.encode(), "text/plain"))])).json()
     rid = r["req_id"]
@@ -203,11 +215,11 @@ async def test_自动提取调用日志带需求归属_提取模型可单独配�
         await asyncio.sleep(0.02)
         r = (await client.get(f"/api/v1/requirements/{rid}")).json()
     assert r["extraction_status"] == "current" and r["extraction"]["meta"]["model"] == "stub-extract"
-    assert app.state.llm.calls[0]["model"] == "stub-extract"        # 没指定模型时用配置的提取模型，不跟默认模型降档
+    assert all(c["model"] == "stub-extract" for c in app.state.llm.calls)   # 没指定模型时提取与补漏都用配置的提取模型，不跟默认模型降档
     rows = calllog.list_calls(requirement_id=rid)["items"]
-    assert rows and rows[0]["project"] == "P" and rows[0]["purpose"] == "需求提取（分析前置）"   # 自动提取也能按需求筛到
+    assert rows and all(x["project"] == "P" for x in rows) and {x["purpose"] for x in rows} == {"需求提取（分析前置）", "需求提取补漏"}   # 自动提取也能按需求筛到
     # 手动提取页面选了模型时以页面为准
-    app.state.llm = StubLLM([EXTRACT_REPLY])
+    app.state.llm = StubLLM([EXTRACT_REPLY, NOISY_GAP])
     r = (await client.post(f"/api/v1/requirements/{rid}/extract", json={"model": "stub-manual"})).json()
     assert r["extraction"]["meta"]["model"] == "stub-manual"
     m = (await client.get("/api/v1/models")).json()
@@ -256,13 +268,15 @@ GAP_FIRST = json.dumps({"modules": [{"name": "报名-规则", "items": [
 GAP_REPLY = json.dumps({"add": [
     {"module": "报名-规则", "text": "- 第 2 条报名规则：报名费满 2 元后当日将无法再次报名并退回到活动详情页面", "sources": ["原型.zip › 报名"]},
     {"module": "报名-新区块", "text": "第 3 条报名规则：报名费满 3 元后当日将无法再次报名并退回到活动详情页面"},
-    {"module": "报名-规则", "text": "模型自己编的一句不在材料里的规则内容", "sources": []},
-], "skip": [{"text": "第 4 条", "reason": "重复"}]}, ensure_ascii=False)
+    {"uid": "F1-0005", "module": "报名-规则", "text": "模型改写过的第 5 条", "sources": []},        # 带编号但改了写法 → 按原句收
+    {"module": "报名-规则", "text": "模型自己编的一句不在材料里的规则内容", "sources": []},         # 没编号也对不上原句 → 不收
+], "skip": [{"text": "第 4 条报名规则：报名费满 4 元后当日将无法再次报名并退回到活动详情页面", "reason": "重复"},
+            {"uid": "F1-0006", "reason": "样例"}, {"text": "第 7 条", "reason": "对不上原句的概括，不算判定"}]}, ensure_ascii=False)
 
 
 async def test_自动补漏_未覆盖句送回模型_只认原句_标补漏_覆盖率入meta(client, extract_on):
     await client.post("/api/v1/projects", json={"name": "P"})
-    app.state.llm = StubLLM([GAP_FIRST, GAP_REPLY, json.dumps({"add": [], "skip": []})])
+    app.state.llm = StubLLM([GAP_FIRST, GAP_REPLY, NO_GAP])
     r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "报名"},
                            files=[("files", ("原型.txt", GAP_MATERIAL.encode(), "text/plain"))])).json()
     rid = r["req_id"]
@@ -273,21 +287,29 @@ async def test_自动补漏_未覆盖句送回模型_只认原句_标补漏_覆�
         await asyncio.sleep(0.02)
         r = (await client.get(f"/api/v1/requirements/{rid}")).json()
     m = r["extraction"]["meta"]
-    assert m["gap"]["rounds"] >= 1 and m["gap"]["added"] == 2 and m["gap"]["skipped"] == 1
-    assert m["gap"]["before"]["covered"] == 1 and m["gap"]["after"]["covered"] == 3 and m["gap"]["after"]["lines"] == 15
+    assert m["gap"]["rounds"] == 2 and m["gap"]["added"] == 3 and m["gap"]["skipped"] == 2 and m["gap"]["forced"] == 9
+    # 15 句：1 句首轮摘录 + 3 句补漏 + 9 句模型没判定、程序按原句兜底 = 13 句收录；2 句模型排除；待处理 0
+    assert m["gap"]["before"]["covered"] == 1 and m["gap"]["after"]["covered"] == 13 and m["gap"]["after"]["lines"] == 15
+    led = r["extraction"]["ledger"]["stats"]
+    assert led == {"total": 15, "in": 13, "ex": 2, "todo": 0, "ex_by": {"model": 2, "auto": 0, "user": 0}}
     text = r["extraction"]["text"]
     assert "第 2 条报名规则" in text and "〔补漏〕" in text and "## 报名-新区块" in text and "模型自己编的" not in text
+    assert "模型改写过的" not in text and "- 第 5 条报名规则：报名费满 5 元后当日将无法再次报名并退回到活动详情页面 〔补漏〕" in text
+    assert "第 4 条报名规则" not in text and "第 6 条报名规则" not in text and "第 7 条报名规则：报名费满 7 元后当日将无法再次报名并退回到活动详情页面 〔兜底〕" in text
     gap_call = app.state.llm.calls[1]["messages"][1]["content"]
-    assert "未覆盖原句" in gap_call and "第 5 条报名规则" in gap_call and "- 报名-规则" in gap_call
-    # 逐条结构：每条有 id、verified；补漏条目 gap=True
+    assert "未覆盖原句" in gap_call and "[F1-0005] 第 5 条报名规则" in gap_call and "- 报名-规则" in gap_call and "每一句都必须出现在 add 或 skip 里" in gap_call
+    assert "第 1 条报名规则" not in gap_call.split("未覆盖原句")[1]      # 已收录的不再送
+    # 逐条结构：每条有 id、verified；补漏条目 gap=True，兜底条目 forced=True 且记单元编号
     mods = r["extraction"]["modules"]
     items = [it for mod in mods for it in mod["items"]]
-    assert len(items) == 3 and all(it["id"] and it["verified"] for it in items) and sum(1 for it in items if it.get("gap")) == 2
+    assert len(items) == 13 and all(it["id"] and it["verified"] for it in items) and sum(1 for it in items if it.get("gap")) == 12
+    forced = [it for it in items if it.get("forced")]
+    assert len(forced) == 9 and all(it["unit"].startswith("F1-") for it in forced) and {mod["name"] for mod in mods} >= {"报名-待归类"}
 
 
 async def test_逐条审核_核对修改删除_审核完成_版本历史对比恢复(client, extract_on):
     await client.post("/api/v1/projects", json={"name": "P"})
-    app.state.llm = StubLLM([EXTRACT_REPLY])
+    app.state.llm = StubLLM([EXTRACT_REPLY, NOISY_GAP])
     r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "活动后台"},
                            files=[("files", ("原型.txt", NOISY.encode(), "text/plain"))])).json()
     rid = r["req_id"]
@@ -324,7 +346,7 @@ async def test_逐条审核_核对修改删除_审核完成_版本历史对比�
     r = (await client.post(f"/api/v1/requirements/{rid}/extraction/items", json={"item_id": items["活动状态分为未开始、进行中、已结束"]["id"], "action": "delete"})).json()
     assert r["analysis_outdated"] is True and r["extraction"]["reviewed"] is None
     # 版本历史：重新提取后旧版进历史，可看差异、可恢复
-    app.state.llm = StubLLM([EXTRACT_REPLY])
+    app.state.llm = StubLLM([EXTRACT_REPLY, NOISY_GAP])
     r = (await client.post(f"/api/v1/requirements/{rid}/extract", json={})).json()
     assert r["extraction_history_count"] == 1
     h = (await client.get(f"/api/v1/requirements/{rid}/extraction/history")).json()
@@ -345,7 +367,7 @@ async def test_补漏调用日志记为需求提取补漏(client, extract_on):
     from app.llm import calllog
 
     await client.post("/api/v1/projects", json={"name": "P"})
-    app.state.llm = StubLLM([GAP_FIRST, GAP_REPLY, json.dumps({"add": [], "skip": []})])
+    app.state.llm = StubLLM([GAP_FIRST, GAP_REPLY, NO_GAP])
     r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "报名"},
                            files=[("files", ("原型.txt", GAP_MATERIAL.encode(), "text/plain"))])).json()
     rid = r["req_id"]
@@ -357,3 +379,78 @@ async def test_补漏调用日志记为需求提取补漏(client, extract_on):
         r = (await client.get(f"/api/v1/requirements/{rid}")).json()
     purposes = sorted(x["purpose"] for x in calllog.list_calls(requirement_id=rid)["items"])
     assert purposes == ["需求提取补漏", "需求提取补漏", "需求提取（分析前置）"]
+
+
+def test_底稿单元_编号与来源_程序规则只判三类():
+    from app.agents.ledger import AUTO_HEADING, AUTO_LABEL, AUTO_SAMPLE, account, build_units
+
+    materials = ("需求原文一句话：密码错误 5 次锁定 30 分钟\n\n【文件：原型.zip】\n# Axure 原型：原型.zip\n## 页面：报名\n"
+                 "[u12] 查询功能说明如下：\n[u12] 活动ID\n[u15] 剩余应占位金额 ≤ 0，则不再需要占位\n[u15] 第二段：结余部分计入第二天\n"
+                 "38,179.80\nposition:absolute;\nThe user must login before checkout\n[[图片:1]]\n【文档内图片理解 [[图片:1]]】\n# 界面元素清单\n- 底部有 × 按钮和刷新按钮\n")
+    units = build_units(materials)
+    rows = {u["uid"]: u for u in units}
+    assert [u["uid"] for u in units] == ["F0-0001", "u12", "u12.2", "u15", "u15.2", "F1-0005", "F1-0006", "F1-0007", "F1-0008"]
+    assert rows["F0-0001"]["path"] == "需求原文" and rows["u15"]["path"] == "原型.zip › Axure 原型：原型.zip › 页面：报名"
+    assert rows["u15"]["text"] == "剩余应占位金额 ≤ 0，则不再需要占位" and rows["F1-0008"]["text"] == "底部有 × 按钮和刷新按钮"   # 去掉编号与列表符号
+    assert rows["u12"]["auto"] == AUTO_HEADING and rows["u12.2"]["auto"] == AUTO_LABEL and rows["F1-0005"]["auto"] == AUTO_SAMPLE
+    assert rows["F1-0006"]["auto"] == AUTO_SAMPLE and rows["F1-0007"]["auto"] is None     # 英文整句交模型判
+    assert rows["u15"]["auto"] is None and rows["F1-0008"]["auto"] is None                # 外观描述不由程序判，交模型 / 人
+    acct = account(units, "## 报名\n- 密码错误 5 次锁定 30 分钟\n- 剩余应占位金额 ≤ 0\n- 则不再需要占位", {"F1-0008": {"r": "外观描述", "by": "model"}})
+    rows = {u["uid"]: u for u in acct["units"]}
+    st = {k: v["status"] for k, v in rows.items()}
+    assert st["u15"] == "in"                                       # 拆成两条但按段全部命中也算收录
+    assert st["F0-0001"] == "todo" and rows["F0-0001"]["partial"] == 0.63   # 只收了后半句（63% < 90%）：待处理，带已覆盖比例提示模型补全
+    assert st["u12"] == "ex" and st["u12.2"] == "ex" and st["F1-0005"] == "ex" and st["F1-0008"] == "ex"
+    assert st["u15.2"] == "todo" and st["F1-0007"] == "todo" and "partial" not in rows["u15.2"]
+    assert acct["stats"] == {"total": 9, "in": 1, "ex": 5, "todo": 3, "ex_by": {"model": 1, "auto": 4, "user": 0}}
+    assert rows["F1-0008"]["reason"] == "外观描述" and rows["F1-0008"]["by"] == "model" and rows["u12"]["by"] == "auto"
+
+
+async def test_底稿核对_每句有去向_人工收录与排除_待处理不能完成审核(client, extract_on):
+    await client.post("/api/v1/projects", json={"name": "P"})
+    app.state.llm = StubLLM([GAP_FIRST, GAP_REPLY, NO_GAP])
+    r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "报名"},
+                           files=[("files", ("原型.txt", GAP_MATERIAL.encode(), "text/plain"))])).json()
+    rid = r["req_id"]
+    r = await _wait_parsed(client, rid)
+    for _ in range(200):
+        if r["extraction_status"] == "current":
+            break
+        await asyncio.sleep(0.02)
+        r = (await client.get(f"/api/v1/requirements/{rid}")).json()
+    assert "decisions" not in r["extraction"]["ledger"]          # 详情只带统计，明细走底稿接口
+    led = (await client.get(f"/api/v1/requirements/{rid}/extraction/ledger")).json()
+    assert led["stats"]["todo"] == 0 and len(led["pages"]) == 1 and led["pages"][0]["path"] == "原型.txt › 页面：报名"
+    units = {u["uid"]: u for u in led["pages"][0]["units"]}
+    assert len(units) == 15 and units["F1-0001"]["status"] == "in" and not units["F1-0001"].get("forced")
+    assert units["F1-0004"] == {"uid": "F1-0004", "path": "原型.txt › 页面：报名", "status": "ex", "reason": "重复", "by": "model",
+                                "text": "第 4 条报名规则：报名费满 4 元后当日将无法再次报名并退回到活动详情页面"}
+    assert units["F1-0007"]["status"] == "in" and units["F1-0007"]["forced"] is True
+    # 兜底收录的可以人工排除：条目撤掉、记人工原因
+    r = (await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "F1-0007", "action": "exclude", "reason": "页面提示"})).json()
+    assert "第 7 条报名规则" not in r["extraction"]["text"] and r["extraction"]["meta"]["rev"] == 1
+    assert r["extraction"]["ledger"]["stats"] == {"total": 15, "in": 12, "ex": 3, "todo": 0, "ex_by": {"model": 2, "auto": 0, "user": 1}}
+    # 模型排除的可以人工翻回收录：按原句进「页面-人工收录」
+    r = (await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "F1-0004", "action": "include"})).json()
+    assert "## 报名-人工收录" in r["extraction"]["text"] and "- 第 4 条报名规则：报名费满 4 元后当日将无法再次报名并退回到活动详情页面" in r["extraction"]["text"]
+    it = next(x for m in r["extraction"]["modules"] for x in m["items"] if x.get("unit") == "F1-0004")
+    assert it["manual"] is True and it["verified"] is True and it["review"]["status"] == "included" and it["id"]
+    assert r["extraction"]["ledger"]["stats"]["in"] == 13 and r["extraction"]["ledger"]["stats"]["ex_by"]["model"] == 1
+    # 整理稿里本来就逐字有的句子不能排除
+    resp = await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "F1-0001", "action": "exclude"})
+    assert resp.status_code == 400 and "不能排除" in resp.json()["detail"]
+    assert (await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "no-such", "action": "include"})).status_code == 400
+    # 删掉一条摘录后对应单元回到待处理 → 完成审核被拦；底稿页处理后可完成
+    r = (await client.post(f"/api/v1/requirements/{rid}/extraction/items", json={"item_id": it["id"], "action": "delete"})).json()
+    assert r["extraction"]["ledger"]["stats"]["todo"] == 1
+    resp = await client.post(f"/api/v1/requirements/{rid}/extraction/review-done")
+    assert resp.status_code == 400 and "1 句" in resp.json()["detail"]
+    led = (await client.get(f"/api/v1/requirements/{rid}/extraction/ledger")).json()
+    assert next(u for u in led["pages"][0]["units"] if u["uid"] == "F1-0004")["status"] == "todo"
+    r = (await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "F1-0004", "action": "exclude"})).json()
+    assert r["extraction"]["ledger"]["stats"]["todo"] == 0
+    r = (await client.post(f"/api/v1/requirements/{rid}/extraction/review-done")).json()
+    assert r["extraction"]["reviewed"]["by"]
+    assert r["analysis_outdated"] is False or r["analysis"] is None
+    h = (await client.get(f"/api/v1/requirements/{rid}/extraction/history")).json()
+    assert h["current"]["ledger"]["total"] == 15

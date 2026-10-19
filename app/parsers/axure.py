@@ -81,16 +81,62 @@ def _sitemap(document_js: str) -> list[tuple[str, str]]:
 
 
 def _page_text(html: str) -> tuple[str, list[str]]:
-    from app.parsers.link import html_to_markdown
+    """页面可见文字：按 Axure 文字控件（id 以 _text 结尾的容器）逐个取，一个控件内的段落各成一行，每行前面带控件编号
+    「[u1125] 」——需求提取的底稿按这个编号逐控件核对去向（收录 / 排除），审核时也能按编号回原型里找。
 
-    title, body = html_to_markdown(html)
+    去重按整个控件的全文，而不是按行：同一页里母版 / 动态面板各状态会整块重复同样的控件，整块去掉即可；
+    按行去重会把「各字段详细说明如下」「≤」这类在多个控件里都出现的短行从后面的句子里抠掉。
+    没有文字控件的页面（非 Axure 页）退回通用的 HTML 转文本（不带编号）。
+    """
+    import lxml.html
+
+    from app.parsers.link import html_to_markdown, inline_lines
+
+    try:
+        root = lxml.html.fromstring(html)
+    except Exception:
+        return html_to_markdown(html)
+    title_el = root.find(".//title")
+    title = (title_el.text or "").strip() if title_el is not None else ""
+    boxes = root.xpath("//*[substring(@id, string-length(@id) - 4) = '_text']")
+    if not boxes:
+        _, body = html_to_markdown(html)
+        lines, seen = [], set()
+        for line in body.splitlines():
+            line = line.strip()
+            if line and line not in seen:
+                seen.add(line)
+                lines.append(line)
+        return title, lines
     lines, seen = [], set()
-    for line in body.splitlines():
-        line = line.strip()
-        if line and line not in seen:  # 同一页里母版 / 动态面板各状态会重复出现同样文字，去重
-            seen.add(line)
-            lines.append(line)
+    for box in boxes:
+        paras = box.xpath(".//p") or [box]
+        obj_lines: list[str] = []
+        for para in paras:
+            obj_lines.extend(inline_lines(para))
+        key = "\n".join(obj_lines)
+        if key and key not in seen:
+            seen.add(key)
+            uid = control_id(box.get("id") or "")
+            lines.extend(f"[{uid}] {l}" if uid else l for l in obj_lines)
     return title, lines
+
+
+_CONTROL_ID_RE = re.compile(r"^(u\d+)_text$")
+
+
+def control_id(element_id: str) -> str:
+    """文字控件容器 id「u1125_text」→ 控件编号「u1125」；不是 Axure 命名的返回空。"""
+    m = _CONTROL_ID_RE.match(element_id or "")
+    return m.group(1) if m else ""
+
+
+def strip_control_id(line: str) -> str:
+    """去掉行首的控件编号「[u1125] 」。"""
+    return _LINE_ID_RE.sub("", line, count=1)
+
+
+_LINE_ID_RE = re.compile(r"^\[(u\d+)\]\s?")
 
 
 def _notes(data_js: str, known: set[str]) -> list[str]:
@@ -140,7 +186,7 @@ def parse_axure_export(files: list[tuple[str, Path]], source: str, root: str) ->
         data_js = by_name.get(f"files/{Path(url).stem}/data.js")
         if data_js is not None:
             try:
-                notes = _notes(read_text_any(data_js), set(lines))
+                notes = _notes(read_text_any(data_js), {strip_control_id(l) for l in lines})
             except Exception:
                 notes = []
             if notes:

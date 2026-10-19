@@ -23,7 +23,7 @@ async def test_健康检查与模型列表(client):
     resp = await client.get("/api/v1/models")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["default_model"] == "gpt-6-astra"
+    assert data["default_model"] == "gpt-6-sol"
     names = [m["name"] for m in data["models"]]
     assert "gpt-6-astra" in names
     for m in data["models"]:
