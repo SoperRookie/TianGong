@@ -330,7 +330,8 @@ def _gap_batches(missing: list[dict]) -> list[str]:
             buf.append(f"〔{m['path']}〕")
             last_path = m["path"]
         part = f"　〔整理稿已有其中 {int(m['partial'] * 100)}%，缺的部分多半是句尾条件，要么按原句整句补进要么判排除〕" if m.get("partial") else ""
-        buf.append(f"- [{m['uid']}] {m['text']}{part}")
+        times = f"　〔出现 {m['count']} 次〕" if m.get("count", 1) > 1 else ""
+        buf.append(f"- [{m['uid']}] {m['text']}{part}{times}")
         size += len(m["text"]) + len(part) + 2
     if buf:
         batches.append("\n".join(buf))
@@ -436,7 +437,7 @@ async def _gap_fill(materials: str, modules: list[dict], llm: LLMClient, model: 
         stats["forced"] = len(todo)
         acct = ledger_mod.account(units, extraction_markdown(modules), decisions)
     stats["after"] = uncovered_lines(materials, extraction_markdown(modules))[1]
-    return stats, {"stats": acct["stats"], "decisions": decisions}
+    return stats, {"stats": acct["stats"], "image": acct["image"], "decisions": decisions}
 
 
 # ---------- 主流程 ----------
@@ -476,9 +477,10 @@ async def run_requirement_extraction(materials: str, llm: LLMClient, model: str 
     cov = gap["after"]
     ls = ledger["stats"]
     logger.info("需求提取：材料 {} 字 → 整理稿 {} 字，{} 个模块 {} 条；逐字核验通过 {}，未找到 {}；补漏 {} 轮 +{} 条、兜底 {} 条，"
-                "需求句覆盖 {}/{}；底稿 {} 行：收录 {} 排除 {}（模型 {} / 程序 {}）待处理 {}（分 {} 份，{}）",
+                "需求句覆盖 {}/{}；底稿 {} 句（去重）：收录 {} 排除 {}（模型 {} / 程序 {}）需复核 {} 待处理 {}；图中文字 {} 句（分 {} 份，{}）",
                 len(materials), len(text), len(modules), stats["checked"], stats["verified"], stats["unverified"],
                 gap["rounds"], gap["added"], gap["forced"], cov["covered"], cov["lines"],
-                ls["total"], ls["in"], ls["ex"], ls["ex_by"].get("model", 0), ls["ex_by"].get("auto", 0), ls["todo"], len(units), model_name)
+                ls["total"], ls["in"], ls["ex"], ls["ex_by"].get("model", 0), ls["ex_by"].get("auto", 0), ls["review"], ls["todo"],
+                (ledger.get("image") or {}).get("total", 0), len(units), model_name)
     return {"text": text, "modules": modules, "dropped": dropped, "model_name": model_name, "chunks": len(units),
             "source_chars": len(materials), "gap": gap, "ledger": ledger, **stats}

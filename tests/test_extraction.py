@@ -91,9 +91,9 @@ async def test_附件解析完成自动提取_分析与设计以整理稿为准_
     m = r["extraction"]["meta"]
     assert m["auto"] is True and m["modules"] == 1 and m["checked"] == 3 and m["unverified"] == 1 and m["dropped"] == ["页面导航", "版权信息"]
     assert "⚠ 活动删除后不可恢复" in r["extraction"]["text"] and "版权所有" not in r["extraction"]["text"]
-    # 底稿：材料 5 行全有去向——1 行整句收录；导航 2 行、版权、只差页面名前缀的那行（整理稿命中 71%，不足 90% 不算收录）由模型排除并记原因；待处理 0
+    # 底稿：材料 5 行去重成 4 句（导航出现两次只记一句）全有去向——1 句整句收录；导航、版权、只差页面名前缀的那句（整理稿命中 71%，不足 90% 不算收录）由模型排除并记原因；待处理 0
     led = r["extraction"]["ledger"]["stats"]
-    assert led["total"] == 5 and led["in"] == 1 and led["ex"] == 4 and led["todo"] == 0 and led["ex_by"]["model"] == 4
+    assert led["total"] == 4 and led["in"] == 1 and led["ex"] == 3 and led["todo"] == 0 and led["ex_by"]["model"] == 3 and led["review"] == 0
     assert "〔整理稿已有其中 71%" in app.state.llm.calls[1]["messages"][1]["content"]
     # 提取 Prompt 收到的是全部材料（原文 + 附件文本），最高推理强度
     call = app.state.llm.calls[0]
@@ -291,7 +291,7 @@ async def test_自动补漏_未覆盖句送回模型_只认原句_标补漏_覆�
     # 15 句：1 句首轮摘录 + 3 句补漏 + 9 句模型没判定、程序按原句兜底 = 13 句收录；2 句模型排除；待处理 0
     assert m["gap"]["before"]["covered"] == 1 and m["gap"]["after"]["covered"] == 13 and m["gap"]["after"]["lines"] == 15
     led = r["extraction"]["ledger"]["stats"]
-    assert led == {"total": 15, "in": 13, "ex": 2, "todo": 0, "ex_by": {"model": 2, "auto": 0, "user": 0}}
+    assert led == {"total": 15, "in": 13, "ex": 2, "todo": 0, "review": 2, "review_open": 2, "ex_by": {"model": 2, "auto": 0, "user": 0}}   # 模型排除的两句像规则 → 需复核
     text = r["extraction"]["text"]
     assert "第 2 条报名规则" in text and "〔补漏〕" in text and "## 报名-新区块" in text and "模型自己编的" not in text
     assert "模型改写过的" not in text and "- 第 5 条报名规则：报名费满 5 元后当日将无法再次报名并退回到活动详情页面 〔补漏〕" in text
@@ -386,24 +386,33 @@ def test_底稿单元_编号与来源_程序规则只判三类():
 
     materials = ("需求原文一句话：密码错误 5 次锁定 30 分钟\n\n【文件：原型.zip】\n# Axure 原型：原型.zip\n## 页面：报名\n"
                  "[u12] 查询功能说明如下：\n[u12] 活动ID\n[u15] 剩余应占位金额 ≤ 0，则不再需要占位\n[u15] 第二段：结余部分计入第二天\n"
-                 "38,179.80\nposition:absolute;\nThe user must login before checkout\n[[图片:1]]\n【文档内图片理解 [[图片:1]]】\n# 界面元素清单\n- 底部有 × 按钮和刷新按钮\n")
+                 "38,179.80\nposition:absolute;\nThe user must login before checkout\n[u19] 查询功能说明如下：\n[[图片:1]]\n"
+                 "【文档内图片理解 [[图片:1]]】\n# 界面元素清单\n- 底部有 × 按钮和刷新按钮\n## 查询条件区\n- 日期范围控件\n# 图中文字原文\n- 报名后当日不可撤销，次日生效\n【图片理解结束 [[图片:1]]】\n"
+                 "## 页面：规则\n[u30] 月榜前三名额外奖励\n")
     units = build_units(materials)
     rows = {u["uid"]: u for u in units}
-    assert [u["uid"] for u in units] == ["F0-0001", "u12", "u12.2", "u15", "u15.2", "F1-0005", "F1-0006", "F1-0007", "F1-0008"]
+    # 图片理解块里只有「图中文字原文」段算单元（kind=image，排在原文单元之后）；块内子标题不动路径；同文控件行去重记次数
+    assert [u["uid"] for u in units] == ["F0-0001", "u12", "u12.2", "u15", "u15.2", "F1-0005", "F1-0006", "F1-0007", "u30", "F1-0009"]
+    assert rows["u12"]["count"] == 2 and rows["u12"]["uids"] == ["u12", "u19"] and rows["u30"]["path"] == "原型.zip › Axure 原型：原型.zip › 页面：规则"
+    assert rows["F1-0009"]["kind"] == "image" and rows["F1-0009"]["text"] == "报名后当日不可撤销，次日生效" and rows["u30"]["kind"] == "source"
     assert rows["F0-0001"]["path"] == "需求原文" and rows["u15"]["path"] == "原型.zip › Axure 原型：原型.zip › 页面：报名"
-    assert rows["u15"]["text"] == "剩余应占位金额 ≤ 0，则不再需要占位" and rows["F1-0008"]["text"] == "底部有 × 按钮和刷新按钮"   # 去掉编号与列表符号
+    assert rows["u15"]["text"] == "剩余应占位金额 ≤ 0，则不再需要占位"   # 去掉编号
     assert rows["u12"]["auto"] == AUTO_HEADING and rows["u12.2"]["auto"] == AUTO_LABEL and rows["F1-0005"]["auto"] == AUTO_SAMPLE
     assert rows["F1-0006"]["auto"] == AUTO_SAMPLE and rows["F1-0007"]["auto"] is None     # 英文整句交模型判
-    assert rows["u15"]["auto"] is None and rows["F1-0008"]["auto"] is None                # 外观描述不由程序判，交模型 / 人
-    acct = account(units, "## 报名\n- 密码错误 5 次锁定 30 分钟\n- 剩余应占位金额 ≤ 0\n- 则不再需要占位", {"F1-0008": {"r": "外观描述", "by": "model"}})
+    assert rows["u15"]["auto"] is None and rows["u30"]["auto"] is None
+    acct = account(units, "## 报名\n- 密码错误 5 次锁定 30 分钟\n- 剩余应占位金额 ≤ 0\n- 则不再需要占位",
+                   {"u15.2": {"r": "过渡句", "by": "model"}, "u30": {"r": "样例", "by": "model", "checked": {"by": "lisi"}}})
     rows = {u["uid"]: u for u in acct["units"]}
     st = {k: v["status"] for k, v in rows.items()}
     assert st["u15"] == "in"                                       # 拆成两条但按段全部命中也算收录
     assert st["F0-0001"] == "todo" and rows["F0-0001"]["partial"] == 0.63   # 只收了后半句（63% < 90%）：待处理，带已覆盖比例提示模型补全
-    assert st["u12"] == "ex" and st["u12.2"] == "ex" and st["F1-0005"] == "ex" and st["F1-0008"] == "ex"
-    assert st["u15.2"] == "todo" and st["F1-0007"] == "todo" and "partial" not in rows["u15.2"]
-    assert acct["stats"] == {"total": 9, "in": 1, "ex": 5, "todo": 3, "ex_by": {"model": 1, "auto": 4, "user": 0}}
-    assert rows["F1-0008"]["reason"] == "外观描述" and rows["F1-0008"]["by"] == "model" and rows["u12"]["by"] == "auto"
+    assert st["u12"] == "ex" and st["u12.2"] == "ex" and st["F1-0005"] == "ex" and st["u15.2"] == "ex" and st["u30"] == "ex"
+    assert st["F1-0007"] == "todo" and st["F1-0009"] == "todo"
+    # 模型排除里像规则的句子标需复核：u15.2（含「第二天」）未看、u30（含数字）已确认；英文句 / 短标签不标
+    assert rows["u15.2"]["review"] is True and "checked" not in rows["u15.2"] and rows["u30"]["review"] is True and rows["u30"]["checked"]["by"] == "lisi"
+    assert acct["stats"] == {"total": 9, "in": 1, "ex": 6, "todo": 2, "review": 2, "review_open": 1, "ex_by": {"model": 2, "auto": 4, "user": 0}}
+    assert acct["image"] == {"total": 1, "in": 0, "ex": 0, "todo": 1, "review": 0, "review_open": 0, "ex_by": {"model": 0, "auto": 0, "user": 0}}
+    assert rows["u15.2"]["reason"] == "过渡句" and rows["u15.2"]["by"] == "model" and rows["u12"]["by"] == "auto"
 
 
 async def test_底稿核对_每句有去向_人工收录与排除_待处理不能完成审核(client, extract_on):
@@ -423,19 +432,20 @@ async def test_底稿核对_每句有去向_人工收录与排除_待处理不�
     assert led["stats"]["todo"] == 0 and len(led["pages"]) == 1 and led["pages"][0]["path"] == "原型.txt › 页面：报名"
     units = {u["uid"]: u for u in led["pages"][0]["units"]}
     assert len(units) == 15 and units["F1-0001"]["status"] == "in" and not units["F1-0001"].get("forced")
-    assert units["F1-0004"] == {"uid": "F1-0004", "path": "原型.txt › 页面：报名", "status": "ex", "reason": "重复", "by": "model",
-                                "text": "第 4 条报名规则：报名费满 4 元后当日将无法再次报名并退回到活动详情页面"}
+    u4 = units["F1-0004"]
+    assert (u4["path"], u4["status"], u4["reason"], u4["by"], u4["review"], u4["count"], u4["kind"]) == ("原型.txt › 页面：报名", "ex", "重复", "model", True, 1, "source")
+    assert u4["text"] == "第 4 条报名规则：报名费满 4 元后当日将无法再次报名并退回到活动详情页面" and "checked" not in u4
     assert units["F1-0007"]["status"] == "in" and units["F1-0007"]["forced"] is True
     # 兜底收录的可以人工排除：条目撤掉、记人工原因
     r = (await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "F1-0007", "action": "exclude", "reason": "页面提示"})).json()
     assert "第 7 条报名规则" not in r["extraction"]["text"] and r["extraction"]["meta"]["rev"] == 1
-    assert r["extraction"]["ledger"]["stats"] == {"total": 15, "in": 12, "ex": 3, "todo": 0, "ex_by": {"model": 2, "auto": 0, "user": 1}}
+    assert r["extraction"]["ledger"]["stats"] == {"total": 15, "in": 12, "ex": 3, "todo": 0, "review": 2, "review_open": 2, "ex_by": {"model": 2, "auto": 0, "user": 1}}
     # 模型排除的可以人工翻回收录：按原句进「页面-人工收录」
     r = (await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "F1-0004", "action": "include"})).json()
     assert "## 报名-人工收录" in r["extraction"]["text"] and "- 第 4 条报名规则：报名费满 4 元后当日将无法再次报名并退回到活动详情页面" in r["extraction"]["text"]
     it = next(x for m in r["extraction"]["modules"] for x in m["items"] if x.get("unit") == "F1-0004")
     assert it["manual"] is True and it["verified"] is True and it["review"]["status"] == "included" and it["id"]
-    assert r["extraction"]["ledger"]["stats"]["in"] == 13 and r["extraction"]["ledger"]["stats"]["ex_by"]["model"] == 1
+    assert r["extraction"]["ledger"]["stats"]["in"] == 13 and r["extraction"]["ledger"]["stats"]["ex_by"]["model"] == 1 and r["extraction"]["ledger"]["stats"]["review_open"] == 1
     # 整理稿里本来就逐字有的句子不能排除
     resp = await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "F1-0001", "action": "exclude"})
     assert resp.status_code == 400 and "不能排除" in resp.json()["detail"]
@@ -449,6 +459,14 @@ async def test_底稿核对_每句有去向_人工收录与排除_待处理不�
     assert next(u for u in led["pages"][0]["units"] if u["uid"] == "F1-0004")["status"] == "todo"
     r = (await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "F1-0004", "action": "exclude"})).json()
     assert r["extraction"]["ledger"]["stats"]["todo"] == 0
+    # 需复核的模型排除句（F1-0006）没看过也不能完成审核；确认后可以
+    resp = await client.post(f"/api/v1/requirements/{rid}/extraction/review-done")
+    assert resp.status_code == 400 and "1 句模型排除的需复核句" in resp.json()["detail"]
+    r = (await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "F1-0006", "action": "confirm"})).json()
+    assert r["extraction"]["ledger"]["stats"]["review_open"] == 0 and r["extraction"]["meta"]["rev"] == 4   # 确认不改整理稿、不加 rev
+    led = (await client.get(f"/api/v1/requirements/{rid}/extraction/ledger")).json()
+    assert next(u for u in led["pages"][0]["units"] if u["uid"] == "F1-0006")["checked"]["by"]
+    assert (await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "F1-0001", "action": "confirm"})).status_code == 400
     r = (await client.post(f"/api/v1/requirements/{rid}/extraction/review-done")).json()
     assert r["extraction"]["reviewed"]["by"]
     assert r["analysis_outdated"] is False or r["analysis"] is None
