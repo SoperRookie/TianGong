@@ -70,6 +70,44 @@ def _guess_name(url: str, suffix: str) -> str:
     return f"{stem}{suffix}"
 
 
+_INLINE_TAGS = frozenset((
+    "span", "b", "i", "u", "s", "strong", "em", "a", "font", "sup", "sub", "code", "small", "mark", "abbr",
+    "time", "del", "ins", "label", "q", "cite", "kbd", "var", "br", "img", "wbr",
+))
+
+
+def _has_block(el) -> bool:
+    """元素内部是否含块级后代；只含行内后代的元素按一段文本处理。"""
+    return any(isinstance(c.tag, str) and c.tag not in _INLINE_TAGS for c in el.iterdescendants())
+
+
+def inline_lines(el) -> list[str]:
+    """只含行内元素的段落 → 文本行：<br> 处断行，其余 span / b / a 的文字原样拼接（不加空格，中文句子不被拆开）。"""
+    parts: list[str] = []
+
+    def collect(node) -> None:
+        if isinstance(node.tag, str) and node.tag == "br":
+            parts.append("\n")
+        elif node.text:
+            parts.append(node.text)
+        for child in node:
+            if not isinstance(child.tag, str):
+                if child.tail:
+                    parts.append(child.tail)
+                continue
+            collect(child)
+            if child.tail:
+                parts.append(child.tail)
+
+    collect(el)
+    out = []
+    for line in "".join(parts).split("\n"):
+        line = " ".join(line.split())
+        if line:
+            out.append(line)
+    return out
+
+
 def html_to_markdown(raw: str) -> tuple[str, str]:
     """网页 → (标题, 正文文本)：去脚本 / 样式 / 导航，块级元素换行，标题转 Markdown 井号。"""
     import lxml.html
@@ -102,10 +140,10 @@ def html_to_markdown(raw: str) -> tuple[str, str]:
             if text:
                 lines.append(f"- {text}")
             return
-        if len(el) == 0:  # 叶子元素：整段文本
-            text = " ".join(el.text_content().split())
-            if text:
-                lines.append(text)
+        if len(el) == 0 or not _has_block(el):
+            # 叶子元素，或只含行内元素（span / b / a …）的段落：整段作为一行。Axure 等工具按字体切 span，
+            # 一句话会拆成「…是否」「≤」「0，则…」多个 span，逐 span 成行会把符号和编号拆离句子
+            lines.extend(inline_lines(el))
             return
         if el.text and el.text.strip():
             lines.append(" ".join(el.text.split()))

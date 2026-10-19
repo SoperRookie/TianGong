@@ -8,7 +8,7 @@
 # - 当前选型：公司采购 OpenAI GPT，生成 / 评审 / 图片理解全部走 GPT（provider 须为
 #   openai，客户端据此改传 max_completion_tokens）。
 
-default_model: gpt-6-astra
+default_model: gpt-6-sol
 
 # 单模型调用失败的自动重试次数（F-1-6）；重试耗尽后按各模型的 fallbacks 依序降级
 max_retries: 1
@@ -18,8 +18,8 @@ monthly_budget_usd: 1500
 
 # GPT-6 / 5.6 / 5.5 均为推理型模型，只接受默认温度 1，传其他值直接 400；5.4 系可用 0.3
 models:
-  # 默认模型：GPT-6 旗舰，生成、评审、图片理解全走它（公司决策：默认用效果最好的组合，
-  # 各组合的效果排序与预算见 docs/GPT模型组合与预算.md）
+  # 旗舰：效果最好也最贵（输入 / 输出单价是 sol 的 5 倍），需要顶配时在页面改默认或任务级指定评审模型；
+  # 各组合的效果排序与预算见 docs/GPT模型组合与预算.md
   - name: gpt-6-astra
     provider: openai
     base_url: https://api.openai.com/v1
@@ -34,7 +34,8 @@ models:
     timeout: 300
     fallbacks: [gpt-6-sol, gpt-6-luna]
 
-  # 中档：均衡组合的生成模型，也是旗舰的第一降级
+  # 默认模型：GPT-6 中档，性价比最高（「均衡」组合：生成、评审、图片理解全走它，单任务约 $0.96，
+  # 质量仅次于旗舰、成本是旗舰的五分之一）；也是旗舰的第一降级
   - name: gpt-6-sol
     provider: openai
     base_url: https://api.openai.com/v1

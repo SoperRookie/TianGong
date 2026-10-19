@@ -4722,11 +4722,14 @@ async def _run_extraction(app, req_id: str, model: str | None, by: str | None, a
         except RequirementError:
             pass
         raise
+    if (rstore.get(req_id) or {}).get("deleted_at") or rstore.get(req_id) is None:
+        raise ValueError("提取进行中需求已被删除，结果未保存")   # 模型已经跑完，但没地方落：明确告诉用户，而不是报「需求不存在」
     meta = {"id": uuid.uuid4().hex[:8], "model": data.get("model_name"), "chunks": data.get("chunks"), "inputs": inputs,
             "by": by, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "auto": auto,
             "source_chars": data.get("source_chars"), "chars": len(data["text"]), "modules": len(data.get("modules") or []),
             "checked": data.get("checked"), "verified": data.get("verified"), "unverified": data.get("unverified"),
-            "dropped": data.get("dropped") or [], "gap": data.get("gap")}
+            "dropped": data.get("dropped") or [], "gap": data.get("gap"),
+            "ledger": (data.get("ledger") or {}).get("stats")}
     return rstore.set_extraction(req_id, data, meta)
 
 
@@ -4839,7 +4842,8 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
 
     rstore = request.app.state.requirements
     view = {
-        **{k: v for k, v in item.items() if k not in ("attachments", "extraction_history")},
+        **{k: v for k, v in item.items() if k not in ("attachments", "extraction_history", "extraction")},
+        "extraction": _extraction_view(item.get("extraction")),
         "attachments": [{k: v for k, v in a.items() if k != "text"} for a in item["attachments"]],
         "status_label": REQ_STATUSES.get(item["status"], item["status"]),
         "source_label": SOURCE_TYPES.get(item["source_type"], item["source_type"]),
@@ -5314,9 +5318,50 @@ async def finish_requirement_extraction_review(request: Request, req_id: str) ->
     return _req_view(request, item)
 
 
+def _extraction_view(ex: dict | None) -> dict | None:
+    """需求详情里的整理稿：底稿只带统计，逐单元明细走 GET .../extraction/ledger（上千行，不随详情每次返回）。"""
+    if not ex:
+        return ex
+    led = ex.get("ledger") or {}
+    return {**ex, "ledger": {"stats": led.get("stats")}}
+
+
+@router.get("/api/v1/requirements/{req_id}/extraction/ledger")
+async def get_requirement_extraction_ledger(request: Request, req_id: str) -> dict:
+    """底稿核对：材料每一行（Axure 行带控件编号）的去向——收录 / 排除（原因、判定方）/ 待处理，按页面分组。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.view")
+    try:
+        return request.app.state.requirements.ledger_view(req_id)
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class LedgerUnitBody(BaseModel):
+    uid: str
+    action: str            # include 按原句收进整理稿 / exclude 人工排除
+    reason: str | None = None
+
+
+@router.post("/api/v1/requirements/{req_id}/extraction/ledger")
+async def review_requirement_extraction_ledger(request: Request, req_id: str, body: LedgerUnitBody) -> dict:
+    """底稿核对：把排除 / 待处理的单元按原句收进整理稿，或把兜底 / 待处理的单元记为人工排除。改动后已有分析标过期。"""
+    from app.requirements import RequirementError
+
+    _req(request, req_id, "requirement.edit")
+    try:
+        item = request.app.state.requirements.review_ledger_unit(req_id, body.uid, body.action, body.reason, _operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    request.state.audit_detail = f"{body.action} {body.uid}"
+    return _req_view(request, item)
+
+
 def _extraction_version_brief(ex: dict, index: int | None) -> dict:
     m = ex.get("meta") or {}
     return {"index": index, "id": m.get("id"), "at": m.get("at"), "by": m.get("by"), "auto": m.get("auto"), "model": m.get("model"),
+            "ledger": (ex.get("ledger") or {}).get("stats"),
             "rev": m.get("rev", 0), "chars": len(ex.get("text") or ""), "modules": m.get("modules"), "checked": m.get("checked"),
             "unverified": m.get("unverified"), "edited": ex.get("edited"), "reviewed": ex.get("reviewed"),
             "restored_from": m.get("restored_from"), "has_items": bool(ex.get("modules"))}

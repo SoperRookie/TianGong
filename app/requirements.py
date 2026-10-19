@@ -170,10 +170,100 @@ class RequirementStore:
         self._archive_extraction(item)
         meta = {**meta, "rev": 0}
         item["extraction"] = {"text": data["text"], "meta": meta, "edited": None,
-                              "modules": data.get("modules"), "dropped": data.get("dropped") or [], "reviewed": None}
+                              "modules": data.get("modules"), "dropped": data.get("dropped") or [], "reviewed": None,
+                              "ledger": data.get("ledger") or {"stats": None, "decisions": {}}}
         item["extracting"], item["extraction_error"] = False, None
         self._persist(item)
         return item
+
+    @staticmethod
+    def _refresh_ledger(item: dict) -> dict:
+        """按当前整理稿正文重新核算底稿（每个材料单元的去向），统计写回 extraction.ledger.stats；返回核算结果。"""
+        from app.agents.ledger import account, build_units
+
+        ex = item["extraction"]
+        led = ex.setdefault("ledger", {"stats": None, "decisions": {}})
+        acct = account(build_units(source_materials(item)), ex.get("text") or "", led.get("decisions") or {})
+        led["stats"] = acct["stats"]
+        return acct
+
+    def ledger_view(self, req_id: str) -> dict:
+        """底稿核对页数据：每个单元的编号、来源、原句、去向（收录 / 排除 + 原因与判定方 / 待处理），按页面分组。"""
+        from app.agents.ledger import group_by_page
+
+        item = self._get_alive(req_id)
+        if not item.get("extraction"):
+            raise RequirementError("还没有整理稿")
+        acct = self._refresh_ledger(item)
+        flags = {it["unit"]: ("forced" if it.get("forced") else "manual") for m in item["extraction"].get("modules") or []
+                 for it in m["items"] if it.get("unit") and (it.get("forced") or it.get("manual"))}
+        for u in acct["units"]:
+            if u["uid"] in flags:
+                u[flags[u["uid"]]] = True
+        return {"stats": acct["stats"], "pages": group_by_page(acct["units"]), "rev": item["extraction"]["meta"].get("rev", 0)}
+
+    def review_ledger_unit(self, req_id: str, uid: str, action: str, reason: str | None = None,
+                           operator: str | None = None) -> dict:
+        """底稿核对：include 把排除 / 待处理的单元按原句收进整理稿（标人工收录）；exclude 把兜底 / 人工收录 / 待处理的单元
+        记为人工排除并撤掉对应条目。整理稿里本来就逐字有的单元不能排除（它确实在稿里，要删得删那条摘录）。"""
+        from app.agents.extraction import extraction_markdown
+        from app.agents.ledger import STATUS_IN, build_units, page_of, source_of
+
+        item = self._get_alive(req_id)
+        ex = item.get("extraction") or {}
+        if not ex.get("modules"):
+            raise RequirementError("这份整理稿没有逐条结构（整篇改写过或旧版本提取），不能按底稿核对；可重新提取")
+        unit = next((u for u in build_units(source_materials(item)) if u["uid"] == uid), None)
+        if unit is None:
+            raise RequirementError("底稿里没有这个单元（材料可能已变化）")
+        led = ex.setdefault("ledger", {"stats": None, "decisions": {}})
+        decisions = led.setdefault("decisions", {})
+        own = [(m, it) for m in ex["modules"] for it in m["items"] if it.get("unit") == uid]
+        if action == "include":
+            if not own:
+                name = f"{page_of(unit['path'])}-人工收录"
+                mod = next((m for m in ex["modules"] if m["name"] == name), None)
+                if mod is None:
+                    mod = {"name": name, "items": []}
+                    ex["modules"].append(mod)
+                mod["items"].append({"text": unit["text"], "sources": [source_of(unit["path"])], "manual": True, "unit": uid,
+                                     "verified": True, "id": self._unit_item_id(name, unit["text"]),
+                                     "review": {"status": "included", "by": operator, "at": _now()}})
+            decisions.pop(uid, None)
+        elif action == "exclude":
+            status = next((u["status"] for u in self._refresh_ledger(item)["units"] if u["uid"] == uid), None)
+            if status == STATUS_IN and not own:
+                raise RequirementError("这句已在整理稿里逐字出现，不能排除；要去掉请删除对应的摘录条目")
+            for mod, it in own:
+                mod["items"].remove(it)
+                if not mod["items"]:
+                    ex["modules"].remove(mod)
+            decisions[uid] = {"r": (reason or "").strip()[:80] or "人工排除", "by": "user", "who": operator, "at": _now()}
+        else:
+            raise RequirementError(f"未知操作：{action}")
+        ex["text"] = extraction_markdown(ex["modules"], ex.get("dropped"))
+        self._after_item_change(item, operator)
+        return item
+
+    @staticmethod
+    def _unit_item_id(module: str, text: str) -> str:
+        from app.agents.extraction import _item_id
+
+        return _item_id(module, text)
+
+    def _after_item_change(self, item: dict, operator: str | None) -> None:
+        """逐条 / 底稿改动后的公共收尾：统计、rev +1（分析指纹变化）、审核标记作废、底稿重算、落库。"""
+        ex = item["extraction"]
+        ex["meta"]["rev"] = int(ex["meta"].get("rev") or 0) + 1
+        ex["meta"]["checked"] = sum(len(m["items"]) for m in ex["modules"])
+        ex["meta"]["unverified"] = sum(1 for m in ex["modules"] for x in m["items"] if x.get("verified") is False)
+        ex["meta"]["verified"] = ex["meta"]["checked"] - ex["meta"]["unverified"]
+        ex["meta"]["modules"] = len(ex["modules"])
+        ex["meta"]["chars"] = len(ex["text"])
+        ex["reviewed"] = None
+        self._refresh_ledger(item)
+        item["updated_by"], item["updated_at"] = operator, _now()
+        self._persist(item)
 
     def edit_extraction(self, req_id: str, text: str, operator: str | None = None) -> dict:
         """整篇人工改写整理稿：逐条结构失效（modules 清空），edited 记录改动者与时间。"""
@@ -188,6 +278,7 @@ class RequirementStore:
         ex["modules"], ex["reviewed"] = None, None
         ex["edited"] = {"by": operator, "at": _now()}
         ex["meta"]["rev"] = int(ex["meta"].get("rev") or 0) + 1
+        self._refresh_ledger(item)
         item["updated_by"], item["updated_at"] = operator, _now()
         self._persist(item)
         return item
@@ -227,19 +318,11 @@ class RequirementStore:
         else:
             raise RequirementError(f"未知操作：{action}")
         ex["text"] = extraction_markdown(ex["modules"], ex.get("dropped"))
-        ex["meta"]["rev"] = int(ex["meta"].get("rev") or 0) + 1
-        ex["meta"]["checked"] = sum(len(m["items"]) for m in ex["modules"])
-        ex["meta"]["unverified"] = sum(1 for m in ex["modules"] for x in m["items"] if x.get("verified") is False)
-        ex["meta"]["verified"] = ex["meta"]["checked"] - ex["meta"]["unverified"]
-        ex["meta"]["modules"] = len(ex["modules"])
-        ex["meta"]["chars"] = len(ex["text"])
-        ex["reviewed"] = None
-        item["updated_by"], item["updated_at"] = operator, _now()
-        self._persist(item)
+        self._after_item_change(item, operator)
         return item
 
     def finish_extraction_review(self, req_id: str, operator: str | None = None) -> dict:
-        """标记整理稿已审核：⚠ 条目都得有核对结论（通过 / 修改 / 删除）。"""
+        """标记整理稿已审核：⚠ 条目都得有核对结论（通过 / 修改 / 删除），底稿里不能有待处理的单元（每句要么收录要么有排除原因）。"""
         item = self._get_alive(req_id)
         ex = item.get("extraction") or {}
         if not ex:
@@ -247,6 +330,9 @@ class RequirementStore:
         pending = sum(1 for m in ex.get("modules") or [] for x in m["items"] if x.get("verified") is False and not x.get("review"))
         if pending:
             raise RequirementError(f"还有 {pending} 条未逐字找到的条目没有核对，请先逐条处理（核对通过 / 修改 / 删除）")
+        todo = (self._refresh_ledger(item)["stats"] or {}).get("todo") or 0
+        if todo:
+            raise RequirementError(f"底稿里还有 {todo} 句材料原句既没收录也没有排除原因，请在「底稿核对」里处理（收录 / 排除）")
         ex["reviewed"] = {"by": operator, "at": _now(), "rev": ex["meta"].get("rev", 0)}
         item["updated_by"], item["updated_at"] = operator, _now()
         self._persist(item)
@@ -266,6 +352,7 @@ class RequirementStore:
                             "rev": int(restored.get("meta", {}).get("rev") or 0) + 1}
         restored["reviewed"] = None
         item["extraction"] = restored
+        self._refresh_ledger(item)
         item["updated_by"], item["updated_at"] = operator, _now()
         self._persist(item)
         return item
