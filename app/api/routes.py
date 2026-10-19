@@ -5323,7 +5323,7 @@ def _extraction_view(ex: dict | None) -> dict | None:
     if not ex:
         return ex
     led = ex.get("ledger") or {}
-    return {**ex, "ledger": {"stats": led.get("stats")}}
+    return {**ex, "ledger": {"stats": led.get("stats"), "image": led.get("image")}}
 
 
 @router.get("/api/v1/requirements/{req_id}/extraction/ledger")
@@ -5340,13 +5340,14 @@ async def get_requirement_extraction_ledger(request: Request, req_id: str) -> di
 
 class LedgerUnitBody(BaseModel):
     uid: str
-    action: str            # include 按原句收进整理稿 / exclude 人工排除
+    action: str            # include 按原句收进整理稿 / exclude 人工排除 / confirm 需复核的已看过
     reason: str | None = None
 
 
 @router.post("/api/v1/requirements/{req_id}/extraction/ledger")
 async def review_requirement_extraction_ledger(request: Request, req_id: str, body: LedgerUnitBody) -> dict:
-    """底稿核对：把排除 / 待处理的单元按原句收进整理稿，或把兜底 / 待处理的单元记为人工排除。改动后已有分析标过期。"""
+    """底稿核对：把排除 / 待处理的单元按原句收进整理稿，或把兜底 / 待处理的单元记为人工排除，或确认需复核句已看过。
+    收录 / 排除后已有分析标过期；确认不改整理稿。"""
     from app.requirements import RequirementError
 
     _req(request, req_id, "requirement.edit")

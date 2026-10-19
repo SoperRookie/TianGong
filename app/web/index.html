@@ -5709,8 +5709,8 @@ function reqExtractionHtml(r, canAI, canEdit) {
   const ex = r.extraction, m = (ex && ex.meta) || {}, st = r.extraction_status, gap = m.gap || null;
   const intro = `<div class="hint" style="margin-bottom:10px">需求提取是 AI 分析的前置步骤：从原文与<b>全部附件</b>（文档、原型导出页、截图的图片理解结果、链接）里<b>逐字摘录</b>需求内容。流程：按「文件 › 页面」分层提取 → 逐条对照材料核验（没逐字找到的标 ⚠）→ <b>底稿双向核验</b>：材料每一句（原型行带控件编号）必须有去向——在整理稿里逐字找到即「收录」，否则送回模型逐句判「补进〔补漏〕/ 排除并写原因」，模型没判的按原句〔兜底〕收进 → 人工逐条审核与底稿核对 → 版本存档。<b>AI 需求分析与测试设计以整理稿为准</b>，原始材料仍在「原文与附件」页可查；整理稿改动后需重新分析。</div>`;
   const cov = gap && gap.after && gap.after.lines ? `需求句覆盖 <b>${Math.round(gap.after.covered*100/gap.after.lines)}%</b>（${gap.after.covered}/${gap.after.lines}${gap.added?`，补漏 +${gap.added} 条`:''}${gap.forced?`，兜底 ${gap.forced} 条`:''}）` : '';
-  const ls = ex && ex.ledger && ex.ledger.stats;
-  const ledg = ls ? `底稿 ${ls.total} 句：收录 ${ls.in} · 排除 ${ls.ex}（模型 ${(ls.ex_by||{}).model||0} / 程序 ${(ls.ex_by||{}).auto||0} / 人工 ${(ls.ex_by||{}).user||0}）· <b style="color:${ls.todo?'var(--danger)':'var(--ok,#1a7f37)'}">待处理 ${ls.todo}</b>` : '';
+  const ls = ex && ex.ledger && ex.ledger.stats, li = ex && ex.ledger && ex.ledger.image;
+  const ledg = ls ? `底稿 ${ls.total} 句（去重）：收录 ${ls.in} · 排除 ${ls.ex}（程序 ${(ls.ex_by||{}).auto||0} / 模型 ${(ls.ex_by||{}).model||0} / 人工 ${(ls.ex_by||{}).user||0}）· <b style="color:${ls.review_open?'var(--warn)':'var(--ok,#1a7f37)'}">需复核 ${ls.review||0}${ls.review_open?`（未看 ${ls.review_open}）`:''}</b> · <b style="color:${ls.todo?'var(--danger)':'var(--ok,#1a7f37)'}">待处理 ${ls.todo}</b>${li&&li.total?` · 图中文字 ${li.total} 句（收录 ${li.in}）`:''}` : '';
   const toolbar = `<div class="toolbar" style="margin-bottom:10px;flex-wrap:wrap">
       ${canAI?`<select id="rqExtractModel" style="width:150px" title="提取模型（默认：${esc(_extractDefaultModel||'未配置')}。提取是逐字摘录、输出量大，低档模型会压成摘要，建议用 GPT-6 旗舰或中档）">${anModelOpts().replace('>默认模型<', `>默认（${esc(_extractDefaultModel||'未配置')}）<`)}</select>
       <button class="btn sm" id="rqExtractBtn" onclick="extractReq()" ${st==='running'?'disabled':''}>${st==='running'?'<span class="spin"></span> 提取中':ex?'重新提取':'提取需求'}</button>`:''}
@@ -5740,8 +5740,8 @@ function reqExtractionHtml(r, canAI, canEdit) {
   const all = _exItemsOf(r);
   const nUnv = all.filter(it => it.verified === false).length, nPend = all.filter(it => it.verified === false && !it.review).length, nGap = all.filter(it => it.gap && !it.forced).length, nForced = all.filter(it => it.forced).length, nRev = all.filter(it => it.review).length;
   const filt = `<div class="toolbar" style="margin-bottom:8px;flex-wrap:wrap">
-      ${[['all',`全部 ${all.length}`],['unverified',`⚠ 待核对 ${nPend}`],['gap',`补漏 ${nGap}`],['forced',`兜底 ${nForced}`],['reviewed',`已处理 ${nRev}`],['ledger',`底稿核对${ls&&ls.todo?` <b style="color:var(--danger)">${ls.todo}</b>`:''}`]].map(([k,t])=>`<button class="btn ghost sm ${_exFilter===k?'on':''}" style="${_exFilter===k?'font-weight:600':''}" onclick="_exFilter='${k}';renderRequirementDetail()">${t}</button>`).join('')}
-      <span class="hint">${_exFilter==='ledger'?'底稿 = 材料的每一句（原型行带控件编号），每句的去向：收录 / 排除（原因与判定方）/ 待处理。可把排除的翻回收录（按原句进整理稿）、把兜底或人工收录的排除；待处理为 0 才能完成审核':'⚠ = 没在材料里逐字找到（多半是模型改了写法），请对照原文核对通过、改成原句或删除；〔补漏〕= 模型判定是需求后补进的原句；〔兜底〕= 模型没判定去向、程序按原句收进来的，请核对后留下或在底稿里排除'}</span></div>`;
+      ${[['all',`全部 ${all.length}`],['unverified',`⚠ 待核对 ${nPend}`],['gap',`补漏 ${nGap}`],['forced',`兜底 ${nForced}`],['reviewed',`已处理 ${nRev}`],['ledger',`底稿核对${ls&&(ls.todo||ls.review_open)?` <b style="color:${ls.todo?'var(--danger)':'var(--warn)'}">${(ls.todo||0)+(ls.review_open||0)}</b>`:''}`]].map(([k,t])=>`<button class="btn ghost sm ${_exFilter===k?'on':''}" style="${_exFilter===k?'font-weight:600':''}" onclick="_exFilter='${k}';renderRequirementDetail()">${t}</button>`).join('')}
+      <span class="hint">${_exFilter==='ledger'?'底稿 = 产品原文的每一句（原型控件行、文档段落、说明备注，重复的只记一次；图片理解的描述不算，截图里转录的文字单列「图中文字」），每句的去向：收录 / 排除（原因与判定方）/ 待处理。要人看的只有「需复核」（模型排除的、像规则的句子）和「待处理」；程序按类排除的折叠起来。待处理为 0、需复核都看过才能完成审核':'⚠ = 没在材料里逐字找到（多半是模型改了写法），请对照原文核对通过、改成原句或删除；〔补漏〕= 模型判定是需求后补进的原句；〔兜底〕= 模型没判定去向、程序按原句收进来的，请核对后留下或在底稿里排除'}</span></div>`;
   if (_exFilter === 'ledger') return intro + toolbar + bar + filt + exLedgerHtml(r, canEdit);
   const keep = it => _exFilter==='all' || (_exFilter==='unverified' && it.verified===false && !it.review) || (_exFilter==='gap' && it.gap && !it.forced) || (_exFilter==='forced' && it.forced) || (_exFilter==='reviewed' && it.review);
   const rows = ex.modules.map(mod => {
@@ -5766,25 +5766,38 @@ function reqExtractionHtml(r, canAI, canEdit) {
 }
 function exLedgerHtml(r, canEdit) {
   if (!_exLedger) { if (!_exLedgerLoading) exLedgerLoad(); return `<div class="hint"><span class="spin"></span> 正在核算底稿…</div>`; }
-  const L = _exLedger, st = L.stats || {}, f = _exLedgerF || (st.todo ? 'todo' : 'ex');
-  const tabs = [['todo',`待处理 ${st.todo||0}`],['ex',`排除 ${st.ex||0}`],['in',`收录 ${st.in||0}`],['all',`全部 ${st.total||0}`]];
+  const L = _exLedger, st = L.stats || {}, li = L.image || {};
+  const all = (L.pages||[]).flatMap(pg => pg.units);
+  const src = all.filter(u => u.kind !== 'image'), img = all.filter(u => u.kind === 'image');
+  const f = _exLedgerF || (st.todo ? 'todo' : st.review_open ? 'review' : 'ex');
+  const tabs = [['review',`需复核 ${st.review||0}${st.review_open?` <b style="color:var(--warn)">未看 ${st.review_open}</b>`:''}`],['todo',`待处理 ${st.todo||0}`],['ex',`排除 ${st.ex||0}`],['in',`收录 ${st.in||0}`],['image',`图中文字 ${li.total||0}`],['all',`全部 ${st.total||0}`]];
   let out = `<div class="toolbar" style="margin-bottom:6px;flex-wrap:wrap">${tabs.map(([k,t])=>`<button class="btn ghost sm ${f===k?'on':''}" style="${f===k?'font-weight:600':''}" onclick="_exLedgerF='${k}';renderRequirementDetail()">${t}</button>`).join('')}
-      <span class="hint">排除原因后的标记：模型 = 补漏审核时模型判定；程序 = 小标题 / 纯样例数据 / 不足 8 个汉字的短标签；人工 = 底稿核对里排除</span></div>`;
+      <span class="hint">${f==='review'?'模型判「不是需求」但句子像规则（≥ 8 个汉字且带数字 / 条件词）：看一眼，是需求就「收录」，确实不是就「确认」':f==='ex'?'程序按规则排除的三类按类折叠；模型排除的按原因折叠，需复核的在上一个页签':f==='image'?'模型从截图里转录的文字，不是产品写的原文：低优先级，不送补漏、不拦审核；需要的可以手动收录':f==='todo'?'既没收录也没有排除原因的句子，AI 提取完成时应为 0；删了摘录会回到这里':'去向以整理稿正文为准'}</span></div>`;
   const byMap = {model:'模型', auto:'程序', user:'人工'};
-  const pages = (L.pages||[]).map(pg => {
-    const units = pg.units.filter(u => f==='all' || u.status===f);
-    if (!units.length) return '';
-    return `<div style="margin:10px 0 4px"><b>${esc(pg.path)}</b> <span class="hint">${units.length} / ${pg.units.length} 句</span></div>` + units.map(u => {
-      const badge = u.status==='in' ? `<span class="st approved">${u.forced?'兜底收录':'收录'}</span>` : u.status==='ex' ? `<span class="st rejected" title="${esc(u.reason||'')}">排除</span> <span class="hint">${esc(u.reason||'')}（${byMap[u.by]||esc(u.by||'')}）</span>` : `<span class="st candidate" style="color:var(--danger)">待处理</span>${u.partial?` <span class="hint">整理稿已有其中 ${Math.round(u.partial*100)}%</span>`:''}`;
-      const asking = _exLedgerReasonFor === u.uid;
-      const ops = canEdit && !asking ? `<span style="margin-left:auto;display:flex;gap:4px;flex-shrink:0">
-          ${u.status!=='in'?`<button class="btn ghost sm" title="按原句收进整理稿（标人工收录）" onclick="exLedgerAct('${esc(u.uid)}','include')">收录</button>`:''}
-          ${u.status==='todo'||(u.status==='in'&&u.forced)?`<button class="btn ghost sm danger" title="记为人工排除（兜底 / 人工收录的条目一并撤掉）" onclick="_exLedgerReasonFor='${esc(u.uid)}';renderRequirementDetail()">排除</button>`:''}</span>` : '';
-      const ask = asking ? `<div style="flex-basis:100%;display:flex;gap:6px;align-items:center;margin-top:4px"><input id="exLedgerReason" placeholder="排除原因（可空，默认「人工排除」）" style="flex:1" onkeydown="if(event.key==='Enter')exLedgerAct('${esc(u.uid)}','exclude',this.value)"><button class="btn sm danger" onclick="exLedgerAct('${esc(u.uid)}','exclude',$('exLedgerReason').value)">确定排除</button><button class="btn ghost sm" onclick="_exLedgerReasonFor=null;renderRequirementDetail()">取消</button></div>` : '';
-      return `<div style="display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap;padding:4px 6px;border-bottom:1px solid var(--line)"><span class="hint" style="font-family:ui-monospace,monospace;flex-shrink:0;min-width:64px" title="单元编号：原型控件编号可在 Axure 导出页里按 id 查到">${esc(u.uid)}</span><span style="flex:1;line-height:1.6">${badge} ${esc(u.text)}</span>${ops}${ask}</div>`;
-    }).join('');
-  }).join('');
-  return out + `<div style="max-height:600px;overflow:auto;background:var(--line-2);padding:4px 10px;border-radius:8px">${pages || '<div class="empty">没有符合筛选的句子</div>'}</div>`;
+  const row = u => {
+    const badge = u.status==='in' ? `<span class="st approved">${u.forced?'兜底收录':u.manual?'人工收录':'收录'}</span>` : u.status==='ex' ? `<span class="st rejected" title="${esc(u.reason||'')}">排除</span> <span class="hint">${esc(u.reason||'')}（${byMap[u.by]||esc(u.by||'')}${u.checked?`，${esc(u.checked.by||'')} 已确认`:''}）</span>` : `<span class="st candidate" style="color:var(--danger)">待处理</span>${u.partial?` <span class="hint">整理稿已有其中 ${Math.round(u.partial*100)}%</span>`:''}`;
+    const times = u.count>1 ? `<span class="hint" title="${esc((u.pages||[]).join('\n'))}">×${u.count}${(u.pages||[]).length>1?`，${u.pages.length} 页`:''}</span>` : '';
+    const asking = _exLedgerReasonFor === u.uid;
+    const ops = canEdit && !asking ? `<span style="margin-left:auto;display:flex;gap:4px;flex-shrink:0">
+        ${u.status!=='in'?`<button class="btn ghost sm" title="按原句收进整理稿（标人工收录）" onclick="exLedgerAct('${esc(u.uid)}','include')">收录</button>`:''}
+        ${u.review&&!u.checked?`<button class="btn ghost sm" title="看过了，确实不是需求，维持排除" onclick="exLedgerAct('${esc(u.uid)}','confirm')">确认</button>`:''}
+        ${u.status==='todo'||(u.status==='in'&&(u.forced||u.manual))?`<button class="btn ghost sm danger" title="记为人工排除（兜底 / 人工收录的条目一并撤掉）" onclick="_exLedgerReasonFor='${esc(u.uid)}';renderRequirementDetail()">排除</button>`:''}</span>` : '';
+    const ask = asking ? `<div style="flex-basis:100%;display:flex;gap:6px;align-items:center;margin-top:4px"><input id="exLedgerReason" placeholder="排除原因（可空，默认「人工排除」）" style="flex:1" onkeydown="if(event.key==='Enter')exLedgerAct('${esc(u.uid)}','exclude',this.value)"><button class="btn sm danger" onclick="exLedgerAct('${esc(u.uid)}','exclude',$('exLedgerReason').value)">确定排除</button><button class="btn ghost sm" onclick="_exLedgerReasonFor=null;renderRequirementDetail()">取消</button></div>` : '';
+    return `<div style="display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap;padding:4px 6px;border-bottom:1px solid var(--line)"><span class="hint" style="font-family:ui-monospace,monospace;flex-shrink:0;min-width:64px" title="单元编号：原型控件编号可在 Axure 导出页里按 id 查到">${esc(u.uid)}</span><span style="flex:1;line-height:1.6">${badge} ${esc(u.text)} ${times}</span>${ops}${ask}</div>`;
+  };
+  const byPage = units => { const m = new Map(); units.forEach(u => { if (!m.has(u.path)) m.set(u.path, []); m.get(u.path).push(u); }); return [...m].map(([path, us]) => `<div style="margin:10px 0 4px"><b>${esc(path)}</b> <span class="hint">${us.length} 句</span></div>` + us.map(row).join('')).join(''); };
+  const fold = (title, units, open) => units.length ? `<details ${open?'open':''} style="margin:6px 0"><summary style="cursor:pointer"><b>${esc(title)}</b> <span class="hint">${units.length} 句</span></summary>${byPage(units)}</details>` : '';
+  let body = '';
+  if (f === 'review') body = byPage(src.filter(u => u.review && !u.checked)) + fold('已确认', src.filter(u => u.review && u.checked), false);
+  else if (f === 'todo') body = byPage(src.filter(u => u.status === 'todo'));
+  else if (f === 'in') body = byPage(src.filter(u => u.status === 'in'));
+  else if (f === 'image') body = ['todo','ex','in'].map(k => fold({todo:'未收录（可手动收录）', ex:'排除', in:'已在整理稿'}[k], img.filter(u => u.status === k), k==='todo')).join('');
+  else if (f === 'ex') {
+    const ex = src.filter(u => u.status === 'ex');
+    const groups = new Map(); ex.forEach(u => { const k = `${byMap[u.by]||u.by}：${u.reason||''}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(u); });
+    body = [...groups].sort((a,b) => b[1].length - a[1].length).map(([k, us]) => fold(k, us, false)).join('');
+  } else body = byPage(src);
+  return out + `<div style="max-height:600px;overflow:auto;background:var(--line-2);padding:4px 10px;border-radius:8px">${body || '<div class="empty">没有符合筛选的句子</div>'}</div>`;
 }
 async function exLedgerLoad() {
   _exLedgerLoading = true;
@@ -5796,7 +5809,7 @@ async function exLedgerAct(uid, action, reason) {
   try {
     const r = await jpost(`/api/v1/requirements/${curReq}/extraction/ledger`, {uid, action, reason: reason || null});
     const st = ((r.extraction||{}).ledger||{}).stats || {};
-    toast(action === 'include' ? '已按原句收进整理稿' : `已排除，待处理 ${st.todo||0}`, 'ok');
+    toast(action === 'include' ? '已按原句收进整理稿' : action === 'confirm' ? `已确认，需复核未看 ${st.review_open||0}` : `已排除，待处理 ${st.todo||0}`, 'ok');
     _exLedgerReasonFor = null; _exLedger = null; renderRequirementDetail();
   } catch (e) { toast(e.message, 'err'); }
 }
