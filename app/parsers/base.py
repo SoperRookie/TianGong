@@ -30,6 +30,8 @@ class ParsedDocument(BaseModel):
     embedded_images: list[EmbeddedImage] = Field(
         default_factory=list, exclude=True, description="待 Vision 理解的内嵌图片（不序列化）"
     )
+    controls: dict = Field(default_factory=dict, description="原型控件索引 {uid: {cls, x, y, hidden?, img?}}（Axure：底稿核对按编号查类型 / 位置 / 隐藏态）")
+    check: dict | None = Field(default=None, description="解析自校验（Axure：整页字符多重集 vs 提取行，{ok, missing, pages[...]}）")
 
     @property
     def full_text(self) -> str:

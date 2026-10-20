@@ -903,6 +903,7 @@ async def preview_parse(
                 "sections": [s.model_dump() for s in doc.sections],
                 "tables": doc.tables,
                 "full_text": doc.full_text,
+                "check": doc.check,
             }
             for doc in docs
         ],
@@ -4518,6 +4519,8 @@ def _attachment_record(saved: Path, doc=None, error: str | None = None) -> dict:
         "text": doc.full_text if doc is not None else "",
         "chars": len(doc.full_text) if doc is not None else 0,
         "warning": content_warning(doc.full_text) if doc is not None else None,
+        "controls": (doc.controls or None) if doc is not None else None,   # Axure：控件索引（类型 / 坐标 / 隐藏态），底稿核对按编号查
+        "check": doc.check if doc is not None else None,                   # Axure：整页字符多重集自校验（缺字即报）
         "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
@@ -5290,13 +5293,14 @@ class ExtractionItemBody(BaseModel):
 async def review_requirement_extraction_item(request: Request, req_id: str, body: ExtractionItemBody) -> dict:
     """整理稿逐条审核：核对通过 / 修改（改后重新对照材料核验）/ 删除。改动后正文按结构重生成，已有分析标过期。"""
     from app.agents.analysis import normalize
-    from app.agents.extraction import verify_text
+    from app.agents.extraction import strict_normalize, verify_text
     from app.requirements import RequirementError, source_materials
 
     item = _req(request, req_id, "requirement.edit")
     verified = None
     if body.action == "edit" and (body.text or "").strip():
-        verified = verify_text(body.text.strip(), normalize(source_materials(item)))
+        materials = source_materials(item)
+        verified = verify_text(body.text.strip(), normalize(materials), strict_normalize(materials))
     try:
         item = request.app.state.requirements.review_extraction_item(req_id, body.item_id, body.action, body.text, verified, _operator(request))
     except RequirementError as e:

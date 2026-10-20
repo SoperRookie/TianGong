@@ -197,12 +197,19 @@ class RequirementStore:
         acct = self._refresh_ledger(item)
         flags = {it["unit"]: ("forced" if it.get("forced") else "manual") for m in item["extraction"].get("modules") or []
                  for it in m["items"] if it.get("unit") and (it.get("forced") or it.get("manual"))}
+        index = {a["filename"]: a["controls"] for a in item.get("attachments", []) if a.get("controls")}
         for u in acct["units"]:
             for x in u["uids"]:
                 if x in flags:
                     u[flags[x]] = True
+            ctl = (index.get(u["path"].split(" › ")[0]) or {}).get(u["uid"].split(".")[0])
+            if ctl:
+                u["ctl"] = ctl   # 原型控件类型 / 坐标 / 隐藏态：人看底稿时分辨表格单元格、流程框、隐藏面板
+        checks = [{"filename": a["filename"], "ok": a["check"].get("ok", False), "missing": a["check"].get("missing", 0),
+                   "pages": len(a["check"].get("pages") or [])}
+                  for a in item.get("attachments", []) if a.get("check")]
         return {"stats": acct["stats"], "image": acct["image"], "pages": group_by_page(acct["units"]),
-                "rev": item["extraction"]["meta"].get("rev", 0)}
+                "checks": checks, "rev": item["extraction"]["meta"].get("rev", 0)}
 
     def review_ledger_unit(self, req_id: str, uid: str, action: str, reason: str | None = None,
                            operator: str | None = None) -> dict:
