@@ -151,8 +151,10 @@ def _module_source(mod: dict) -> str:
 TABLE_SEP = " ｜ "   # 解析器把表格同一行单元格并成的分隔符（app.parsers.axure.TABLE_SEP）
 IMAGE_SECTION = "仅出现在图片中的文案"
 _LABEL_RE = re.compile(r"[:：]\s*$")
+_FLOW_RE = re.compile(r"\s—[^→]*→\s|\s→\s")   # 解析器还原的流程行「A → B」「A —是→ B」
 _SUB_RE = re.compile(r"^(?:注|备注|说明|示例|例)[:：]|^(?:\d{1,2}|[一二三四五六七八九十]{1,2})\s*[、.．:：)）]|^[①-⑳]|^[1-9]\ufe0f?\u20e3|^[（(]示例")
-_IMG_SRC_RE = re.compile(r"图片[:：]\s*\d+")
+_IMG_SRC_RE = re.compile(r"图片\s*[:：]?\s*\d+")   # 「图片:7」「图片 7」「图片10」都算只在图片里的文案
+_PAGE_RANK = [re.compile(r"更新记录|版本记录|修订记录|变更记录|更新日志|版本历史"), re.compile(r"需求说明|需求背景|需求概述|总体说明|概述|总览")]
 _PAGE_PREFIX = re.compile(r"^页面[:：]\s*")
 _MAX_LABEL = 30
 
@@ -169,6 +171,12 @@ def _block_rows(items: list[dict]) -> list[dict]:
     rows: list[dict] = []
     for it in items:
         text = it["text"]
+        if _FLOW_RE.search(text):   # 流程行：连续的并成一块（成稿为代码块，保留箭头与分支）
+            if rows and rows[-1]["t"] == "flow":
+                rows[-1]["items"].append(it)
+            else:
+                rows.append({"t": "flow", "items": [it]})
+            continue
         if TABLE_SEP in text:
             cols = text.count(TABLE_SEP) + 1
             if rows and rows[-1]["t"] == "table" and rows[-1]["cols"] == cols:
@@ -195,6 +203,53 @@ def _block_rows(items: list[dict]) -> list[dict]:
     return out
 
 
+def _page_rank(title: str) -> int:
+    """页面在整理稿里的先后：版本 / 更新记录最前，需求说明（背景、总体规则）其次，各功能页面按材料顺序，只在图片里的文案最后。"""
+    if title == IMAGE_SECTION:
+        return 3
+    for i, rx in enumerate(_PAGE_RANK):
+        if rx.search(title):
+            return i
+    return 2
+
+
+_FLOW_SPLIT = re.compile(r"\s—([^→]*)→\s|\s→\s")
+
+
+def dedupe_flow_nodes(modules: list[dict]) -> int:
+    """模块里有程序还原的流程行时，各流程框的文字与分支标签（是 / 否 / Y / N）不再单独成条：它们已经在「A —是→ B」里，
+    单列只是重复（模型常把框文字也逐条抄一遍）。底稿按流程行也能对回这些框。返回去掉的条数。"""
+    n = 0
+    for mod in modules:
+        flows = [it for it in mod["items"] if _FLOW_RE.search(it["text"])]
+        if not flows:
+            continue
+        nodes: set[str] = set()
+        for it in flows:
+            for part in _FLOW_SPLIT.split(it["text"]):
+                if part and ledger_mod.unit_key(part):
+                    nodes.add(ledger_mod.unit_key(part))
+        def dup(it: dict) -> bool:   # 整条等于某个框，或（≥ 4 字）是某个多行框文字的一段（模型把一个框按行拆成几条）
+            k = ledger_mod.unit_key(it["text"])
+            return k in nodes or (len(k) >= 4 and any(k in nd for nd in nodes))
+
+        kept = [it for it in mod["items"] if _FLOW_RE.search(it["text"]) or not dup(it)]
+        n += len(mod["items"]) - len(kept)
+        mod["items"] = kept
+    return n
+
+
+def enforce_draft(modules: list[dict], keys: set[str]) -> int:
+    """疑似草稿只认独立区域里的句子：模型在别处标的 draft 去掉（程序判定优先于模型判定）。返回去掉的条数。"""
+    n = 0
+    for mod in modules:
+        for it in mod["items"]:
+            if it.get("draft") and not ledger_mod.in_islands(it["text"], keys):
+                del it["draft"]
+                n += 1
+    return n
+
+
 def extraction_outline(modules: list[dict]) -> list[dict]:
     """整理稿层级：页面（按模块主来源分组，编号 1. 2. …）› 区块（模块，编号 1.1 …，名字去掉「页面-」前缀）› 条目层级
     （见 _block_rows）。只在图片里出现的文案（来源「图片:N」）归到最后一节「仅出现在图片中的文案」。
@@ -205,7 +260,7 @@ def extraction_outline(modules: list[dict]) -> list[dict]:
         if not mod["items"]:
             continue
         main = _module_source(mod)
-        if main and _IMG_SRC_RE.search(main):
+        if main and (_IMG_SRC_RE.search(main) or main.split(" › ")[-1].strip().startswith("图片")):
             page, src = IMAGE_SECTION, ""
         elif main:
             page, src = _page_title(main), main
@@ -227,7 +282,7 @@ def extraction_outline(modules: list[dict]) -> list[dict]:
         sec["blocks"].append({"name": name or mod["name"], "module": mod["name"], "source": "" if page == IMAGE_SECTION else main,
                               "draft": all(it.get("draft") for it in mod["items"]),   # 整块都是疑似草稿：区块标题标出来
                               "rows": _block_rows(mod["items"])})   # 图片文案节每条都标明来自哪张图
-    sections.sort(key=lambda s: s["title"] == IMAGE_SECTION)
+    sections.sort(key=lambda s: _page_rank(s["title"]))   # 稳定排序：更新记录 → 需求说明 → 其它页面（原顺序）→ 图片文案
     for i, sec in enumerate(sections, 1):
         sec["no"] = str(i)
         for j, b in enumerate(sec["blocks"], 1):
@@ -245,6 +300,8 @@ def outline_view(modules: list[dict]) -> list[dict]:
             for r in b["rows"]:
                 if r["t"] == "table":
                     rows.append({"t": "table", "cols": r["cols"], "ids": [it.get("id") for it in r["items"]]})
+                elif r["t"] == "flow":
+                    rows.append({"t": "flow", "ids": [it.get("id") for it in r["items"]]})
                 elif r["t"] == "label":
                     rows.append({"t": "label", "id": r["item"].get("id")})
                 else:
@@ -291,6 +348,12 @@ def extraction_markdown(modules: list[dict], dropped: list[str] | None = None, h
                         lines.append("| " + " | ".join(cells) + " |")
                         if k == 0:
                             lines.append("|" + "---|" * r["cols"])
+                elif r["t"] == "flow":
+                    lines.append("```")
+                    for it in r["items"]:
+                        mark, tail = _item_marks(it, main)
+                        lines.append(f"{mark}{it['text']}{tail}")
+                    lines.append("```")
                 elif r["t"] == "label":
                     mark, tail = _item_marks(r["item"], main)
                     lines.append(f"**{mark}{r['item']['text']}**{tail}")
@@ -447,8 +510,14 @@ def uncovered_lines(materials: str, text: str) -> tuple[list[dict], dict]:
     file_name = "需求原文"
     out: list[dict] = []
     total = covered = 0
+    in_flow = False
     for raw in materials.split("\n"):
         s = raw.strip()
+        if s.startswith(ledger_mod.FLOW_BEGIN) or s == ledger_mod.FLOW_END:
+            in_flow = s.startswith(ledger_mod.FLOW_BEGIN)
+            continue
+        if in_flow:
+            continue   # 流程块是程序从流程框还原的派生内容，框里的文字另有原行
         h = _heading_of(s)
         if h:
             if h[0] == 0:
@@ -618,10 +687,12 @@ def _crosscheck_input(modules: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def apply_crosscheck(modules: list[dict], data: dict) -> dict:
+def apply_crosscheck(modules: list[dict], data: dict, keys: set[str] | None = None) -> dict:
     """把交叉核对结果写回条目：doubts 按 id 追加到条目 doubt（已有的用「；」接上，≤ 200 字）；drafts 按模块名把整块标 draft，
-    理由写进该块第一条的 doubt。只认存在的 id / 模块名。返回 {doubts, drafts}。"""
+    理由写进该块第一条的 doubt。只认存在的 id / 模块名；给了 keys（独立区域句子）时，只有半数以上条目来自独立区域的模块才能标草稿
+    ——模型单凭「内容相似」判草稿误报太多，画布位置这个硬信号才算数。返回 {doubts, drafts}。"""
     by_id = {it["id"]: it for mod in modules for it in mod["items"] if it.get("id")}
+    mod_of = {it["id"]: mod["name"] for mod in modules for it in mod["items"] if it.get("id")}
     n_doubt = 0
     for d in data.get("doubts") or []:
         if not isinstance(d, dict):
@@ -630,6 +701,7 @@ def apply_crosscheck(modules: list[dict], data: dict) -> dict:
         text = " ".join(str(d.get("doubt") or "").split())
         if it is None or not text:
             continue
+        text = re.sub(r"[（(]?\b([0-9a-f]{8})\b[）)]?", lambda m: f"「{mod_of[m.group(1)]}」" if m.group(1) in mod_of else m.group(0), text)   # 模型爱引条目 id，读者看不懂：换成模块名
         it["doubt"] = (f"{it['doubt']}；{text}" if it.get("doubt") and text not in it["doubt"] else (it.get("doubt") or text))[:200]
         n_doubt += 1
     by_name = {normalize(mod["name"]): mod for mod in modules}
@@ -640,6 +712,8 @@ def apply_crosscheck(modules: list[dict], data: dict) -> dict:
         mod = by_name.get(normalize(str(d.get("module") or "")))
         if mod is None or not mod["items"]:
             continue
+        if keys is not None and sum(1 for it in mod["items"] if ledger_mod.in_islands(it["text"], keys)) * 2 < len(mod["items"]):
+            continue   # 不在独立区域里：不算草稿
         reason = " ".join(str(d.get("reason") or "").split())
         for it in mod["items"]:
             it["draft"] = True
@@ -651,7 +725,7 @@ def apply_crosscheck(modules: list[dict], data: dict) -> dict:
     return {"doubts": n_doubt, "drafts": n_draft}
 
 
-async def _crosscheck(modules: list[dict], llm: LLMClient, model: str | None, extra: str) -> dict | None:
+async def _crosscheck(modules: list[dict], llm: LLMClient, model: str | None, extra: str, keys: set[str] | None = None) -> dict | None:
     """整稿一次交叉核对（跨页面矛盾、疑似遗留草稿）。关了、稿子超长或模型出错都跳过，不影响提取结果。"""
     from app.llm.calllog import used_prompts
 
@@ -669,7 +743,7 @@ async def _crosscheck(modules: list[dict], llm: LLMClient, model: str | None, ex
     except Exception as e:   # 核对只加疑点，失败不拦提取
         logger.warning("需求提取交叉核对失败（已跳过）：{}", e)
         return None
-    return apply_crosscheck(modules, data)
+    return apply_crosscheck(modules, data, keys)
 
 
 # ---------- 主流程 ----------
@@ -702,10 +776,15 @@ async def run_requirement_extraction(materials: str, llm: LLMClient, model: str 
     modules, dropped, model_name = _merge_modules(outputs)
     if not modules:
         raise ValueError("模型没有从材料里提取出任何需求内容（材料可能不是需求文档）")
+    islands = ledger_mod.island_keys(materials)
+    enforce_draft(modules, islands)
+    dedupe_flow_nodes(modules)
     gap, ledger = await _gap_fill(materials, modules, llm, model, extra)
+    enforce_draft(modules, islands)
+    dedupe_flow_nodes(modules)
     stats = verify_modules(modules, materials)
     assign_ids(modules)
-    crosscheck = await _crosscheck(modules, llm, model, extra)
+    crosscheck = await _crosscheck(modules, llm, model, extra, islands)
     text = extraction_markdown(modules, dropped)
     cov = gap["after"]
     ls = ledger["stats"]
