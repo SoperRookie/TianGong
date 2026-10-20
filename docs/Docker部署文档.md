@@ -71,6 +71,7 @@ MYSQL_PASSWORD=<强密码>
 # TIANGONG_TASK_MAX_CONCURRENCY=2    # 同时执行的测试设计任务数，超出的排队，默认 2
 # TIANGONG_REQUIREMENT_EXTRACT=true  # 附件解析完成后自动提取需求整理稿，默认开
 # TIANGONG_REQUIREMENT_EXTRACT_MODEL=gpt-6-astra  # 需求提取用的模型，空则用默认模型
+# TIANGONG_REQUIREMENT_EXTRACT_CROSSCHECK=true   # 提取最后整稿交叉核对（跨页面矛盾、疑似遗留草稿），多一次模型调用
 ```
 
 不用填 `TIANGONG_DB_URL` 和 `TIANGONG_TRUSTED_PROXIES`，compose 文件已按容器网络写死。`MYSQL_PASSWORD` 会被拼进连接串，密码含 `@ # / % ?` 等符号也可以，应用会自动编码；但 compose 自身对 `$` 有特殊解释，密码里避免用 `$`。

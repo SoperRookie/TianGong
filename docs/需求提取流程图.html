@@ -56,7 +56,7 @@ flowchart TD
   subgraph S0[材料准备 · 附件解析]
     A0[上传附件 / 粘贴原文 / 链接]:::prog
     A1{文件类型}:::prog
-    A2["Axure 导出包<br/>控件带坐标提取 → 父链累加绝对坐标<br/>同父控件按 round(y/4), x 排阅读顺序<br/>每行 [uNNN] 前缀 · 下拉选项 / 输入值单独成行<br/>隐藏态照提并标记 · 整块重复的控件去重<br/>表格同一行单元格并成「A ｜ B ｜ C」"]:::prog
+    A2["Axure 导出包<br/>控件带坐标提取 → 父链累加绝对坐标<br/>同父控件按 round(y/4), x 排阅读顺序<br/>每行 [uNNN] 前缀 · 下拉选项 / 输入值单独成行<br/>隐藏态照提并标记 · 整块重复的控件去重<br/>表格同一行单元格并成「A ｜ B ｜ C」<br/>相距千像素的控件群 → 独立区域成块标〔疑似遗留草稿〕"]:::prog
     A3["整页字符多重集自校验<br/>整页 get_text − 提取行 = 0 才算不丢<br/>缺字 → 附件标 ⚠ 缺 N 字"]:::prog
     A4["文档 / 网页 / 表格<br/>按章节段落解析"]:::prog
     A5["整幅设计稿 / 截图 / 图片附件<br/>Vision 图片理解（短边 ≥ 400px，每包 ≤ 30 张）<br/>生成【文档内图片理解】块"]:::model
@@ -98,9 +98,10 @@ flowchart TD
 
   subgraph S4[反向核验与成稿]
     D1["verify_modules 每条回查材料<br/>含数字 / 运算符：整句严格命中（保留 ≤ ≥ < > = %）<br/>其它：分段 ≥ 70%<br/>没找到标 ⚠"]:::prog
-    D2["assign_ids → extraction_markdown<br/>## 模块〔来源〕 · - 条目<br/>标记 ⚠ 〔补漏〕〔兜底〕〔疑点：…〕<br/>末尾：疑点 / 不一致清单 · 已剔除"]:::prog
+    D2["assign_ids → extraction_outline → extraction_markdown<br/>文头 · ## N. 页面〔来源〕 · ### N.M 区块<br/>表格行还原成表 · 冒号短句作子标题 · 序号 / 注 缩进<br/>标记 ⚠ 〔补漏〕〔兜底〕〔疑点：…〕 · 图片文案单列 · 疑点清单 · 已剔除"]:::prog
     D3["set_extraction 落库<br/>上一版进历史（10 版）<br/>meta：模型 / 附件指纹 / 统计 / ledger"]:::store
-    D1 --> D2 --> D3
+    D0["requirement_extract_crosscheck Prompt（整稿一次）<br/>跨页面 / 跨文档矛盾 → 追加疑点<br/>疑似遗留草稿 → 整块标〔疑似草稿〕"]:::model
+    D1 --> D0 --> D2 --> D3
   end
   C3 -->|否| D1
   C6 --> D1

@@ -4731,7 +4731,7 @@ async def _run_extraction(app, req_id: str, model: str | None, by: str | None, a
             "by": by, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "auto": auto,
             "source_chars": data.get("source_chars"), "chars": len(data["text"]), "modules": len(data.get("modules") or []),
             "checked": data.get("checked"), "verified": data.get("verified"), "unverified": data.get("unverified"),
-            "dropped": data.get("dropped") or [], "gap": data.get("gap"),
+            "dropped": data.get("dropped") or [], "gap": data.get("gap"), "crosscheck": data.get("crosscheck"),
             "ledger": (data.get("ledger") or {}).get("stats")}
     return rstore.set_extraction(req_id, data, meta)
 
@@ -5326,8 +5326,11 @@ def _extraction_view(ex: dict | None) -> dict | None:
     """需求详情里的整理稿：底稿只带统计，逐单元明细走 GET .../extraction/ledger（上千行，不随详情每次返回）。"""
     if not ex:
         return ex
+    from app.agents.extraction import outline_view
+
     led = ex.get("ledger") or {}
-    return {**ex, "ledger": {"stats": led.get("stats"), "image": led.get("image")}}
+    return {**ex, "ledger": {"stats": led.get("stats"), "image": led.get("image")},
+            "outline": outline_view(ex["modules"]) if ex.get("modules") else None}   # 页面 › 区块 › 条目层级，页面按这个渲染
 
 
 @router.get("/api/v1/requirements/{req_id}/extraction/ledger")

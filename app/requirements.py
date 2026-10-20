@@ -173,8 +173,19 @@ class RequirementStore:
                               "modules": data.get("modules"), "dropped": data.get("dropped") or [], "reviewed": None,
                               "ledger": data.get("ledger") or {"stats": None, "decisions": {}}}
         item["extracting"], item["extraction_error"] = False, None
+        self._render_text(item)
         self._persist(item)
         return item
+
+    @staticmethod
+    def _render_text(item: dict) -> None:
+        """有逐条结构时按层级重生成整理稿正文（带文头：标题 / 来源 / 校验）；整篇改写过的正文不动。"""
+        from app.agents.extraction import extraction_markdown
+
+        ex = item["extraction"]
+        if ex.get("modules"):
+            ex["text"] = extraction_markdown(ex["modules"], ex.get("dropped"), head=extraction_head(item))
+            ex["meta"]["chars"] = len(ex["text"])
 
     @staticmethod
     def _refresh_ledger(item: dict) -> dict:
@@ -287,6 +298,7 @@ class RequirementStore:
         ex["meta"]["chars"] = len(ex["text"])
         ex["reviewed"] = None
         self._refresh_ledger(item)
+        self._render_text(item)
         item["updated_by"], item["updated_at"] = operator, _now()
         self._persist(item)
 
@@ -690,6 +702,29 @@ def _analysis_id(item: dict) -> str | None:
     # 只数改了内容的操作：看过复核意见认为原条目没问题（dismiss_review）只留痕，不算新版本
     edits = sum(1 for x in item.get("analysis_edits") or [] if x.get("action") in ("edit", "delete", "add"))
     return f"{base}+{edits}" if base and edits else base
+
+
+def extraction_head(item: dict) -> dict:
+    """整理稿文头：标题、来源（附件与页面清单）、校验结论（逐字回查、底稿去向、原型自校验），与《连赢挑战赛_需求提取》的文头一致。"""
+    ex = item.get("extraction") or {}
+    meta, ls = ex.get("meta") or {}, (ex.get("ledger") or {}).get("stats") or {}
+    srcs = ["需求原文"] if (item.get("text") or "").strip() else []
+    checks = []
+    for a in item.get("attachments") or []:
+        if not a.get("parsed"):
+            continue
+        chk = a.get("check") or {}
+        pages = chk.get("pages") or []
+        srcs.append(f"`{a.get('filename', '')}`" + (f"（Axure 原型导出，共 {len(pages)} 个页面：{' / '.join(str(p.get('page', '')) for p in pages)}）" if pages else ""))
+        if pages:
+            checks.append(f"`{a.get('filename', '')}` 整页字符自校验 " + ("0 缺字" if chk.get("ok") else f"缺 {chk.get('missing', '?')} 字") + f"（{len(pages)} 页）")
+    parts = []
+    if meta.get("checked") is not None:
+        parts.append(f"整理稿 {meta.get('checked')} 条逐字回查材料，未找到 {meta.get('unverified') or 0} 条")
+    if ls:
+        parts.append(f"底稿 {ls.get('total', 0)} 句（去重）：收录 {ls.get('in', 0)}、排除 {ls.get('ex', 0)}、待处理 {ls.get('todo', 0)}")
+    parts.extend(checks)
+    return {"title": item.get("title") or "", "sources": "；".join(srcs) or "需求原文", "check": "；".join(parts) or "—"}
 
 
 def source_materials(item: dict) -> str:
