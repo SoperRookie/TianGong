@@ -184,6 +184,7 @@ class RequirementStore:
 
         ex = item["extraction"]
         if ex.get("modules"):
+            tidy_modules(item)
             ex["text"] = extraction_markdown(ex["modules"], ex.get("dropped"), head=extraction_head(item))
             ex["meta"]["chars"] = len(ex["text"])
 
@@ -702,6 +703,17 @@ def _analysis_id(item: dict) -> str | None:
     # 只数改了内容的操作：看过复核意见认为原条目没问题（dismiss_review）只留痕，不算新版本
     edits = sum(1 for x in item.get("analysis_edits") or [] if x.get("action") in ("edit", "delete", "add"))
     return f"{base}+{edits}" if base and edits else base
+
+
+def tidy_modules(item: dict) -> None:
+    """按当前规则收口逐条结构（老整理稿也适用，不用重新提取）：疑似草稿只认独立区域、流程框文字不与流程行重复。原地改。"""
+    from app.agents.extraction import dedupe_flow_nodes, enforce_draft
+    from app.agents.ledger import island_keys
+
+    modules = (item.get("extraction") or {}).get("modules")
+    if modules:
+        enforce_draft(modules, island_keys(source_materials(item)))
+        dedupe_flow_nodes(modules)
 
 
 def extraction_head(item: dict) -> dict:

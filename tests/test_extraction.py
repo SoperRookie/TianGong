@@ -399,8 +399,8 @@ def test_数字运算符条目整句严格核验_条件反转与数值替换标�
     assert verify_modules(mods, mat) == {"checked": 3, "verified": 1, "unverified": 2}
 
 
-def test_底稿单元_编号与来源_程序规则只判两类():
-    from app.agents.ledger import AUTO_HEADING, AUTO_SAMPLE, account, build_units
+def test_底稿单元_编号与来源_程序规则只判纯样例():
+    from app.agents.ledger import AUTO_SAMPLE, account, build_units
 
     materials = ("需求原文一句话：密码错误 5 次锁定 30 分钟\n\n【文件：原型.zip】\n# Axure 原型：原型.zip\n## 页面：报名\n"
                  "[u12] 查询功能说明如下：\n[u12] 活动ID\n[u15] 剩余应占位金额 ≤ 0，则不再需要占位\n[u15] 第二段：结余部分计入第二天\n"
@@ -416,7 +416,7 @@ def test_底稿单元_编号与来源_程序规则只判两类():
     assert rows["F1-0009"]["image"] == 1 and rows["F1-0009"]["path"] == "原型.zip › Axure 原型：原型.zip › 页面：报名" and "image" not in rows["u30"]   # 图中文字记是哪一页的第几张图
     assert rows["F0-0001"]["path"] == "需求原文" and rows["u15"]["path"] == "原型.zip › Axure 原型：原型.zip › 页面：报名"
     assert rows["u15"]["text"] == "剩余应占位金额 ≤ 0，则不再需要占位"   # 去掉编号
-    assert rows["u12"]["auto"] == AUTO_HEADING and rows["u12.2"]["auto"] is None and rows["F1-0005"]["auto"] == AUTO_SAMPLE   # 短标签「活动ID」交模型判
+    assert rows["u12"]["auto"] is None and rows["u12.2"]["auto"] is None and rows["F1-0005"]["auto"] == AUTO_SAMPLE   # 小标题与短标签「活动ID」都交模型判
     assert rows["F1-0006"]["auto"] == AUTO_SAMPLE and rows["F1-0007"]["auto"] is None     # 英文整句交模型判
     assert rows["u15"]["auto"] is None and rows["u30"]["auto"] is None
     acct = account(units, "## 报名\n- 密码错误 5 次锁定 30 分钟\n- 剩余应占位金额 ≤ 0\n- 则不再需要占位",
@@ -426,14 +426,14 @@ def test_底稿单元_编号与来源_程序规则只判两类():
     st = {k: v["status"] for k, v in rows.items()}
     assert st["u15"] == "in"                                       # 拆成两条但按段全部命中也算收录
     assert st["F0-0001"] == "todo" and rows["F0-0001"]["partial"] == 0.63   # 只收了后半句（63% < 90%）：待处理，带已覆盖比例提示模型补全
-    assert st["u12"] == "ex" and st["u12.2"] == "todo" and st["F1-0005"] == "ex" and st["u15.2"] == "ex" and st["u30"] == "ex"   # 短标签「活动ID」待模型判
+    assert st["u12"] == "todo" and st["u12.2"] == "todo" and st["F1-0005"] == "ex" and st["u15.2"] == "ex" and st["u30"] == "ex"   # 小标题与短标签待模型判
     assert st["F1-0007"] == "ex" and st["F1-0009"] == "todo"
     # 模型排除里像规则的句子标需复核：u15.2（含「第二天」）未看、u30（含数字）已确认；英文句（无汉字）即使理由是「片段」也不标
     assert rows["u15.2"]["review"] is True and "checked" not in rows["u15.2"] and rows["u30"]["review"] is True and rows["u30"]["checked"]["by"] == "lisi"
     assert "review" not in rows["F1-0007"]
-    assert acct["stats"] == {"total": 9, "in": 1, "ex": 6, "todo": 2, "review": 2, "review_open": 1, "ex_by": {"model": 3, "auto": 3, "user": 0}}
+    assert acct["stats"] == {"total": 9, "in": 1, "ex": 5, "todo": 3, "review": 2, "review_open": 1, "ex_by": {"model": 3, "auto": 2, "user": 0}}
     assert acct["image"] == {"total": 1, "in": 0, "ex": 0, "todo": 1, "review": 0, "review_open": 0, "ex_by": {"model": 0, "auto": 0, "user": 0}}
-    assert rows["u15.2"]["reason"] == "过渡句" and rows["u15.2"]["by"] == "model" and rows["u12"]["by"] == "auto"
+    assert rows["u15.2"]["reason"] == "过渡句" and rows["u15.2"]["by"] == "model" and rows["F1-0005"]["by"] == "auto"
     # 流程图半句（无数字无条件词）被模型以「片段」为由排除 → 也要进需复核
     from app.agents.ledger import needs_review
     assert needs_review("覆盖基础奖金成本中", "脱离上下文的片段") and not needs_review("覆盖基础奖金成本中", "外观描述") and not needs_review("是否", "片段")
@@ -650,3 +650,73 @@ def test_合并去重按逐字键_运算符不同是两条_id不撞():
     assert [it["text"] for it in modules[0]["items"]] == ["输赢金额>0 ｜ +1", "输赢金额=0 ｜ 不变"]   # 只有空白差异的才算重复
     assign_ids(modules)
     assert len({it["id"] for it in modules[0]["items"]}) == 2
+
+
+def test_流程行成稿为代码块_底稿按流程行命中流程框短文字_覆盖率不算流程块():
+    from app.agents.extraction import assign_ids, extraction_markdown, extraction_outline, outline_view, uncovered_lines
+    from app.agents.ledger import account, build_units
+
+    src = "a.zip › 需求说明"
+    modules = [{"name": "需求说明-连赢判断", "items": [{"text": "连赢记录统计判断流程示例：", "sources": [src]},
+                                              {"text": "用户单局投注 → 该用户当局输赢金额是否>0", "sources": [src]},
+                                              {"text": "该用户当局输赢金额是否>0 —Y→ 当前连赢记录+1", "sources": [src], "gap": True},
+                                              {"text": "注：仅影响当前连赢记录", "sources": [src]}]}]
+    assign_ids(modules)
+    rows = extraction_outline(modules)[0]["blocks"][0]["rows"]
+    assert [r["t"] for r in rows] == ["label", "flow", "item"] and len(rows[1]["items"]) == 2
+    assert outline_view(modules)[0]["blocks"][0]["rows"][1] == {"t": "flow", "ids": [modules[0]["items"][1]["id"], modules[0]["items"][2]["id"]]}
+    md = extraction_markdown(modules)
+    assert "**连赢记录统计判断流程示例：**\n```\n用户单局投注 → 该用户当局输赢金额是否>0\n该用户当局输赢金额是否>0 —Y→ 当前连赢记录+1 〔补漏〕\n```\n- 注：仅影响当前连赢记录" in md
+    mat = ("【文件：a.zip】\n# Axure 原型：a.zip\n## 页面：需求说明\n[u47] 用户单局投注\n[u48] 该用户当局输赢金额是否>0\n[u55] 当前连赢记录+1\n[u50] Y\n"
+           "【流程图 1：3 个节点 2 条连线】\n用户单局投注 → 该用户当局输赢金额是否>0\n该用户当局输赢金额是否>0 —Y→ 当前连赢记录+1\n【流程图结束】\n[u59] 注：仅影响当前连赢记录\n")
+    st = {u["uid"]: u["status"] for u in account(build_units(mat), md)["units"]}
+    assert st == {"u47": "in", "u48": "in", "u55": "in", "u50": "ex", "u59": "in"}   # 框文字靠流程行命中；连接线标签「Y」无汉字按样例排除
+    missing, cov = uncovered_lines(mat, md)
+    assert cov == {"lines": 2, "covered": 2} and missing == []   # 需求句只有判断框与注两行：流程块与 < 8 汉字的行不算
+
+
+def test_整理稿页面顺序_更新记录与需求说明在前_图片来源写法宽松_底稿不切掉第一节():
+    from app.agents.extraction import extraction_outline
+    from app.agents.ledger import account, build_units
+
+    mk = lambda name, src: {"name": name, "items": [{"text": f"{name} 的一条内容说明文字", "sources": [src]}]}
+    modules = [mk("pc-活动入口说明-游戏外入口", "a.zip › pc-活动入口说明"), mk("pc-活动详情页界面说明-报名成功弹窗", "a.zip › 图片10"),
+               mk("更新记录-更新记录表", "a.zip › 更新记录"), mk("移动-活动入口说明-游戏外入口", "a.zip › 移动-活动入口说明"),
+               mk("需求说明-需求背景", "a.zip › 需求说明")]
+    assert [s["title"] for s in extraction_outline(modules)] == ["更新记录", "需求说明", "pc-活动入口说明", "移动-活动入口说明", "仅出现在图片中的文案"]
+    # 没有文头的正文（补漏 / 兜底阶段核算用的）不能把第一节切掉：兜底收进第一节的句子要算收录
+    mat = "【文件：a.zip】\n# Axure 原型：a.zip\n## 页面：甲\n[u1] 第一节里的兜底句子\n## 页面：乙\n[u2] 第二节的句子\n"
+    draft = "## 1. 甲 〔来源：a.zip › 甲〕\n\n### 1.1 待归类\n- 第一节里的兜底句子 〔兜底〕\n\n## 2. 乙\n\n### 2.1 正文\n- 第二节的句子\n"
+    assert {u["uid"]: u["status"] for u in account(build_units(mat), draft)["units"]} == {"u1": "in", "u2": "in"}
+
+
+def test_疑似草稿只认独立区域_模型别处标的去掉_交叉核对也受限():
+    from app.agents.extraction import apply_crosscheck, assign_ids, enforce_draft
+    from app.agents.ledger import in_islands, island_keys
+
+    mat = ("【文件：a.zip】\n# Axure 原型：a.zip\n## 页面：连赢活动记录\n[u1] 正式页面说明\n【独立区域 1：主体右侧 2394px，3 控件，疑似遗留草稿】\n"
+           "[u11] 晋级年榜 ｜ 字符串 ｜ 系统\n[u12] 年榜统计周期为自然年，按年榜排名\n## 页面：需求说明\n[u20] 活动规则说明正文\n")
+    keys = island_keys(mat)
+    assert keys == {"晋级年榜|字符串|系统", "年榜统计周期为自然年,按年榜排名"} and in_islands("年榜统计周期为自然年", keys) and not in_islands("正式页面说明", keys)
+    modules = [{"name": "需求说明-活动规则说明", "items": [{"text": "活动规则说明正文", "draft": True}]},
+               {"name": "连赢活动记录-年榜", "items": [{"text": "晋级年榜 ｜ 字符串 ｜ 系统", "draft": True}, {"text": "年榜统计周期为自然年，按年榜排名"}]}]
+    assert enforce_draft(modules, keys) == 1 and "draft" not in modules[0]["items"][0] and modules[1]["items"][0]["draft"] is True
+    assign_ids(modules)
+    data = {"doubts": [], "drafts": [{"module": "需求说明-活动规则说明", "reason": "与 PC 页重复"}, {"module": "连赢活动记录-年榜", "reason": "年榜未在别处出现"}]}
+    assert apply_crosscheck(modules, data, keys) == {"doubts": 0, "drafts": 1}   # 不在独立区域的模块不能标草稿
+    assert "draft" not in modules[0]["items"][0] and all(it.get("draft") for it in modules[1]["items"])
+
+
+def test_流程框文字不与流程行重复_疑点里的条目id换成模块名():
+    from app.agents.extraction import apply_crosscheck, assign_ids, dedupe_flow_nodes
+
+    modules = [{"name": "需求说明-连赢判断", "items": [{"text": "用户单局投注"}, {"text": "Y"}, {"text": "用户单局投注 → 该用户当局输赢金额是否>0"},
+                                              {"text": "该用户当局输赢金额是否>0 —Y→ 当前连赢记录+1"}, {"text": "当前连赢记录+1"}, {"text": "注：仅影响当前连赢记录"},
+                                              {"text": "当局输赢金额"}, {"text": "用户"}]},   # 多行框拆出的一段去掉；短于 4 字的子串不算
+               {"name": "月榜排名-榜单列表", "items": [{"text": "第 1 名固定展示"}]}]
+    assert dedupe_flow_nodes(modules) == 4
+    assert [it["text"] for it in modules[0]["items"]] == ["用户单局投注 → 该用户当局输赢金额是否>0", "该用户当局输赢金额是否>0 —Y→ 当前连赢记录+1", "注：仅影响当前连赢记录", "用户"]
+    assign_ids(modules)
+    rid = modules[0]["items"][2]["id"]
+    apply_crosscheck(modules, {"doubts": [{"id": modules[1]["items"][0]["id"], "doubt": f"与（{rid}）及 deadbeef 矛盾"}], "drafts": []})
+    assert modules[1]["items"][0]["doubt"] == "与「需求说明-连赢判断」及 deadbeef 矛盾"   # 已知 id 换模块名，未知的原样

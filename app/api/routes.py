@@ -4846,7 +4846,7 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
     rstore = request.app.state.requirements
     view = {
         **{k: v for k, v in item.items() if k not in ("attachments", "extraction_history", "extraction")},
-        "extraction": _extraction_view(item.get("extraction")),
+        "extraction": _extraction_view(item),
         "attachments": [{k: v for k, v in a.items() if k != "text"} for a in item["attachments"]],
         "status_label": REQ_STATUSES.get(item["status"], item["status"]),
         "source_label": SOURCE_TYPES.get(item["source_type"], item["source_type"]),
@@ -5322,15 +5322,26 @@ async def finish_requirement_extraction_review(request: Request, req_id: str) ->
     return _req_view(request, item)
 
 
-def _extraction_view(ex: dict | None) -> dict | None:
-    """需求详情里的整理稿：底稿只带统计，逐单元明细走 GET .../extraction/ledger（上千行，不随详情每次返回）。"""
+def _extraction_view(item: dict) -> dict | None:
+    """需求详情里的整理稿：底稿只带统计，逐单元明细走 GET .../extraction/ledger（上千行，不随详情每次返回）。
+    有逐条结构的正文按当前成稿规则现算（页面顺序、表格 / 流程块、文头随代码升级即时生效，不用重新提取）。"""
+    ex = item.get("extraction")
     if not ex:
         return ex
-    from app.agents.extraction import outline_view
+    import copy
+
+    from app.agents.extraction import extraction_markdown, outline_view
+    from app.requirements import extraction_head, tidy_modules
 
     led = ex.get("ledger") or {}
-    return {**ex, "ledger": {"stats": led.get("stats"), "image": led.get("image")},
-            "outline": outline_view(ex["modules"]) if ex.get("modules") else None}   # 页面 › 区块 › 条目层级，页面按这个渲染
+    out = {**ex, "ledger": {"stats": led.get("stats"), "image": led.get("image")}, "outline": None}
+    if ex.get("modules"):
+        view = copy.deepcopy(item)   # 在副本上按当前规则收口（草稿只认独立区域、流程框不重复），不改库里的数据
+        tidy_modules(view)
+        mods = view["extraction"]["modules"]
+        out["modules"], out["outline"] = mods, outline_view(mods)   # 页面 › 区块 › 条目层级，页面按这个渲染
+        out["text"] = extraction_markdown(mods, ex.get("dropped"), head=extraction_head(view))
+    return out
 
 
 @router.get("/api/v1/requirements/{req_id}/extraction/ledger")

@@ -570,3 +570,40 @@ def test_Axure画布独立区域_与主体相距千像素的控件群单独成�
     from app.agents.ledger import build_units
     units = build_units("【文件：记录.zip】\n# Axure 原型：记录.zip\n## 页面：记录\n" + doc.full_text.split("## 页面：记录\n", 1)[-1])
     assert all("独立区域" not in u["text"] for u in units) and any(u["uid"] == "u11" for u in units)   # 标记行不进底稿
+
+
+def test_Axure流程图_流程框加连接线还原成带分支标签的流程行_块内行不进底稿(tmp_path):
+    """原型里的流程图是流程框 + 连接线（#uNNN_segK 线段，小方块是箭头），逐框提文字就丢了连线关系。按线段几何找起止框，
+    还原成「A → B」「A —是→ B」，每张图包在【流程图 N：…】…【流程图结束】里插在最后一个节点后面；块内行是派生内容，底稿不记。"""
+    import zipfile
+
+    from app.parsers.base import parse_file
+
+    def box(i, text):
+        return f"<div id='u{i}' class='ax_default box_1'><div id='u{i}_text' class='text'><p>{text}</p></div></div>"
+    def conn(i, label):
+        return (f"<div id='u{i}' class='ax_default _连接'><img id='u{i}_seg0' class='img' src='x.svg'/><img id='u{i}_seg1' class='img' src='y.svg'/>"
+                f"<div id='u{i}_text' class='text'><p>{label}</p></div></div>")
+    page = ("<html><head><title>流程</title></head><body><div id='base'>" + box(1, "用户投注") + box(2, "是否盈利") + box(3, "记录+1") + box(4, "清零")
+            + conn(5, "") + conn(6, "是") + conn(7, "否") + box(9, "说明文字") + "</div></body></html>")
+    css = ("#u1 { left:100px; top:100px; width:100px; height:40px; } #u2 { left:80px; top:200px; width:140px; height:60px; }"
+           "#u3 { left:100px; top:320px; width:100px; height:40px; } #u4 { left:300px; top:210px; width:100px; height:40px; }"
+           "#u5 { left:150px; top:140px; } #u5_seg0 { left:-5px; top:0px; width:10px; height:60px; } #u5_seg1 { left:-10px; top:40px; width:20px; height:20px; }"
+           "#u6 { left:150px; top:260px; } #u6_seg0 { left:-5px; top:0px; width:10px; height:60px; } #u6_seg1 { left:-10px; top:40px; width:20px; height:20px; }"
+           "#u7 { left:220px; top:230px; } #u7_seg0 { left:0px; top:-5px; width:80px; height:10px; } #u7_seg1 { left:60px; top:-10px; width:20px; height:20px; }"
+           "#u9 { left:100px; top:500px; width:200px; height:30px; }")
+    z = tmp_path / "流程.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("原型/index.html", "<html><body><iframe src='start.html'></iframe></body></html>")
+        zf.writestr("原型/流程.html", page)
+        zf.writestr("原型/files/流程/styles.css", css)
+        zf.writestr("原型/data/document.js", '$axure.loadDocument({"sitemap":{"rootNodes":[{"pageName":"流程","url":"流程.html"}]}});')
+        zf.writestr("原型/resources/scripts/axure/axure.js", "var $axure = {};")
+    doc = parse_file(z)
+    text = doc.full_text
+    assert ("[u4] 清零\n[u7] 否\n[u6] 是\n[u3] 记录+1\n【流程图 1：4 个节点 3 条连线】\n用户投注 → 是否盈利\n是否盈利 —否→ 清零\n是否盈利 —是→ 记录+1\n【流程图结束】\n[u9] 说明文字") in text   # 分支按目标框的阅读顺序排
+    assert doc.check["pages"][0]["flows"] == 1 and doc.check["ok"] is True   # 连接线标签「是 / 否」也是页面文字，自校验照样 0 缺字
+    from app.agents.ledger import build_units
+    units = build_units("【文件：流程.zip】\n# Axure 原型：流程.zip\n## 页面：流程\n" + text.split("## 页面：流程\n", 1)[-1])
+    assert [u["uid"] for u in units] == ["u1", "u2", "u4", "u7", "u6", "u3", "u9"]   # 块内行不记；连接线标签控件（是 / 否）仍是单元
+    assert all("→" not in u["text"] for u in units)
