@@ -540,3 +540,33 @@ def test_Axure表格同一行单元格并成一行_表头与数据行对应_自�
     assert "u12" not in doc.controls   # 并进行里的单元格不单独建索引
     page_check = doc.check["pages"][0]
     assert page_check["missing"] == 0 and page_check["extra"] == 0 and page_check["raw"] == page_check["got"]
+
+
+def test_Axure画布独立区域_与主体相距千像素的控件群单独成块并标疑似草稿(tmp_path):
+    """作者把旧版本丢在画布右侧 / 下方忘了删：与主体任何控件横纵都相距 ≥ 1000px 的控件群（≥ 3 个）算独立区域，主体先输出、
+    区域各自成块、前面一行【独立区域 N：…疑似遗留草稿】标记（≤ 40 字，底稿不当原文句），控件索引记 region；零星 1～2 个不算。"""
+    import zipfile
+
+    from app.parsers.base import parse_file
+
+    def box(i, text):
+        return f"<div id='u{i}' class='ax_default _段落'><div id='u{i}_text' class='text'><p>{text}</p></div></div>"
+    page = ("<html><head><title>记录</title></head><body><div id='base'>" + box(1, "正式页面标题") + box(2, "日榜说明") + box(3, "月榜说明")
+            + box(11, "旧版：年榜说明") + box(12, "晋级年榜") + box(13, "道具明细") + box(21, "远处零星一个备注") + "</div></body></html>")
+    css = ("#u1 { left:30px; top:40px; } #u2 { left:30px; top:100px; } #u3 { left:30px; top:160px; }"
+           "#u11 { left:2400px; top:40px; } #u12 { left:2400px; top:100px; } #u13 { left:2420px; top:160px; } #u21 { left:30px; top:5000px; }")
+    z = tmp_path / "记录.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("原型/index.html", "<html><body><iframe src='start.html'></iframe></body></html>")
+        zf.writestr("原型/记录.html", page)
+        zf.writestr("原型/files/记录/styles.css", css)
+        zf.writestr("原型/data/document.js", '$axure.loadDocument({"sitemap":{"rootNodes":[{"pageName":"记录","url":"记录.html"}]}});')
+        zf.writestr("原型/resources/scripts/axure/axure.js", "var $axure = {};")
+    doc = parse_file(z)
+    assert ("[u1] 正式页面标题\n[u2] 日榜说明\n[u3] 月榜说明\n[u21] 远处零星一个备注\n"
+            "【独立区域 1：主体右侧 2370px，3 控件，疑似遗留草稿】\n[u11] 旧版：年榜说明\n[u12] 晋级年榜\n[u13] 道具明细") in doc.full_text
+    assert doc.controls["u11"]["region"] == 1 and "region" not in doc.controls["u1"] and "region" not in doc.controls["u21"]
+    assert doc.check["pages"][0]["islands"] == 1 and doc.check["ok"] is True
+    from app.agents.ledger import build_units
+    units = build_units("【文件：记录.zip】\n# Axure 原型：记录.zip\n## 页面：记录\n" + doc.full_text.split("## 页面：记录\n", 1)[-1])
+    assert all("独立区域" not in u["text"] for u in units) and any(u["uid"] == "u11" for u in units)   # 标记行不进底稿

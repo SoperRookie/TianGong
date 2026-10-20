@@ -40,13 +40,15 @@ UNVERIFIED_MARK = "⚠"
 GAP_MARK = "〔补漏〕"
 FORCED_MARK = "〔兜底〕"     # 模型没判定去向、程序按原句直接收进整理稿的单元
 DOUBT_MARK = "〔疑点："      # 原文疑点（错别字 / 前后口径不一致 / 占位符），原句照抄、疑点单列
+DRAFT_MARK = "〔疑似草稿〕"   # 画布上与主体不相连、与正式内容重复却有出入的区块：照样摘录但标出来，用例不要照它写
+CROSSCHECK_MAX_CHARS = 150000   # 整稿交叉核对的输入上限，超过就跳过（极少见）
 GAP_ROUNDS = 2            # 补漏最多轮数（有待处理单元就问模型，不设最少字数门槛：每句都要有去向）
 GAP_BATCH_CHARS = 15000   # 一次补漏调用最多送这么多字的未覆盖句
 MIN_CJK = 8               # 少于这么多汉字的行不算需求句（按钮名 / 表头 / 样例数据）
 
 
 def _item_id(module: str, text: str) -> str:
-    return hashlib.sha1(f"{module}\n{normalize(text)}".encode()).hexdigest()[:8]
+    return hashlib.sha1(f"{module}\n{ledger_mod.unit_key(text)}".encode()).hexdigest()[:8]   # 逐字键：「=0」「>0」两条不能撞 id
 
 
 def _merge_modules(outputs) -> tuple[list[dict], list[str], str]:
@@ -77,7 +79,7 @@ def _merge_modules(outputs) -> tuple[list[dict], list[str], str]:
                 if isinstance(srcs, str):
                     srcs = [srcs]
                 srcs = [str(x).strip() for x in srcs if str(x).strip()]
-                key = normalize(text)
+                key = ledger_mod.unit_key(text)   # 逐字去重（只去空白）：「输赢金额=0」「输赢金额>0」是两条，不能并掉
                 if key in mod["_seen"]:
                     prev = mod["_seen"][key]
                     for sx in srcs:
@@ -88,6 +90,8 @@ def _merge_modules(outputs) -> tuple[list[dict], list[str], str]:
                 for k in ("gap", "forced", "manual", "unit", "verified", "id", "review"):
                     if it.get(k) is not None:
                         entry[k] = it[k]
+                if it.get("draft") is True:
+                    entry["draft"] = True   # 疑似遗留草稿（模型按独立区域 / 重复出入判的）
                 doubt = " ".join(str(it.get("doubt") or "").split())[:200]
                 if doubt:
                     entry["doubt"] = doubt   # 原文疑点（错别字 / 前后口径不一致 / 占位符）：原句照抄，疑点单列
@@ -144,27 +148,167 @@ def _module_source(mod: dict) -> str:
     return max(counts, key=counts.get) if counts else ""
 
 
-def extraction_markdown(modules: list[dict], dropped: list[str] | None = None) -> str:
-    """整理稿正文：按模块分节（标题带主来源），每条一行，来源与模块主来源不同时才单独标注；未逐字找到的加 ⚠ 前缀供人核对；
-    补漏进来的条目加〔补漏〕标记。"""
-    lines: list[str] = []
+TABLE_SEP = " ｜ "   # 解析器把表格同一行单元格并成的分隔符（app.parsers.axure.TABLE_SEP）
+IMAGE_SECTION = "仅出现在图片中的文案"
+_LABEL_RE = re.compile(r"[:：]\s*$")
+_SUB_RE = re.compile(r"^(?:注|备注|说明|示例|例)[:：]|^(?:\d{1,2}|[一二三四五六七八九十]{1,2})\s*[、.．:：)）]|^[①-⑳]|^[1-9]\ufe0f?\u20e3|^[（(]示例")
+_IMG_SRC_RE = re.compile(r"图片[:：]\s*\d+")
+_PAGE_PREFIX = re.compile(r"^页面[:：]\s*")
+_MAX_LABEL = 30
+
+
+def _page_title(source: str) -> str:
+    """来源「文件 › 页面」的页面名（去掉「页面：」前缀）；只有文件名时就是文件名。"""
+    last = source.split(" › ")[-1].strip() if source else ""
+    return _PAGE_PREFIX.sub("", last) or source
+
+
+def _block_rows(items: list[dict]) -> list[dict]:
+    """区块内条目的层级：表格行（含「 ｜ 」，连续且列数相同的并成一张表，表头是第一行）、小标签（以冒号结尾的短句，
+    加粗成子标题）、子项（「1、」「①」「注：」「示例」开头且上一条是普通条目 / 标签 / 表格的，缩进一级）、普通条目。"""
+    rows: list[dict] = []
+    for it in items:
+        text = it["text"]
+        if TABLE_SEP in text:
+            cols = text.count(TABLE_SEP) + 1
+            if rows and rows[-1]["t"] == "table" and rows[-1]["cols"] == cols:
+                rows[-1]["items"].append(it)
+            else:
+                rows.append({"t": "table", "cols": cols, "items": [it]})
+            continue
+        if _LABEL_RE.search(text) and len(text) <= _MAX_LABEL:
+            rows.append({"t": "label", "item": it})
+            continue
+        sub = bool(_SUB_RE.match(text))
+        lv = 0
+        if sub and rows:
+            prev = rows[-1]
+            if prev["t"] in ("label", "table") or (prev["t"] == "item" and (prev["lv"] == 1 or not prev["sub"])):
+                lv = 1
+        rows.append({"t": "item", "item": it, "lv": lv, "sub": sub})
+    out: list[dict] = []
+    for r in rows:
+        if r["t"] == "table" and len(r["items"]) == 1:   # 孤零零一行不成表
+            out.append({"t": "item", "item": r["items"][0], "lv": 0, "sub": False})
+        else:
+            out.append(r)
+    return out
+
+
+def extraction_outline(modules: list[dict]) -> list[dict]:
+    """整理稿层级：页面（按模块主来源分组，编号 1. 2. …）› 区块（模块，编号 1.1 …，名字去掉「页面-」前缀）› 条目层级
+    （见 _block_rows）。只在图片里出现的文案（来源「图片:N」）归到最后一节「仅出现在图片中的文案」。
+    返回 [{no, title, source, blocks: [{no, name, module, source, rows}]}]，rows 里是条目对象本身（供成稿与接口两用）。"""
+    sections: list[dict] = []
+    index: dict[str, dict] = {}
     for mod in modules:
         if not mod["items"]:
             continue
         main = _module_source(mod)
-        lines.append(f"## {mod['name']}" + (f" 〔来源：{main}〕" if main else ""))
-        for it in mod["items"]:
-            mark = "" if it.get("verified", True) else f"{UNVERIFIED_MARK} "
-            others = [sx for sx in it.get("sources") or [] if sx != main]
-            src = f" 〔来源：{'；'.join(others)}〕" if others else ""
-            gap = f" {FORCED_MARK}" if it.get("forced") else (f" {GAP_MARK}" if it.get("gap") else "")
-            doubt = f" {DOUBT_MARK}{it['doubt']}〕" if it.get("doubt") else ""
-            lines.append(f"- {mark}{it['text']}{gap}{doubt}{src}")
+        if main and _IMG_SRC_RE.search(main):
+            page, src = IMAGE_SECTION, ""
+        elif main:
+            page, src = _page_title(main), main
+        else:
+            page, src = (mod["name"].split("-", 1)[0] if "-" in mod["name"] else mod["name"]), ""
+        sec = index.get(normalize(page))
+        if sec is None:
+            sec = {"title": page, "source": src, "blocks": []}
+            index[normalize(page)] = sec
+            sections.append(sec)
+        elif not sec["source"] and src:
+            sec["source"] = src
+        name = mod["name"]
+        if page != IMAGE_SECTION:
+            for sep in ("-", "－", "—", "–", "：", ":", " › ", "›"):
+                if name.startswith(page + sep) and len(name) > len(page) + len(sep):
+                    name = name[len(page) + len(sep):].strip()
+                    break
+        sec["blocks"].append({"name": name or mod["name"], "module": mod["name"], "source": "" if page == IMAGE_SECTION else main,
+                              "draft": all(it.get("draft") for it in mod["items"]),   # 整块都是疑似草稿：区块标题标出来
+                              "rows": _block_rows(mod["items"])})   # 图片文案节每条都标明来自哪张图
+    sections.sort(key=lambda s: s["title"] == IMAGE_SECTION)
+    for i, sec in enumerate(sections, 1):
+        sec["no"] = str(i)
+        for j, b in enumerate(sec["blocks"], 1):
+            b["no"] = f"{i}.{j}"
+    return sections
+
+
+def outline_view(modules: list[dict]) -> list[dict]:
+    """给接口用的层级：条目换成 id（逐条审核按 id 操作），表格行给 ids。"""
+    out = []
+    for sec in extraction_outline(modules):
+        blocks = []
+        for b in sec["blocks"]:
+            rows = []
+            for r in b["rows"]:
+                if r["t"] == "table":
+                    rows.append({"t": "table", "cols": r["cols"], "ids": [it.get("id") for it in r["items"]]})
+                elif r["t"] == "label":
+                    rows.append({"t": "label", "id": r["item"].get("id")})
+                else:
+                    rows.append({"t": "item", "id": r["item"].get("id"), "lv": r["lv"]})
+            blocks.append({"no": b["no"], "name": b["name"], "module": b["module"], "source": b["source"], "draft": b["draft"], "rows": rows})
+        out.append({"no": sec["no"], "title": sec["title"], "source": sec["source"], "blocks": blocks})
+    return out
+
+
+def _item_marks(it: dict, main: str) -> tuple[str, str]:
+    """条目的前缀（⚠）与后缀（〔补漏〕〔兜底〕〔疑点〕〔来源〕）。"""
+    mark = "" if it.get("verified", True) else f"{UNVERIFIED_MARK} "
+    others = [sx for sx in it.get("sources") or [] if sx != main]
+    src = f" 〔来源：{'；'.join(others)}〕" if others else ""
+    gap = f" {FORCED_MARK}" if it.get("forced") else (f" {GAP_MARK}" if it.get("gap") else "")
+    draft = f" {DRAFT_MARK}" if it.get("draft") else ""
+    doubt = f" {DOUBT_MARK}{it['doubt']}〕" if it.get("doubt") else ""
+    return mark, f"{gap}{draft}{doubt}{src}"
+
+
+def extraction_markdown(modules: list[dict], dropped: list[str] | None = None, head: dict | None = None) -> str:
+    """整理稿正文，层级与《连赢挑战赛_需求提取》一致：可选文头（标题 / 来源 / 提取原则 / 校验）→ `## N. 页面 〔来源〕` →
+    `### N.M 区块` → 条目（表格行还原成 Markdown 表格、以冒号结尾的短句加粗成子标题、「1、」「注：」类子项缩进一级）；
+    未逐字找到的加 ⚠ 前缀，补漏 / 兜底 / 疑点各有标记，来源与区块主来源不同时才单独标注；末尾疑点清单与已剔除说明。"""
+    lines: list[str] = []
+    if head:
+        lines += [f"# 「{head.get('title') or '需求'}」需求整理稿", "", f"- 来源：{head.get('sources') or '需求原文'}",
+                  "- 提取原则：全部需求语句逐字摘录原文（含原文错别字，不作改写），按「页面 › 区块」归类；表格按行还原；只在图片里出现的文案单列；原文疑点另列、不改原句。",
+                  f"- 校验：{head.get('check') or '—'}", ""]
+    sections = extraction_outline(modules)
+    for sec in sections:
+        lines.append(f"## {sec['no']}. {sec['title']}" + (f" 〔来源：{sec['source']}〕" if sec["source"] else ""))
         lines.append("")
+        for b in sec["blocks"]:
+            main = b["source"]
+            lines.append(f"### {b['no']} {b['name']}" + (f" {DRAFT_MARK.replace('疑似草稿', '疑似遗留草稿')}" if b["draft"] else ""))
+            for r in b["rows"]:
+                if r["t"] == "table":
+                    for k, it in enumerate(r["items"]):
+                        mark, tail = _item_marks(it, main)
+                        cells = [c.strip().replace("|", "\\|") for c in it["text"].split(TABLE_SEP)]
+                        cells[0] = f"{mark}{cells[0]}"
+                        cells[-1] = f"{cells[-1]}{tail}"
+                        lines.append("| " + " | ".join(cells) + " |")
+                        if k == 0:
+                            lines.append("|" + "---|" * r["cols"])
+                elif r["t"] == "label":
+                    mark, tail = _item_marks(r["item"], main)
+                    lines.append(f"**{mark}{r['item']['text']}**{tail}")
+                else:
+                    mark, tail = _item_marks(r["item"], main)
+                    lines.append(("  " if r["lv"] else "") + f"- {mark}{r['item']['text']}{tail}")
+            lines.append("")
     doubts = [(mod["name"], it) for mod in modules for it in mod["items"] if it.get("doubt")]
     if doubts:
-        lines.append("## 疑点 / 不一致清单 〔原句已按原文保留在上文，此处只列疑点，供需求澄清与用例设计〕")
+        lines.append(f"## {len(sections) + 1}. 疑点 / 不一致清单 〔原句已按原文保留在上文，此处只列疑点，供需求澄清与用例设计〕")
+        lines.append("")
         lines.extend(f"- {it['text']} —— {it['doubt']}（{name}）" for name, it in doubts)
+        lines.append("")
+    drafts = [b for sec in sections for b in sec["blocks"] if b["draft"]]
+    if drafts:
+        lines.append(f"## {len(sections) + (2 if doubts else 1)}. 疑似遗留草稿 〔画布上与页面主体不相连、与正式内容重复却有出入的区块，已照抄收录但用例不要照它写，请与产品确认〕")
+        lines.append("")
+        lines.extend(f"- {b['no']} {b['name']}（{b['module']}）" for b in drafts)
         lines.append("")
     if dropped:
         lines.append(f"（已剔除：{'、'.join(dropped)}）")
@@ -314,8 +458,8 @@ def uncovered_lines(materials: str, text: str) -> tuple[list[dict], dict]:
                 for lv in [k for k in stack if k > h[0]]:
                     del stack[lv]
             continue
-        if not s or _IMG_HEAD.match(s) or s.startswith(("[[图片", ">", "```", "|---")):
-            continue
+        if not s or _IMG_HEAD.match(s) or s.startswith(("[[图片", ">", "```", "|---", "【")):
+            continue   # 【独立区域 …】【说明 / 备注】这类程序标记不是需求句
         s = ledger_mod.UNIT_ID_RE.sub("", s).strip()
         if len(_CJK_RE.findall(s)) < MIN_CJK or _NOISE_RE.search(s) or _HEADER_LINE_RE.search(s):
             continue
@@ -435,8 +579,10 @@ async def _gap_fill(materials: str, modules: list[dict], llm: LLMClient, model: 
                 srcs = a.get("sources") or []
                 if isinstance(srcs, str):
                     srcs = [srcs]
-                adds.append({"name": str(a.get("module") or "").strip() or f"{ledger_mod.page_of(u['path'])}-待归类",
-                             "items": [{"text": t, "sources": srcs or [ledger_mod.source_of(u["path"])], "gap": True, "unit": uid}]})
+                item = {"text": t, "sources": srcs or [ledger_mod.source_of(u["path"])], "gap": True, "unit": uid}
+                if a.get("draft") is True:
+                    item["draft"] = True
+                adds.append({"name": str(a.get("module") or "").strip() or f"{ledger_mod.page_of(u['path'])}-待归类", "items": [item]})
         stats["skipped"] += len(new_decisions)
         decisions.update(new_decisions)
         if adds:
@@ -459,6 +605,71 @@ async def _gap_fill(materials: str, modules: list[dict], llm: LLMClient, model: 
         acct = ledger_mod.account(units, extraction_markdown(modules), decisions)
     stats["after"] = uncovered_lines(materials, extraction_markdown(modules))[1]
     return stats, {"stats": acct["stats"], "image": acct["image"], "decisions": decisions}
+
+
+# ---------- 第五层：整稿交叉核对 ----------
+
+def _crosscheck_input(modules: list[dict]) -> str:
+    lines: list[str] = []
+    for mod in modules:
+        lines.append(f"## {mod['name']}")
+        for it in mod["items"]:
+            lines.append(f"- [{it['id']}] {it['text']}" + (f" {DRAFT_MARK}" if it.get("draft") else "") + (f" {DOUBT_MARK}{it['doubt']}〕" if it.get("doubt") else ""))
+    return "\n".join(lines)
+
+
+def apply_crosscheck(modules: list[dict], data: dict) -> dict:
+    """把交叉核对结果写回条目：doubts 按 id 追加到条目 doubt（已有的用「；」接上，≤ 200 字）；drafts 按模块名把整块标 draft，
+    理由写进该块第一条的 doubt。只认存在的 id / 模块名。返回 {doubts, drafts}。"""
+    by_id = {it["id"]: it for mod in modules for it in mod["items"] if it.get("id")}
+    n_doubt = 0
+    for d in data.get("doubts") or []:
+        if not isinstance(d, dict):
+            continue
+        it = by_id.get(str(d.get("id") or "").strip())
+        text = " ".join(str(d.get("doubt") or "").split())
+        if it is None or not text:
+            continue
+        it["doubt"] = (f"{it['doubt']}；{text}" if it.get("doubt") and text not in it["doubt"] else (it.get("doubt") or text))[:200]
+        n_doubt += 1
+    by_name = {normalize(mod["name"]): mod for mod in modules}
+    n_draft = 0
+    for d in data.get("drafts") or []:
+        if not isinstance(d, dict):
+            continue
+        mod = by_name.get(normalize(str(d.get("module") or "")))
+        if mod is None or not mod["items"]:
+            continue
+        reason = " ".join(str(d.get("reason") or "").split())
+        for it in mod["items"]:
+            it["draft"] = True
+        first = mod["items"][0]
+        note = f"疑似遗留草稿：{reason}" if reason else "疑似遗留草稿"
+        if note not in (first.get("doubt") or ""):
+            first["doubt"] = (f"{first['doubt']}；{note}" if first.get("doubt") else note)[:200]
+        n_draft += 1
+    return {"doubts": n_doubt, "drafts": n_draft}
+
+
+async def _crosscheck(modules: list[dict], llm: LLMClient, model: str | None, extra: str) -> dict | None:
+    """整稿一次交叉核对（跨页面矛盾、疑似遗留草稿）。关了、稿子超长或模型出错都跳过，不影响提取结果。"""
+    from app.llm.calllog import used_prompts
+
+    if not get_settings().requirement_extract_crosscheck:
+        return None
+    body = _crosscheck_input(modules)
+    if len(body) > CROSSCHECK_MAX_CHARS:
+        logger.info("需求提取交叉核对跳过：整理稿 {} 字超过上限 {}", len(body), CROSSCHECK_MAX_CHARS)
+        return None
+    used_prompts.set({})
+    system = prompt_text("requirement_extract_crosscheck")
+    try:
+        data, _r = await _chat_json(llm, [{"role": "system", "content": system},
+                                          {"role": "user", "content": wrap_data("整理稿条目清单", body) + extra}], model, reasoning_effort="medium")
+    except Exception as e:   # 核对只加疑点，失败不拦提取
+        logger.warning("需求提取交叉核对失败（已跳过）：{}", e)
+        return None
+    return apply_crosscheck(modules, data)
 
 
 # ---------- 主流程 ----------
@@ -494,6 +705,7 @@ async def run_requirement_extraction(materials: str, llm: LLMClient, model: str 
     gap, ledger = await _gap_fill(materials, modules, llm, model, extra)
     stats = verify_modules(modules, materials)
     assign_ids(modules)
+    crosscheck = await _crosscheck(modules, llm, model, extra)
     text = extraction_markdown(modules, dropped)
     cov = gap["after"]
     ls = ledger["stats"]
@@ -503,5 +715,7 @@ async def run_requirement_extraction(materials: str, llm: LLMClient, model: str 
                 gap["rounds"], gap["added"], gap["forced"], cov["covered"], cov["lines"],
                 ls["total"], ls["in"], ls["ex"], ls["ex_by"].get("model", 0), ls["ex_by"].get("auto", 0), ls["review"], ls["todo"],
                 (ledger.get("image") or {}).get("total", 0), len(units), model_name)
+    if crosscheck:
+        logger.info("需求提取交叉核对：跨页面疑点 +{}，疑似遗留草稿区块 {}", crosscheck["doubts"], crosscheck["drafts"])
     return {"text": text, "modules": modules, "dropped": dropped, "model_name": model_name, "chunks": len(units),
-            "source_chars": len(materials), "gap": gap, "ledger": ledger, **stats}
+            "source_chars": len(materials), "gap": gap, "ledger": ledger, "crosscheck": crosscheck, **stats}

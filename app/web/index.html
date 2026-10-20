@@ -237,6 +237,9 @@ details.fold summary:hover { color:var(--ink); }
 details.fold[open] summary { border-bottom:1px solid var(--line-2); color:var(--ink); }
 details.fold .fold-b { padding:10px 12px; }
 table { width:100%; border-collapse:collapse; font-size:12.8px; }
+.ex-table { width:auto; max-width:100%; margin:4px 6px 6px; font-size:inherit; }
+.ex-table th, .ex-table td { border:1px solid var(--line); padding:3px 8px; vertical-align:top; text-align:left; line-height:1.5; }
+.ex-table th { background:var(--line-2); font-weight:600; }
 th { position:sticky; top:0; background:var(--well); color:var(--ink-2); font-weight:600;
   font-size:12px; letter-spacing:.2px; text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
   white-space:nowrap; z-index:1; }
@@ -3765,10 +3768,10 @@ function keepScroll(group, key, fn) {
   _scrollKeys[group] = key;
   if (!same) return fn();
   const win = [window.scrollX, window.scrollY];
-  const boxes = [...document.querySelectorAll('.tbl-wrap, .drawer .d-b, .dlg-b')].map((el, i) => [i, el.scrollTop, el.scrollLeft]).filter(x => x[1] || x[2]);
+  const boxes = [...document.querySelectorAll('.tbl-wrap, .drawer .d-b, .dlg-b, .ex-scroll')].map((el, i) => [i, el.scrollTop, el.scrollLeft]).filter(x => x[1] || x[2]);
   const restore = () => {
     if (window.scrollY !== win[1] || window.scrollX !== win[0]) window.scrollTo(win[0], win[1]);
-    const els = document.querySelectorAll('.tbl-wrap, .drawer .d-b, .dlg-b');
+    const els = document.querySelectorAll('.tbl-wrap, .drawer .d-b, .dlg-b, .ex-scroll');
     for (const [i, top, left] of boxes) { const el = els[i]; if (el) { el.scrollTop = top; el.scrollLeft = left; } }
   };
   const r = fn();
@@ -5735,37 +5738,60 @@ function reqExtractionHtml(r, canAI, canEdit) {
   }
   if (!ex.modules) {
     return intro + toolbar + bar + `<div class="hint" style="margin-bottom:6px">这份整理稿没有逐条结构（整篇改写过或旧版本提取），只能整篇查看 / 改写；重新提取后可逐条审核</div>
-      <pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:560px;overflow:auto;font:inherit;line-height:1.6">${esc(ex.text).replace(/^(## .+)$/gm, '<b>$1</b>').replace(/^- ⚠ (.+)$/gm, '- <span style="color:var(--warn)" title="未在材料中逐字找到，请核对">⚠</span> $1')}</pre>`;
+      <pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:560px;overflow:auto;font:inherit;line-height:1.6">${esc(ex.text).replace(/^(#{1,3} .+)$/gm, '<b>$1</b>').replace(/^\*\*(.+?)\*\*/gm, '<b>$1</b>').replace(/^(\s*)- ⚠ (.+)$/gm, '- <span style="color:var(--warn)" title="未在材料中逐字找到，请核对">⚠</span> $1')}</pre>`;
   }
   const all = _exItemsOf(r);
-  const nUnv = all.filter(it => it.verified === false).length, nPend = all.filter(it => it.verified === false && !it.review).length, nGap = all.filter(it => it.gap && !it.forced).length, nForced = all.filter(it => it.forced).length, nRev = all.filter(it => it.review).length, nDoubt = all.filter(it => it.doubt).length;
+  const nUnv = all.filter(it => it.verified === false).length, nPend = all.filter(it => it.verified === false && !it.review).length, nGap = all.filter(it => it.gap && !it.forced).length, nForced = all.filter(it => it.forced).length, nRev = all.filter(it => it.review).length, nDoubt = all.filter(it => it.doubt).length, nDraft = all.filter(it => it.draft).length;
   const filt = `<div class="toolbar" style="margin-bottom:8px;flex-wrap:wrap">
-      ${[['all',`全部 ${all.length}`],['unverified',`⚠ 待核对 ${nPend}`],['gap',`补漏 ${nGap}`],['forced',`兜底 ${nForced}`],['doubt',`疑点 ${nDoubt}`],['reviewed',`已处理 ${nRev}`],['ledger',`底稿核对${ls&&(ls.todo||ls.review_open)?` <b style="color:${ls.todo?'var(--danger)':'var(--warn)'}">${(ls.todo||0)+(ls.review_open||0)}</b>`:''}`]].map(([k,t])=>`<button class="btn ghost sm ${_exFilter===k?'on':''}" style="${_exFilter===k?'font-weight:600':''}" onclick="_exFilter='${k}';renderRequirementDetail()">${t}</button>`).join('')}
-      <span class="hint">${_exFilter==='ledger'?'底稿 = 产品原文的每一句（原型控件行、文档段落、说明备注，重复的只记一次；图片理解的描述不算，截图里转录的文字单列「图中文字」），每句的去向：收录 / 排除（原因与判定方）/ 待处理。要人看的只有「需复核」（模型排除的、像规则的句子）和「待处理」；程序按类排除的折叠起来。待处理为 0、需复核都看过才能完成审核':'⚠ = 没在材料里逐字找到（多半是模型改了写法），请对照原文核对通过、改成原句或删除；〔补漏〕= 模型判定是需求后补进的原句；〔兜底〕= 模型没判定去向、程序按原句收进来的，请核对后留下或在底稿里排除；〔疑点〕= 原文本身的问题（错别字、前后台 / PC 与移动口径不一致、占位符），原句照抄不改，疑点单列供需求澄清'}</span></div>`;
+      ${[['all',`全部 ${all.length}`],['unverified',`⚠ 待核对 ${nPend}`],['gap',`补漏 ${nGap}`],['forced',`兜底 ${nForced}`],['doubt',`疑点 ${nDoubt}`],['draft',`疑似草稿 ${nDraft}`],['reviewed',`已处理 ${nRev}`],['ledger',`底稿核对${ls&&(ls.todo||ls.review_open)?` <b style="color:${ls.todo?'var(--danger)':'var(--warn)'}">${(ls.todo||0)+(ls.review_open||0)}</b>`:''}`]].map(([k,t])=>`<button class="btn ghost sm ${_exFilter===k?'on':''}" style="${_exFilter===k?'font-weight:600':''}" onclick="_exFilter='${k}';renderRequirementDetail()">${t}</button>`).join('')}
+      <span class="hint">${_exFilter==='ledger'?'底稿 = 产品原文的每一句（原型控件行、文档段落、说明备注，重复的只记一次；图片理解的描述不算，截图里转录的文字单列「图中文字」），每句的去向：收录 / 排除（原因与判定方）/ 待处理。要人看的只有「需复核」（模型排除的、像规则的句子）和「待处理」；程序按类排除的折叠起来。待处理为 0、需复核都看过才能完成审核':'⚠ = 没在材料里逐字找到（多半是模型改了写法），请对照原文核对通过、改成原句或删除；〔补漏〕= 模型判定是需求后补进的原句；〔兜底〕= 模型没判定去向、程序按原句收进来的，请核对后留下或在底稿里排除；〔疑点〕= 原文本身的问题（错别字、前后台 / PC 与移动口径不一致、占位符），原句照抄不改，疑点单列供需求澄清；〔疑似草稿〕= 画布上与主体不相连、与正式内容重复却有出入的区块（旧版本），已照抄收录但用例不要照它写'}</span></div>`;
   if (_exFilter === 'ledger') return intro + toolbar + bar + filt + exLedgerHtml(r, canEdit);
-  const keep = it => _exFilter==='all' || (_exFilter==='unverified' && it.verified===false && !it.review) || (_exFilter==='gap' && it.gap && !it.forced) || (_exFilter==='forced' && it.forced) || (_exFilter==='doubt' && it.doubt) || (_exFilter==='reviewed' && it.review);
-  const rows = ex.modules.map(mod => {
-    const items = mod.items.filter(keep);
-    if (!items.length) return '';
-    return `<div style="margin:10px 0 4px"><b>${esc(mod.name)}</b> <span class="hint">${mod.items.length} 条</span></div>` + items.map(it => {
-      const editing = _exEditItem === it.id;
-      const badge = `${it.verified===false?'<span style="color:var(--warn)" title="未在材料中逐字找到">⚠</span> ':''}${it.forced?`<span class="st rejected" title="模型没判定去向，程序按原句收进来的（单元 ${esc(it.unit||'')}）；请核对：留下、改归模块，或在底稿核对里排除">兜底</span> `:it.gap?'<span class="st candidate" title="模型判定是需求后补进的原句">补漏</span> ':''}${it.manual?`<span class="st approved" title="底稿核对里人工按原句收录（单元 ${esc(it.unit||'')}）">人工收录</span> `:''}${it.doubt?`<span class="st candidate" style="color:var(--warn)" title="原文疑点（照抄原句，疑点单列）：${esc(it.doubt)}">疑点</span> `:''}${it.review&&!it.manual?`<span class="st approved" title="${esc(it.review.by||'')} ${esc(fmtTime(it.review.at))}">${it.review.status==='ok'?'已核对':'已修改'}</span> `:''}`;
-      const src = (it.sources||[]).length ? `<span class="hint" style="margin-left:6px">〔${esc((it.sources||[]).join('；'))}〕</span>` : '';
-      const ops = canEdit && !editing ? `<span style="margin-left:auto;display:flex;gap:2px;flex-shrink:0">
+  const keep = it => _exFilter==='all' || (_exFilter==='unverified' && it.verified===false && !it.review) || (_exFilter==='gap' && it.gap && !it.forced) || (_exFilter==='forced' && it.forced) || (_exFilter==='doubt' && it.doubt) || (_exFilter==='draft' && it.draft) || (_exFilter==='reviewed' && it.review);
+  const byId = Object.fromEntries(all.map(it => [it.id, it]));
+  const badgeOf = it => `${it.verified===false?'<span style="color:var(--warn)" title="未在材料中逐字找到">⚠</span> ':''}${it.forced?`<span class="st rejected" title="模型没判定去向，程序按原句收进来的（单元 ${esc(it.unit||'')}）；请核对：留下、改归模块，或在底稿核对里排除">兜底</span> `:it.gap?'<span class="st candidate" title="模型判定是需求后补进的原句">补漏</span> ':''}${it.manual?`<span class="st approved" title="底稿核对里人工按原句收录（单元 ${esc(it.unit||'')}）">人工收录</span> `:''}${it.draft?`<span class="st rejected" title="画布上与页面主体不相连、与正式内容重复却有出入的区块（旧版本 / 备用稿）：已照抄收录，用例不要照它写，请与产品确认">疑似草稿</span> `:''}${it.review?`<span class="st ${it.review.status==='ok'?'approved':'candidate'}" title="${esc(it.review.by||'')} ${esc(relTime(it.review.at))}">${it.review.status==='ok'?'已核对':'已修改'}</span> `:''}`;
+  const tailOf = (it, main) => { const others = (it.sources||[]).filter(x => x !== main);   // 来源与区块主来源相同的不重复标，与整理稿正文一致
+    return `${it.doubt?`<span class="hint" style="margin-left:6px;color:var(--warn)">〔疑点：${esc(it.doubt)}〕</span>`:''}${others.length ? `<span class="hint" style="margin-left:6px">〔${esc(others.join('；'))}〕</span>` : ''}`; };
+  const opsOf = it => canEdit && _exEditItem !== it.id ? `<span style="margin-left:auto;display:flex;gap:2px;flex-shrink:0">
           ${it.verified===false&&!it.review?`<button class="ibtn" title="核对通过：原文确有此意" onclick="reviewExItem('${it.id}','ok')">${IC.check||'✓'}</button>`:''}
           <button class="ibtn" title="修改（改成材料里的原句会重新核验）" onclick="_exEditItem='${it.id}';renderRequirementDetail()">${IC.edit}</button>
           <button class="ibtn" title="删除此条" onclick="reviewExItem('${it.id}','delete')">${IC.x}</button></span>` : '';
-      const body = editing ? `<div style="flex:1"><textarea id="exItemEdit" rows="2" style="width:100%;box-sizing:border-box;font:inherit">${esc(it.text)}</textarea>
-          <div class="toolbar" style="margin-top:4px"><button class="btn sm" onclick="reviewExItem('${it.id}','edit',$('exItemEdit').value)">保存</button><button class="btn ghost sm" onclick="_exEditItem=null;renderRequirementDetail()">取消</button></div></div>`
-        : `<span style="flex:1;line-height:1.6">${badge}${esc(it.text)}${it.doubt?`<span class="hint" style="margin-left:6px;color:var(--warn)">〔疑点：${esc(it.doubt)}〕</span>`:''}${src}</span>`;
-      return `<div style="display:flex;gap:6px;align-items:flex-start;padding:4px 6px;border-bottom:1px solid var(--line)">${body}${ops}</div>`;
+  const editBox = it => `<div style="flex:1"><textarea id="exItemEdit" rows="2" style="width:100%;box-sizing:border-box;font:inherit">${esc(it.text)}</textarea>
+          <div class="toolbar" style="margin-top:4px"><button class="btn sm" onclick="reviewExItem('${it.id}','edit',$('exItemEdit').value)">保存</button><button class="btn ghost sm" onclick="_exEditItem=null;renderRequirementDetail()">取消</button></div></div>`;
+  // 层级渲染：页面（## N.）› 区块（### N.M）› 条目；表格行还原成表格，以冒号结尾的短句加粗成子标题，「1、」「注：」类子项缩进
+  const itemHtml = (it, opt = {}) => {
+    const body = _exEditItem === it.id ? editBox(it) : `<span style="flex:1;line-height:1.6${opt.bold?';font-weight:600':''}">${badgeOf(it)}${esc(it.text)}${tailOf(it, opt.main)}</span>`;
+    return `<div style="display:flex;gap:6px;align-items:flex-start;padding:4px 6px${opt.lv?';padding-left:30px':''};border-bottom:1px solid var(--line)">${body}${opsOf(it)}</div>`;
+  };
+  const tableHtml = (its, cols, main) => {
+    const cells = it => it.text.split(' ｜ ');
+    const tr = (it, tag) => _exEditItem === it.id ? `<tr><td colspan="${cols+1}">${editBox(it)}</td></tr>` : (cs => `<tr>${cs.map((c,i)=>`<${tag}>${i===0?badgeOf(it):''}${esc(c)}${i===cs.length-1?tailOf(it, main):''}</${tag}>`).join('')}<${tag} style="white-space:nowrap">${opsOf(it)}</${tag}></tr>`)(cells(it));
+    return `<table class="ex-table"><thead>${tr(its[0], 'th')}</thead><tbody>${its.slice(1).map(it => tr(it, 'td')).join('')}</tbody></table>`;
+  };
+  const outline = ex.outline || ex.modules.map((mod, i) => ({no: String(i+1), title: mod.name, source: '', blocks: [{no: `${i+1}.1`, name: mod.name, module: mod.name, rows: mod.items.map(it => ({t: 'item', id: it.id, lv: 0}))}]}));
+  const rows = outline.map(sec => {
+    const blocks = sec.blocks.map(b => {
+      const parts = b.rows.map(r => {
+        if (r.t === 'table') {
+          const its = r.ids.map(id => byId[id]).filter(Boolean), shown = its.filter(keep);
+          if (!shown.length) return '';
+          return tableHtml(_exFilter === 'all' ? its : [its[0], ...shown.filter(x => x !== its[0])], r.cols, b.source);   // 筛选时表头照留
+        }
+        const it = byId[r.id];
+        if (!it || !keep(it)) return '';
+        return itemHtml(it, {bold: r.t === 'label', lv: r.lv || 0, main: b.source});
+      }).join('');
+      if (!parts) return '';
+      const n = b.rows.reduce((acc, r) => acc + (r.t === 'table' ? r.ids.length : 1), 0);
+      return `<div style="margin:8px 0 2px 8px"><b>${esc(b.no)} ${esc(b.name)}</b> <span class="hint">${n} 条</span>${b.draft?' <span class="st rejected">疑似遗留草稿</span>':''}</div>` + parts;
     }).join('');
+    if (!blocks) return '';
+    return `<div style="margin:14px 0 4px;font-size:14px;border-bottom:2px solid var(--line);padding-bottom:2px"><b>${esc(sec.no)}. ${esc(sec.title)}</b>${sec.source?` <span class="hint">〔来源：${esc(sec.source)}〕</span>`:''}</div>` + blocks;
   }).join('');
-  return intro + toolbar + bar + filt + `<div style="max-height:600px;overflow:auto;background:var(--line-2);padding:4px 10px;border-radius:8px">${rows || '<div class="empty">没有符合筛选的条目</div>'}</div>` +
+  return intro + toolbar + bar + filt + `<div class="ex-scroll" style="max-height:600px;overflow:auto;background:var(--line-2);padding:4px 10px;border-radius:8px">${rows || '<div class="empty">没有符合筛选的条目</div>'}</div>` +
     (ex.dropped && ex.dropped.length ? `<div class="hint" style="margin-top:6px">（已剔除：${ex.dropped.map(esc).join('、')}）</div>` : '');
 }
 function exLedgerHtml(r, canEdit) {
-  if (!_exLedger) { if (!_exLedgerLoading) exLedgerLoad(); return `<div class="hint"><span class="spin"></span> 正在核算底稿…</div>`; }
+  if (!_exLedger) { if (!_exLedgerLoading) exLedgerLoad(); return `<div class="hint" style="min-height:600px"><span class="spin"></span> 正在核算底稿…</div>`; }
   const L = _exLedger, st = L.stats || {}, li = L.image || {};
   const all = (L.pages||[]).flatMap(pg => pg.units);
   const src = all.filter(u => u.kind !== 'image'), img = all.filter(u => u.kind === 'image');
@@ -5775,7 +5801,7 @@ function exLedgerHtml(r, canEdit) {
       <span class="hint">${f==='review'?'模型判「不是需求」但句子像规则（≥ 8 个汉字且带数字 / 条件词）：看一眼，是需求就「收录」，确实不是就「确认」':f==='ex'?'程序按规则排除的两类（小标题、纯样例）按类折叠；模型排除的按原因折叠，需复核的在上一个页签':f==='image'?'模型从截图里转录的文字，不是产品写的原文：低优先级，不送补漏、不拦审核；需要的可以手动收录':f==='todo'?'既没收录也没有排除原因的句子，AI 提取完成时应为 0；删了摘录会回到这里':'去向以整理稿正文为准'}</span></div>`;
   const byMap = {model:'模型', auto:'程序', user:'人工'};
   const CTL = {table_cell:'单元格', table_row:'表格行', _段落:'段落', label:'标签', box_1:'流程框', box_2:'矩形', box_3:'矩形', flow_shape:'流程框', _连接:'连接线', _连接线:'连接线', droplist:'下拉框', text_field:'输入框', text_area:'文本域', checkbox1:'复选框', radio_button:'单选框', primary_button:'按钮', button:'按钮', heading_1:'标题', heading_2:'标题', _二级标题:'标题', _三级标题:'标题', placeholder:'占位区', image:'图片', _图片:'图片', table:'表格', ellipse:'椭圆', shape:'形状', shape1:'形状', icon:'图标', line:'线', arrow:'箭头'};
-  const ctlTag = c => c ? ` <span class="hint" title="原型控件类型 ${esc(c.cls||'')}，坐标 (${c.x},${c.y})${c.hidden?'，页面上默认隐藏（动态面板 / 弹窗的另一状态），照样提取':''}">〔${esc(CTL[(c.cls||'').split(' ')[0]]||c.cls||'控件')}${c.hidden?' · 隐藏态':''}〕</span>` : '';
+  const ctlTag = c => c ? ` <span class="hint" title="原型控件类型 ${esc(c.cls||'')}，坐标 (${c.x},${c.y})${c.hidden?'，页面上默认隐藏（动态面板 / 弹窗的另一状态），照样提取':''}${c.region?'，在画布上与页面主体不相连的独立区域（旧版本 / 备用稿常这样）':''}">〔${esc(CTL[(c.cls||'').split(' ')[0]]||c.cls||'控件')}${c.hidden?' · 隐藏态':''}${c.region?` · <span style="color:var(--danger)">独立区域 ${c.region}</span>`:''}〕</span>` : '';
   if ((L.checks||[]).length) out += `<div class="hint" style="margin:0 0 6px">原型解析自校验（整页字符 vs 提取行，与控件解析相互独立）：${L.checks.map(c => c.ok ? `${esc(c.filename)} <span class="st approved">0 缺字</span> <span class="hint">${c.pages} 页</span>` : `${esc(c.filename)} <span class="st rejected">缺 ${c.missing} 字</span>`).join('　')}</div>`;
   const row = u => {
     const badge = u.status==='in' ? `<span class="st approved">${u.forced?'兜底收录':u.manual?'人工收录':'收录'}</span>` : u.status==='ex' ? `<span class="st rejected" title="${esc(u.reason||'')}">排除</span> <span class="hint">${esc(u.reason||'')}（${byMap[u.by]||esc(u.by||'')}${u.checked?`，${esc(u.checked.by||'')} 已确认`:''}）</span>` : `<span class="st candidate" style="color:var(--danger)">待处理</span>${u.partial?` <span class="hint">整理稿已有其中 ${Math.round(u.partial*100)}%</span>`:''}`;
@@ -5805,7 +5831,7 @@ function exLedgerHtml(r, canEdit) {
     const groups = new Map(); ex.forEach(u => { const k = `${byMap[u.by]||u.by}：${u.reason||''}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(u); });
     body = [...groups].sort((a,b) => b[1].length - a[1].length).map(([k, us]) => fold(k, us, false)).join('');
   } else body = byPage(src);
-  return out + `<div style="max-height:600px;overflow:auto;background:var(--line-2);padding:4px 10px;border-radius:8px">${body || '<div class="empty">没有符合筛选的句子</div>'}</div>`;
+  return out + `<div class="ex-scroll" style="max-height:600px;overflow:auto;background:var(--line-2);padding:4px 10px;border-radius:8px">${body || '<div class="empty">没有符合筛选的句子</div>'}</div>`;
 }
 async function exLedgerLoad() {
   _exLedgerLoading = true;
@@ -5818,7 +5844,9 @@ async function exLedgerAct(uid, action, reason) {
     const r = await jpost(`/api/v1/requirements/${curReq}/extraction/ledger`, {uid, action, reason: reason || null});
     const st = ((r.extraction||{}).ledger||{}).stats || {};
     toast(action === 'include' ? '已按原句收进整理稿' : action === 'confirm' ? `已确认，需复核未看 ${st.review_open||0}` : `已排除，待处理 ${st.todo||0}`, 'ok');
-    _exLedgerReasonFor = null; _exLedger = null; renderRequirementDetail();
+    _exLedgerReasonFor = null;
+    try { _exLedger = await api(`/api/v1/requirements/${curReq}/extraction/ledger`); } catch (e2) { _exLedger = null; }   // 先拉新底稿再重绘：中间不出现空态，滚动位置不丢
+    renderRequirementDetail();
   } catch (e) { toast(e.message, 'err'); }
 }
 function exHistoryHtml(r, canEdit) {
