@@ -27,6 +27,7 @@ from app.agents.analysis import normalize, quote_found
 from app.agents.context import profile_block
 from app.agents.graph import _chat_json
 from app.agents import ledger as ledger_mod
+from app.agents.ledger import _NUMERIC_RE, _strict_found, strict_normalize   # 严格规范化与底稿共用，两个方向口径一致
 from app.agents.prompts import wrap_data
 from app.config import get_settings
 from app.llm.client import LLMClient
@@ -38,6 +39,7 @@ MAX_DROPPED = 10   # 各片都会报一遍剔除类型，去重后最多列这�
 UNVERIFIED_MARK = "⚠"
 GAP_MARK = "〔补漏〕"
 FORCED_MARK = "〔兜底〕"     # 模型没判定去向、程序按原句直接收进整理稿的单元
+DOUBT_MARK = "〔疑点："      # 原文疑点（错别字 / 前后口径不一致 / 占位符），原句照抄、疑点单列
 GAP_ROUNDS = 2            # 补漏最多轮数（有待处理单元就问模型，不设最少字数门槛：每句都要有去向）
 GAP_BATCH_CHARS = 15000   # 一次补漏调用最多送这么多字的未覆盖句
 MIN_CJK = 8               # 少于这么多汉字的行不算需求句（按钮名 / 表头 / 样例数据）
@@ -86,6 +88,9 @@ def _merge_modules(outputs) -> tuple[list[dict], list[str], str]:
                 for k in ("gap", "forced", "manual", "unit", "verified", "id", "review"):
                     if it.get(k) is not None:
                         entry[k] = it[k]
+                doubt = " ".join(str(it.get("doubt") or "").split())[:200]
+                if doubt:
+                    entry["doubt"] = doubt   # 原文疑点（错别字 / 前后口径不一致 / 占位符）：原句照抄，疑点单列
                 mod["_seen"][key] = entry
                 mod["items"].append(entry)
     out = []
@@ -96,21 +101,31 @@ def _merge_modules(outputs) -> tuple[list[dict], list[str], str]:
 
 
 def verify_modules(modules: list[dict], materials: str) -> dict:
-    """逐条对照材料：摘录是否逐字（或分段 ≥70%）出现在材料里。"""
-    source_norm = normalize(materials)
+    """逐条对照材料：摘录是否逐字出现在材料里。含数字 / 运算符 / 百分号的条目（规则、边界、公式）必须整句逐字命中且
+    运算符一致；其余条目允许分段 ≥70% 命中（模型可能把一行拆成几条、去掉序号）。"""
+    source_norm, source_strict = normalize(materials), strict_normalize(materials)
     checked = verified = 0
     for mod in modules:
         for it in mod["items"]:
             checked += 1
-            it["verified"] = verify_text(it["text"], source_norm)
+            it["verified"] = verify_text(it["text"], source_norm, source_strict)
             verified += int(it["verified"])
     return {"checked": checked, "verified": verified, "unverified": checked - verified}
 
 
-def verify_text(text: str, source_norm: str) -> bool:
-    """单条核验：过短的条目（按钮名 / 表头之类）quote_found 一律判否，这里按子串判，是否该单独成条交给人看。"""
+def verify_text(text: str, source_norm: str, source_strict: str | None = None) -> bool:
+    """单条核验：过短的条目（按钮名 / 表头之类）quote_found 一律判否，这里按子串判，是否该单独成条交给人看；
+    含数字 / 运算符的条目整句严格命中（≤ 与 > 不同、35% 与 75% 不同），不走分段放行。"""
     norm = normalize(text)
+    if source_strict is not None and _NUMERIC_RE.search(unicodedata_nfkc(text)):
+        return _strict_found(strict_normalize(text), source_strict)
     return (norm in source_norm) if len(norm) < 4 else quote_found(text, source_norm)
+
+
+def unicodedata_nfkc(text: str) -> str:
+    import unicodedata
+
+    return unicodedata.normalize("NFKC", text or "")
 
 
 def assign_ids(modules: list[dict]) -> None:
@@ -143,7 +158,13 @@ def extraction_markdown(modules: list[dict], dropped: list[str] | None = None) -
             others = [sx for sx in it.get("sources") or [] if sx != main]
             src = f" 〔来源：{'；'.join(others)}〕" if others else ""
             gap = f" {FORCED_MARK}" if it.get("forced") else (f" {GAP_MARK}" if it.get("gap") else "")
-            lines.append(f"- {mark}{it['text']}{gap}{src}")
+            doubt = f" {DOUBT_MARK}{it['doubt']}〕" if it.get("doubt") else ""
+            lines.append(f"- {mark}{it['text']}{gap}{doubt}{src}")
+        lines.append("")
+    doubts = [(mod["name"], it) for mod in modules for it in mod["items"] if it.get("doubt")]
+    if doubts:
+        lines.append("## 疑点 / 不一致清单 〔原句已按原文保留在上文，此处只列疑点，供需求澄清与用例设计〕")
+        lines.extend(f"- {it['text']} —— {it['doubt']}（{name}）" for name, it in doubts)
         lines.append("")
     if dropped:
         lines.append(f"（已剔除：{'、'.join(dropped)}）")
