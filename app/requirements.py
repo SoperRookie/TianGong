@@ -349,6 +349,8 @@ class RequirementStore:
             if verified is not None:
                 it["verified"] = verified
             it["review"] = {"status": "edited", "by": operator, "at": _now()}
+            if it.pop("doubt", None):
+                it["doubt_resolved"] = True   # 人改过这条就算疑点处理过了：整理稿与预览不再标〔疑点〕，疑点清单也不再列
         elif action == "delete":
             mod["items"].remove(it)
             if not mod["items"]:

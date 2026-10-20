@@ -280,9 +280,9 @@ def draft_index(draft_text: str) -> tuple[str, set[str], str]:
         if s.startswith("```"):
             fence = not fence
             continue
-        if fence:   # 流程图代码块：每行「A —是→ B」算条目，各框的短文字靠它命中
+        if fence:   # 流程图代码块（分支树或「A —是→ B」行）：拆出各框的文字算条目，短文字靠它命中
             items.add(normalize(s))
-            items.update(normalize(x) for x in re.split(r"\s—[^→]*→\s|\s→\s", s) if normalize(x))
+            items.update(normalize(x) for x in re.split(r"[─┬├└►│]+|\s—[^→]*→\s|\s→\s|（回到：|）", s) if normalize(x))
             continue
         m = _ITEM_LINE.match(s)
         if m:
