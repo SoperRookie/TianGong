@@ -6,8 +6,8 @@
 
 每个单元必须有去向之一：
 - 收录：整理稿里逐字有它（整行是整理稿子串，或按标点切段后命中 ≥ 90%；短于 4 字的要整条等于某条摘录）；
-- 排除：写明原因与判定方——模型（补漏审核时逐句判「不是需求」）、程序（小标题 / 纯样例数据或代码，这两类规则简单可解释，
-  页面按类折叠；按钮名、表头、字段名之类的短标签是界面文案，不由程序排除，交模型按业务含义判）、人工（底稿核对页点「排除」）；模型排除里 ≥ 8 个汉字且带数字 / 条件词的标「需复核」，
+- 排除：写明原因与判定方——模型（补漏审核时逐句判「不是需求」）、程序（只有没有汉字的纯样例数据 / 代码这一类，规则简单可解释，页面按类折叠；小标题是整理稿的子标题、
+  按钮名 / 表头 / 字段名之类的短标签是界面文案，都不由程序排除，交模型按业务含义判）、人工（底稿核对页点「排除」）；模型排除里 ≥ 8 个汉字且带数字 / 条件词的标「需复核」，
   人看过点「确认」才算；
 - 待处理：以上都不是。提取流水线结束前，待处理的单元按原句直接收进整理稿（〔兜底〕），所以 AI 提取完成时待处理为 0；
   之后逐条审核删了条目、整篇改写，都会重新核算，待处理不为 0 或需复核没看完不能「完成审核」。
@@ -33,6 +33,7 @@ _VISION_SECTIONS = ("图片类型与整体说明", "界面元素清单", "交互
 _IMG_TEXT_HEAD = re.compile(r"^#{1,6}\s*图中文字原文")
 _BULLET = re.compile(r"^[\-•·*]\s+")
 _PARSER_NOTE = re.compile(r"^共 \d+ 个页面，按站点地图顺序")   # Axure 解析器自己写的说明行，不是产品原文
+FLOW_BEGIN, FLOW_END = "【流程图 ", "【流程图结束】"   # 解析器从流程框 + 连接线还原的流程块：派生内容，各框的文字已是单元，块内行不再记
 _CJK = re.compile(r"[一-鿿]")
 _HEADING_TAIL = re.compile(r"[:：]\s*$")
 _HEADING_WORD = re.compile(r"^[^，。；,.;]{0,24}(示例|说明|参考图例|清单|区域|入口位)[：:]?\s*$")
@@ -45,21 +46,19 @@ MIN_CJK = 8
 KIND_SOURCE, KIND_IMAGE = "source", "image"
 STATUS_IN, STATUS_EX, STATUS_TODO = "in", "ex", "todo"
 BY_MODEL, BY_AUTO, BY_USER = "model", "auto", "user"
-AUTO_HEADING, AUTO_SAMPLE = "小标题", "纯样例数据 / 代码（无中文）"
+AUTO_SAMPLE = "纯样例数据 / 代码（无中文）"
+AUTO_HEADING = "小标题"   # 已不再由程序判（小标题是整理稿的子标题，交模型按区块收），常量留给老数据的排除原因显示
 _FORMAT_SIGNAL = re.compile(r"[～~≥≤<>=%]")   # 没有汉字但带区间 / 比较 / 百分号的行（「UTC+8 9.21 00:00:00～23:59:59」）是格式示例，交模型判
 
 
 def auto_reason(text: str) -> str | None:
-    """程序直接判排除的两类（可解释、可在底稿页翻回来）：小标题、纯样例数据 / 代码；其余交模型 / 人判。
-    短标签（按钮名、表头、字段名、交易类型名、状态文案）不再由程序排除：它们是界面文案，用例要核对，由补漏模型按业务含义判。"""
+    """程序直接判排除的只有一类（可解释、可在底稿页翻回来）：没有汉字的纯样例数据 / 代码；其余交模型 / 人判。
+    小标题（「参与方式：」「报名规则说明」）是整理稿的子标题，给上下文用，不再由程序排除；短标签（按钮名、表头、字段名、
+    交易类型名、状态文案）是界面文案，用例要核对，也交补漏模型按业务含义判。"""
     s = text.strip()
     cjk = len(_CJK.findall(s))
     if not cjk and len(_WORDS.findall(s)) < 3 and not _FORMAT_SIGNAL.search(s):
         return AUTO_SAMPLE
-    if cjk <= 12 and _HEADING_TAIL.search(s) and not _LABEL_PUNCT.search(s[:-1]):
-        return AUTO_HEADING
-    if _HEADING_WORD.match(s) and cjk < 16:
-        return AUTO_HEADING
     return None
 
 
@@ -99,8 +98,14 @@ def build_units(materials: str) -> list[dict]:
     seen_uid: dict[str, int] = {}
     in_img = img_text = img_file = False
     img_no = 0   # 当前图片理解块是第几张图（材料里的 [[图片:N]] 编号；独立图片附件为 0，页面显示文件名）
+    in_flow = False
     for raw in materials.split("\n"):
         s = raw.strip()
+        if s.startswith(FLOW_BEGIN) or s == FLOW_END:
+            in_flow = s.startswith(FLOW_BEGIN)
+            continue
+        if in_flow:
+            continue
         m = _FILE_HEAD.match(s)
         if m:
             file_name, stack, file_no, line_no = m.group(2).strip(), {}, file_no + 1, 0
@@ -181,6 +186,37 @@ def build_units(materials: str) -> list[dict]:
     return units
 
 
+_ISLAND_HEAD = re.compile(r"^【独立区域 \d+：")
+
+
+def island_keys(materials: str) -> set[str]:
+    """材料里独立区域（画布上与页面主体不相连的控件群）内每一行的逐字键：疑似草稿只能标在这些句子上，别处一律不算。
+    区域到下一个页面标题 / 文件头 / 说明备注标记为止。"""
+    keys: set[str] = set()
+    on = False
+    for raw in materials.split("\n"):
+        s = raw.strip()
+        if _ISLAND_HEAD.match(s):
+            on = True
+            continue
+        if s.startswith(("# ", "## ", "【说明", "【文件：", "【链接：")):
+            on = False
+        if not on or not s or s.startswith(("[[图片", "```", "|---", ">", "【")):
+            continue
+        s = _BULLET.sub("", UNIT_ID_RE.sub("", s)).strip()
+        if s:
+            keys.add(unit_key(s))
+    return keys
+
+
+def in_islands(text: str, keys: set[str]) -> bool:
+    """条目是否来自独立区域：逐字键命中，或（≥ 8 字时）是某一行的子串（模型把一行拆成几条）。"""
+    k = unit_key(text)
+    if not k or not keys:
+        return False
+    return k in keys or (len(k) >= 8 and any(k in x for x in keys))
+
+
 def unit_key(text: str) -> str:
     """去重键：全角转半角、去空白、小写，其余逐字保留。"""
     return "".join(unicodedata.normalize("NFKC", text or "").split()).lower()
@@ -235,11 +271,19 @@ def draft_index(draft_text: str) -> tuple[str, set[str], str]:
     """整理稿 → (规范化全文, 规范化后的条目集合, 严格规范化全文)。条目集合给很短的单元用：「1 名」「序号」这类只有整条等于
     某条摘录才算收录，按子串判会在任何长条目里误中。严格规范化全文给带数字 / 运算符的单元用。"""
     text = draft_text or ""
-    if "\n## " in text:
-        text = text[text.index("\n## ") + 1:]   # 文头（标题 / 来源 / 校验说明）不是摘录，不参与核算
+    if text.startswith("# ") and "\n## " in text:
+        text = text[text.index("\n## ") + 1:]   # 文头（# 标题 + 来源 / 校验说明）不是摘录，不参与核算；没有文头的正文从第一节开始，不能切
     items: set[str] = set()
+    fence = False
     for line in text.split("\n"):
         s = line.strip()
+        if s.startswith("```"):
+            fence = not fence
+            continue
+        if fence:   # 流程图代码块：每行「A —是→ B」算条目，各框的短文字靠它命中
+            items.add(normalize(s))
+            items.update(normalize(x) for x in re.split(r"\s—[^→]*→\s|\s→\s", s) if normalize(x))
+            continue
         m = _ITEM_LINE.match(s)
         if m:
             items.add(normalize(m.group(1)))

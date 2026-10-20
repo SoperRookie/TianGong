@@ -26,12 +26,16 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _CONTROL_ID_RE = re.compile(r"^(u\d+)$")
 _TEXT_ID_RE = re.compile(r"^(u\d+)_text$")
 _LINE_ID_RE = re.compile(r"^\[(u\d+)\]\s?")
-_CSS_RULE_RE = re.compile(r"#(u\d+)\s*\{([^}]*)\}")
+_CSS_RULE_RE = re.compile(r"#(u\d+(?:_seg\d+)?)\s*\{([^}]*)\}")   # 控件与连接线线段（#u49_seg0）的定位规则
 _CSS_PX_RE = {k: re.compile(rf"(?<![\w-]){k}:\s*(-?[\d.]+)px") for k in ("left", "top", "width", "height")}
 _HIDDEN_RE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden")
 ROW_TOLERANCE = 4
 ISLAND_GAP = 1000   # 与页面主体任何控件横纵都相距 ≥ 1000px 的控件群算「独立区域」：作者丢在画布右侧 / 下方的旧版本、备用稿常这样
-ISLAND_MIN = 3      # 少于 3 个控件的零星控件不算独立区域   # 同一行控件的 top 常差 1～3px：按 4px 归并成一行再按列排
+ISLAND_MIN = 3      # 少于 3 个控件的零星控件不算独立区域
+FLOW_BEGIN, FLOW_END = "【流程图 ", "【流程图结束】"   # 程序从流程框 + 连接线还原的流程块（派生内容：底稿与覆盖率都不当原文句）
+_CONNECTOR_CLASS = ("_连接", "connector")
+_ARROW_MAX = 30      # 连接线的箭头段两边都不超过这么大；线段至少一边 ≤ 10px
+_SNAP = 10           # 连接线端点落在流程框边框外 10px 内也算连到它   # 同一行控件的 top 常差 1～3px：按 4px 归并成一行再按列排
 OPTIONS_MARK, VALUE_MARK, PLACEHOLDER_MARK = "下拉选项：", "输入值：", "占位提示："
 _FORM_MARKS = (OPTIONS_MARK, VALUE_MARK, PLACEHOLDER_MARK)
 _ATTR_MARKS = (VALUE_MARK, PLACEHOLDER_MARK)   # 来自属性、不在页面文字里的行，自校验时不计入提取侧
@@ -172,8 +176,8 @@ def _table_row(cells: list[dict]) -> dict | None:
             "visible": [v for c in cells for v in c["visible"]], "cells": [c["id"] for c in cells]}
 
 
-def _page_controls(html: str, css: str = "") -> tuple[str, list[dict]]:
-    """页面 → (标题, 按阅读顺序排好的控件 [{id, cls, x, y, hidden, lines, img, visible}])。
+def _page_controls(html: str, css: str = "") -> tuple[str, list[dict], list[dict]]:
+    """页面 → (标题, 按阅读顺序排好的控件 [{id, cls, x, y, w, h, hidden, lines, img, visible}], 连接线 [{id, x, y, segs, label}])。
 
     控件 = id 形如 uNNN 的元素；绝对坐标沿父控件链累加；同一父控件下的子控件按（round(y/4), x）排序，先列控件自己的
     文字再列子控件（动态面板各状态、组合各自连续）。文字取 #uNNN_text 里每个 <p> 一行（按字体拆开的 span 拼回同一行，
@@ -194,6 +198,23 @@ def _page_controls(html: str, css: str = "") -> tuple[str, list[dict]]:
     def hidden_of(el) -> bool:
         return bool(_HIDDEN_RE.search((el.get("style") or "").replace(" ", "")))
 
+    connectors: list[dict] = []
+
+    def is_connector(el) -> bool:
+        cls = el.get("class") or ""
+        return any(k in cls for k in _CONNECTOR_CLASS)
+
+    def connector(el, uid: str, x: float, y: float) -> None:
+        """连接线：起点是控件原点，线段 #uNNN_segK（细长的是线，小方块是箭头）相对原点；标签在 _text 里。"""
+        segs = []
+        k = 0
+        while (p := pos.get(f"{uid}_seg{k}")) is not None:
+            segs.append(p)
+            k += 1
+        tdiv = el.find(f".//*[@id='{uid}_text']")
+        label = " ".join(tdiv.text_content().split()) if tdiv is not None else ""
+        connectors.append({"id": uid, "x": x, "y": y, "segs": segs, "label": label})
+
     def own(el, uid: str, x: float, y: float, hidden: bool) -> dict | None:
         tdiv = el.find(f".//*[@id='{uid}_text']")
         lines: list[str] = []
@@ -211,7 +232,9 @@ def _page_controls(html: str, css: str = "") -> tuple[str, list[dict]]:
         src = (img.get("src") or "") if img is not None else ""
         if not lines and not src:
             return None
+        p = pos.get(uid) or {}
         return {"id": uid, "cls": _short_class(el.get("class") or ""), "x": int(round(x)), "y": int(round(y)),
+                "w": float(p.get("width") or 0), "h": float(p.get("height") or 0),
                 "hidden": hidden, "lines": lines, "img": src, "visible": visible}
 
     def children(el) -> list:
@@ -249,6 +272,8 @@ def _page_controls(html: str, css: str = "") -> tuple[str, list[dict]]:
                 cells = [own(g[2], g[3], g[4], g[5], hidden or hidden_of(g[2])) for g in group]
                 rec = _table_row([r for r in cells if r is not None])
             else:
+                if is_connector(c):
+                    connector(c, uid, x, y)
                 rec = own(c, uid, x, y, hidden or hidden_of(c))
             if rec is not None:
                 out.append(rec)
@@ -257,7 +282,9 @@ def _page_controls(html: str, css: str = "") -> tuple[str, list[dict]]:
             i += len(group)
 
     walk(root, 0.0, 0.0, False)
-    return title, out
+    for c in out:
+        c["cells"] = c.get("cells")   # 保持键集合一致
+    return title, out, connectors
 
 
 def _regions(controls: list[dict]) -> list[int]:
@@ -295,6 +322,103 @@ def _regions(controls: list[dict]) -> list[int]:
     return region
 
 
+def _connector_ends(c: dict) -> tuple[tuple[float, float], tuple[float, float]]:
+    """连接线的 (起点, 终点) 绝对坐标：从原点沿细长线段一段段走到头；箭头小方块贴在哪头，哪头就是终点。"""
+    ox, oy = c["x"], c["y"]
+    cur = (0.0, 0.0)
+    arrows = []
+    for sg in c["segs"]:
+        l, t, w, h = sg.get("left", 0.0), sg.get("top", 0.0), sg.get("width", 0.0), sg.get("height", 0.0)
+        if w <= _ARROW_MAX and h <= _ARROW_MAX:
+            arrows.append((l + w / 2, t + h / 2))
+            continue
+        if w <= _SNAP:   # 竖线
+            ends = [(l + w / 2, t), (l + w / 2, t + h)]
+        elif h <= _SNAP:   # 横线
+            ends = [(l, t + h / 2), (l + w, t + h / 2)]
+        else:   # 斜线：按对角
+            ends = [(l, t), (l + w, t + h)]
+        cur = max(ends, key=lambda e: abs(e[0] - cur[0]) + abs(e[1] - cur[1]))
+    start, end = (0.0, 0.0), cur
+    if arrows and all(abs(a[0] - start[0]) + abs(a[1] - start[1]) < abs(a[0] - end[0]) + abs(a[1] - end[1]) for a in arrows):
+        start, end = end, start   # 箭头在原点这头：方向反过来
+    return (ox + start[0], oy + start[1]), (ox + end[0], oy + end[1])
+
+
+def _flows(controls: list[dict], connectors: list[dict]) -> list[dict]:
+    """流程框 + 连接线 → 流程图：每条连线找到起止两端落在哪个有文字的控件上，得到「A —标签→ B」；按连通分量分成几张图，
+    每张图从起点（没有入边的框）开始深度优先列边。返回 [{nodes: [uid…], lines: [...], anchor: 阅读顺序里最后一个节点 uid}]。"""
+    shapes = [c for c in controls if c["lines"] and c.get("w") and c.get("cls") != "table_row"
+              and not any(k in (c.get("cls") or "") for k in _CONNECTOR_CLASS)]
+    if not shapes or not connectors:
+        return []
+
+    def at(pt) -> dict | None:
+        hits = [sh for sh in shapes if sh["x"] - _SNAP <= pt[0] <= sh["x"] + sh["w"] + _SNAP and sh["y"] - _SNAP <= pt[1] <= sh["y"] + sh["h"] + _SNAP]
+        return min(hits, key=lambda sh: sh["w"] * sh["h"]) if hits else None
+
+    edges: list[tuple[str, str, str]] = []
+    for c in connectors:
+        if not c["segs"]:
+            continue
+        a, b = _connector_ends(c)
+        src, dst = at(a), at(b)
+        if src is None or dst is None or src is dst:
+            continue
+        edges.append((src["id"], c["label"], dst["id"]))
+    if not edges:
+        return []
+    text = {sh["id"]: " ".join(" ".join(sh["lines"]).split()) for sh in shapes}
+    order = {sh["id"]: i for i, sh in enumerate(controls) if sh.get("id") in text}
+    parent: dict[str, str] = {}
+
+    def find(u: str) -> str:
+        parent.setdefault(u, u)
+        while parent[u] != u:
+            parent[u] = parent[parent[u]]
+            u = parent[u]
+        return u
+
+    for u, _l, v in edges:
+        parent[find(u)] = find(v)
+    comps: dict[str, list[tuple[str, str, str]]] = {}
+    for e in edges:
+        comps.setdefault(find(e[0]), []).append(e)
+    out = []
+    for es in comps.values():
+        nodes = []
+        for u, _l, v in es:
+            for n in (u, v):
+                if n not in nodes:
+                    nodes.append(n)
+        incoming = {v for _u, _l, v in es}
+        outs: dict[str, list[tuple[str, str, str]]] = {}
+        for e in es:
+            outs.setdefault(e[0], []).append(e)
+        for lst in outs.values():
+            lst.sort(key=lambda e: order.get(e[2], 0))
+        starts = sorted([n for n in nodes if n not in incoming], key=lambda n: order.get(n, 0)) or [min(nodes, key=lambda n: order.get(n, 0))]
+        lines, seen = [], set()
+
+        def walk(n: str) -> None:
+            for e in outs.get(n, []):
+                if e in seen:
+                    continue
+                seen.add(e)
+                lines.append(f"{text[e[0]]} —{e[1]}→ {text[e[2]]}" if e[1] else f"{text[e[0]]} → {text[e[2]]}")
+                walk(e[2])
+
+        for st in starts:
+            walk(st)
+        for e in es:   # 环里没走到的
+            if e not in seen:
+                seen.add(e)
+                lines.append(f"{text[e[0]]} —{e[1]}→ {text[e[2]]}" if e[1] else f"{text[e[0]]} → {text[e[2]]}")
+        out.append({"nodes": nodes, "edges": len(es), "lines": lines, "anchor": max(nodes, key=lambda n: order.get(n, 0))})
+    out.sort(key=lambda f: order.get(f["anchor"], 0))
+    return out
+
+
 def _island_note(k: int, members: list[dict], main: list[dict]) -> str:
     """独立区域的标记行（≤ 40 字，底稿不当原文句）：在主体的哪个方向、距离多少、几个控件。"""
     mx = max((c["x"] for c in main), default=0)
@@ -316,7 +440,7 @@ def _page_text(html: str, css: str = "") -> tuple[str, list[str], list[dict], di
     from app.parsers.link import html_to_markdown
 
     try:
-        title, controls = _page_controls(html, css)
+        title, controls, connectors = _page_controls(html, css)
     except Exception:
         title, body = html_to_markdown(html)
         return title, [l for l in body.splitlines() if l.strip()], [], {}
@@ -355,6 +479,17 @@ def _page_text(html: str, css: str = "") -> tuple[str, list[str], list[dict], di
                 meta["region"] = k
             index.append(meta)
     check["islands"] = len(groups) - (1 if 0 in groups else 0)
+    flows = _flows(controls, connectors)
+    if flows:   # 每张流程图插在它阅读顺序里最后一个节点的后面：派生内容，标记行包起来
+        last_line = {}
+        for i, l in enumerate(lines):
+            m = re.match(r"^\[(u\d+)\]", l)
+            if m:
+                last_line[m.group(1)] = i
+        for k, f in sorted(enumerate(flows, 1), key=lambda kf: -last_line.get(kf[1]["anchor"], len(lines))):
+            at_ = last_line.get(f["anchor"], len(lines) - 1) + 1
+            lines[at_:at_] = [f"{FLOW_BEGIN}{k}：{len(f['nodes'])} 个节点 {f['edges']} 条连线】", *f["lines"], FLOW_END]
+    check["flows"] = len(flows)
     return title, lines, index, check
 
 
