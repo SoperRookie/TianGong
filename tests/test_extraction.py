@@ -381,8 +381,26 @@ async def test_补漏调用日志记为需求提取补漏(client, extract_on):
     assert purposes == ["需求提取补漏", "需求提取补漏", "需求提取（分析前置）"]
 
 
-def test_底稿单元_编号与来源_程序规则只判三类():
-    from app.agents.ledger import AUTO_HEADING, AUTO_LABEL, AUTO_SAMPLE, account, build_units
+def test_数字运算符条目整句严格核验_条件反转与数值替换标警告():
+    """普通规范化会把 ≤ 和 > 都当标点去掉，「≤0 正常结算」改成「>0 正常结算」照样通过；含数字 / 运算符的条目必须整句逐字且运算符一致。"""
+    from app.agents.analysis import normalize
+    from app.agents.extraction import strict_normalize, verify_modules, verify_text
+
+    mat = ("四、机器人占位规则\n先判断未覆盖基础奖金是否≤0，是则正常结算；否则增加机器人占位。\n初始暂定75%\n导出间隔至少 1 分钟\n"
+           "取消第一名的特殊机制，改为与其他排名一致\n报名费计入奖池比例必填，范围 1～100")
+    n, st = normalize(mat), strict_normalize(mat)
+    ok = ["未覆盖基础奖金是否≤0，是则正常结算", "初始暂定75%", "导出间隔至少1分钟", "报名费计入奖池比例必填，范围 1~100", "改为与其他排名一致"]
+    bad = ["未覆盖基础奖金是否>0，是则正常结算", "未覆盖基础奖金是否＞0，是则正常结算", "初始暂定35%", "导出间隔大于 1 分钟", "取消第一次的特殊机制", "范围 1～10"]
+    assert all(verify_text(t, n, st) for t in ok) and not any(verify_text(t, n, st) for t in bad)
+    assert verify_text("未覆盖基础奖金是否>0，是则正常结算", n)     # 旧规则（不传严格串）抓不住：这正是要堵的洞
+    # 不含数字的条目仍允许分段 ≥70% 命中（模型去掉序号 / 拆行）
+    assert verify_text("取消第一名的特殊机制，改为与其他排名一致", n, st) and verify_text("先判断未覆盖基础奖金是否≤0，是则正常结算；否则增加机器人占位", n, st)
+    mods = [{"name": "机器人", "items": [{"text": "未覆盖基础奖金是否≤0，是则正常结算"}, {"text": "未覆盖基础奖金是否>0，是则正常结算"}, {"text": "初始暂定35%"}]}]
+    assert verify_modules(mods, mat) == {"checked": 3, "verified": 1, "unverified": 2}
+
+
+def test_底稿单元_编号与来源_程序规则只判两类():
+    from app.agents.ledger import AUTO_HEADING, AUTO_SAMPLE, account, build_units
 
     materials = ("需求原文一句话：密码错误 5 次锁定 30 分钟\n\n【文件：原型.zip】\n# Axure 原型：原型.zip\n## 页面：报名\n"
                  "[u12] 查询功能说明如下：\n[u12] 活动ID\n[u15] 剩余应占位金额 ≤ 0，则不再需要占位\n[u15] 第二段：结余部分计入第二天\n"
@@ -395,24 +413,30 @@ def test_底稿单元_编号与来源_程序规则只判三类():
     assert [u["uid"] for u in units] == ["F0-0001", "u12", "u12.2", "u15", "u15.2", "F1-0005", "F1-0006", "F1-0007", "u30", "F1-0009"]
     assert rows["u12"]["count"] == 2 and rows["u12"]["uids"] == ["u12", "u19"] and rows["u30"]["path"] == "原型.zip › Axure 原型：原型.zip › 页面：规则"
     assert rows["F1-0009"]["kind"] == "image" and rows["F1-0009"]["text"] == "报名后当日不可撤销，次日生效" and rows["u30"]["kind"] == "source"
+    assert rows["F1-0009"]["image"] == 1 and rows["F1-0009"]["path"] == "原型.zip › Axure 原型：原型.zip › 页面：报名" and "image" not in rows["u30"]   # 图中文字记是哪一页的第几张图
     assert rows["F0-0001"]["path"] == "需求原文" and rows["u15"]["path"] == "原型.zip › Axure 原型：原型.zip › 页面：报名"
     assert rows["u15"]["text"] == "剩余应占位金额 ≤ 0，则不再需要占位"   # 去掉编号
-    assert rows["u12"]["auto"] == AUTO_HEADING and rows["u12.2"]["auto"] == AUTO_LABEL and rows["F1-0005"]["auto"] == AUTO_SAMPLE
+    assert rows["u12"]["auto"] == AUTO_HEADING and rows["u12.2"]["auto"] is None and rows["F1-0005"]["auto"] == AUTO_SAMPLE   # 短标签「活动ID」交模型判
     assert rows["F1-0006"]["auto"] == AUTO_SAMPLE and rows["F1-0007"]["auto"] is None     # 英文整句交模型判
     assert rows["u15"]["auto"] is None and rows["u30"]["auto"] is None
     acct = account(units, "## 报名\n- 密码错误 5 次锁定 30 分钟\n- 剩余应占位金额 ≤ 0\n- 则不再需要占位",
-                   {"u15.2": {"r": "过渡句", "by": "model"}, "u30": {"r": "样例", "by": "model", "checked": {"by": "lisi"}}})
+                   {"u15.2": {"r": "过渡句", "by": "model"}, "u30": {"r": "样例", "by": "model", "checked": {"by": "lisi"}},
+                    "F1-0007": {"r": "脱离上下文的片段", "by": "model"}})
     rows = {u["uid"]: u for u in acct["units"]}
     st = {k: v["status"] for k, v in rows.items()}
     assert st["u15"] == "in"                                       # 拆成两条但按段全部命中也算收录
     assert st["F0-0001"] == "todo" and rows["F0-0001"]["partial"] == 0.63   # 只收了后半句（63% < 90%）：待处理，带已覆盖比例提示模型补全
-    assert st["u12"] == "ex" and st["u12.2"] == "ex" and st["F1-0005"] == "ex" and st["u15.2"] == "ex" and st["u30"] == "ex"
-    assert st["F1-0007"] == "todo" and st["F1-0009"] == "todo"
-    # 模型排除里像规则的句子标需复核：u15.2（含「第二天」）未看、u30（含数字）已确认；英文句 / 短标签不标
+    assert st["u12"] == "ex" and st["u12.2"] == "todo" and st["F1-0005"] == "ex" and st["u15.2"] == "ex" and st["u30"] == "ex"   # 短标签「活动ID」待模型判
+    assert st["F1-0007"] == "ex" and st["F1-0009"] == "todo"
+    # 模型排除里像规则的句子标需复核：u15.2（含「第二天」）未看、u30（含数字）已确认；英文句（无汉字）即使理由是「片段」也不标
     assert rows["u15.2"]["review"] is True and "checked" not in rows["u15.2"] and rows["u30"]["review"] is True and rows["u30"]["checked"]["by"] == "lisi"
-    assert acct["stats"] == {"total": 9, "in": 1, "ex": 6, "todo": 2, "review": 2, "review_open": 1, "ex_by": {"model": 2, "auto": 4, "user": 0}}
+    assert "review" not in rows["F1-0007"]
+    assert acct["stats"] == {"total": 9, "in": 1, "ex": 6, "todo": 2, "review": 2, "review_open": 1, "ex_by": {"model": 3, "auto": 3, "user": 0}}
     assert acct["image"] == {"total": 1, "in": 0, "ex": 0, "todo": 1, "review": 0, "review_open": 0, "ex_by": {"model": 0, "auto": 0, "user": 0}}
     assert rows["u15.2"]["reason"] == "过渡句" and rows["u15.2"]["by"] == "model" and rows["u12"]["by"] == "auto"
+    # 流程图半句（无数字无条件词）被模型以「片段」为由排除 → 也要进需复核
+    from app.agents.ledger import needs_review
+    assert needs_review("覆盖基础奖金成本中", "脱离上下文的片段") and not needs_review("覆盖基础奖金成本中", "外观描述") and not needs_review("是否", "片段")
 
 
 async def test_底稿核对_每句有去向_人工收录与排除_待处理不能完成审核(client, extract_on):
@@ -428,9 +452,15 @@ async def test_底稿核对_每句有去向_人工收录与排除_待处理不�
         await asyncio.sleep(0.02)
         r = (await client.get(f"/api/v1/requirements/{rid}")).json()
     assert "decisions" not in r["extraction"]["ledger"]          # 详情只带统计，明细走底稿接口
+    # 附件带原型控件索引与自校验结果（Axure 解析写入）：底稿页按编号给每句挂控件类型 / 坐标 / 隐藏态，并列出各包自校验
+    att = app.state.requirements.get(rid)["attachments"][0]
+    att["controls"] = {"F1-0001": {"cls": "flow_shape", "x": 10, "y": 100, "hidden": True}}
+    att["check"] = {"ok": True, "missing": 0, "pages": [{"page": "报名", "missing": 0}]}
     led = (await client.get(f"/api/v1/requirements/{rid}/extraction/ledger")).json()
     assert led["stats"]["todo"] == 0 and len(led["pages"]) == 1 and led["pages"][0]["path"] == "原型.txt › 页面：报名"
+    assert led["checks"] == [{"filename": "原型.txt", "ok": True, "missing": 0, "pages": 1}]
     units = {u["uid"]: u for u in led["pages"][0]["units"]}
+    assert units["F1-0001"]["ctl"] == {"cls": "flow_shape", "x": 10, "y": 100, "hidden": True} and "ctl" not in units["F1-0002"]
     assert len(units) == 15 and units["F1-0001"]["status"] == "in" and not units["F1-0001"].get("forced")
     u4 = units["F1-0004"]
     assert (u4["path"], u4["status"], u4["reason"], u4["by"], u4["review"], u4["count"], u4["kind"]) == ("原型.txt › 页面：报名", "ex", "重复", "model", True, 1, "source")
@@ -472,3 +502,58 @@ async def test_底稿核对_每句有去向_人工收录与排除_待处理不�
     assert r["analysis_outdated"] is False or r["analysis"] is None
     h = (await client.get(f"/api/v1/requirements/{rid}/extraction/history")).json()
     assert h["current"]["ledger"]["total"] == 15
+
+
+def test_疑点字段_原句照抄疑点单列_整理稿末尾疑点清单():
+    """《Axure 需求提取流程》：需求语句逐字保留只做归类，错别字 / 口径不一致 / 占位符这类疑点单列，不改原文。"""
+    out = ({"modules": [{"name": "报名-规则", "items": [
+        {"text": "报名费满 4 元后当日将无法再次报名", "sources": ["a.zip › 报名"], "doubt": " 前台写的是 5 元，  前后台口径不一致 "},
+        {"text": "活动名称最长 30 个字符", "sources": ["a.zip › 报名"], "doubt": ""}]}], "dropped": []}, None)
+    modules, _, _ = _merge_modules([out])
+    items = modules[0]["items"]
+    assert items[0]["doubt"] == "前台写的是 5 元， 前后台口径不一致" and "doubt" not in items[1]   # 空疑点不带字段
+    md = extraction_markdown(modules)
+    assert "- 报名费满 4 元后当日将无法再次报名 〔疑点：前台写的是 5 元， 前后台口径不一致〕\n- 活动名称最长 30 个字符\n" in md
+    assert md.endswith("## 疑点 / 不一致清单 〔原句已按原文保留在上文，此处只列疑点，供需求澄清与用例设计〕\n"
+                       "- 报名费满 4 元后当日将无法再次报名 —— 前台写的是 5 元， 前后台口径不一致（报名-规则）")
+    assert "疑点" not in extraction_markdown([{"name": "m", "items": [items[1]]}])   # 没有疑点就没有清单
+    # 底稿核算：带疑点标记的条目行仍按原句对回单元
+    from app.agents.ledger import covered
+    assert covered("报名费满 4 元后当日将无法再次报名", md)
+
+
+def test_底稿收录_整理稿去掉或改写了行首序号也算命中():
+    """终验口径（《Axure 需求提取流程》8.3）：原文「1、」整理稿写成「1.」或去掉序号，不算丢。"""
+    from app.agents.ledger import covered
+
+    draft = "## 规则\n- 报名费满 4 元后当日将无法再次报名\n- 2. 次日 0 点重置连赢次数\n- 月榜前三名额外奖励"
+    assert covered("1、报名费满 4 元后当日将无法再次报名", draft) and covered("注：1、报名费满 4 元后当日将无法再次报名", draft)
+    assert covered("2、次日 0 点重置连赢次数", draft) and covered("③ 月榜前三名额外奖励", draft) and covered("三、月榜前三名额外奖励", draft)
+    assert not covered("1、报名费满 5 元后当日将无法再次报名", draft)   # 内容不同仍不算
+    assert not covered("1、月榜", draft)                                   # 去掉序号后太短的不按子串判
+
+
+def test_底稿去重与收录按严格口径_运算符与括号算字_表格行按单元格切段():
+    """对照《连赢挑战赛_需求提取》复盘：底稿去重曾用去标点的 normalize 当键，「输赢金额=0」「输赢金额<0」被并进「输赢金额>0」，
+    「（今日）」并进「今日」，三条判定规则只剩一条且算「已收录」。现在去重键逐字（只去空白），带数字 / 运算符的单元按严格
+    规范化比；表格行「A ｜ B」按单元格切段；没有汉字但带区间 / 比较符的格式示例不再由程序判样例；短标签交模型判。"""
+    from app.agents.ledger import AUTO_SAMPLE, account, build_units, covered
+
+    materials = ("【文件：原型.zip】\n# Axure 原型：原型.zip\n## 页面：需求说明\n[u39] 本局游戏结果 ｜ 系统计算方式\n"
+                 "[u41] 输赢金额>0 ｜ 当前连赢次数“+1”\n[u43] 输赢金额=0 ｜ 当前连赢次数“不变”\n[u45] 输赢金额<0 ｜ 当前连赢次数“清零”\n"
+                 "[u48] 该用户当局输赢金额是否>0\n[u54] 该用户当局输赢金额是否=0\n[u341] 今日\n[u1482] （今日）\n"
+                 "[u422] 连赢-奖励\n[u1501] 改为直接报名\n[u339] UTC+8 9.21 00:00:00～23:59:59\n[u355] 6/10\n[u64] 3局 ｜ +1分\n[u66] 4局 ｜ +3分\n")
+    units = build_units(materials)
+    rows = {u["uid"]: u for u in units}
+    assert [u["uid"] for u in units] == ["u39", "u41", "u43", "u45", "u48", "u54", "u341", "u1482", "u422", "u1501", "u339", "u355", "u64", "u66"]
+    assert rows["u41"]["count"] == 1 and rows["u341"]["count"] == 1   # 不再合并
+    assert rows["u422"]["auto"] is None and rows["u1501"]["auto"] is None   # 交易类型名 / 按钮名不由程序排除
+    assert rows["u339"]["auto"] is None and rows["u355"]["auto"] == AUTO_SAMPLE   # 带区间符的时间格式示例交模型；纯数字仍是样例
+    draft = ("## 需求说明-连赢判断规则\n- 输赢金额>0 ｜ 当前连赢次数“+1”\n- 该用户当局输赢金额是否>0\n- 今日\n"
+             "- 输赢金额<0\n- 当前连赢次数“清零”\n- 3局\n- +1分\n")
+    acct = {u["uid"]: u for u in account(units, draft)["units"]}
+    assert acct["u41"]["status"] == "in" and acct["u48"]["status"] == "in"
+    assert acct["u43"]["status"] == "todo" and acct["u54"]["status"] == "todo"   # =0 不能靠 >0 过关
+    assert acct["u45"]["status"] == "in" and acct["u64"]["status"] == "in" and acct["u66"]["status"] == "todo"   # 表格行拆成两条：按单元格切段（不设最短字数）都命中也算收录
+    assert acct["u341"]["status"] == "in" and acct["u1482"]["status"] == "in"   # 「（今日）」短句整条等于摘录「今日」（只差括号）
+    assert covered("输赢金额=0 ｜ 当前连赢次数“不变”", draft) is False and covered("输赢金额>0 ｜ 当前连赢次数“+1”", draft) is True

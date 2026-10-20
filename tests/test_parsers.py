@@ -461,3 +461,82 @@ def test_Axure页面文字_按控件整块去重_不按行去重(tmp_path):
     assert "\n≤\n" not in text
     # 每行带控件编号，需求提取的底稿按编号逐控件核对去向；一个控件多段每段都带同一编号
     assert "[u1] 2.5.1 字段说明\n[u1] 各字段详细说明如下\n[u2] 2.6.1 字段说明" in text and "[u3] 剩余应占位金额 ≤ 0" in text and "[u4]" not in text
+
+
+def test_Axure按坐标还原阅读顺序_表单控件单独抓_隐藏态照提_整页字符自校验(tmp_path):
+    """《Axure 需求提取流程》：控件带坐标提取（子控件坐标相对父控件）、按（行 4px 容差，列）排序；下拉框选项 / 输入框值不在 _text
+    里要单独抓；隐藏态照样提取并标记；整页 get_text 字符多重集减提取行必须为空（与控件解析相互独立），漏了就报。"""
+    import zipfile
+
+    from app.parsers.base import parse_file
+
+    def box(i, text, cls="_段落", extra=""):
+        return (f"<div id='u{i}' class='ax_default {cls}'{extra}><div id='u{i}_div'></div>"
+                f"<div id='u{i}_text' class='text'><p><span>{text}</span></p></div></div>")
+    # DOM 顺序 u1(下方) → u2(上方右) → u3(上方左)；u4 是组合，子控件 u5 / u6 坐标相对 u4；u7 隐藏；u8 下拉框；u9 输入框
+    page = ("<html><head><title>流程</title></head><body><div id='base'>"
+            + box(1, "结余部分计入第二天") + box(2, "否", "label") + box(3, "是否有结余", "flow_shape")
+            + "<div id='u4' class='ax_default'><div id='u4_div'></div>" + box(6, "第二行") + box(5, "第一行") + "</div>"
+            + box(7, "隐藏的弹窗文案", "box_1", " style=\"display:none; visibility: hidden\"")
+            + "<div id='u8' class='ax_default droplist'><select id='u8_input'><option value='全部'>全部</option><option value='日榜'>日榜</option></select></div>"
+            + "<div id='u9' class='ax_default text_field'><input id='u9_input' type='text' value='100'/></div>"
+            + "<!-- Unnamed (矩形) --></div></body></html>")
+    css = ("#u1 { position:absolute; left:10px; top:300px; width:100px; height:20px; }"
+           "#u2 { left:200px; top:102px; } #u3 { left:10px; top:100px; }"
+           "#u4 { left:0px; top:400px; } #u5 { left:0px; top:0px; } #u6 { left:0px; top:30px; }"
+           "#u7 { left:0px; top:500px; } #u8 { left:0px; top:600px; } #u9 { left:0px; top:700px; }")
+    orphan = ("<html><head><title>孤儿</title></head><body><div id='base'>" + box(21, "有编号的行")
+              + "<div class='stray'>没有控件编号的文字</div></div></body></html>")
+    z = tmp_path / "原型.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("原型/index.html", "<html><body><iframe src='start.html'></iframe></body></html>")
+        zf.writestr("原型/流程.html", page)
+        zf.writestr("原型/files/流程/styles.css", css)
+        zf.writestr("原型/孤儿.html", orphan)
+        zf.writestr("原型/data/document.js", '$axure.loadDocument({"sitemap":{"rootNodes":[{"pageName":"流程","url":"流程.html"},{"pageName":"孤儿","url":"孤儿.html"}]}});')
+        zf.writestr("原型/resources/scripts/axure/axure.js", "var $axure = {};")
+    doc = parse_file(z)
+    text = doc.full_text
+    # 阅读顺序按坐标：上方左 → 上方右（同一行 4px 容差）→ 下方 → 组合内按相对坐标 → 隐藏控件 → 表单控件
+    assert ("[u3] 是否有结余\n[u2] 否\n[u1] 结余部分计入第二天\n[u5] 第一行\n[u6] 第二行\n[u7] 隐藏的弹窗文案\n"
+            "[u8] 下拉选项：全部 / 日榜\n[u9] 输入值：100") in text
+    assert doc.controls["u5"] == {"cls": "_段落", "x": 0, "y": 400} and doc.controls["u6"]["y"] == 430   # 子控件绝对坐标沿父链累加
+    assert doc.controls["u7"] == {"cls": "box_1", "x": 0, "y": 500, "hidden": True} and doc.controls["u3"]["cls"] == "flow_shape"
+    assert doc.controls["u8"]["cls"] == "droplist" and "u4" not in doc.controls   # 没有文字 / 图片的容器不进索引
+    pages = {p["page"]: p for p in doc.check["pages"]}
+    ok = pages["流程"]
+    assert ok["missing"] == 0 and ok["raw"] == ok["got"] > 0 and ok["controls"] == 8 and ok["hidden"] == 1 and "outside" not in ok
+    bad = pages["孤儿"]
+    assert bad["missing"] == len("没有控件编号的文字") and "没" in bad["missing_chars"] and bad["outside"] == ["没有控件编号的文字"]
+    assert doc.check["ok"] is False and doc.check["missing"] == bad["missing"]
+    assert "没有控件编号的文字" not in text   # 自校验就是为了把这种漏抓暴露出来，而不是静默过
+
+
+def test_Axure表格同一行单元格并成一行_表头与数据行对应_自校验不计分隔符(tmp_path):
+    """表格单元格各是一个控件，按行各自成行会丢掉「条件 → 结果」的对应（「输赢金额=0」与「不变」分家）。同一行（top 相同）的
+    单元格并成「A ｜ B」一条，编号取第一格，cls=table_row；表头行也是一行；跨行合并的单元格单独一行；整页字符自校验不计「｜」。"""
+    import zipfile
+
+    from app.parsers.base import parse_file
+
+    def cell(i, text):
+        return (f"<div id='u{i}' class='ax_default table_cell'><img id='u{i}_img' src='images/u{i}.png'/>"
+                f"<div id='u{i}_text' class='text'><p><span>{text}</span></p></div></div>")
+    page = ("<html><head><title>表</title></head><body><div id='base'><div id='u10' class='ax_default'>"
+            + cell(14, "当前连赢次数“不变”") + cell(13, "输赢金额=0") + cell(12, "系统计算方式") + cell(11, "本局游戏结果") + cell(15, "合并单元格说明")
+            + "</div></div></body></html>")
+    css = ("#u10 { left:100px; top:200px; } #u11 { left:0px; top:0px; } #u12 { left:200px; top:1px; }"
+           "#u13 { left:0px; top:30px; } #u14 { left:200px; top:30px; } #u15 { left:0px; top:60px; }")
+    z = tmp_path / "表.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("原型/index.html", "<html><body><iframe src='start.html'></iframe></body></html>")
+        zf.writestr("原型/表.html", page)
+        zf.writestr("原型/files/表/styles.css", css)
+        zf.writestr("原型/data/document.js", '$axure.loadDocument({"sitemap":{"rootNodes":[{"pageName":"表","url":"表.html"}]}});')
+        zf.writestr("原型/resources/scripts/axure/axure.js", "var $axure = {};")
+    doc = parse_file(z)
+    assert "[u11] 本局游戏结果 ｜ 系统计算方式\n[u13] 输赢金额=0 ｜ 当前连赢次数“不变”\n[u15] 合并单元格说明" in doc.full_text
+    assert doc.controls["u11"] == {"cls": "table_row", "x": 100, "y": 200, "img": "images/u11.png"} and doc.controls["u15"]["cls"] == "table_cell"
+    assert "u12" not in doc.controls   # 并进行里的单元格不单独建索引
+    page_check = doc.check["pages"][0]
+    assert page_check["missing"] == 0 and page_check["extra"] == 0 and page_check["raw"] == page_check["got"]

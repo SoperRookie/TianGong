@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>需求提取流程图</title>
+<style>
+body{margin:0}
+
+/* 布局：单栏文档，流程图横向可滚动，正文 65 字宽 */
+:root {
+  --bg: #f7f6f2; --fg: #22251f; --muted: #6b6f66; --line: #d9d7cf; --panel: #ffffff;
+  --accent: #1f6f5f; --warn: #a3622a; --danger: #a33a3a;
+  --font-body: "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #15171a; --fg: #e6e4de; --muted: #9a9d95; --line: #30343a; --panel: #1d2024;
+  --accent: #5fc2a9; --warn: #e0a06a; --danger: #e07a7a; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #15171a; --fg: #e6e4de; --muted: #9a9d95; --line: #30343a; --panel: #1d2024;
+  --accent: #5fc2a9; --warn: #e0a06a; --danger: #e07a7a; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); padding-block: 28px; padding-inline: 16px; line-height: 1.65 }
+.wrap { max-width: 1180px; margin: 0 auto; min-width: 0 }
+h1 { font-size: 1.6rem; margin: 0 0 4px; text-wrap: balance }
+.sub { color: var(--muted); margin: 0 0 20px; max-width: 65ch }
+h2 { font-size: 1.1rem; margin: 28px 0 8px }
+.diagram { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto }
+.diagram pre.mermaid { margin: 0; min-width: 900px }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--muted); font-size: .9rem; margin-top: 10px }
+.legend span::before { content: ""; display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; border: 1px solid var(--line) }
+.legend .p::before { background: #dfeee9 } .legend .m::before { background: #e7e3f6 } .legend .h::before { background: #fbe9d5 } .legend .s::before { background: #eceae4 }
+table { border-collapse: collapse; width: 100%; font-size: .92rem; background: var(--panel) }
+th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top }
+th { background: var(--bg); font-weight: 600 }
+td:first-child { white-space: nowrap }
+code { font-family: var(--font-mono); font-size: .86em }
+.note { color: var(--warn); max-width: 70ch }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<h1>需求提取流程图</h1>
+<p class="sub">天工 v2.1.4 当前实现（2026-10-20，含按《Axure 需求提取流程》落地的解析改动）。从材料进来到整理稿交给 AI 分析与测试设计，每一步都标了程序做的和模型做的。</p>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  classDef prog fill:#dfeee9,stroke:#1f6f5f,color:#1b2a26
+  classDef model fill:#e7e3f6,stroke:#5b4a9e,color:#241f36
+  classDef human fill:#fbe9d5,stroke:#a3622a,color:#3a2410
+  classDef store fill:#eceae4,stroke:#8a877d,color:#2a2a26
+  classDef warn fill:#f6dada,stroke:#a33a3a,color:#3a1414
+
+  subgraph S0[材料准备 · 附件解析]
+    A0[上传附件 / 粘贴原文 / 链接]:::prog
+    A1{文件类型}:::prog
+    A2["Axure 导出包<br/>控件带坐标提取 → 父链累加绝对坐标<br/>同父控件按 round(y/4), x 排阅读顺序<br/>每行 [uNNN] 前缀 · 下拉选项 / 输入值单独成行<br/>隐藏态照提并标记 · 整块重复的控件去重<br/>表格同一行单元格并成「A ｜ B ｜ C」"]:::prog
+    A3["整页字符多重集自校验<br/>整页 get_text − 提取行 = 0 才算不丢<br/>缺字 → 附件标 ⚠ 缺 N 字"]:::prog
+    A4["文档 / 网页 / 表格<br/>按章节段落解析"]:::prog
+    A5["整幅设计稿 / 截图 / 图片附件<br/>Vision 图片理解（短边 ≥ 400px，每包 ≤ 30 张）<br/>生成【文档内图片理解】块"]:::model
+    A6["materials 文本<br/>【文件：…】 › ## 页面 › 行<br/>+ 说明备注 + 图片理解块"]:::store
+    A0 --> A1
+    A1 -->|zip 且含 Axure 结构| A2 --> A3 --> A6
+    A1 -->|其它格式| A4 --> A6
+    A2 -.页面大图.-> A5 --> A6
+    A4 -.内嵌图片.-> A5
+  end
+
+  subgraph S1[触发]
+    T1[附件全部解析完 → 自动提取]:::prog
+    T2[需求页「重新提取」可选模型]:::human
+    T3["AI 分析 / 发起设计前<br/>整理稿过期 → 用设计模型重提<br/>（已排查：会覆盖上一版与人工判定）"]:::warn
+  end
+  A6 --> T1 & T2 & T3
+
+  subgraph S2[提取流水线 run_requirement_extraction]
+    B1["structure_units<br/>按文件 › 页面切单元<br/>小页打包 ≤ 20000 字，超限再切"]:::prog
+    B2["requirement_extract Prompt（各单元并行）<br/>逐字摘录 · 模块名「页面-区块」<br/>设计约束 / 枚举 / 流程分支都保留<br/>原文疑点写 doubt 不改原句"]:::model
+    B3["_merge_modules<br/>按模块合并、按规范化文本去重<br/>去掉抄进来的 [uNNN]，保留 doubt"]:::prog
+    B1 --> B2 --> B3
+  end
+  T1 & T2 & T3 --> B1
+
+  subgraph S3[底稿双向核验 ledger]
+    C1["build_units<br/>产品原文每句一个单元（uid = 控件编号 / F文件-行号）<br/>同句（逐字）去重记次数与页面<br/>图中文字原文单独 kind=image"]:::prog
+    C2["account 核算每句去向<br/>收录：整行子串（去序号再比，带数字 / 运算符的严格比）或切段 ≥ 90%<br/>表格行按单元格切段 · 短句须整条等于摘录<br/>排除：模型 / 程序两类 / 人工<br/>待处理：都不是"]:::prog
+    C3{待处理 > 0 ?}:::prog
+    C4["requirement_extract_gap Prompt<br/>待处理句带 uid 全部送模型<br/>每句必须出现在 add 或 skip<br/>最多 2 轮"]:::model
+    C5["add → 按原句收进〔补漏〕<br/>skip → 原因记入 decisions<br/>像规则的 / 片段类理由 → 需复核"]:::prog
+    C6["两轮后仍未判定<br/>按原句收进「页面-待归类」〔兜底〕<br/>提取完成时待处理恒为 0"]:::prog
+    C1 --> C2 --> C3
+    C3 -->|是| C4 --> C5 --> C2
+    C3 -->|两轮用完| C6
+  end
+  B3 --> C1
+
+  subgraph S4[反向核验与成稿]
+    D1["verify_modules 每条回查材料<br/>含数字 / 运算符：整句严格命中（保留 ≤ ≥ < > = %）<br/>其它：分段 ≥ 70%<br/>没找到标 ⚠"]:::prog
+    D2["assign_ids → extraction_markdown<br/>## 模块〔来源〕 · - 条目<br/>标记 ⚠ 〔补漏〕〔兜底〕〔疑点：…〕<br/>末尾：疑点 / 不一致清单 · 已剔除"]:::prog
+    D3["set_extraction 落库<br/>上一版进历史（10 版）<br/>meta：模型 / 附件指纹 / 统计 / ledger"]:::store
+    D1 --> D2 --> D3
+  end
+  C3 -->|否| D1
+  C6 --> D1
+
+  subgraph S5[人工审核]
+    E1["逐条审核<br/>核对通过 / 修改（重新核验）/ 删除<br/>删条目 → 对应句回到待处理"]:::human
+    E2["底稿核对页<br/>需复核 · 待处理 · 排除（按类折叠）· 收录 · 图中文字<br/>每句挂控件类型 / 坐标 / 隐藏态<br/>收录 / 排除 / 确认"]:::human
+    E3{"完成审核条件<br/>⚠ 都处理 ∧ 待处理 = 0 ∧ 需复核都看过"}:::human
+    E4[整篇改写 / 恢复历史版本]:::human
+    E1 --> E3
+    E2 --> E3
+    E4 -.重算底稿.-> E2
+  end
+  D3 --> E1 & E2 & E4
+
+  subgraph S6[下游]
+    F1["design_brief<br/>整理稿 + 人工补充 + 已确认结论"]:::store
+    F2[AI 需求分析]:::model
+    F3[测试设计任务]:::model
+    F1 --> F2 & F3
+  end
+  E3 -->|通过| F1
+  D3 -.未审核也可用.-> F1
+</pre>
+</div>
+<div class="legend"><span class="p">程序</span><span class="m">模型调用</span><span class="h">人工</span><span class="s">存储 / 数据</span></div>
+
+<h2>关键阈值</h2>
+<table>
+<tr><th>环节</th><th>阈值</th></tr>
+<tr><td>Axure 阅读顺序</td><td>同一父控件下按 <code>round(y / 4px)</code> 分行、行内按 x；子控件坐标沿父链累加</td></tr>
+<tr><td>Axure 自校验</td><td>整页非空白字符多重集 − 去重前全部控件行 = 空（允许 BOM）；差集非空即报缺字</td></tr>
+<tr><td>图片理解</td><td>短边 ≥ 400px 且 ≥ 20KB 才送 Vision，每包最多 30 张，svg 不送</td></tr>
+<tr><td>分层切单元</td><td>文件 › 页面；相邻小页打包 ≤ 20000 字，超限页再切并标「第 k 段」</td></tr>
+<tr><td>底稿收录</td><td>整行子串（去掉行首「1、」「注：1、」「①」再比一次）或按标点切段命中 ≥ 90%；短于 4 字须整条等于某条摘录</td></tr>
+<tr><td>程序排除三类</td><td>小标题（≤ 12 汉字且以冒号结尾等）；无中文且 &lt; 3 个英文单词的样例 / 代码；1～7 个汉字无标点无数字的短标签</td></tr>
+<tr><td>需复核</td><td>模型排除且 ≥ 8 汉字带数字 / 条件词；或理由含「片段 / 上下文 / 不完整」且 ≥ 4 汉字</td></tr>
+<tr><td>补漏</td><td>待处理全部送模型，每批 ≤ 15000 字，最多 2 轮，之后兜底</td></tr>
+<tr><td>反向核验</td><td>含数字 / 运算符的条目整句严格命中；其它分段 ≥ 70%；不足 4 字按子串</td></tr>
+<tr><td>版本</td><td>整理稿历史保留 10 版；逐条改动 rev + 1</td></tr>
+</table>
+
+<h2>已知问题</h2>
+<p class="note">红色节点：AI 分析或发起设计时整理稿过期会用设计模型静默重提，新版覆盖当前版（旧版进历史），底稿里人工的收录 / 排除 / 确认判定不会带到新版。修法待定：改为明确提示、模型固定用提取模型、人工判定按单元编号带过去。</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true, theme:"neutral", flowchart:{htmlLabels:true, curve:"basis"}});</script>
+</body>
+</html>
