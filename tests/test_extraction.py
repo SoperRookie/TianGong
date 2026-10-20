@@ -666,11 +666,12 @@ def test_流程行成稿为代码块_底稿按流程行命中流程框短文字_
     assert [r["t"] for r in rows] == ["label", "flow", "item"] and len(rows[1]["items"]) == 2
     assert outline_view(modules)[0]["blocks"][0]["rows"][1] == {"t": "flow", "ids": [modules[0]["items"][1]["id"], modules[0]["items"][2]["id"]]}
     md = extraction_markdown(modules)
-    assert "**连赢记录统计判断流程示例：**\n```\n用户单局投注 → 该用户当局输赢金额是否>0\n该用户当局输赢金额是否>0 —Y→ 当前连赢记录+1 〔补漏〕\n```\n- 注：仅影响当前连赢记录" in md
+    assert ("**连赢记录统计判断流程示例：**\n```\n用户单局投注 ──► 该用户当局输赢金额是否>0 ─ Y ─► 当前连赢记录+1\n\n"
+            "· 该用户当局输赢金额是否>0 —Y→ 当前连赢记录+1 〔补漏〕\n```\n- 注：仅影响当前连赢记录") in md   # 画成树，带标记的流程行另列在树下
     mat = ("【文件：a.zip】\n# Axure 原型：a.zip\n## 页面：需求说明\n[u47] 用户单局投注\n[u48] 该用户当局输赢金额是否>0\n[u55] 当前连赢记录+1\n[u50] Y\n"
            "【流程图 1：3 个节点 2 条连线】\n用户单局投注 → 该用户当局输赢金额是否>0\n该用户当局输赢金额是否>0 —Y→ 当前连赢记录+1\n【流程图结束】\n[u59] 注：仅影响当前连赢记录\n")
     st = {u["uid"]: u["status"] for u in account(build_units(mat), md)["units"]}
-    assert st == {"u47": "in", "u48": "in", "u55": "in", "u50": "ex", "u59": "in"}   # 框文字靠流程行命中；连接线标签「Y」无汉字按样例排除
+    assert st == {"u47": "in", "u48": "in", "u55": "in", "u50": "in", "u59": "in"}   # 框文字与分支标签「Y」都靠树里拆出的字命中
     missing, cov = uncovered_lines(mat, md)
     assert cov == {"lines": 2, "covered": 2} and missing == []   # 需求句只有判断框与注两行：流程块与 < 8 汉字的行不算
 
@@ -720,3 +721,54 @@ def test_流程框文字不与流程行重复_疑点里的条目id换成模块�
     rid = modules[0]["items"][2]["id"]
     apply_crosscheck(modules, {"doubts": [{"id": modules[1]["items"][0]["id"], "doubt": f"与（{rid}）及 deadbeef 矛盾"}], "drafts": []})
     assert modules[1]["items"][0]["doubt"] == "与「需求说明-连赢判断」及 deadbeef 矛盾"   # 已知 id 换模块名，未知的原样
+
+
+def test_流程行画成分支树_汇合框重复_回路止住_带标记的行另列_底稿按框文字命中():
+    from app.agents.extraction import assign_ids, extraction_markdown, flow_ascii
+    from app.agents.ledger import draft_index
+
+    j = ["用户单局投注 → 该用户当局输赢金额是否>0", "该用户当局输赢金额是否>0 —N→ 该用户当局输赢金额是否=0",
+         "该用户当局输赢金额是否=0 —N→ 当前连赢记录清零", "该用户当局输赢金额是否=0 —Y→ 当前连赢记录不变", "该用户当局输赢金额是否>0 —Y→ 当前连赢记录+1"]
+    assert flow_ascii(j) == [
+        "用户单局投注 ──► 该用户当局输赢金额是否>0 ──┬─ N ─► 该用户当局输赢金额是否=0 ──┬─ N ─► 当前连赢记录清零",
+        "                                                                               └─ Y ─► 当前连赢记录不变",
+        "                                            └─ Y ─► 当前连赢记录+1"]
+    assert flow_ascii(["甲 → 乙", "乙 → 甲"]) == ["甲 ──► 乙 ──► （回到：甲）"] and flow_ascii(["不是流程行"]) is None
+    modules = [{"name": "需求说明-连赢判断", "items": [{"text": j[0]}, {"text": j[1], "gap": True}, {"text": j[2]}, {"text": j[3]}, {"text": j[4]}]}]
+    assign_ids(modules)
+    md = extraction_markdown(modules)
+    assert "```\n用户单局投注 ──► 该用户当局输赢金额是否>0 ──┬─ N ─► " in md and "\n\n· 该用户当局输赢金额是否>0 —N→ 该用户当局输赢金额是否=0 〔补漏〕\n```" in md
+    _n, items, _st = draft_index(md)
+    assert "当前连赢记录清零" in items and "当前连赢记录+1".replace("+", "") in items or "当前连赢记录1" in items   # 树里拆出的框文字算条目
+
+
+async def test_逐条修改带疑点的条目后疑点不再显示(client, extract_on):
+    await client.post("/api/v1/projects", json={"name": "P"})
+    reply = json.dumps({"modules": [{"name": "报名-规则", "items": [
+        {"text": "报名费满 4 元后当日将无法再次报名", "sources": ["a.zip › 报名"], "doubt": "前台写的是 5 元"},
+        {"text": "活动名称最长 30 个字符", "sources": ["a.zip › 报名"]}]}], "dropped": []}, ensure_ascii=False)
+    app.state.llm = StubLLM([reply, NO_GAP])
+    r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "报名", "text": "报名费满 4 元后当日将无法再次报名\n活动名称最长 30 个字符"})).json()
+    rid = r["req_id"]
+    r = (await client.post(f"/api/v1/requirements/{rid}/extract", json={})).json()
+    ex = r["extraction"]
+    assert "〔疑点：前台写的是 5 元〕" in ex["text"] and "疑点 / 不一致清单" in ex["text"]
+    it = ex["modules"][0]["items"][0]
+    r = (await client.post(f"/api/v1/requirements/{rid}/extraction/items", json={"item_id": it["id"], "action": "edit", "text": "报名费满 4 元后当日将无法再次报名"})).json()
+    ex = r["extraction"]
+    assert "〔疑点" not in ex["text"] and "疑点 / 不一致清单" not in ex["text"]   # 人改过的条目疑点算处理过
+    assert ex["modules"][0]["items"][0].get("doubt_resolved") is True and "doubt" not in ex["modules"][0]["items"][0]
+
+
+async def test_附件解析全文接口(client):
+    await client.post("/api/v1/projects", json={"name": "P"})
+    r = (await client.post("/api/v1/requirements", data={"project": "P", "title": "附件"}, files=[("files", ("规则.txt", "报名费满 4 元后当日将无法再次报名".encode(), "text/plain"))])).json()
+    rid = r["req_id"]
+    for _ in range(50):
+        r = (await client.get(f"/api/v1/requirements/{rid}")).json()
+        if all(not a.get("parsing") for a in r["attachments"]):
+            break
+    att = r["attachments"][0]
+    t = (await client.get(f"/api/v1/requirements/{rid}/attachments/{att['att_id']}/text")).json()
+    assert t["filename"] == "规则.txt" and t["parsed"] is True and "报名费满 4 元后当日将无法再次报名" in t["text"]
+    assert (await client.get(f"/api/v1/requirements/{rid}/attachments/nope/text")).status_code == 404

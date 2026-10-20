@@ -5230,6 +5230,16 @@ async def reparse_requirement_attachment(request: Request, req_id: str, att_id: 
     return _req_view(request, item)
 
 
+@router.get("/api/v1/requirements/{req_id}/attachments/{att_id}/text")
+async def requirement_attachment_text(request: Request, req_id: str, att_id: str) -> dict:
+    """附件解析全文（页面文字按控件带编号、表格行、流程块、独立区域标记、图片理解块）：页面按文档格式渲染查看。"""
+    item = _req(request, req_id, "requirement.view")
+    for a in item.get("attachments") or []:
+        if a.get("att_id") == att_id:
+            return {"att_id": att_id, "filename": a.get("filename"), "parsed": bool(a.get("parsed")), "text": a.get("text") or ""}
+    raise HTTPException(status_code=404, detail=f"附件不存在: {att_id}")
+
+
 @router.get("/api/v1/requirements/{req_id}/attachments/{att_id}")
 async def download_requirement_attachment(request: Request, req_id: str, att_id: str) -> FileResponse:
     item = _req(request, req_id, "requirement.view")

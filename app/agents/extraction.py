@@ -165,6 +165,69 @@ def _page_title(source: str) -> str:
     return _PAGE_PREFIX.sub("", last) or source
 
 
+_EDGE_RE = re.compile(r"^(.*?)\s(?:—([^→]*)→|→)\s(.*)$")
+FLOW_ART_MAX_LINES = 80
+
+
+def _width(text: str) -> int:
+    import unicodedata
+
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def flow_ascii(lines: list[str]) -> list[str] | None:
+    """流程行「A → B」「A —是→ B」→ 文字流程图（与手工稿同一画法）：
+    用户报名 ──┬─ 直接报名 ──► 用户游戏投注 ──► 日/月榜排名派奖
+               └─ 盈利报名 ──► 当日报名费是否扣除完毕 ─ Y ─► 日/月榜排名派奖
+                                                       └─ N ─► 取消当日参赛资格
+    从起点（没有入边的框）深度优先；多条出边第一条接在本行、其余换行对齐到分叉；汇合的框在各分支里重复出现；
+    回到路径上已有的框写「回到：…」止住。画不出来（不是流程行 / 行数超限）返回 None，成稿退回边列表。"""
+    edges = []
+    for l in lines:
+        m = _EDGE_RE.match(l.strip())
+        if not m:
+            return None
+        edges.append((m.group(1).strip(), (m.group(2) or "").strip(), m.group(3).strip()))
+    order: list[str] = []
+    for a, _l, b in edges:
+        for n in (a, b):
+            if n not in order:
+                order.append(n)
+    outs: dict[str, list[tuple[str, str]]] = {}
+    for a, l, b in edges:
+        outs.setdefault(a, []).append((l, b))
+    incoming = {b for _a, _l, b in edges}
+    starts = [n for n in order if n not in incoming] or [order[0]]
+
+    def render(n: str, path: tuple[str, ...]) -> list[str]:
+        kids = outs.get(n, [])
+        if not kids:
+            return [n]
+        if len(kids) == 1:
+            label, child = kids[0]
+            head = n + (f" ─ {label} ─► " if label else " ──► ")
+            sub = [f"（回到：{child}）"] if child in path else render(child, path + (n,))
+            pad = " " * _width(head)
+            return [head + sub[0]] + [pad + x for x in sub[1:]]
+        out: list[str] = []
+        stem = n + " ──"
+        for i, (label, child) in enumerate(kids):
+            glyph = "┬─" if i == 0 else ("└─" if i == len(kids) - 1 else "├─")
+            lead = (stem if i == 0 else " " * _width(stem)) + glyph + (f" {label} ─► " if label else " ")
+            sub = [f"（回到：{child}）"] if child in path else render(child, path + (n,))
+            pad = " " * _width(lead)
+            out.append(lead + sub[0])
+            out.extend(pad + x for x in sub[1:])
+        return out
+
+    art: list[str] = []
+    for st in starts:
+        art.extend(render(st, ()))
+        if len(art) > FLOW_ART_MAX_LINES:
+            return None
+    return art
+
+
 def _block_rows(items: list[dict]) -> list[dict]:
     """区块内条目的层级：表格行（含「 ｜ 」，连续且列数相同的并成一张表，表头是第一行）、小标签（以冒号结尾的短句，
     加粗成子标题）、子项（「1、」「①」「注：」「示例」开头且上一条是普通条目 / 标签 / 表格的，缩进一级）、普通条目。"""
@@ -350,9 +413,18 @@ def extraction_markdown(modules: list[dict], dropped: list[str] | None = None, h
                             lines.append("|" + "---|" * r["cols"])
                 elif r["t"] == "flow":
                     lines.append("```")
-                    for it in r["items"]:
-                        mark, tail = _item_marks(it, main)
-                        lines.append(f"{mark}{it['text']}{tail}")
+                    art = flow_ascii([it["text"] for it in r["items"]])
+                    if art:   # 画成分支树；带标记（⚠ / 补漏 / 疑点）的流程行另列在树下面
+                        lines.extend(art)
+                        marked = [(it, *_item_marks(it, main)) for it in r["items"]]
+                        marked = [(it, mk, tl) for it, mk, tl in marked if mk or tl]
+                        if marked:
+                            lines.append("")
+                            lines.extend(f"· {mk}{it['text']}{tl}" for it, mk, tl in marked)
+                    else:
+                        for it in r["items"]:
+                            mark, tail = _item_marks(it, main)
+                            lines.append(f"{mark}{it['text']}{tail}")
                     lines.append("```")
                 elif r["t"] == "label":
                     mark, tail = _item_marks(r["item"], main)

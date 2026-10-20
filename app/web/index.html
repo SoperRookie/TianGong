@@ -242,7 +242,7 @@ table { width:100%; border-collapse:collapse; font-size:12.8px; }
 .md-doc h1 { font-size:18px; margin:0 0 10px; } .md-doc h2 { font-size:15px; margin:18px 0 6px; padding-bottom:4px; border-bottom:1px solid var(--line); } .md-doc h3 { font-size:13.5px; margin:12px 0 4px; } .md-doc h4, .md-doc h5, .md-doc h6 { font-size:13px; margin:10px 0 4px; }
 .md-doc ul, .md-doc ol { margin:2px 0 6px 22px; padding:0; } .md-doc li { margin:2px 0; } .md-doc p { margin:4px 0 8px; } .md-doc hr { border:0; border-top:1px solid var(--line); margin:12px 0; }
 .md-doc table { width:auto; max-width:100%; margin:6px 0 10px; border-collapse:collapse; font-size:inherit; } .md-doc th, .md-doc td { border:1px solid var(--line); padding:4px 8px; vertical-align:top; text-align:left; } .md-doc th { background:var(--line-2); font-weight:600; }
-.md-doc code { background:var(--line-2); padding:0 4px; border-radius:4px; font-size:12px; } .md-doc pre { white-space:pre-wrap; background:var(--line-2); padding:10px 12px; border-radius:8px; font-size:12px; line-height:1.6; }
+.md-doc code { background:var(--line-2); padding:0 4px; border-radius:4px; font-size:12px; } .md-doc pre { white-space:pre; overflow-x:auto; background:var(--line-2); padding:10px 12px; border-radius:8px; font-size:12px; line-height:1.6; font-family:ui-monospace, 'SF Mono', Menlo, 'PingFang SC', 'Microsoft YaHei', monospace; }
 .md-doc .md-mark { color:var(--ink-3); font-size:12px; } .md-doc .md-warn { color:var(--warn); } .md-doc blockquote { margin:4px 0; padding:2px 10px; border-left:3px solid var(--line); color:var(--ink-3); }
 .ex-table th, .ex-table td { border:1px solid var(--line); padding:3px 8px; vertical-align:top; text-align:left; line-height:1.5; }
 .ex-table th { background:var(--line-2); font-weight:600; }
@@ -642,6 +642,11 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 </dialog>
 
 <!-- 需求文档编写规范（给产品方） -->
+<dialog id="attTextDlg" style="width:1100px;max-width:96vw">
+  <div class="dlg-h"><h3 id="attTextTitle">附件解析全文</h3></div>
+  <div class="dlg-b" id="attTextBody" style="max-height:76vh;overflow:auto"></div>
+  <div class="dlg-f"><span class="hint" style="margin-right:auto">解析器输出：页面按控件带编号〔uNNN〕、表格行还原成表、流程框 + 连接线画成流程树、画布独立区域与图片理解块单独标出</span><button class="btn" onclick="$('attTextDlg').close()">关闭</button></div>
+</dialog>
 <dialog id="reqGuideDlg" style="width:820px">
   <div class="dlg-h"><h3>需求文档编写规范</h3><span class="meta">给产品 / 需求方：规则逐条编号、数值写死、状态成表，AI 分析才有可核验的依据</span></div>
   <div class="dlg-b" id="reqGuideBody" style="max-height:70vh;overflow:auto"></div>
@@ -5785,7 +5790,9 @@ function reqExtractionHtml(r, canAI, canEdit) {
         }
         if (r.t === 'flow') {   // 流程图：程序从流程框 + 连接线还原的「A —是→ B」行，等宽字体成块
           const its = r.ids.map(id => byId[id]).filter(it => it && keep(it));
-          return its.length ? `<div style="margin:4px 6px 6px;padding:4px 0;border-left:3px solid var(--line);font-family:ui-monospace,Menlo,monospace;font-size:12.5px">${its.map(it => itemHtml(it, {main: b.source})).join('')}</div>` : '';
+          if (!its.length) return '';
+          const art = flowAscii(r.ids.map(id => byId[id]).filter(Boolean).map(it => it.text));
+          return `<div style="margin:4px 6px 6px;padding:4px 0;border-left:3px solid var(--line)">${art?`<pre style="margin:0 0 4px 6px;white-space:pre;overflow-x:auto;font-family:ui-monospace,'SF Mono',Menlo,'PingFang SC',monospace;font-size:12px;line-height:1.6;background:transparent">${esc(art.join('\n'))}</pre>`:''}<div style="font-family:ui-monospace,Menlo,monospace;font-size:12.5px">${its.map(it => itemHtml(it, {main: b.source})).join('')}</div></div>`;
         }
         const it = byId[r.id];
         if (!it || !keep(it)) return '';
@@ -6037,6 +6044,55 @@ function downloadReqGuide() {
   const blob = new Blob([_reqGuideMd], {type: 'text/markdown;charset=utf-8'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = '需求文档编写规范.md'; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+const _ew = ch => /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u3000-\u303f]/.test(ch) ? 2 : 1;
+const _width = t => [...t].reduce((n, ch) => n + _ew(ch), 0);
+function flowAscii(lines) {
+  // 与后端 flow_ascii 同一画法：流程行「A → B」「A —是→ B」→ 分支树；画不出返回 null
+  const edges = [];
+  for (const l of lines) { const m = l.trim().match(/^(.*?)\s(?:—([^→]*)→|→)\s(.*)$/); if (!m) return null; edges.push([m[1].trim(), (m[2] || '').trim(), m[3].trim()]); }
+  const order = []; edges.forEach(([a, , b]) => [a, b].forEach(n => { if (!order.includes(n)) order.push(n); }));
+  const outs = {}; edges.forEach(([a, l, b]) => (outs[a] = outs[a] || []).push([l, b]));
+  const incoming = new Set(edges.map(e => e[2]));
+  const starts = order.filter(n => !incoming.has(n)); if (!starts.length) starts.push(order[0]);
+  const render = (n, path) => {
+    const kids = outs[n] || []; if (!kids.length) return [n];
+    if (kids.length === 1) { const [label, child] = kids[0]; const head = n + (label ? ` ─ ${label} ─► ` : ' ──► '); const sub = path.includes(child) ? [`（回到：${child}）`] : render(child, [...path, n]); const pad = ' '.repeat(_width(head)); return [head + sub[0], ...sub.slice(1).map(x => pad + x)]; }
+    const out = [], stem = n + ' ──';
+    kids.forEach(([label, child], i) => { const glyph = i === 0 ? '┬─' : (i === kids.length - 1 ? '└─' : '├─'); const lead = (i === 0 ? stem : ' '.repeat(_width(stem))) + glyph + (label ? ` ${label} ─► ` : ' '); const sub = path.includes(child) ? [`（回到：${child}）`] : render(child, [...path, n]); const pad = ' '.repeat(_width(lead)); out.push(lead + sub[0]); sub.slice(1).forEach(x => out.push(pad + x)); });
+    return out;
+  };
+  const art = []; for (const st of starts) { art.push(...render(st, [])); if (art.length > 80) return null; }
+  return art;
+}
+function materialsDoc(text) {
+  // 附件解析全文 → 文档式 Markdown：页面标题、控件行（编号弱化）、表格行成表、流程块成树、独立区域 / 图片理解块标出
+  const out = []; let flow = null, img = false;
+  for (const raw of text.split('\n')) {
+    const l = raw.trim();
+    if (flow) { if (l.startsWith('【流程图结束】')) { const art = flowAscii(flow); out.push('```', ...(art || flow), '```'); flow = null; } else if (l) flow.push(l); continue; }
+    if (/^【流程图 /.test(l)) { flow = []; continue; }
+    if (/^【文档内图片理解/.test(l)) { img = true; out.push(`> **${l.replace(/[【】]/g, '')}**`); continue; }
+    if (/^【图片理解结束/.test(l)) { img = false; continue; }
+    if (/^【独立区域 /.test(l)) { out.push(`**⚠ ${l.replace(/[【】]/g, '')}**`); continue; }
+    if (/^【/.test(l) && /】$/.test(l)) { out.push(`**${l.replace(/[【】]/g, '')}**`); continue; }
+    if (img) { out.push('> ' + l.replace(/^#{1,6}\s+/, '**').replace(/^\*\*(.+)$/, '**$1**')); continue; }
+    const m = l.match(/^\[(u\d+)\]\s?(.*)$/);
+    if (m) { const t = m[2]; if (t.includes(' ｜ ')) out.push(`| ${t.split(' ｜ ').map(c => c.replace(/\|/g, '\\|')).join(' | ')} |`); else out.push(`- ${t} 〔${m[1]}〕`); continue; }
+    out.push(l);
+  }
+  // 连续表格行补表头分隔线（第一行作表头）
+  const md = []; let inTbl = 0;
+  for (const l of out) { if (l.startsWith('| ')) { md.push(l); if (inTbl === 0) md.push('|' + '---|'.repeat(l.split(' | ').length)); inTbl++; } else { inTbl = 0; md.push(l); } }
+  return mdDoc(md.join('\n'));
+}
+async function openAttText(attId) {
+  try {
+    const r = await api(`/api/v1/requirements/${curReq}/attachments/${attId}/text`);
+    $('attTextTitle').textContent = `附件解析全文 · ${r.filename || ''}`;
+    $('attTextBody').innerHTML = `<div class="md-doc">${materialsDoc(r.text || '（没有解析文本）')}</div>`;
+    $('attTextDlg').showModal();
+  } catch (e) { toast(e.message, 'err'); }
 }
 function mdDoc(md) {
   // 整理稿 / 文档预览：标题层级、表格、多级列表、加粗、行内代码；〔补漏〕〔疑点〕这类标记弱化显示，⚠ 高亮
@@ -6340,7 +6396,7 @@ async function _renderRequirementDetail__impl() {
     <td>${a.stored?`<a onclick="downloadFile(${jsq('/api/v1/requirements/'+r.req_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a>`:esc(a.filename)}${a.source_url?`<div class="hint" style="word-break:break-all"><span class="tag">链接</span> <a href="${esc(a.source_url)}" target="_blank" rel="noopener">${esc(a.source_url.length>70?a.source_url.slice(0,70)+'…':a.source_url)}</a></div>`:''}</td>
     <td class="hint">${a.size?(a.size/1024).toFixed(1)+' KB':'—'}</td>
     <td>${a.parsing?`<span class="st candidate">${a.source_url&&!a.stored?'抓取中':'解析中'}</span> <span class="spin"></span><div class="hint">${a.source_url?'链接下载与解析在后台进行':'PDF 提取 / 图片理解在后台进行'}，可离开页面</div>`:a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>${a.check?(a.check.ok?`<div class="hint" title="每页去掉脚本 / 样式 / 注释后的整页文字字符多重集，减去按控件提取的行，差集为空即没有漏字（与控件解析相互独立）">自校验 ✓ 0 缺字（${(a.check.pages||[]).length} 页）</div>`:`<div class="hint" style="color:var(--danger)" title="${esc((a.check.pages||[]).filter(p=>p.missing||p.error).map(p=>`${p.page}：${p.error||('缺 '+p.missing+' 字 '+(p.missing_chars||''))}`).join('\n'))}">自校验 ⚠ 缺 ${a.check.missing} 字，见底稿核对</div>`):''}${a.warning?`<div class="hint" style="color:var(--warn)">⚠ ${esc(a.warning)}</div>`:''}`:`<span class="st rejected">${a.source_url&&!a.stored?'抓取失败':'解析失败'}</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
-    <td>${canEdit&&(a.stored||a.source_url)&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">${a.source_url&&!a.stored?'重新抓取':'重新解析'}</button>`:''}</td>
+    <td style="white-space:nowrap">${a.parsed?`<button class="btn ghost sm" onclick="openAttText('${a.att_id}')" title="按文档格式查看解析全文（表格、流程图树、独立区域）">查看解析</button> `:''}${canEdit&&(a.stored||a.source_url)&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">${a.source_url&&!a.stored?'重新抓取':'重新解析'}</button>`:''}</td>
     <td class="hint" style="white-space:pre-wrap;max-width:420px">${a.parsed?esc((a.preview||'').slice(0,300))+((a.preview||'').length>300?'…':''):''}</td></tr>`).join('');
   const rawTab = `<div class="section-t">需求原文<span class="hint">（永久保留，AI 结果不覆盖）</span></div>
     <pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:420px;overflow:auto;font:inherit">${esc(r.raw_text||'（原文来自附件）')}</pre>
