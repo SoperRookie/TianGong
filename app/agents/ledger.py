@@ -226,6 +226,7 @@ _SEG_RE = re.compile(r"[，。；：！？,.;:!?、()（）「」【】\[\]｜|]
 _NUM_PREFIX = re.compile(r"^(注[:：]\s*)?(?:(\d{1,2}|[一二三四五六七八九十]{1,2})\s*[、.．:：)）]|[①-⑳]|[1-9]\ufe0f?\u20e3)\s*")   # 「1、」「注：1、」「三、」「①」「1️⃣」
 _FULL_RATIO = 0.9
 _ITEM_LINE = re.compile(r"^-\s+(?:⚠\s+)?(.*?)(?:\s+〔.*)?$")
+_TABLE_RULE = re.compile(r"^\|?\s*:?-{3,}")
 _SHORT = 4
 TABLE_SEP = "｜"   # 解析器把表格同一行单元格并成「A ｜ B」的分隔符（app.parsers.axure.TABLE_SEP 去空白）
 
@@ -233,12 +234,24 @@ TABLE_SEP = "｜"   # 解析器把表格同一行单元格并成「A ｜ B」的
 def draft_index(draft_text: str) -> tuple[str, set[str], str]:
     """整理稿 → (规范化全文, 规范化后的条目集合, 严格规范化全文)。条目集合给很短的单元用：「1 名」「序号」这类只有整条等于
     某条摘录才算收录，按子串判会在任何长条目里误中。严格规范化全文给带数字 / 运算符的单元用。"""
+    text = draft_text or ""
+    if "\n## " in text:
+        text = text[text.index("\n## ") + 1:]   # 文头（标题 / 来源 / 校验说明）不是摘录，不参与核算
     items: set[str] = set()
-    for line in (draft_text or "").split("\n"):
-        m = _ITEM_LINE.match(line.strip())
+    for line in text.split("\n"):
+        s = line.strip()
+        m = _ITEM_LINE.match(s)
         if m:
             items.add(normalize(m.group(1)))
-    return normalize(draft_text or ""), items, strict_normalize(draft_text or "")
+            if TABLE_SEP in m.group(1):   # 没成表的孤行「3局 ｜ +1分」：单元格也算条目
+                items.update(normalize(c) for c in m.group(1).split(TABLE_SEP) if normalize(c))
+        elif s.startswith("|") and not _TABLE_RULE.match(s):   # 表格行：整行与每个单元格都算条目
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            items.update(normalize(c) for c in cells if c)
+            items.add(normalize("".join(cells)))
+        elif s.startswith("**"):
+            items.add(normalize(s.strip("*").split("〔")[0]))
+    return normalize(text), items, strict_normalize(text)
 
 
 def coverage(text: str, draft_norm: str, items: set[str] | None = None, draft_strict: str | None = None) -> float:

@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     # 需求提取用的模型：空则用默认模型。提取是逐字摘录、输出量大，低档模型会压成摘要（gpt-5.6-sol 的输出只有 gpt-6-astra 的三分之一）；
     # 默认模型为省钱改成低档时，这里单独钉住提取模型（手动提取页面选了模型时以页面为准）
     requirement_extract_model: str = ""
+    requirement_extract_crosscheck: bool = True   # 提取最后整稿交叉核对（跨页面矛盾、疑似遗留草稿），多一次模型调用
     analysis_eval_auto_sample: bool = True
 
     # 历史用例复用提示阈值（需求二十九）：向量相似度达到该值提示「高度相关，可复用」

@@ -26,6 +26,8 @@ PROMPT_DEFS: list[dict] = [
      "where": "需求中心 → 附件解析完成后自动 / 手动提取：从全部材料逐字摘录需求内容归整为整理稿，AI 分析与测试设计以整理稿为准"},
     {"key": "requirement_extract_gap", "name": "需求提取补漏", "kind": "system", "default": P.REQUIREMENT_EXTRACT_GAP_SYSTEM,
      "where": "需求提取之后：程序对照出整理稿没覆盖的材料原句，交模型判「补进 / 跳过」，最多两轮"},
+    {"key": "requirement_extract_crosscheck", "name": "需求提取交叉核对", "kind": "system", "default": P.REQUIREMENT_EXTRACT_CROSSCHECK_SYSTEM,
+     "where": "需求提取最后一步：整稿条目清单送模型找跨页面 / 跨文档矛盾与疑似遗留草稿（只加疑点与草稿标记，不改条目）"},
     {"key": "requirement_analysis", "name": "需求分析（11 项）", "kind": "system", "default": P.REQUIREMENT_ANALYSIS_SYSTEM,
      "where": "需求中心 → AI 需求分析（每条带原文依据 quote，程序逐条核验）"},
     {"key": "requirement_analysis_review", "name": "需求分析独立复核", "kind": "system",

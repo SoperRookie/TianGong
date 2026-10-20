@@ -71,8 +71,8 @@ def test_合并去重_逐字核验_整理稿格式():
     short = [{"name": "m", "items": [{"text": "退出", "sources": []}, {"text": "报名", "sources": []}]}]
     assert verify_modules(short, NOISY) == {"checked": 2, "verified": 1, "unverified": 1}   # 过短条目按子串判
     md = extraction_markdown(modules, dropped)
-    assert md.startswith("## 活动后台-活动列表 〔来源：b.html〕\n- 活动状态分为未开始、进行中、已结束 〔来源：a.docx〕\n- 活动名称最长 30 个字符\n")
-    assert "- ⚠ 按天统计参与人数" in md and md.endswith("（已剔除：页面导航、css）")
+    assert md.startswith("## 1. b.html 〔来源：b.html〕\n\n### 1.1 活动后台-活动列表\n- 活动状态分为未开始、进行中、已结束 〔来源：a.docx〕\n- 活动名称最长 30 个字符\n")
+    assert "## 2. 活动后台\n\n### 2.1 数据统计\n- ⚠ 按天统计参与人数" in md and md.endswith("（已剔除：页面导航、css）")   # 没来源的模块按名字前半归页
 
 
 async def test_附件解析完成自动提取_分析与设计以整理稿为准_修改整理稿分析标过期(client, extract_on):
@@ -293,7 +293,7 @@ async def test_自动补漏_未覆盖句送回模型_只认原句_标补漏_覆�
     led = r["extraction"]["ledger"]["stats"]
     assert led == {"total": 15, "in": 13, "ex": 2, "todo": 0, "review": 2, "review_open": 2, "ex_by": {"model": 2, "auto": 0, "user": 0}}   # 模型排除的两句像规则 → 需复核
     text = r["extraction"]["text"]
-    assert "第 2 条报名规则" in text and "〔补漏〕" in text and "## 报名-新区块" in text and "模型自己编的" not in text
+    assert "第 2 条报名规则" in text and "〔补漏〕" in text and "### 1.2 新区块" in text and "模型自己编的" not in text   # 模块「报名-新区块」归到「## 1. 报名」下
     assert "模型改写过的" not in text and "- 第 5 条报名规则：报名费满 5 元后当日将无法再次报名并退回到活动详情页面 〔补漏〕" in text
     assert "第 4 条报名规则" not in text and "第 6 条报名规则" not in text and "第 7 条报名规则：报名费满 7 元后当日将无法再次报名并退回到活动详情页面 〔兜底〕" in text
     gap_call = app.state.llm.calls[1]["messages"][1]["content"]
@@ -472,7 +472,7 @@ async def test_底稿核对_每句有去向_人工收录与排除_待处理不�
     assert r["extraction"]["ledger"]["stats"] == {"total": 15, "in": 12, "ex": 3, "todo": 0, "review": 2, "review_open": 2, "ex_by": {"model": 2, "auto": 0, "user": 1}}
     # 模型排除的可以人工翻回收录：按原句进「页面-人工收录」
     r = (await client.post(f"/api/v1/requirements/{rid}/extraction/ledger", json={"uid": "F1-0004", "action": "include"})).json()
-    assert "## 报名-人工收录" in r["extraction"]["text"] and "- 第 4 条报名规则：报名费满 4 元后当日将无法再次报名并退回到活动详情页面" in r["extraction"]["text"]
+    assert "人工收录\n" in r["extraction"]["text"] and "- 第 4 条报名规则：报名费满 4 元后当日将无法再次报名并退回到活动详情页面" in r["extraction"]["text"]
     it = next(x for m in r["extraction"]["modules"] for x in m["items"] if x.get("unit") == "F1-0004")
     assert it["manual"] is True and it["verified"] is True and it["review"]["status"] == "included" and it["id"]
     assert r["extraction"]["ledger"]["stats"]["in"] == 13 and r["extraction"]["ledger"]["stats"]["ex_by"]["model"] == 1 and r["extraction"]["ledger"]["stats"]["review_open"] == 1
@@ -514,7 +514,7 @@ def test_疑点字段_原句照抄疑点单列_整理稿末尾疑点清单():
     assert items[0]["doubt"] == "前台写的是 5 元， 前后台口径不一致" and "doubt" not in items[1]   # 空疑点不带字段
     md = extraction_markdown(modules)
     assert "- 报名费满 4 元后当日将无法再次报名 〔疑点：前台写的是 5 元， 前后台口径不一致〕\n- 活动名称最长 30 个字符\n" in md
-    assert md.endswith("## 疑点 / 不一致清单 〔原句已按原文保留在上文，此处只列疑点，供需求澄清与用例设计〕\n"
+    assert md.endswith("## 2. 疑点 / 不一致清单 〔原句已按原文保留在上文，此处只列疑点，供需求澄清与用例设计〕\n\n"
                        "- 报名费满 4 元后当日将无法再次报名 —— 前台写的是 5 元， 前后台口径不一致（报名-规则）")
     assert "疑点" not in extraction_markdown([{"name": "m", "items": [items[1]]}])   # 没有疑点就没有清单
     # 底稿核算：带疑点标记的条目行仍按原句对回单元
@@ -557,3 +557,96 @@ def test_底稿去重与收录按严格口径_运算符与括号算字_表格行
     assert acct["u45"]["status"] == "in" and acct["u64"]["status"] == "in" and acct["u66"]["status"] == "todo"   # 表格行拆成两条：按单元格切段（不设最短字数）都命中也算收录
     assert acct["u341"]["status"] == "in" and acct["u1482"]["status"] == "in"   # 「（今日）」短句整条等于摘录「今日」（只差括号）
     assert covered("输赢金额=0 ｜ 当前连赢次数“不变”", draft) is False and covered("输赢金额>0 ｜ 当前连赢次数“+1”", draft) is True
+
+
+def test_整理稿层级_页面区块条目_表格还原_子标题与子项_图片文案单列_文头():
+    """按《连赢挑战赛_需求提取》的层级成稿：## N. 页面（模块主来源）› ### N.M 区块（去掉「页面-」前缀）› 条目；连续的表格行
+    还原成 Markdown 表格（表头第一行、单元格带标记）；以冒号结尾的短句加粗成子标题；「1、」「注：」开头的子项缩进一级；
+    只在图片里的文案归最后一节；文头带标题 / 来源 / 校验。底稿核算跳过文头、表格行与单元格都算条目。"""
+    from app.agents.extraction import assign_ids, extraction_markdown, extraction_outline, outline_view
+    from app.agents.ledger import account, build_units
+
+    src = "连赢挑战.zip › 需求说明"
+    modules = [
+        {"name": "需求说明-连赢判断规则", "items": [
+            {"text": "连赢判断规则如下表所示：", "sources": [src]},
+            {"text": "本局游戏结果 ｜ 系统计算方式", "sources": [src]},
+            {"text": "输赢金额>0 ｜ 当前连赢次数“+1”", "sources": [src]},
+            {"text": "输赢金额=0 ｜ 当前连赢次数“不变”", "sources": [src], "gap": True},
+            {"text": "注：", "sources": [src]},
+            {"text": "1、输赢金额=派彩金额-投注金额", "sources": [src]},
+            {"text": "2、仅影响用户“当前连赢记录”", "sources": [src]},
+            {"text": "【活动对象】仅针对正式账号", "sources": [src]},
+            {"text": "3局 ｜ +1分", "sources": [src]}]},
+        {"name": "pc-活动入口说明-报名确认弹窗", "items": [{"text": "是否确认报名？", "sources": ["连赢挑战.zip › 图片:7"]}]},
+        {"name": "pc-活动入口说明-游戏外入口", "items": [{"text": "1、大厅左侧活动入口", "sources": ["连赢挑战.zip › 页面：pc-活动入口说明"]}]},
+    ]
+    assign_ids(modules)
+    outline = extraction_outline(modules)
+    assert [s["title"] for s in outline] == ["需求说明", "pc-活动入口说明", "仅出现在图片中的文案"]   # 图片文案永远最后
+    assert outline[0]["no"] == "1" and outline[0]["blocks"][0]["no"] == "1.1" and outline[0]["blocks"][0]["name"] == "连赢判断规则"
+    rows = outline[0]["blocks"][0]["rows"]
+    assert [r["t"] for r in rows] == ["label", "table", "label", "item", "item", "item", "item"]
+    assert len(rows[1]["items"]) == 3 and rows[1]["cols"] == 2 and [r.get("lv") for r in rows[3:]] == [1, 1, 0, 0]   # 孤行「3局 ｜ +1分」不成表
+    assert outline[1]["blocks"][0]["rows"][0]["lv"] == 0   # 区块第一条就是「1、」不缩进
+    view = outline_view(modules)
+    assert view[0]["blocks"][0]["rows"][1]["ids"] == [it["id"] for it in modules[0]["items"][1:4]] and view[2]["blocks"][0]["name"] == "pc-活动入口说明-报名确认弹窗"
+    md = extraction_markdown(modules, head={"title": "oks", "sources": "`连赢挑战.zip`（Axure 原型导出，共 6 个页面：需求说明 / …）", "check": "底稿 620 句（去重）：收录 421、排除 148、待处理 51；`连赢挑战.zip` 整页字符自校验 0 缺字（6 页）"})
+    assert md.startswith("# 「oks」需求整理稿\n\n- 来源：`连赢挑战.zip`（Axure 原型导出，共 6 个页面：需求说明 / …）\n- 提取原则：")
+    assert ("## 1. 需求说明 〔来源：连赢挑战.zip › 需求说明〕\n\n### 1.1 连赢判断规则\n**连赢判断规则如下表所示：**\n"
+            "| 本局游戏结果 | 系统计算方式 |\n|---|---|\n| 输赢金额>0 | 当前连赢次数“+1” |\n| 输赢金额=0 | 当前连赢次数“不变” 〔补漏〕 |\n"
+            "**注：**\n  - 1、输赢金额=派彩金额-投注金额\n  - 2、仅影响用户“当前连赢记录”\n- 【活动对象】仅针对正式账号\n- 3局 ｜ +1分\n") in md
+    assert "## 3. 仅出现在图片中的文案\n\n### 3.1 pc-活动入口说明-报名确认弹窗\n- 是否确认报名？ 〔来源：连赢挑战.zip › 图片:7〕" in md
+    # 底稿：文头里的字不算收录依据；表格行按整行 / 单元格都能对上；去掉行首序号的子项也对上
+    mat = ("【文件：连赢挑战.zip】\n# Axure 原型：连赢挑战.zip\n## 页面：需求说明\n[u41] 输赢金额>0 ｜ 当前连赢次数“+1”\n[u43] 输赢金额=0 ｜ 当前连赢次数“不变”\n"
+           "[u45] 输赢金额<0 ｜ 当前连赢次数“清零”\n[u64] 3局\n[u59] 1、输赢金额=派彩金额-投注金额\n[u90] 需求原文\n")
+    st = {u["uid"]: u["status"] for u in account(build_units(mat), md)["units"]}
+    assert st["u41"] == "in" and st["u43"] == "in" and st["u59"] == "in" and st["u64"] == "in" and st["u45"] == "todo"
+    assert st["u90"] == "todo"   # 「需求原文」只在文头出现，不算收录
+
+
+async def test_交叉核对_跨页面疑点按id追加_疑似草稿整块标记_失败不拦提取(monkeypatch):
+    """整理稿是分页面提取的，版本记录写了「取消第一名机制」而月榜正文仍是旧规则这类矛盾单页看不出；画布远处的旧版本（年榜）也要标出来。
+    最后整稿过一遍模型：doubts 按 id 追加到条目疑点，drafts 按模块名把整块标〔疑似草稿〕并把理由写进第一条；模型出错只跳过。"""
+    from app.agents.extraction import DRAFT_MARK, _crosscheck, apply_crosscheck, assign_ids, extraction_markdown, extraction_outline
+    from app.config import get_settings
+
+    modules = [{"name": "月榜排名-榜单列表", "items": [{"text": "第 1 名固定展示在榜单顶部", "sources": ["a.zip › 月榜排名"], "doubt": "原文「固定展示」疑为「固定行」"}]},
+               {"name": "连赢活动记录-年榜", "items": [{"text": "晋级年榜 ｜ 字符串 ｜ 系统 ｜ 展示是否晋级年榜", "sources": ["a.zip › 连赢活动记录"]},
+                                                 {"text": "年榜统计周期为自然年", "sources": ["a.zip › 连赢活动记录"]}]}]
+    assign_ids(modules)
+    data = {"doubts": [{"id": modules[0]["items"][0]["id"], "doubt": "版本记录第 4 行写「取消第一名的特殊机制」，此处仍是第 1 名固定行"},
+                       {"id": "nope", "doubt": "不存在的 id 忽略"}],
+            "drafts": [{"module": "连赢活动记录-年榜", "reason": "正式页面只有日榜、月榜"}, {"module": "没有的模块", "reason": "忽略"}]}
+    assert apply_crosscheck(modules, data) == {"doubts": 1, "drafts": 1}
+    assert modules[0]["items"][0]["doubt"] == "原文「固定展示」疑为「固定行」；版本记录第 4 行写「取消第一名的特殊机制」，此处仍是第 1 名固定行"
+    assert all(it["draft"] for it in modules[1]["items"]) and modules[1]["items"][0]["doubt"] == "疑似遗留草稿：正式页面只有日榜、月榜"
+    assert "draft" not in modules[0]["items"][0]
+    md = extraction_markdown(modules)
+    assert f"### 2.1 年榜 〔疑似遗留草稿〕\n- 晋级年榜 ｜ 字符串 ｜ 系统 ｜ 展示是否晋级年榜 {DRAFT_MARK} 〔疑点：疑似遗留草稿：正式页面只有日榜、月榜〕\n- 年榜统计周期为自然年 {DRAFT_MARK}" in md
+    assert "## 4. 疑似遗留草稿 〔" in md and "- 2.1 年榜（连赢活动记录-年榜）" in md   # 疑点清单是第 3 节，草稿清单第 4 节
+    assert extraction_outline(modules)[1]["blocks"][0]["draft"] is True and extraction_outline(modules)[0]["blocks"][0]["draft"] is False
+    # 开关：默认测试环境关；打开后走模型，模型抛错只跳过
+    assert await _crosscheck(modules, StubLLM([]), None, "") is None
+    monkeypatch.setenv("TIANGONG_REQUIREMENT_EXTRACT_CROSSCHECK", "true")
+    get_settings.cache_clear()
+    try:
+        class Boom:
+            async def chat(self, *a, **k):
+                raise RuntimeError("模型超时")
+        assert await _crosscheck(modules, Boom(), None, "") is None
+        stub = StubLLM([json.dumps({"doubts": [], "drafts": [{"module": "月榜排名-榜单列表", "reason": "测试"}]}, ensure_ascii=False)])
+        assert await _crosscheck(modules, stub, None, "") == {"doubts": 0, "drafts": 1} and modules[0]["items"][0]["draft"] is True
+    finally:
+        monkeypatch.setenv("TIANGONG_REQUIREMENT_EXTRACT_CROSSCHECK", "false")
+        get_settings.cache_clear()
+
+
+def test_合并去重按逐字键_运算符不同是两条_id不撞():
+    from app.agents.extraction import _merge_modules, assign_ids
+
+    out = ({"modules": [{"name": "规则", "items": [{"text": "输赢金额>0 ｜ +1"}, {"text": "输赢金额=0 ｜ 不变"}, {"text": "输赢金额 > 0 ｜ +1"}]}]}, None)
+    modules, _, _ = _merge_modules([out])
+    assert [it["text"] for it in modules[0]["items"]] == ["输赢金额>0 ｜ +1", "输赢金额=0 ｜ 不变"]   # 只有空白差异的才算重复
+    assign_ids(modules)
+    assert len({it["id"] for it in modules[0]["items"]}) == 2

@@ -29,7 +29,9 @@ _LINE_ID_RE = re.compile(r"^\[(u\d+)\]\s?")
 _CSS_RULE_RE = re.compile(r"#(u\d+)\s*\{([^}]*)\}")
 _CSS_PX_RE = {k: re.compile(rf"(?<![\w-]){k}:\s*(-?[\d.]+)px") for k in ("left", "top", "width", "height")}
 _HIDDEN_RE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden")
-ROW_TOLERANCE = 4   # 同一行控件的 top 常差 1～3px：按 4px 归并成一行再按列排
+ROW_TOLERANCE = 4
+ISLAND_GAP = 1000   # 与页面主体任何控件横纵都相距 ≥ 1000px 的控件群算「独立区域」：作者丢在画布右侧 / 下方的旧版本、备用稿常这样
+ISLAND_MIN = 3      # 少于 3 个控件的零星控件不算独立区域   # 同一行控件的 top 常差 1～3px：按 4px 归并成一行再按列排
 OPTIONS_MARK, VALUE_MARK, PLACEHOLDER_MARK = "下拉选项：", "输入值：", "占位提示："
 _FORM_MARKS = (OPTIONS_MARK, VALUE_MARK, PLACEHOLDER_MARK)
 _ATTR_MARKS = (VALUE_MARK, PLACEHOLDER_MARK)   # 来自属性、不在页面文字里的行，自校验时不计入提取侧
@@ -258,6 +260,51 @@ def _page_controls(html: str, css: str = "") -> tuple[str, list[dict]]:
     return title, out
 
 
+def _regions(controls: list[dict]) -> list[int]:
+    """每个控件所属区域：0 = 页面主体（含最靠左上的控件的那一簇），1.. = 独立区域（与主体相距 ≥ ISLAND_GAP 的控件簇，按位置编号）。
+    单链接聚类：两个控件横纵距离都小于 ISLAND_GAP 就连在一起。只有文字 / 图片控件参与（传进来的就是）。"""
+    n = len(controls)
+    if n == 0:
+        return []
+    lab = list(range(n))
+
+    def find(i: int) -> int:
+        while lab[i] != i:
+            lab[i] = lab[lab[i]]
+            i = lab[i]
+        return i
+
+    pts = [(c["x"], c["y"]) for c in controls]
+    for i in range(n):
+        for j in range(i + 1, n):
+            if abs(pts[i][0] - pts[j][0]) < ISLAND_GAP and abs(pts[i][1] - pts[j][1]) < ISLAND_GAP:
+                a, b = find(i), find(j)
+                if a != b:
+                    lab[a] = b
+    roots = [find(i) for i in range(n)]
+    members: dict[int, list[int]] = {}
+    for i, r in enumerate(roots):
+        members.setdefault(r, []).append(i)
+    main = roots[min(range(n), key=lambda i: (pts[i][1] + pts[i][0], pts[i][1]))]   # 最靠左上的控件所在簇是主体
+    islands = [r for r in members if r != main and len(members[r]) >= ISLAND_MIN]
+    islands.sort(key=lambda r: min((pts[i][1], pts[i][0]) for i in members[r]))
+    region = [0] * n
+    for k, r in enumerate(islands, 1):
+        for i in members[r]:
+            region[i] = k
+    return region
+
+
+def _island_note(k: int, members: list[dict], main: list[dict]) -> str:
+    """独立区域的标记行（≤ 40 字，底稿不当原文句）：在主体的哪个方向、距离多少、几个控件。"""
+    mx = max((c["x"] for c in main), default=0)
+    my = max((c["y"] for c in main), default=0)
+    ix = min(c["x"] for c in members)
+    iy = min(c["y"] for c in members)
+    where = f"主体右侧 {ix - mx}px" if ix - mx >= iy - my else f"主体下方 {iy - my}px"
+    return f"【独立区域 {k}：{where}，{len(members)} 控件，疑似遗留草稿】"
+
+
 def _page_text(html: str, css: str = "") -> tuple[str, list[str], list[dict], dict]:
     """页面可见文字：按控件、按阅读顺序，每行前面带控件编号「[u1125] 」——需求提取的底稿按这个编号逐控件核对去向。
 
@@ -283,21 +330,31 @@ def _page_text(html: str, css: str = "") -> tuple[str, list[str], list[dict], di
                 lines.append(line)
         return title, lines, [], {}
     check = _page_check(html, controls)
+    region = _regions(controls)
+    groups: dict[int, list[dict]] = {}
+    for c, k in zip(controls, region):
+        groups.setdefault(k, []).append(c)
     lines, seen = [], set()
     index: list[dict] = []
-    for c in controls:
-        key = "\n".join(c["lines"])
-        if key and key in seen:
-            continue   # 整块重复的控件（母版 / 面板状态）只留一份
-        if key:
-            seen.add(key)
-        lines.extend(f"[{c['id']}] {l}" for l in c["lines"])
-        meta = {"id": c["id"], "cls": c["cls"], "x": c["x"], "y": c["y"]}
-        if c["hidden"]:
-            meta["hidden"] = True
-        if c["img"]:
-            meta["img"] = c["img"]
-        index.append(meta)
+    for k in sorted(groups):   # 主体在前；画布上与主体不相连的独立区域各自成块、带标记行，不与主体按坐标穿插
+        if k:
+            lines.append(_island_note(k, groups[k], groups.get(0, [])))
+        for c in groups[k]:
+            key = "\n".join(c["lines"])
+            if key and key in seen:
+                continue   # 整块重复的控件（母版 / 面板状态）只留一份
+            if key:
+                seen.add(key)
+            lines.extend(f"[{c['id']}] {l}" for l in c["lines"])
+            meta = {"id": c["id"], "cls": c["cls"], "x": c["x"], "y": c["y"]}
+            if c["hidden"]:
+                meta["hidden"] = True
+            if c["img"]:
+                meta["img"] = c["img"]
+            if k:
+                meta["region"] = k
+            index.append(meta)
+    check["islands"] = len(groups) - (1 if 0 in groups else 0)
     return title, lines, index, check
 
 
