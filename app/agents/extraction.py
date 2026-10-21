@@ -365,7 +365,8 @@ def _fold_heading(name: str, rows: list[dict], main: str) -> str:
 def extraction_outline(modules: list[dict]) -> list[dict]:
     """整理稿层级：页面（按模块主来源分组，编号 1. 2. …）› 区块（模块，编号 1.1 …，名字去掉「页面-」前缀）› 条目层级
     （见 _block_rows）。只在图片里出现的文案（来源「图片:N」）归到最后一节「仅出现在图片中的文案」。
-    返回 [{no, title, source, blocks: [{no, name, module, source, rows}]}]，rows 里是条目对象本身（供成稿与接口两用）。"""
+    站点地图带文件夹的页面（「活动运营后台 / 活动列表」）按文件夹分组：分组 N. › 页面 N.M › 区块 N.M.K，没分组的页面 N. › 区块 N.M。
+    返回 [{no, gno, group, title, source, blocks: [{no, name, module, source, rows}]}]，rows 里是条目对象本身（供成稿与接口两用）。"""
     sections: list[dict] = []
     index: dict[str, dict] = {}
     for mod in modules:
@@ -373,21 +374,23 @@ def extraction_outline(modules: list[dict]) -> list[dict]:
             continue
         main = _module_source(mod)
         if main and (_IMG_SRC_RE.search(main) or main.split(" › ")[-1].strip().startswith("图片")):
-            page, src = IMAGE_SECTION, ""
+            label, src = IMAGE_SECTION, ""
         elif main:
-            page, src = _page_title(main), main
+            label, src = _page_title(main), main
         else:
-            page, src = (mod["name"].split("-", 1)[0] if "-" in mod["name"] else mod["name"]), ""
-        sec = index.get(normalize(page))
+            label, src = (mod["name"].split("-", 1)[0] if "-" in mod["name"] else mod["name"]), ""
+        group, page = label.rsplit(" / ", 1) if (label != IMAGE_SECTION and " / " in label) else ("", label)   # 「活动运营后台 / 活动列表」：文件夹是分组
+        group, page = group.strip(), page.strip() or label
+        sec = index.get(normalize(label))
         if sec is None:
-            sec = {"title": page, "source": src, "blocks": []}
-            index[normalize(page)] = sec
+            sec = {"title": page, "group": group, "source": src, "blocks": []}
+            index[normalize(label)] = sec
             sections.append(sec)
         elif not sec["source"] and src:
             sec["source"] = src
         name = mod["name"]
         if page != IMAGE_SECTION:
-            for pg in dict.fromkeys([page, page.split(" / ")[-1].strip()]):   # 站点地图带文件夹的页面名「商户管理后台 / 日榜排名」：模块名只带页面名
+            for pg in dict.fromkeys([label, page]):   # 模块名多半只带页面名
                 for sep in ("-", "－", "—", "–", "：", ":", " › ", "›"):
                     if name.startswith(pg + sep) and len(name) > len(pg) + len(sep):
                         name = name[len(pg) + len(sep):].strip()
@@ -399,11 +402,25 @@ def extraction_outline(modules: list[dict]) -> list[dict]:
         sec["blocks"].append({"name": name, "module": mod["name"], "source": "" if page == IMAGE_SECTION else main,
                               "draft": all(it.get("draft") for it in mod["items"]),   # 整块都是疑似草稿：区块标题标出来
                               "rows": rows})   # 图片文案节每条都标明来自哪张图
-    sections.sort(key=lambda s: _page_rank(s["title"]))   # 稳定排序：更新记录 → 需求说明 → 其它页面（原顺序）→ 图片文案
-    for i, sec in enumerate(sections, 1):
-        sec["no"] = str(i)
+    # 稳定排序：更新记录 → 需求说明 → 其它（原顺序）→ 图片文案；同一文件夹的页面连在一起、按文件夹第一次出现的位置排
+    units: list[str] = []
+    for sec in sections:
+        key = sec["group"] or sec["title"]
+        if key not in units:
+            units.append(key)
+    sections.sort(key=lambda s: (_page_rank(s["group"] or s["title"]), units.index(s["group"] or s["title"])))
+    top, cur, k = 0, None, 0   # 编号：分组 / 独立页面 N.，分组里的页面 N.M，区块再加一级
+    for sec in sections:
+        key = sec["group"] or sec["title"]
+        if key != cur:
+            top, cur, k = top + 1, key, 0
+        if sec["group"]:
+            k += 1
+            sec["gno"], sec["no"] = str(top), f"{top}.{k}"
+        else:
+            sec["gno"], sec["no"] = "", str(top)
         for j, b in enumerate(sec["blocks"], 1):
-            b["no"] = f"{i}.{j}"
+            b["no"] = f"{sec['no']}.{j}"
     return sections
 
 
@@ -424,7 +441,7 @@ def outline_view(modules: list[dict]) -> list[dict]:
                 else:
                     rows.append({"t": "item", "id": r["item"].get("id"), "lv": r["lv"]})
             blocks.append({"no": b["no"], "name": b["name"], "module": b["module"], "source": b["source"], "draft": b["draft"], "rows": rows})
-        out.append({"no": sec["no"], "title": sec["title"], "source": sec["source"], "blocks": blocks})
+        out.append({"no": sec["no"], "gno": sec["gno"], "group": sec["group"], "title": sec["title"], "source": sec["source"], "blocks": blocks})
     return out
 
 
@@ -440,7 +457,8 @@ def _item_marks(it: dict, main: str) -> tuple[str, str]:
 
 
 def extraction_markdown(modules: list[dict], dropped: list[str] | None = None, head: dict | None = None) -> str:
-    """整理稿正文，层级与《连赢挑战赛_需求提取》一致：可选文头（标题 / 来源 / 提取原则 / 校验）→ `## N. 页面 〔来源〕` →
+    """整理稿正文，层级与《连赢挑战赛_需求提取》一致：可选文头（标题 / 来源 / 提取原则 / 校验）→ `## N. 页面 〔来源〕`（站点地图
+    带文件夹的：`## N. 文件夹` → `### N.M 页面` → `#### N.M.K 区块`）→
     `### N.M 区块` → 条目（表格行还原成 Markdown 表格、以冒号结尾的短句与「一、」「2.1 」编号的原文小标题加粗成子标题、
     「1、」「注：」类子项缩进一级，区块开头与区块标题重复的原文标题并进标题）；页面之间用分隔线；
     未逐字找到的加 ⚠ 前缀，补漏 / 兜底 / 疑点各有标记，来源与区块主来源不同时才单独标注；末尾疑点清单与已剔除说明。"""
@@ -450,14 +468,21 @@ def extraction_markdown(modules: list[dict], dropped: list[str] | None = None, h
                   "- 提取原则：全部需求语句逐字摘录原文（含原文错别字，不作改写），按「页面 › 区块」归类；表格按行还原；只在图片里出现的文案单列；原文疑点另列、不改原句。",
                   f"- 校验：{head.get('check') or '—'}", ""]
     sections = extraction_outline(modules)
+    cur_group = None
     for k, sec in enumerate(sections):
-        if k:
+        if sec["group"] and sec["group"] != cur_group:   # 文件夹分组：## N. 文件夹 › ### N.M 页面 › #### N.M.K 区块
+            if k:
+                lines += ["---", ""]
+            lines += [f"## {sec['gno']}. {sec['group']}", ""]
+        elif not sec["group"] and k:
             lines += ["---", ""]   # 页面之间分隔线
-        lines.append(f"## {sec['no']}. {sec['title']}" + (f" 〔来源：{sec['source']}〕" if sec["source"] else ""))
+        cur_group = sec["group"] or None
+        h = "###" if sec["group"] else "##"
+        lines.append(f"{h} {sec['no']}{'' if sec['group'] else '.'} {sec['title']}" + (f" 〔来源：{sec['source']}〕" if sec["source"] else ""))
         lines.append("")
         for b in sec["blocks"]:
             main = b["source"]
-            lines.append(f"### {b['no']} {b['name']}" + (f" {DRAFT_MARK.replace('疑似草稿', '疑似遗留草稿')}" if b["draft"] else ""))
+            lines.append(f"{h}# {b['no']} {b['name']}" + (f" {DRAFT_MARK.replace('疑似草稿', '疑似遗留草稿')}" if b["draft"] else ""))
             for r in b["rows"]:
                 if r.get("dup"):   # 区块的原文标题已并进区块标题
                     continue
@@ -493,14 +518,15 @@ def extraction_markdown(modules: list[dict], dropped: list[str] | None = None, h
                     lines.append(("  " if r["lv"] else "") + f"- {mark}{r['item']['text']}{tail}")
             lines.append("")
     doubts = [(mod["name"], it) for mod in modules for it in mod["items"] if it.get("doubt")]
+    top_n = max((int(sec["gno"] or sec["no"]) for sec in sections), default=0)
     if doubts:
-        lines.append(f"## {len(sections) + 1}. 疑点 / 不一致清单 〔原句已按原文保留在上文，此处只列疑点，供需求澄清与用例设计〕")
+        lines.append(f"## {top_n + 1}. 疑点 / 不一致清单 〔原句已按原文保留在上文，此处只列疑点，供需求澄清与用例设计〕")
         lines.append("")
         lines.extend(f"- {it['text']} —— {it['doubt']}（{name}）" for name, it in doubts)
         lines.append("")
     drafts = [b for sec in sections for b in sec["blocks"] if b["draft"]]
     if drafts:
-        lines.append(f"## {len(sections) + (2 if doubts else 1)}. 疑似遗留草稿 〔画布上与页面主体不相连、与正式内容重复却有出入的区块，已照抄收录但用例不要照它写，请与产品确认〕")
+        lines.append(f"## {top_n + (2 if doubts else 1)}. 疑似遗留草稿 〔画布上与页面主体不相连、与正式内容重复却有出入的区块，已照抄收录但用例不要照它写，请与产品确认〕")
         lines.append("")
         lines.extend(f"- {b['no']} {b['name']}（{b['module']}）" for b in drafts)
         lines.append("")
