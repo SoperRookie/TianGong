@@ -101,11 +101,12 @@ class PlanStore:
         self._persist(plan)
         return plan
 
-    def delete(self, plan_id: str) -> None:
+    def delete(self, plan_id: str, force: bool = False) -> None:
+        """删除计划；有执行记录的拒绝（改归档），force 只给删除整个项目用。"""
         plan = self._plans.get(plan_id)
         if plan is None:
             raise PlanError(f"测试计划不存在: {plan_id}")
-        if plan["runs"]:
+        if plan["runs"] and not force:
             raise PlanError("计划已有执行记录，不可删除，请改为归档")
         self._plans.pop(plan_id)
         self._doc.remove(plan_id)

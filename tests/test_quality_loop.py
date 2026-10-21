@@ -924,3 +924,32 @@ async def test_盲区与重复对_批量处置(client):
         r = (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/batch", json={"action": "reopen", "keys": keys})).json()
         assert all(p["status"] == "open" for p in r["applied"])
     assert (await client.post(f"/api/v1/tasks/{task_id}/points/dup-pairs/batch", json={"action": "ignore", "keys": []})).status_code == 400
+
+
+async def test_删除非空项目_默认拒绝并列出内容_cascade连同需求计划任务一起删(client):
+    """项目不空时默认 400 并说清里面有什么；contents 接口给清单；cascade=true 连同内容一起删：需求彻底清除（回收站里的也清）、
+    计划连执行轮次一起删、任务进回收站；之后项目 404、任务列表与需求列表都空。"""
+    from tests.stubs import ANALYST_REPLY
+
+    await client.post("/api/v1/projects", json={"name": "要整删"})
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+    task_id = (await client.post("/api/v1/tasks", data={"text": "登录需求", "project": "要整删"})).json()["task_id"]
+    r1 = (await client.post("/api/v1/requirements", data={"project": "要整删", "title": "需求一", "text": "原文一"})).json()["req_id"]
+    r2 = (await client.post("/api/v1/requirements", data={"project": "要整删", "title": "需求二", "text": "原文二"})).json()["req_id"]
+    assert (await client.delete(f"/api/v1/requirements/{r2}")).status_code == 200   # 一条进回收站
+    plan_id = (await client.post("/api/v1/plans", json={"name": "计划A", "project": "要整删"})).json()["plan_id"]
+
+    c = (await client.get("/api/v1/projects/要整删/contents")).json()
+    assert c["tasks"] == 1 and c["plans"] == 1 and c["requirements"] == 1 and c["recycled_requirements"] == 1 and c["running"] == 0 and not c["empty"]
+    resp = await client.delete("/api/v1/projects/要整删")
+    assert resp.status_code == 400 and "1 个任务、1 个测试计划、1 条需求" in resp.json()["detail"] and "cascade=true" in resp.json()["detail"]
+    assert (await client.get("/api/v1/projects/要整删/versions")).status_code == 200   # 没删
+
+    resp = await client.delete("/api/v1/projects/要整删", params={"cascade": "true"})
+    assert resp.status_code == 200 and resp.json() == {"deleted": "要整删", "cascade": True, "tasks": 1, "plans": 1, "requirements": 1}
+    assert (await client.get("/api/v1/projects/要整删/contents")).status_code == 404
+    assert (await client.get(f"/api/v1/requirements/{r1}")).status_code == 404 and (await client.get(f"/api/v1/requirements/{r2}")).status_code == 404
+    assert (await client.get(f"/api/v1/plans/{plan_id}")).status_code == 404
+    assert (await client.get("/api/v1/tasks", params={"project": "要整删"})).json()["tasks"] == []
+    assert any(t["task_id"] == task_id for t in (await client.get("/api/v1/tasks", params={"include_deleted": "true"})).json()["tasks"])   # 任务在回收站
+    assert (await client.get("/api/v1/projects/不存在/contents")).status_code == 404

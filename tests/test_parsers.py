@@ -282,7 +282,7 @@ def test_Axure原型导出包_按站点地图逐页提取文字与说明_跳过�
     doc = parse_file(z)
     text = doc.full_text
     assert doc.doc_type == "zip" and "共 3 个页面" in text
-    assert text.index("页面：首页") < text.index("页面：首页 / 登录") < text.index("页面：设置 / 账号安全")
+    assert text.index("页面：首页") < text.index("页面：登录") < text.index("页面：账号安全") and "首页 / 登录" not in text   # 按站点地图顺序，标题只带页面自己的名字
     assert "欢迎使用" in text and "密码错误 5 次锁定" in text and "修改密码" in text
     assert text.count("登录按钮") == 1  # 同页重复文字去重
     assert "点击登录后跳转首页" in text and "【说明 / 备注】" in text
@@ -524,9 +524,9 @@ def test_Axure表格同一行单元格并成一行_表头与数据行对应_自�
                 f"<div id='u{i}_text' class='text'><p><span>{text}</span></p></div></div>")
     page = ("<html><head><title>表</title></head><body><div id='base'><div id='u10' class='ax_default'>"
             + cell(14, "当前连赢次数“不变”") + cell(13, "输赢金额=0") + cell(12, "系统计算方式") + cell(11, "本局游戏结果") + cell(15, "合并单元格说明")
-            + "</div></div></body></html>")
+            + cell(16, "") + cell(17, "第二格有字") + "</div></div></body></html>")
     css = ("#u10 { left:100px; top:200px; } #u11 { left:0px; top:0px; } #u12 { left:200px; top:1px; }"
-           "#u13 { left:0px; top:30px; } #u14 { left:200px; top:30px; } #u15 { left:0px; top:60px; }")
+           "#u13 { left:0px; top:30px; } #u14 { left:200px; top:30px; } #u15 { left:0px; top:60px; } #u16 { left:0px; top:90px; } #u17 { left:200px; top:90px; }")
     z = tmp_path / "表.zip"
     with zipfile.ZipFile(z, "w") as zf:
         zf.writestr("原型/index.html", "<html><body><iframe src='start.html'></iframe></body></html>")
@@ -535,9 +535,10 @@ def test_Axure表格同一行单元格并成一行_表头与数据行对应_自�
         zf.writestr("原型/data/document.js", '$axure.loadDocument({"sitemap":{"rootNodes":[{"pageName":"表","url":"表.html"}]}});')
         zf.writestr("原型/resources/scripts/axure/axure.js", "var $axure = {};")
     doc = parse_file(z)
-    assert "[u11] 本局游戏结果 ｜ 系统计算方式\n[u13] 输赢金额=0 ｜ 当前连赢次数“不变”\n[u15] 合并单元格说明" in doc.full_text
+    assert "[u11] 本局游戏结果 ｜ 系统计算方式\n[u13] 输赢金额=0 ｜ 当前连赢次数“不变”\n[u15] 合并单元格说明\n[u16] ｜ 第二格有字" in doc.full_text   # 空白格（合并单元格留白）占位，列数不乱
     assert doc.controls["u11"] == {"cls": "table_row", "x": 100, "y": 200, "img": "images/u11.png"} and doc.controls["u15"]["cls"] == "table_cell"
-    assert "u12" not in doc.controls   # 并进行里的单元格不单独建索引
+    assert doc.controls["u16"] == {"cls": "table_row", "x": 100, "y": 290, "img": "images/u16.png"}
+    assert "u12" not in doc.controls and "u17" not in doc.controls   # 并进行里的单元格不单独建索引
     page_check = doc.check["pages"][0]
     assert page_check["missing"] == 0 and page_check["extra"] == 0 and page_check["raw"] == page_check["got"]
 
@@ -584,13 +585,18 @@ def test_Axure流程图_流程框加连接线还原成带分支标签的流程�
     def conn(i, label):
         return (f"<div id='u{i}' class='ax_default _连接'><img id='u{i}_seg0' class='img' src='x.svg'/><img id='u{i}_seg1' class='img' src='y.svg'/>"
                 f"<div id='u{i}_text' class='text'><p>{label}</p></div></div>")
-    page = ("<html><head><title>流程</title></head><body><div id='base'>" + box(1, "用户投注") + box(2, "是否盈利") + box(3, "记录+1") + box(4, "清零")
-            + conn(5, "") + conn(6, "是") + conn(7, "否") + box(9, "说明文字") + "</div></body></html>")
+    def text(i, t):
+        return f"<div id='u{i}' class='ax_default _段落'><div id='u{i}_text' class='text'><p>{t}</p></div></div>"
+    page = ("<html><head><title>流程</title></head><body><div id='base'>" + box(1, "用户投注") + box(2, "是否盈利").replace("box_1", "flow_shape") + box(3, "记录+1") + box(4, "清零")
+            + conn(5, "") + conn(6, "") + conn(7, "否") + text(8, "是") + text(10, "权重50%") + conn(11, "") + box(12, "结束") + box(9, "说明文字") + "</div></body></html>")
     css = ("#u1 { left:100px; top:100px; width:100px; height:40px; } #u2 { left:80px; top:200px; width:140px; height:60px; }"
            "#u3 { left:100px; top:320px; width:100px; height:40px; } #u4 { left:300px; top:210px; width:100px; height:40px; }"
            "#u5 { left:150px; top:140px; } #u5_seg0 { left:-5px; top:0px; width:10px; height:60px; } #u5_seg1 { left:-10px; top:40px; width:20px; height:20px; }"
            "#u6 { left:150px; top:260px; } #u6_seg0 { left:-5px; top:0px; width:10px; height:60px; } #u6_seg1 { left:-10px; top:40px; width:20px; height:20px; }"
            "#u7 { left:220px; top:230px; } #u7_seg0 { left:0px; top:-5px; width:80px; height:10px; } #u7_seg1 { left:60px; top:-10px; width:20px; height:20px; }"
+           "#u8 { left:144px; top:262px; width:13px; height:17px; } #u10 { left:160px; top:285px; width:60px; height:18px; }"   # 贴着 u6 的小字：端点也落在「是」上，但流程框优先；两段小字都挂成 u6 的标签
+           "#u11 { left:150px; top:360px; } #u11_seg0 { left:-5px; top:0px; width:10px; height:27px; } #u11_seg1 { left:-9px; top:9px; width:18px; height:19px; }"   # 27px 的短线不是箭头
+           "#u12 { left:100px; top:380px; width:100px; height:40px; }"
            "#u9 { left:100px; top:500px; width:200px; height:30px; }")
     z = tmp_path / "流程.zip"
     with zipfile.ZipFile(z, "w") as zf:
@@ -601,9 +607,38 @@ def test_Axure流程图_流程框加连接线还原成带分支标签的流程�
         zf.writestr("原型/resources/scripts/axure/axure.js", "var $axure = {};")
     doc = parse_file(z)
     text = doc.full_text
-    assert ("[u4] 清零\n[u7] 否\n[u6] 是\n[u3] 记录+1\n【流程图 1：4 个节点 3 条连线】\n用户投注 → 是否盈利\n是否盈利 —否→ 清零\n是否盈利 —是→ 记录+1\n【流程图结束】\n[u9] 说明文字") in text   # 分支按目标框的阅读顺序排
+    assert ("[u4] 清零\n[u7] 否\n[u8] 是\n[u10] 权重50%\n[u3] 记录+1\n[u12] 结束\n【流程图 1：5 个节点 4 条连线】\n用户投注 → 是否盈利\n是否盈利 —否→ 清零\n是否盈利 —是 权重50%→ 记录+1\n记录+1 → 结束\n【流程图结束】\n[u9] 说明文字") in text   # 分支按目标框的阅读顺序排；旁边小字成标签；短线连上
     assert doc.check["pages"][0]["flows"] == 1 and doc.check["ok"] is True   # 连接线标签「是 / 否」也是页面文字，自校验照样 0 缺字
     from app.agents.ledger import build_units
     units = build_units("【文件：流程.zip】\n# Axure 原型：流程.zip\n## 页面：流程\n" + text.split("## 页面：流程\n", 1)[-1])
-    assert [u["uid"] for u in units] == ["u1", "u2", "u4", "u7", "u6", "u3", "u9"]   # 块内行不记；连接线标签控件（是 / 否）仍是单元
+    assert [u["uid"] for u in units] == ["u1", "u2", "u4", "u7", "u8", "u10", "u3", "u12", "u9"]   # 块内行不记；连接线标签控件（是 / 否）与旁边小字仍是单元
     assert all("→" not in u["text"] for u in units)
+
+
+def test_Axure站点地图混淆格式解码_页面按站点地图顺序_同名页面带路径(tmp_path):
+    """Axure 9/10 导出的 document.js 不是 JSON：`_creator` 里 `_(b,_(c,d…),q,_(r,[…]))` 两两配键值、键和值都是变量名，
+    变量表 `var b="configuration",c=…` 在后面。之前只认 JSON，解析失败就按文件名字母序排页面（后台包 12 页全乱）。
+    解码后按站点地图树的顺序列页面（文件夹只作分组、不进标题），同名页面才带路径。"""
+    import zipfile
+
+    from app.parsers.axure import _sitemap
+    from app.parsers.base import parse_file
+
+    js = ('\ufeff$axure.loadDocument(\n(function() {\n    var _ = function() { var r={},a=arguments; for(var i=0; i<a.length; i+=2) r[a[i]]=a[i+1]; return r; }\n'
+          '    var _creator = function() { return _(b,_(c,d,e,f),g,_(h,[_(i,j,k,l,m,n,o,p),_(i,q,k,r,m,s,o,q,t,[_(i,u,k,v,m,n,o,w),_(i,x,k,y,m,n,o,z,t,[_(i,A,k,B,m,n,o,C)])]),_(i,D,k,E,m,s,o,q,t,[_(i,F,k,B,m,n,o,G)])]),H,[I]); };\n'
+          'var b="configuration",c="showPageNotes",d=true,e="useLabels",f=false,g="sitemap",h="rootNodes",i="id",j="a1",k="pageName",l="需求说明",m="type",n="Wireframe",o="url",p="需求说明.html",'
+          'q="",r="活动运营后台",s="Folder",t="children",u="b2",v="活动列表",w="活动列表.html",x="c3",y="连赢活动记录",z="连赢活动记录.html",A="d4",B="操作记录",C="操作记录.html",'
+          'D="e5",E="商户后台, 含逗号",F="f6",G="操作记录2.html",H="additionalJs",I="plugins/x.js";\nreturn _creator();\n})());')
+    assert _sitemap(js) == [("需求说明", "需求说明.html"), ("活动运营后台 / 活动列表", "活动列表.html"), ("活动运营后台 / 连赢活动记录", "连赢活动记录.html"),
+                            ("活动运营后台 / 连赢活动记录 / 操作记录", "操作记录.html"), ("商户后台, 含逗号 / 操作记录", "操作记录2.html")]
+    page = lambda t: f"<html><head><title>{t}</title></head><body><div id='base'><div id='u1' class='ax_default label'><div id='u1_text' class='text'><p>{t}内容</p></div></div></div></body></html>"
+    z = tmp_path / "原型.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("原型/index.html", "<html><body><iframe src='start.html'></iframe></body></html>")
+        zf.writestr("原型/data/document.js", js)
+        zf.writestr("原型/resources/scripts/axure/axure.js", "var $axure = {};")
+        for name in ("需求说明", "活动列表", "连赢活动记录", "操作记录", "操作记录2"):
+            zf.writestr(f"原型/{name}.html", page(name))
+    text = parse_file(z).full_text
+    heads = [l for l in text.splitlines() if l.startswith("## 页面：")]
+    assert heads == ["## 页面：需求说明", "## 页面：活动列表", "## 页面：连赢活动记录", "## 页面：活动运营后台 / 连赢活动记录 / 操作记录", "## 页面：商户后台, 含逗号 / 操作记录"]

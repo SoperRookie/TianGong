@@ -59,6 +59,11 @@ class DependencyStore:
             auto.pop(key)
         self._persist(project)
 
+    def drop_project(self, project: str) -> None:
+        """删除项目时整张图一起清掉。"""
+        if self._docs.pop(project, None) is not None:
+            self._doc.remove(project)
+
     def _persist(self, project: str) -> None:
         doc = self._docs[project]
         doc["updated_at"] = _now()
