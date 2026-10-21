@@ -15,6 +15,7 @@ from loguru import logger
 
 from pydantic import BaseModel, Field
 
+from app.api import path_params  # noqa: F401  必须先于路由定义：注册保留编码斜杠的 str 转换器
 from app.agents import run_analysis, run_generation
 from app.agents.json_utils import LLMOutputError
 from app.config import get_settings
