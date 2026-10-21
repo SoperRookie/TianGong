@@ -259,7 +259,7 @@ def _found(text: str, draft_norm: str, draft_strict: str | None) -> bool:
 
 
 _SEG_RE = re.compile(r"[，。；：！？,.;:!?、()（）「」【】\[\]｜|]+")
-_NUM_PREFIX = re.compile(r"^(注[:：]\s*)?(?:(\d{1,2}|[一二三四五六七八九十]{1,2})\s*[、.．:：)）]|[①-⑳]|[1-9]\ufe0f?\u20e3)\s*")   # 「1、」「注：1、」「三、」「①」「1️⃣」
+_NUM_PREFIX = re.compile(r"^(注[:：]\s*)?(?:\d{1,2}(?:\.\d{1,2}){1,3}\s+|(\d{1,2}|[一二三四五六七八九十]{1,2})\s*[、.．:：)）]|[①-⑳]|[1-9]\ufe0f?\u20e3)\s*")   # 「1、」「注：1、」「三、」「2.1 」「①」「1️⃣」
 _FULL_RATIO = 0.9
 _ITEM_LINE = re.compile(r"^-\s+(?:⚠\s+)?(.*?)(?:\s+〔.*)?$")
 _TABLE_RULE = re.compile(r"^\|?\s*:?-{3,}")

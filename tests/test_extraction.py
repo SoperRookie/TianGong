@@ -772,3 +772,48 @@ async def test_附件解析全文接口(client):
     t = (await client.get(f"/api/v1/requirements/{rid}/attachments/{att['att_id']}/text")).json()
     assert t["filename"] == "规则.txt" and t["parsed"] is True and "报名费满 4 元后当日将无法再次报名" in t["text"]
     assert (await client.get(f"/api/v1/requirements/{rid}/attachments/nope/text")).status_code == 404
+
+
+def test_原文小标题成子标题_区块开头的标题并进区块名_页面间分隔线_底稿去点号编号也能对上():
+    """「一、奖池规则」「2.3 查询功能说明」这类原文小标题成加粗子标题不缩进；区块开头就是本区块标题的（「一、活动游戏类型说明」、
+    「导出数据」+「2.5 列表的导出数据」）不再单独成行，原文标题更长的用它当区块名；「1、页面说明」后面紧跟「i.」「ii.」子项的也是
+    小标题；带 ⚠ / 疑点或冒号结尾的引语不折；页面之间有分隔线。底稿按整理稿正文核算，折进标题的原文仍能对上（「2.1 」点号编号也去掉再比）。"""
+    from app.agents.extraction import assign_ids, extraction_markdown, extraction_outline
+    from app.agents.ledger import account, build_units
+
+    src = "后台.zip › 需求说明"
+    modules = [
+        {"name": "需求说明-活动游戏类型说明", "items": [
+            {"text": "一、活动游戏类型说明", "sources": [src]},
+            {"text": "连赢活动的游戏类型限制为：仅所有百家乐游戏类型及玩法参与", "sources": [src]},
+            {"text": "2.3 查询功能说明", "sources": [src]},
+            {"text": "更新时间", "sources": [src]}]},
+        {"name": "需求说明-导出数据", "items": [
+            {"text": "导出数据", "sources": [src]},
+            {"text": "2.5 列表的导出数据", "sources": [src]},
+            {"text": "i. 点击【导出数据】后，直接在下载中心查看文件；", "sources": [src]},
+            {"text": "ii. 前后导出时间间隔最少≥1分钟；", "sources": [src]}]},
+        {"name": "需求说明-页面说明", "items": [
+            {"text": "1、页面说明", "sources": [src]},
+            {"text": "i.展示活动后台“连赢活动”类型活动的相关报名记录", "sources": [src]},
+            {"text": "2、功能说明", "sources": [src]},
+            {"text": "ii.操作：手动撤销/批量撤销会员的报名", "sources": [src]}]},
+        {"name": "报名记录-字段说明", "items": [
+            {"text": "2.1 字段说明", "sources": ["后台.zip › 报名记录"], "verified": False},
+            {"text": "连赢判断规则如下表所示：", "sources": ["后台.zip › 报名记录"]}]},
+    ]
+    assign_ids(modules)
+    outline = extraction_outline(modules)
+    b1, b2, b3 = outline[0]["blocks"]
+    assert b1["name"] == "活动游戏类型说明" and b1["rows"][0].get("dup") and [r["t"] for r in b1["rows"]] == ["label", "item", "label", "item"]
+    assert b1["rows"][3]["lv"] == 0   # 「2.3 …」是小标题不是子项，后面的条目也不缩进
+    assert b2["name"] == "列表的导出数据" and b2["rows"][0].get("dup") and b2["rows"][1].get("dup") and [r["t"] for r in b2["rows"][2:]] == ["item", "item"]
+    assert [r["t"] for r in b3["rows"]] == ["label", "item", "label", "item"] and b3["rows"][0].get("dup") and b3["rows"][1]["lv"] == 0
+    assert outline[1]["blocks"][0]["name"] == "字段说明" and not outline[1]["blocks"][0]["rows"][0].get("dup")   # ⚠ 的不折
+    md = extraction_markdown(modules)
+    assert "### 1.1 活动游戏类型说明\n- 连赢活动的游戏类型限制为" in md and "- 一、活动游戏类型说明" not in md and "**2.3 查询功能说明**\n- 更新时间" in md
+    assert "### 1.2 列表的导出数据\n- i. 点击" in md and "### 1.3 页面说明\n- i.展示" in md and "**2、功能说明**\n- ii.操作" in md and "\n\n---\n\n## 2. 报名记录" in md
+    assert "### 2.1 字段说明\n**⚠ 2.1 字段说明**\n**连赢判断规则如下表所示：**" in md
+    materials = "【文件：后台.zip】\n## 页面：需求说明\n[u1] 一、活动游戏类型说明\n[u2] 导出数据\n[u3] 2.5 列表的导出数据\n[u4] 1、页面说明\n[u5] 2.3 查询功能说明\n"
+    acct = account(build_units(materials), md)
+    assert {u["uid"]: u["status"] for u in acct["units"]} == {"u1": "in", "u2": "in", "u3": "in", "u4": "in", "u5": "in"}

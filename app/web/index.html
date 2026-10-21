@@ -238,12 +238,22 @@ details.fold[open] summary { border-bottom:1px solid var(--line-2); color:var(--
 details.fold .fold-b { padding:10px 12px; }
 table { width:100%; border-collapse:collapse; font-size:12.8px; }
 .ex-table { width:auto; max-width:100%; margin:4px 6px 6px; font-size:inherit; }
-.md-doc { background:var(--card, #fff); border:1px solid var(--line); border-radius:8px; padding:14px 20px; line-height:1.75; font-size:13.5px; }
-.md-doc h1 { font-size:18px; margin:0 0 10px; } .md-doc h2 { font-size:15px; margin:18px 0 6px; padding-bottom:4px; border-bottom:1px solid var(--line); } .md-doc h3 { font-size:13.5px; margin:12px 0 4px; } .md-doc h4, .md-doc h5, .md-doc h6 { font-size:13px; margin:10px 0 4px; }
-.md-doc ul, .md-doc ol { margin:2px 0 6px 22px; padding:0; } .md-doc li { margin:2px 0; } .md-doc p { margin:4px 0 8px; } .md-doc hr { border:0; border-top:1px solid var(--line); margin:12px 0; }
-.md-doc table { width:auto; max-width:100%; margin:6px 0 10px; border-collapse:collapse; font-size:inherit; } .md-doc th, .md-doc td { border:1px solid var(--line); padding:4px 8px; vertical-align:top; text-align:left; } .md-doc th { background:var(--line-2); font-weight:600; }
-.md-doc code { background:var(--line-2); padding:0 4px; border-radius:4px; font-size:12px; } .md-doc pre { white-space:pre; overflow-x:auto; background:var(--line-2); padding:10px 12px; border-radius:8px; font-size:12px; line-height:1.6; font-family:ui-monospace, 'SF Mono', Menlo, 'PingFang SC', 'Microsoft YaHei', monospace; }
-.md-doc .md-mark { color:var(--ink-3); font-size:12px; } .md-doc .md-warn { color:var(--warn); } .md-doc blockquote { margin:4px 0; padding:2px 10px; border-left:3px solid var(--line); color:var(--ink-3); }
+.md-doc { background:var(--card, #fff); border:1px solid var(--line); border-radius:8px; padding:20px 32px 32px; line-height:1.8; font-size:13.5px; }
+.md-doc h1 { font-size:20px; margin:0 0 12px; } .md-doc h1 + ul { color:var(--ink-3); font-size:12.5px; margin:0 0 6px; padding:8px 14px 8px 30px; border:1px dashed var(--line); border-radius:8px; }
+.md-doc h2 { font-size:16px; margin:24px 0 12px; padding:0 0 8px; border-bottom:2px solid var(--line); } .md-doc h2:first-of-type { margin-top:8px; }
+.md-doc h3 { font-size:14px; margin:20px 0 8px; padding:2px 0 2px 10px; border-left:3px solid var(--primary); } .md-doc h4, .md-doc h5, .md-doc h6 { font-size:13px; margin:10px 0 4px; }
+.md-doc ul, .md-doc ol { margin:2px 0 8px 22px; padding:0; } .md-doc li { margin:3px 0; } .md-doc li::marker { color:var(--ink-3); } .md-doc li ul, .md-doc li ol { margin:2px 0 2px 18px; }
+.md-doc p { margin:4px 0 8px; } .md-doc p.md-label { margin:12px 0 4px; } .md-doc hr { border:0; border-top:1px dashed var(--line); margin:24px 0 8px; }
+.md-doc table { width:auto; max-width:100%; margin:8px 0 14px; border-collapse:collapse; font-size:12.5px; line-height:1.6; } .md-doc th, .md-doc td { border:1px solid var(--line); padding:5px 10px; vertical-align:top; text-align:left; } .md-doc th { background:var(--line-2); font-weight:600; white-space:nowrap; } .md-doc tbody tr:nth-child(even) td { background:color-mix(in srgb, var(--line-2) 35%, transparent); }
+.md-doc code { background:var(--line-2); padding:0 4px; border-radius:4px; font-size:12px; } .md-doc pre { white-space:pre; overflow-x:auto; background:var(--line-2); border-left:3px solid var(--line); margin:8px 0 14px; padding:10px 14px; border-radius:0 8px 8px 0; font-size:12.5px; line-height:1.65; font-family:ui-monospace, 'SF Mono', Menlo, 'PingFang SC', 'Microsoft YaHei', monospace; }
+.md-doc .md-mark { color:var(--ink-3); font-size:12px; font-weight:400; } .md-doc .md-warn { color:var(--warn); } .md-doc blockquote { margin:4px 0; padding:2px 10px; border-left:3px solid var(--line); color:var(--ink-3); }
+.ex-doc { display:flex; gap:14px; align-items:flex-start; }
+.ex-doc .md-doc { flex:1; min-width:0; }
+.ex-toc { flex:none; width:220px; position:sticky; top:56px; max-height:calc(100vh - 72px); overflow:auto; font-size:12px; line-height:1.5; border:1px solid var(--line); border-radius:8px; background:var(--card, #fff); padding:10px 0; }
+.ex-toc .ex-toc-t { font-weight:600; color:var(--ink-3); padding:0 12px 6px; font-size:11.5px; letter-spacing:.5px; }
+.ex-toc a { display:block; padding:3px 12px; color:var(--ink-2, inherit); cursor:pointer; text-decoration:none; border-left:2px solid transparent; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ex-toc a.lv3 { padding-left:24px; color:var(--ink-3); } .ex-toc a:hover { background:var(--line-2); } .ex-toc a.on { color:var(--primary); border-left-color:var(--primary); background:var(--primary-50); }
+@media (max-width: 1100px) { .ex-toc { display:none; } }
 .ex-table th, .ex-table td { border:1px solid var(--line); padding:3px 8px; vertical-align:top; text-align:left; line-height:1.5; }
 .ex-table th { background:var(--line-2); font-weight:600; }
 th { position:sticky; top:0; background:var(--well); color:var(--ink-2); font-weight:600;
@@ -5749,7 +5759,7 @@ function reqExtractionHtml(r, canAI, canEdit) {
   }
   if (!ex.modules) {
     return intro + toolbar + bar + `<div class="hint" style="margin-bottom:6px">这份整理稿没有逐条结构（整篇改写过或旧版本提取），只能整篇查看 / 改写；重新提取后可逐条审核</div>
-      <div class="ex-scroll md-doc" style="max-height:600px;overflow:auto">${mdDoc(ex.text)}</div>`;
+      ${exDocHtml(ex.text)}`;
   }
   const all = _exItemsOf(r);
   const nUnv = all.filter(it => it.verified === false).length, nPend = all.filter(it => it.verified === false && !it.review).length, nGap = all.filter(it => it.gap && !it.forced).length, nForced = all.filter(it => it.forced).length, nRev = all.filter(it => it.review).length, nDoubt = all.filter(it => it.doubt).length, nDraft = all.filter(it => it.draft).length;
@@ -5757,7 +5767,7 @@ function reqExtractionHtml(r, canAI, canEdit) {
       ${[['preview','预览'],['all',`逐条审核 ${all.length}`],['unverified',`⚠ 待核对 ${nPend}`],['gap',`补漏 ${nGap}`],['forced',`兜底 ${nForced}`],['doubt',`疑点 ${nDoubt}`],['draft',`疑似草稿 ${nDraft}`],['reviewed',`已处理 ${nRev}`],['ledger',`底稿核对${ls&&(ls.todo||ls.review_open)?` <b style="color:${ls.todo?'var(--danger)':'var(--warn)'}">${(ls.todo||0)+(ls.review_open||0)}</b>`:''}`]].map(([k,t])=>`<button class="btn ghost sm ${_exFilter===k?'on':''}" style="${_exFilter===k?'font-weight:600':''}" onclick="_exFilter='${k}';renderRequirementDetail()">${t}</button>`).join('')}
       <span class="hint">${_exFilter==='preview'?'整理稿正文预览（与 docs 文档同一格式：页面 › 区块 › 条目，表格、子标题、缩进；〔补漏〕〔兜底〕〔疑点〕〔疑似草稿〕是标记）；要核对通过 / 修改 / 删除条目切到「逐条审核」':_exFilter==='ledger'?'底稿 = 产品原文的每一句（原型控件行、文档段落、说明备注，重复的只记一次；图片理解的描述不算，截图里转录的文字单列「图中文字」），每句的去向：收录 / 排除（原因与判定方）/ 待处理。要人看的只有「需复核」（模型排除的、像规则的句子）和「待处理」；程序按类排除的折叠起来。待处理为 0、需复核都看过才能完成审核':'⚠ = 没在材料里逐字找到（多半是模型改了写法），请对照原文核对通过、改成原句或删除；〔补漏〕= 模型判定是需求后补进的原句；〔兜底〕= 模型没判定去向、程序按原句收进来的，请核对后留下或在底稿里排除；〔疑点〕= 原文本身的问题（错别字、前后台 / PC 与移动口径不一致、占位符），原句照抄不改，疑点单列供需求澄清；〔疑似草稿〕= 画布上与主体不相连、与正式内容重复却有出入的区块（旧版本），已照抄收录但用例不要照它写'}</span></div>`;
   if (_exFilter === 'ledger') return intro + toolbar + bar + filt + exLedgerHtml(r, canEdit);
-  if (_exFilter === 'preview') return intro + toolbar + bar + filt + `<div class="ex-scroll md-doc" style="max-height:600px;overflow:auto">${mdDoc(ex.text)}</div>`;
+  if (_exFilter === 'preview') return intro + toolbar + bar + filt + exDocHtml(ex.text);
   const keep = it => _exFilter==='all' || (_exFilter==='unverified' && it.verified===false && !it.review) || (_exFilter==='gap' && it.gap && !it.forced) || (_exFilter==='forced' && it.forced) || (_exFilter==='doubt' && it.doubt) || (_exFilter==='draft' && it.draft) || (_exFilter==='reviewed' && it.review);
   const byId = Object.fromEntries(all.map(it => [it.id, it]));
   const badgeOf = it => `${it.verified===false?'<span style="color:var(--warn)" title="未在材料中逐字找到">⚠</span> ':''}${it.forced?`<span class="st rejected" title="模型没判定去向，程序按原句收进来的（单元 ${esc(it.unit||'')}）；请核对：留下、改归模块，或在底稿核对里排除">兜底</span> `:it.gap?'<span class="st candidate" title="模型判定是需求后补进的原句">补漏</span> ':''}${it.manual?`<span class="st approved" title="底稿核对里人工按原句收录（单元 ${esc(it.unit||'')}）">人工收录</span> `:''}${it.draft?`<span class="st rejected" title="画布上与页面主体不相连、与正式内容重复却有出入的区块（旧版本 / 备用稿）：已照抄收录，用例不要照它写，请与产品确认">疑似草稿</span> `:''}${it.review?`<span class="st ${it.review.status==='ok'?'approved':'candidate'}" title="${esc(it.review.by||'')} ${esc(relTime(it.review.at))}">${it.review.status==='ok'?'已核对':'已修改'}</span> `:''}`;
@@ -6107,12 +6117,12 @@ function mdDoc(md) {
     }
     return {html: html + `</${ordered?'ol':'ul'}>`, idx};
   };
-  const lines = md.split('\n'), out = []; let i = 0;
+  const lines = md.split('\n'), out = []; let i = 0, hn = 0;   // 标题按出现顺序编号（data-hn），目录按同一顺序定位
   while (i < lines.length) {
     const l = lines[i];
     if (l.startsWith('```')) { const buf = []; i++; while (i < lines.length && !lines[i].startsWith('```')) buf.push(lines[i++]); i++; out.push(`<pre>${esc(buf.join('\n'))}</pre>`); continue; }
     const h = l.match(/^(#{1,6})\s+(.+)$/);
-    if (h) { out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`); i++; continue; }
+    if (h) { out.push(`<h${h[1].length} data-hn="${hn++}">${inline(h[2])}</h${h[1].length}>`); i++; continue; }
     if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(l)) { out.push('<hr>'); i++; continue; }
     if (l.trim().startsWith('|')) {
       const rows = []; while (i < lines.length && lines[i].trim().startsWith('|')) rows.push(lines[i++].trim());
@@ -6136,10 +6146,44 @@ function mdDoc(md) {
     if (!l.trim()) { i++; continue; }
     const buf = []; while (i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|\s*\||\s*([-*+]|\d+[.、])\s|>)/.test(lines[i])) buf.push(lines[i++]);
     if (!buf.length) { buf.push(lines[i++]); }
-    out.push(`<p>${inline(buf.join(' '))}</p>`);
+    const para = buf.join(' ');
+    out.push(`<p${/^\*\*[^*]+\*\*(\s*〔[^〕]*〕)*\s*$/.test(para) ? ' class="md-label"' : ''}>${inline(para)}</p>`);   // 整段只有加粗的是子标题
   }
   return out.join('');
 }
+// 整理稿文档式预览：左目录（页面 / 区块，随窗口滚动吸顶）+ 正文随页面滚动不另设滚动条；目录点一下滚到对应标题，滚动时高亮当前位置
+function exDocHtml(text) {
+  const toc = []; let hn = 0, fence = false;
+  for (const l of (text || '').split('\n')) {
+    if (l.startsWith('```')) { fence = !fence; continue; }
+    if (fence) continue;
+    const h = l.match(/^(#{1,6})\s+(.+)$/);
+    if (!h) continue;
+    const n = hn++, lv = h[1].length;
+    if (lv === 2 || lv === 3) toc.push({n, lv, text: h[2].split(' 〔')[0].replace(/\*\*/g, '')});
+  }
+  const nav = toc.length > 1 ? `<nav class="ex-toc"><div class="ex-toc-t">目录</div>${toc.map(t => `<a class="lv${t.lv}" data-to="${t.n}" onclick="exTocGo(this)" title="${esc(t.text)}">${esc(t.text)}</a>`).join('')}</nav>` : '';
+  setTimeout(exTocSync, 0);
+  return `<div class="ex-doc">${nav}<div class="md-doc">${mdDoc(text)}</div></div>`;
+}
+function exTocGo(a) {
+  const wrap = a.closest('.ex-doc'), t = wrap && wrap.querySelector(`[data-hn="${a.dataset.to}"]`);
+  if (t) window.scrollTo({top: window.scrollY + t.getBoundingClientRect().top - 56, behavior: 'smooth'});
+}
+let _exTocTimer = null;
+function exTocSync() {
+  if (_exTocTimer) return;
+  _exTocTimer = setTimeout(() => {
+    _exTocTimer = null;
+    const wrap = document.querySelector('.ex-doc'), nav = wrap && wrap.querySelector('.ex-toc'); if (!nav) return;
+    let cur = null;
+    for (const h of wrap.querySelectorAll('h2[data-hn], h3[data-hn]')) { if (h.getBoundingClientRect().top <= 80) cur = h.dataset.hn; else break; }
+    let on = null;
+    for (const a of nav.querySelectorAll('a')) { const hit = a.dataset.to === cur; a.classList.toggle('on', hit); if (hit) on = a; }
+    if (on) { const r = on.getBoundingClientRect(), nr = nav.getBoundingClientRect(); if (r.top < nr.top || r.bottom > nr.bottom) on.scrollIntoView({block: 'nearest'}); }
+  }, 80);
+}
+window.addEventListener('scroll', exTocSync, {passive: true});
 function mdLite(md) {
   const lines = md.split('\n'), out = []; let i = 0;
   const inline = t => esc(t).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
