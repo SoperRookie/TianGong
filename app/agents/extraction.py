@@ -153,6 +153,10 @@ IMAGE_SECTION = "仅出现在图片中的文案"
 _LABEL_RE = re.compile(r"[:：]\s*$")
 _FLOW_RE = re.compile(r"\s—[^→]*→\s|\s→\s")   # 解析器还原的流程行「A → B」「A —是→ B」
 _SUB_RE = re.compile(r"^(?:注|备注|说明|示例|例)[:：]|^(?:\d{1,2}|[一二三四五六七八九十]{1,2})\s*[、.．:：)）]|^[①-⑳]|^[1-9]\ufe0f?\u20e3|^[（(]示例")
+_HEAD_RE = re.compile(r"^(?:[一二三四五六七八九十]{1,3}、|\d{1,2}(?:\.\d{1,2}){1,3}\s*|第[一二三四五六七八九十\d]{1,3}[章节部分]\s*)")   # 原文小标题的编号：「一、」「2.1 」「第三章」
+_HEAD_STRIP_RE = re.compile(r"^(?:[一二三四五六七八九十]{1,3}、|\d{1,2}(?:\.\d{1,2}){1,3}\s*|第[一二三四五六七八九十\d]{1,3}[章节部分]\s*|\d{1,2}\s*[、.．]|[（(]?[一二三四五六七八九十\d]{1,2}[）)]|[①-⑳])\s*")
+_SENTENCE_RE = re.compile(r"[。；，,;！？!?]")
+_ROMAN_RE = re.compile(r"^(?:[ivx]{1,4}|[IVX]{1,4})\s*[.、．]")   # 「i.」「ii.」「iV.」原文用罗马数字的子项
 _IMG_SRC_RE = re.compile(r"图片\s*[:：]?\s*\d+")   # 「图片:7」「图片 7」「图片10」都算只在图片里的文案
 _PAGE_RANK = [re.compile(r"更新记录|版本记录|修订记录|变更记录|更新日志|版本历史"), re.compile(r"需求说明|需求背景|需求概述|总体说明|概述|总览")]
 _PAGE_PREFIX = re.compile(r"^页面[:：]\s*")
@@ -229,8 +233,8 @@ def flow_ascii(lines: list[str]) -> list[str] | None:
 
 
 def _block_rows(items: list[dict]) -> list[dict]:
-    """区块内条目的层级：表格行（含「 ｜ 」，连续且列数相同的并成一张表，表头是第一行）、小标签（以冒号结尾的短句，
-    加粗成子标题）、子项（「1、」「①」「注：」「示例」开头且上一条是普通条目 / 标签 / 表格的，缩进一级）、普通条目。"""
+    """区块内条目的层级：表格行（含「 ｜ 」，连续且列数相同的并成一张表，表头是第一行）、小标签（以冒号结尾的短句、
+    「一、」「2.1 」编号的原文小标题，加粗成子标题）、子项（「1、」「①」「注：」「示例」开头且上一条是普通条目 / 标签 / 表格的，缩进一级）、普通条目。"""
     rows: list[dict] = []
     for it in items:
         text = it["text"]
@@ -250,6 +254,9 @@ def _block_rows(items: list[dict]) -> list[dict]:
         if _LABEL_RE.search(text) and len(text) <= _MAX_LABEL:
             rows.append({"t": "label", "item": it})
             continue
+        if _HEAD_RE.match(text) and len(text) <= _MAX_LABEL and not _SENTENCE_RE.search(text):   # 「一、奖池规则」「2.3 查询功能说明」：原文小标题，成子标题不缩进
+            rows.append({"t": "label", "item": it})
+            continue
         sub = bool(_SUB_RE.match(text))
         lv = 0
         if sub and rows:
@@ -257,6 +264,14 @@ def _block_rows(items: list[dict]) -> list[dict]:
             if prev["t"] in ("label", "table") or (prev["t"] == "item" and (prev["lv"] == 1 or not prev["sub"])):
                 lv = 1
         rows.append({"t": "item", "item": it, "lv": lv, "sub": sub})
+    for k in range(len(rows) - 1):   # 「1、页面说明」后面紧跟「i.」「ii.」子项：它是小标题不是列表项，成子标题、子项不缩进
+        r, nx = rows[k], rows[k + 1]
+        if r["t"] == "item" and nx["t"] == "item" and _ROMAN_RE.match(nx["item"]["text"]) and not _ROMAN_RE.match(r["item"]["text"]) \
+                and _SUB_RE.match(r["item"]["text"]) and len(r["item"]["text"]) <= _MAX_LABEL and not _SENTENCE_RE.search(r["item"]["text"]):
+            rows[k] = {"t": "label", "item": r["item"]}
+    for k, r in enumerate(rows):
+        if r["t"] == "item" and _ROMAN_RE.match(r["item"]["text"]) and k and rows[k - 1]["t"] == "label":
+            r["lv"] = 0
     out: list[dict] = []
     for r in rows:
         if r["t"] == "table" and len(r["items"]) == 1:   # 孤零零一行不成表
@@ -313,6 +328,38 @@ def enforce_draft(modules: list[dict], keys: set[str]) -> int:
     return n
 
 
+def _heading_core(text: str) -> str:
+    """小标题去掉编号与标记后的规范化内容：「一、活动游戏类型说明」→「活动游戏类型说明」。"""
+    return normalize(_HEAD_STRIP_RE.sub("", text.split("〔")[0].strip(), count=1))
+
+
+def _fold_heading(name: str, rows: list[dict], main: str) -> str:
+    """区块开头就是这个区块的原文标题（「一、活动游戏类型说明」「2.1 字段说明」「版本记录」）时，它和区块标题重复：
+    不再单独成行（标 dup，成稿跳过），原文标题比区块名长的用原文标题当区块名，短的（「五、功能清单」对「功能清单活动后台」）
+    保留区块名；最多看开头两条（「导出数据」+「2.5 列表的导出数据」）。带 ⚠ / 疑点的不折，留给人核对。返回区块名。"""
+    for r in rows[:2]:
+        if r["t"] not in ("item", "label"):
+            break
+        it = r["item"]
+        text = it["text"].strip()
+        if _LABEL_RE.search(text) or _SENTENCE_RE.search(text) or len(text) > _MAX_LABEL:   # 「…如下表所示：」是引语不是标题
+            break
+        mark, tail = _item_marks(it, main)
+        if mark or it.get("doubt"):
+            break
+        core, bcore = _heading_core(text), _heading_core(name)
+        if not core or not bcore or len(min(core, bcore, key=len)) < 4:   # 太短的（「二、权限」）底稿按整条等于摘录才算收录，留着
+            break
+        if core == bcore or core in bcore:
+            r["dup"] = True
+        elif bcore in core and _HEAD_RE.match(text) and "：" not in text and ":" not in text:   # 只有带编号的原文标题才替换区块名（「路径：【会员管理-会员流水】」不是标题）
+            r["dup"] = True
+            name = _HEAD_STRIP_RE.sub("", text.split("〔")[0].strip(), count=1)
+        else:
+            break
+    return name
+
+
 def extraction_outline(modules: list[dict]) -> list[dict]:
     """整理稿层级：页面（按模块主来源分组，编号 1. 2. …）› 区块（模块，编号 1.1 …，名字去掉「页面-」前缀）› 条目层级
     （见 _block_rows）。只在图片里出现的文案（来源「图片:N」）归到最后一节「仅出现在图片中的文案」。
@@ -342,9 +389,11 @@ def extraction_outline(modules: list[dict]) -> list[dict]:
                 if name.startswith(page + sep) and len(name) > len(page) + len(sep):
                     name = name[len(page) + len(sep):].strip()
                     break
-        sec["blocks"].append({"name": name or mod["name"], "module": mod["name"], "source": "" if page == IMAGE_SECTION else main,
+        rows = _block_rows(mod["items"])
+        name = _fold_heading(name or mod["name"], rows, "" if page == IMAGE_SECTION else main)
+        sec["blocks"].append({"name": name, "module": mod["name"], "source": "" if page == IMAGE_SECTION else main,
                               "draft": all(it.get("draft") for it in mod["items"]),   # 整块都是疑似草稿：区块标题标出来
-                              "rows": _block_rows(mod["items"])})   # 图片文案节每条都标明来自哪张图
+                              "rows": rows})   # 图片文案节每条都标明来自哪张图
     sections.sort(key=lambda s: _page_rank(s["title"]))   # 稳定排序：更新记录 → 需求说明 → 其它页面（原顺序）→ 图片文案
     for i, sec in enumerate(sections, 1):
         sec["no"] = str(i)
@@ -387,7 +436,8 @@ def _item_marks(it: dict, main: str) -> tuple[str, str]:
 
 def extraction_markdown(modules: list[dict], dropped: list[str] | None = None, head: dict | None = None) -> str:
     """整理稿正文，层级与《连赢挑战赛_需求提取》一致：可选文头（标题 / 来源 / 提取原则 / 校验）→ `## N. 页面 〔来源〕` →
-    `### N.M 区块` → 条目（表格行还原成 Markdown 表格、以冒号结尾的短句加粗成子标题、「1、」「注：」类子项缩进一级）；
+    `### N.M 区块` → 条目（表格行还原成 Markdown 表格、以冒号结尾的短句与「一、」「2.1 」编号的原文小标题加粗成子标题、
+    「1、」「注：」类子项缩进一级，区块开头与区块标题重复的原文标题并进标题）；页面之间用分隔线；
     未逐字找到的加 ⚠ 前缀，补漏 / 兜底 / 疑点各有标记，来源与区块主来源不同时才单独标注；末尾疑点清单与已剔除说明。"""
     lines: list[str] = []
     if head:
@@ -395,13 +445,17 @@ def extraction_markdown(modules: list[dict], dropped: list[str] | None = None, h
                   "- 提取原则：全部需求语句逐字摘录原文（含原文错别字，不作改写），按「页面 › 区块」归类；表格按行还原；只在图片里出现的文案单列；原文疑点另列、不改原句。",
                   f"- 校验：{head.get('check') or '—'}", ""]
     sections = extraction_outline(modules)
-    for sec in sections:
+    for k, sec in enumerate(sections):
+        if k:
+            lines += ["---", ""]   # 页面之间分隔线
         lines.append(f"## {sec['no']}. {sec['title']}" + (f" 〔来源：{sec['source']}〕" if sec["source"] else ""))
         lines.append("")
         for b in sec["blocks"]:
             main = b["source"]
             lines.append(f"### {b['no']} {b['name']}" + (f" {DRAFT_MARK.replace('疑似草稿', '疑似遗留草稿')}" if b["draft"] else ""))
             for r in b["rows"]:
+                if r.get("dup"):   # 区块的原文标题已并进区块标题
+                    continue
                 if r["t"] == "table":
                     for k, it in enumerate(r["items"]):
                         mark, tail = _item_marks(it, main)
