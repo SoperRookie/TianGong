@@ -149,6 +149,7 @@ def _module_source(mod: dict) -> str:
 
 
 TABLE_SEP = " ｜ "   # 解析器把表格同一行单元格并成的分隔符（app.parsers.axure.TABLE_SEP）
+_CELL_RE = re.compile(r"\s*｜\s*")   # 拆单元格：空白格（「｜ 当日… ｜」开头 / 结尾没有空格）也算一格
 IMAGE_SECTION = "仅出现在图片中的文案"
 _LABEL_RE = re.compile(r"[:：]\s*$")
 _FLOW_RE = re.compile(r"\s—[^→]*→\s|\s→\s")   # 解析器还原的流程行「A → B」「A —是→ B」
@@ -244,8 +245,8 @@ def _block_rows(items: list[dict]) -> list[dict]:
             else:
                 rows.append({"t": "flow", "items": [it]})
             continue
-        if TABLE_SEP in text:
-            cols = text.count(TABLE_SEP) + 1
+        if "｜" in text:
+            cols = len(_CELL_RE.split(text.strip()))
             if rows and rows[-1]["t"] == "table" and rows[-1]["cols"] == cols:
                 rows[-1]["items"].append(it)
             else:
@@ -307,6 +308,7 @@ def dedupe_flow_nodes(modules: list[dict]) -> int:
             for part in _FLOW_SPLIT.split(it["text"]):
                 if part and ledger_mod.unit_key(part):
                     nodes.add(ledger_mod.unit_key(part))
+                    nodes.update(ledger_mod.unit_key(tok) for tok in part.split() if ledger_mod.unit_key(tok))   # 分支标签里拼进来的小字（「是 初始暂定75%」）各算一个
         def dup(it: dict) -> bool:   # 整条等于某个框，或（≥ 4 字）是某个多行框文字的一段（模型把一个框按行拆成几条）
             k = ledger_mod.unit_key(it["text"])
             return k in nodes or (len(k) >= 4 and any(k in nd for nd in nodes))
@@ -385,9 +387,12 @@ def extraction_outline(modules: list[dict]) -> list[dict]:
             sec["source"] = src
         name = mod["name"]
         if page != IMAGE_SECTION:
-            for sep in ("-", "－", "—", "–", "：", ":", " › ", "›"):
-                if name.startswith(page + sep) and len(name) > len(page) + len(sep):
-                    name = name[len(page) + len(sep):].strip()
+            for pg in dict.fromkeys([page, page.split(" / ")[-1].strip()]):   # 站点地图带文件夹的页面名「商户管理后台 / 日榜排名」：模块名只带页面名
+                for sep in ("-", "－", "—", "–", "：", ":", " › ", "›"):
+                    if name.startswith(pg + sep) and len(name) > len(pg) + len(sep):
+                        name = name[len(pg) + len(sep):].strip()
+                        break
+                if name != mod["name"]:
                     break
         rows = _block_rows(mod["items"])
         name = _fold_heading(name or mod["name"], rows, "" if page == IMAGE_SECTION else main)
@@ -459,7 +464,7 @@ def extraction_markdown(modules: list[dict], dropped: list[str] | None = None, h
                 if r["t"] == "table":
                     for k, it in enumerate(r["items"]):
                         mark, tail = _item_marks(it, main)
-                        cells = [c.strip().replace("|", "\\|") for c in it["text"].split(TABLE_SEP)]
+                        cells = [c.replace("|", "\\|") for c in _CELL_RE.split(it["text"].strip())]
                         cells[0] = f"{mark}{cells[0]}"
                         cells[-1] = f"{cells[-1]}{tail}"
                         lines.append("| " + " | ".join(cells) + " |")

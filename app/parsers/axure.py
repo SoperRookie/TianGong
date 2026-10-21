@@ -36,6 +36,7 @@ FLOW_BEGIN, FLOW_END = "【流程图 ", "【流程图结束】"   # 程序从流
 _CONNECTOR_CLASS = ("_连接", "connector")
 _ARROW_MAX = 30      # 连接线的箭头段两边都不超过这么大；线段至少一边 ≤ 10px
 _SNAP = 10           # 连接线端点落在流程框边框外 10px 内也算连到它   # 同一行控件的 top 常差 1～3px：按 4px 归并成一行再按列排
+_LABEL_MAX_W, _LABEL_MAX_H, _LABEL_MAX_CHARS, _LABEL_GAP = 160, 24, 12, 12   # 贴在连接线旁边的单行小字（「是」「初始暂定75%」）当这条线的标签
 OPTIONS_MARK, VALUE_MARK, PLACEHOLDER_MARK = "下拉选项：", "输入值：", "占位提示："
 _FORM_MARKS = (OPTIONS_MARK, VALUE_MARK, PLACEHOLDER_MARK)
 _ATTR_MARKS = (VALUE_MARK, PLACEHOLDER_MARK)   # 来自属性、不在页面文字里的行，自校验时不计入提取侧
@@ -56,8 +57,93 @@ def axure_root(files: list[tuple[str, Path]]) -> str | None:
     return None
 
 
+_JS_LITERAL_RE = re.compile(r'"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|true|false|null')
+_JS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _js_literal(tok: str):
+    if tok.startswith('"'):
+        return json.loads(tok)
+    if tok in ("true", "false", "null"):
+        return {"true": True, "false": False, "null": None}[tok]
+    return float(tok) if "." in tok or "e" in tok.lower() else int(tok)
+
+
+def _decode_axure_js(js: str) -> dict | None:
+    """Axure 9/10 导出的 document.js / data.js 是「混淆」格式：`var _creator = function() { return _(b,_(c,d,…),q,_(r,[…])) }`，
+    `_()` 把参数两两配成键值，键和值都是后面 `var b="configuration",c=…` 里的变量。把变量表读出来、按表达式求值还原成字典。"""
+    m = re.search(r"var\s+_creator\s*=\s*function\s*\(\)\s*\{\s*return\s+(.*?);\s*\}", js, re.S)
+    if not m:
+        return None
+    expr = m.group(1)
+    env: dict[str, object] = {}
+    for vm in re.finditer(r"(?m)^\s*var\s+", js):   # 变量表：var b="…",c=…,d=true,…;（逗号在字符串里也不会切错：逐个按字面量吃）
+        i = vm.end()
+        while True:
+            im = _JS_IDENT_RE.match(js, i)
+            if not im:
+                break
+            j = im.end()
+            while j < len(js) and js[j] in " \t":
+                j += 1
+            if j >= len(js) or js[j] != "=":
+                break
+            j += 1
+            while j < len(js) and js[j] in " \t":
+                j += 1
+            lm = _JS_LITERAL_RE.match(js, j)
+            if not lm:
+                break
+            env[im.group(0)] = _js_literal(lm.group(0))
+            j = lm.end()
+            while j < len(js) and js[j] in " \t\r\n":
+                j += 1
+            if j < len(js) and js[j] == ",":
+                i = j + 1
+                while i < len(js) and js[i] in " \t\r\n":
+                    i += 1
+                continue
+            break
+
+    def value(i: int):
+        while i < len(expr) and expr[i] in " \t\r\n":
+            i += 1
+        if expr.startswith("_(", i):
+            items, i = seq(i + 2, ")")
+            return dict(zip(items[0::2], items[1::2])), i
+        if expr[i] == "[":
+            return seq(i + 1, "]")
+        lm = _JS_LITERAL_RE.match(expr, i)
+        if lm:
+            return _js_literal(lm.group(0)), lm.end()
+        im = _JS_IDENT_RE.match(expr, i)
+        if im:
+            return env.get(im.group(0), im.group(0)), im.end()
+        raise ValueError(f"无法解析：{expr[i:i + 20]!r}")
+
+    def seq(i: int, close: str) -> tuple[list, int]:
+        items: list = []
+        while True:
+            while i < len(expr) and expr[i] in " \t\r\n":
+                i += 1
+            if expr[i] == close:
+                return items, i + 1
+            v, i = value(i)
+            items.append(v)
+            while i < len(expr) and expr[i] in " \t\r\n":
+                i += 1
+            if expr[i] == ",":
+                i += 1
+
+    try:
+        data, _end = value(0)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _sitemap(document_js: str) -> list[tuple[str, str]]:
-    """document.js 的站点地图 → [(页面名, url)] 按目录顺序（文件夹节点无 url 时只作为分组名）。"""
+    """document.js 的站点地图 → [(页面名, url)] 按目录顺序（文件夹节点无 url 时只作为分组名）。JSON 与混淆两种格式都认。"""
     start = document_js.find("{")
     if start == -1:
         return []
@@ -73,8 +159,10 @@ def _sitemap(document_js: str) -> list[tuple[str, str]]:
                 end = i
                 break
     pages: list[tuple[str, str]] = []
+    data = _decode_axure_js(document_js) if "_creator" in document_js else None
     try:
-        data = json.loads(document_js[start:end + 1])
+        if data is None:
+            data = json.loads(document_js[start:end + 1])
     except Exception:
         # 兜底：按出现顺序配对 pageName / url
         last = None
@@ -165,14 +253,16 @@ TABLE_SEP = " ｜ "   # 表格同一行各单元格之间的分隔符（竖线�
 
 def _table_row(cells: list[dict]) -> dict | None:
     """同一行的单元格 → 一条控件记录：文字「单元格1 ｜ 单元格2 ｜ …」，编号取第一个单元格，cls=table_row，
-    raw_lines 保留各单元格原行给字符自校验用。只有一个单元格有文字时仍按行记（便于与表头对齐）。"""
+    raw_lines 保留各单元格原行给字符自校验用。空白单元格（原型里「合并单元格」就是留白）占位成空串，列数与表头对齐
+    （「｜ 当日报名费… ｜」），全空的行不记。"""
     if not cells:
         return None
-    texts = [" ".join(c["lines"]) for c in cells if c["lines"]]
-    if not texts:
-        return cells[0]
+    texts = [" ".join(c["lines"]) for c in cells]
+    if not any(texts):
+        return None
     first = cells[0]
-    return {**first, "cls": "table_row", "lines": [TABLE_SEP.join(texts)], "raw_lines": [l for c in cells for l in c["lines"]],
+    img = next((c["img"] for c in cells if c["img"]), "")
+    return {**first, "img": img, "cls": "table_row", "lines": [TABLE_SEP.join(texts).strip()], "raw_lines": [l for c in cells for l in c["lines"]],
             "visible": [v for c in cells for v in c["visible"]], "cells": [c["id"] for c in cells]}
 
 
@@ -269,8 +359,15 @@ def _page_controls(html: str, css: str = "") -> tuple[str, list[dict], list[dict
                 while i + len(group) < len(rows) and rows[i + len(group)][0] == key and is_cell(rows[i + len(group)][2]):
                     group.append(rows[i + len(group)])
             if len(group) > 1:
-                cells = [own(g[2], g[3], g[4], g[5], hidden or hidden_of(g[2])) for g in group]
-                rec = _table_row([r for r in cells if r is not None])
+                cells = []
+                for g in group:
+                    rec = own(g[2], g[3], g[4], g[5], hidden or hidden_of(g[2]))
+                    if rec is None:   # 空白单元格：占位，列数不乱
+                        p = pos.get(g[3]) or {}
+                        rec = {"id": g[3], "cls": "table_cell", "x": int(round(g[4])), "y": int(round(g[5])), "w": float(p.get("width") or 0),
+                               "h": float(p.get("height") or 0), "hidden": hidden or hidden_of(g[2]), "lines": [], "img": "", "visible": []}
+                    cells.append(rec)
+                rec = _table_row(cells)
             else:
                 if is_connector(c):
                     connector(c, uid, x, y)
@@ -329,7 +426,7 @@ def _connector_ends(c: dict) -> tuple[tuple[float, float], tuple[float, float]]:
     arrows = []
     for sg in c["segs"]:
         l, t, w, h = sg.get("left", 0.0), sg.get("top", 0.0), sg.get("width", 0.0), sg.get("height", 0.0)
-        if w <= _ARROW_MAX and h <= _ARROW_MAX:
+        if min(w, h) > _SNAP and w <= _ARROW_MAX and h <= _ARROW_MAX:   # 小方块是箭头；细的（一边 ≤ 10px）再短也是线
             arrows.append((l + w / 2, t + h / 2))
             continue
         if w <= _SNAP:   # 竖线
@@ -345,6 +442,58 @@ def _connector_ends(c: dict) -> tuple[tuple[float, float], tuple[float, float]]:
     return (ox + start[0], oy + start[1]), (ox + end[0], oy + end[1])
 
 
+def _seg_rects(c: dict) -> list[tuple[float, float, float, float]]:
+    """连接线各线段（不含箭头小方块）的绝对矩形 (x, y, w, h)。"""
+    out = []
+    for sg in c["segs"]:
+        l, t, w, h = sg.get("left", 0.0), sg.get("top", 0.0), sg.get("width", 0.0), sg.get("height", 0.0)
+        if min(w, h) > _SNAP and w <= _ARROW_MAX and h <= _ARROW_MAX:
+            continue
+        out.append((c["x"] + l, c["y"] + t, w, h))
+    return out
+
+
+def _gap(box: tuple[float, float, float, float], rect: tuple[float, float, float, float]) -> float:
+    """两个矩形之间的空隙（相交为 0）。"""
+    dx = max(rect[0] - (box[0] + box[2]), box[0] - (rect[0] + rect[2]), 0.0)
+    dy = max(rect[1] - (box[1] + box[3]), box[1] - (rect[1] + rect[3]), 0.0)
+    return dx + dy
+
+
+def _attach_labels(controls: list[dict], connectors: list[dict]) -> dict[str, list[str]]:
+    """贴在连接线旁边的单行小字（「是」「初始暂定75%」「按比例计入」）当这条线的标签：原型常用独立文本框代替连接线自己的
+    标签。候选：不是流程框 / 表格 / 标题 / 图片的文字控件，单行（高 ≤ 24px、宽 ≤ 160px、≤ 12 字）；与某条线的线段空隙 ≤ 12px；
+    贴着几条线时按文字中心到线段的距离取最近的，距离相同的（分叉点上的「是」）每条都挂。返回 {连接线 id: [文字…]}。"""
+    cands = []
+    for c in controls:
+        cls = c.get("cls") or ""
+        if not c["lines"] or c.get("img") or cls == "table_row" or "flow_shape" in cls or "标题" in cls \
+                or any(k in cls for k in _CONNECTOR_CLASS):
+            continue
+        text = " ".join(" ".join(c["lines"]).split())
+        if not (0 < c.get("w", 0) <= _LABEL_MAX_W and 0 < c.get("h", 0) <= _LABEL_MAX_H and len(text) <= _LABEL_MAX_CHARS):
+            continue
+        cands.append((c, text))
+    rects = {c["id"]: _seg_rects(c) for c in connectors}
+    out: dict[str, list[tuple[float, float, str]]] = {}
+    for c, text in cands:
+        box = (c["x"], c["y"], c["w"], c["h"])
+        cx, cy = c["x"] + c["w"] / 2, c["y"] + c["h"] / 2
+        near = []
+        for cid, rs in rects.items():
+            if not rs or min(_gap(box, r) for r in rs) > _LABEL_GAP:
+                continue
+            d = min(max(r[0] - cx, cx - (r[0] + r[2]), 0.0) + max(r[1] - cy, cy - (r[1] + r[3]), 0.0) for r in rs)
+            near.append((d, cid))
+        if not near:
+            continue
+        best = min(d for d, _ in near)
+        for d, cid in near:
+            if d <= best + 1:
+                out.setdefault(cid, []).append((c["y"], c["x"], text))
+    return {cid: [t for _y, _x, t in sorted(v)] for cid, v in out.items()}
+
+
 def _flows(controls: list[dict], connectors: list[dict]) -> list[dict]:
     """流程框 + 连接线 → 流程图：每条连线找到起止两端落在哪个有文字的控件上，得到「A —标签→ B」；按连通分量分成几张图，
     每张图从起点（没有入边的框）开始深度优先列边。返回 [{nodes: [uid…], lines: [...], anchor: 阅读顺序里最后一个节点 uid}]。"""
@@ -355,8 +504,10 @@ def _flows(controls: list[dict], connectors: list[dict]) -> list[dict]:
 
     def at(pt) -> dict | None:
         hits = [sh for sh in shapes if sh["x"] - _SNAP <= pt[0] <= sh["x"] + sh["w"] + _SNAP and sh["y"] - _SNAP <= pt[1] <= sh["y"] + sh["h"] + _SNAP]
-        return min(hits, key=lambda sh: sh["w"] * sh["h"]) if hits else None
+        # 流程框优先（端点常同时落在贴着框的「是」小字上），同类取最小的
+        return min(hits, key=lambda sh: (0 if "flow_shape" in (sh.get("cls") or "") else 1, sh["w"] * sh["h"])) if hits else None
 
+    extra = _attach_labels(controls, connectors)
     edges: list[tuple[str, str, str]] = []
     for c in connectors:
         if not c["segs"]:
@@ -365,7 +516,8 @@ def _flows(controls: list[dict], connectors: list[dict]) -> list[dict]:
         src, dst = at(a), at(b)
         if src is None or dst is None or src is dst:
             continue
-        edges.append((src["id"], c["label"], dst["id"]))
+        label = " ".join(x for x in [c["label"], *extra.get(c["id"], [])] if x)
+        edges.append((src["id"], label, dst["id"]))
     if not edges:
         return []
     text = {sh["id"]: " ".join(" ".join(sh["lines"]).split()) for sh in shapes}
@@ -565,9 +717,11 @@ def parse_axure_export(files: list[tuple[str, Path]], source: str, root: str) ->
     html_names = [n for n in by_name if n.lower().endswith(".html") and "/" not in n and n.lower() not in _PLAYER_PAGES]
     ordered: list[tuple[str, str]] = []
     used: set[str] = set()
-    for label, url in pages:
+    short = [label.split(" / ")[-1].strip() or label for label, _u in pages]
+    dup = {n for n in short if short.count(n) > 1}
+    for (label, url), name in zip(pages, short):   # 页面名只取自己那一级（文件夹路径不进标题），同名页面才带上路径区分
         if url in by_name and url not in used:
-            ordered.append((label, url))
+            ordered.append((label if name in dup else name, url))
             used.add(url)
     ordered.extend((Path(n).stem, n) for n in sorted(html_names) if n not in used)  # 站点地图没列的页面补在后面
 

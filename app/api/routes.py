@@ -6247,29 +6247,70 @@ async def update_project(request: Request, name: str, body: ProjectUpdateBody) -
     return _project_view(request, project)
 
 
+def _project_contents(request: Request, name: str) -> dict:
+    """项目下的内容清单（删除前给人看、删除时据此清理）。"""
+    st = request.app.state
+    tasks = st.tasks.list(limit=100000, project=name)
+    plans = st.plans.list(project=name)
+    return {"tasks": len(tasks), "running": sum(1 for t in tasks if t.status in ("queued", "running")),
+            "cases": sum(len((t.result or {}).get("cases") or []) for t in tasks),
+            "plans": len(plans), "plans_with_runs": sum(1 for p in plans if p.get("runs")),
+            "requirements": len(st.requirements.list(name)),
+            "recycled_requirements": len(st.requirements.list(name, include_deleted=True)) - len(st.requirements.list(name)),
+            "deleted_tasks": len(st.tasks.list(limit=100000, project=name, deleted=True))}
+
+
+@router.get("/api/v1/projects/{name}/contents")
+async def project_contents(request: Request, name: str) -> dict:
+    """删除项目前看一眼里面有什么（系统管理员）。"""
+    _require_admin(request)
+    if request.app.state.projects.get(name) is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {name}")
+    c = _project_contents(request, name)
+    c["empty"] = not (c["tasks"] or c["plans"] or c["requirements"])
+    return {"project": name, **c}
+
+
 @router.delete("/api/v1/projects/{name}")
-async def delete_project(request: Request, name: str) -> dict:
-    """删除项目（系统管理员）：仅允许空项目；有任务/计划引用时拒绝（先迁移或删除）。"""
+async def delete_project(request: Request, name: str, cascade: bool = False) -> dict:
+    """删除项目（系统管理员）。默认只允许空项目（回收站里的需求随之清掉）；cascade=true 连同内容一起删：
+    需求全部清除（含附件目录与自动沉淀的知识）、测试计划连同执行轮次一起删、任务进回收站（用例与版本历史可追溯，
+    恢复后不再归属任何项目）、依赖关系图 / 版本 / 模块 / 画像 / 收藏一并清理。有排队或进行中的任务时拒绝。"""
     from app.projects import ProjectError
 
-    _require_admin(request)
-    referenced = len(request.app.state.tasks.list(limit=100000, project=name))
-    if referenced:
-        raise HTTPException(status_code=400, detail=f"项目下仍有 {referenced} 个任务，不可删除")
-    if request.app.state.plans.list(project=name):
-        raise HTTPException(status_code=400, detail="项目下仍有测试计划，不可删除")
-    if request.app.state.requirements.list(name):
-        raise HTTPException(status_code=400, detail="项目下仍有需求，不可删除")
-    request.app.state.requirements.purge_project(name)  # 回收站里的需求随空项目一并清理
+    user = _require_admin(request)
+    if request.app.state.projects.get(name) is None:
+        raise HTTPException(status_code=404, detail=f"项目不存在: {name}")
+    st = request.app.state
+    c = _project_contents(request, name)
+    if not cascade and (c["tasks"] or c["plans"] or c["requirements"]):
+        parts = [f"{c['tasks']} 个任务" if c["tasks"] else "", f"{c['plans']} 个测试计划" if c["plans"] else "", f"{c['requirements']} 条需求" if c["requirements"] else ""]
+        raise HTTPException(status_code=400, detail=f"项目下仍有{'、'.join(x for x in parts if x)}，不可直接删除；确认连同内容一起删除请带 cascade=true")
+    if c["running"]:
+        raise HTTPException(status_code=409, detail=f"项目下有 {c['running']} 个排队 / 进行中的任务，等它们结束或取消后再删")
+    if cascade:
+        acc = _accumulator(request.app)
+        for r in st.requirements.list(name):
+            st.requirements.delete(r["req_id"], operator=user["username"])
+            acc.forget(r["req_id"])
+        for p in st.plans.list(project=name):
+            st.plans.delete(p["plan_id"], force=True)
+        for t in st.tasks.list(limit=100000, project=name):
+            st.tasks.delete(t.task_id, by=user["username"])
+        st.dependencies.drop_project(name)
+    st.requirements.purge_project(name)  # 回收站里的需求随项目一并清理
     try:
-        request.app.state.projects.delete(name)
+        st.projects.delete(name)
     except ProjectError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    request.app.state.versions.drop_project(name)
-    request.app.state.modules.drop_project(name)
-    request.app.state.user_prefs.drop_project(name)
-    request.app.state.profiles.drop_project(name)
-    return {"deleted": name}
+    st.versions.drop_project(name)
+    st.modules.drop_project(name)
+    st.user_prefs.drop_project(name)
+    st.profiles.drop_project(name)
+    if cascade:
+        request.state.audit_detail = f"连同 {c['tasks']} 个任务、{c['plans']} 个计划、{c['requirements']} 条需求一起删除"
+        logger.info("项目 {} 已连同内容删除：任务 {}、计划 {}、需求 {}（操作人 {}）", name, c["tasks"], c["plans"], c["requirements"], user["username"])
+    return {"deleted": name, "cascade": cascade, **{k: c[k] for k in ("tasks", "plans", "requirements")}}
 
 
 @router.post("/api/v1/projects/{name}/favorite")

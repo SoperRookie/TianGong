@@ -927,7 +927,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <!-- 通用确认 -->
 <dialog id="confirmDlg">
   <div class="dlg-h"><h3 id="cfTitle"></h3></div>
-  <div class="dlg-b"><div id="cfMsg" style="color:var(--ink-2)"></div></div>
+  <div class="dlg-b"><div id="cfMsg" style="color:var(--ink-2);white-space:pre-line"></div>
+    <div id="cfTypeWrap" style="display:none;margin-top:10px"><div class="hint" id="cfTypeHint"></div><input id="cfType" style="width:100%;box-sizing:border-box;margin-top:4px" oninput="$('cfOk').disabled = this.value.trim() !== _cfExpect" autocomplete="off"></div></div>
   <div class="dlg-f">
     <button class="btn ghost" onclick="resolveConfirm(false)">取消</button>
     <button class="btn" id="cfOk" onclick="resolveConfirm(true)">确定</button>
@@ -1632,12 +1633,18 @@ function toast(msg, type='') {
   setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 260); }, 3800);
 }
 let _cfResolve = null;
-function uiConfirm(title, msg, danger=false) {
+let _cfExpect = '';
+function uiConfirm(title, msg, danger=false, expect='') {
+  // expect：危险操作要把这个字串原样敲一遍才能点确定（删除整个项目）
   return new Promise(res => {
-    _cfResolve = res;
+    _cfResolve = res; _cfExpect = expect;
     $('cfTitle').textContent = title; $('cfMsg').textContent = msg;
     $('cfOk').className = 'btn' + (danger ? ' danger' : '');
+    $('cfOk').disabled = !!expect;
+    $('cfTypeWrap').style.display = expect ? '' : 'none';
+    if (expect) { $('cfTypeHint').textContent = `请输入项目名「${expect}」确认：`; $('cfType').value = ''; }
     $('confirmDlg').showModal();
+    if (expect) setTimeout(() => $('cfType').focus(), 50);
   });
 }
 function resolveConfirm(v) { $('confirmDlg').close(); const r=_cfResolve; _cfResolve=null; r && r(v); }
@@ -5785,7 +5792,7 @@ function reqExtractionHtml(r, canAI, canEdit) {
     return `<div style="display:flex;gap:6px;align-items:flex-start;padding:4px 6px${opt.lv?';padding-left:30px':''};border-bottom:1px solid var(--line)">${body}${opsOf(it)}</div>`;
   };
   const tableHtml = (its, cols, main) => {
-    const cells = it => it.text.split(' ｜ ');
+    const cells = it => it.text.trim().split(/\s*｜\s*/);
     const tr = (it, tag) => _exEditItem === it.id ? `<tr><td colspan="${cols+1}">${editBox(it)}</td></tr>` : (cs => `<tr>${cs.map((c,i)=>`<${tag}>${i===0?badgeOf(it):''}${esc(c)}${i===cs.length-1?tailOf(it, main):''}</${tag}>`).join('')}<${tag} style="white-space:nowrap">${opsOf(it)}</${tag}></tr>`)(cells(it));
     return `<table class="ex-table"><thead>${tr(its[0], 'th')}</thead><tbody>${its.slice(1).map(it => tr(it, 'td')).join('')}</tbody></table>`;
   };
@@ -6088,7 +6095,7 @@ function materialsDoc(text) {
     if (/^【/.test(l) && /】$/.test(l)) { out.push(`**${l.replace(/[【】]/g, '')}**`); continue; }
     if (img) { out.push('> ' + l.replace(/^#{1,6}\s+/, '**').replace(/^\*\*(.+)$/, '**$1**')); continue; }
     const m = l.match(/^\[(u\d+)\]\s?(.*)$/);
-    if (m) { const t = m[2]; if (t.includes(' ｜ ')) out.push(`| ${t.split(' ｜ ').map(c => c.replace(/\|/g, '\\|')).join(' | ')} |`); else out.push(`- ${t} 〔${m[1]}〕`); continue; }
+    if (m) { const t = m[2]; if (t.includes('｜')) out.push(`| ${t.trim().split(/\s*｜\s*/).map(c => c.replace(/\|/g, '\\|')).join(' | ')} |`); else out.push(`- ${t} 〔${m[1]}〕`); continue; }
     out.push(l);
   }
   // 连续表格行补表头分隔线（第一行作表头）
@@ -6846,10 +6853,23 @@ async function toggleFavorite(name) {
   } catch (e) { toast(e.message, 'err'); }
 }
 async function deleteProject(name) {
-  if (!await uiConfirm('删除项目', `确定删除项目「${name}」？仅允许删除没有任务与计划的空项目。`, true)) return;
+  let c;
+  try { c = await api('/api/v1/projects/' + encodeURIComponent(name) + '/contents'); } catch (e) { toast(e.message, 'err'); return; }
+  let cascade = false;
+  if (c.empty) {
+    if (!await uiConfirm('删除项目', `确定删除项目「${name}」？${c.recycled_requirements ? `回收站里的 ${c.recycled_requirements} 条需求会一并清除。` : ''}`, true)) return;
+  } else {
+    if (c.running) { toast(`项目下有 ${c.running} 个排队 / 进行中的任务，等它们结束或取消后再删`, 'err'); return; }
+    const lines = [];
+    if (c.requirements) lines.push(`· ${c.requirements} 条需求（含附件与整理稿，彻底清除）`);
+    if (c.plans) lines.push(`· ${c.plans} 个测试计划${c.plans_with_runs ? `（其中 ${c.plans_with_runs} 个有执行记录）` : ''}`);
+    if (c.tasks) lines.push(`· ${c.tasks} 个测试设计任务、${c.cases} 条用例（进回收站，恢复后不再归属项目）`);
+    if (!await uiConfirm('删除项目及全部内容', `项目「${name}」不是空项目，删除会连同以下内容一起删，不可撤销：\n${lines.join('\n')}`, true, name)) return;
+    cascade = true;
+  }
   try {
-    await api('/api/v1/projects/' + encodeURIComponent(name), {method:'DELETE'});
-    toast('项目已删除', 'ok');
+    await api('/api/v1/projects/' + encodeURIComponent(name) + (cascade ? '?cascade=true' : ''), {method:'DELETE'});
+    toast(cascade ? '项目及其内容已删除' : '项目已删除', 'ok');
     if (curProjectName === name) setCurrentProject('', {silent: true});
     await fillProjectSelect();
     renderProjects();
