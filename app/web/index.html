@@ -5792,7 +5792,7 @@ function reqExtractionHtml(r, canAI, canEdit) {
     return `<div style="display:flex;gap:6px;align-items:flex-start;padding:4px 6px${opt.lv?';padding-left:30px':''};border-bottom:1px solid var(--line)">${body}${opsOf(it)}</div>`;
   };
   const tableHtml = (its, cols, main) => {
-    const cells = it => it.text.split(' ｜ ');
+    const cells = it => it.text.trim().split(/\s*｜\s*/);
     const tr = (it, tag) => _exEditItem === it.id ? `<tr><td colspan="${cols+1}">${editBox(it)}</td></tr>` : (cs => `<tr>${cs.map((c,i)=>`<${tag}>${i===0?badgeOf(it):''}${esc(c)}${i===cs.length-1?tailOf(it, main):''}</${tag}>`).join('')}<${tag} style="white-space:nowrap">${opsOf(it)}</${tag}></tr>`)(cells(it));
     return `<table class="ex-table"><thead>${tr(its[0], 'th')}</thead><tbody>${its.slice(1).map(it => tr(it, 'td')).join('')}</tbody></table>`;
   };
@@ -6095,7 +6095,7 @@ function materialsDoc(text) {
     if (/^【/.test(l) && /】$/.test(l)) { out.push(`**${l.replace(/[【】]/g, '')}**`); continue; }
     if (img) { out.push('> ' + l.replace(/^#{1,6}\s+/, '**').replace(/^\*\*(.+)$/, '**$1**')); continue; }
     const m = l.match(/^\[(u\d+)\]\s?(.*)$/);
-    if (m) { const t = m[2]; if (t.includes(' ｜ ')) out.push(`| ${t.split(' ｜ ').map(c => c.replace(/\|/g, '\\|')).join(' | ')} |`); else out.push(`- ${t} 〔${m[1]}〕`); continue; }
+    if (m) { const t = m[2]; if (t.includes('｜')) out.push(`| ${t.trim().split(/\s*｜\s*/).map(c => c.replace(/\|/g, '\\|')).join(' | ')} |`); else out.push(`- ${t} 〔${m[1]}〕`); continue; }
     out.push(l);
   }
   // 连续表格行补表头分隔线（第一行作表头）
