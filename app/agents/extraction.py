@@ -387,9 +387,12 @@ def extraction_outline(modules: list[dict]) -> list[dict]:
             sec["source"] = src
         name = mod["name"]
         if page != IMAGE_SECTION:
-            for sep in ("-", "－", "—", "–", "：", ":", " › ", "›"):
-                if name.startswith(page + sep) and len(name) > len(page) + len(sep):
-                    name = name[len(page) + len(sep):].strip()
+            for pg in dict.fromkeys([page, page.split(" / ")[-1].strip()]):   # 站点地图带文件夹的页面名「商户管理后台 / 日榜排名」：模块名只带页面名
+                for sep in ("-", "－", "—", "–", "：", ":", " › ", "›"):
+                    if name.startswith(pg + sep) and len(name) > len(pg) + len(sep):
+                        name = name[len(pg) + len(sep):].strip()
+                        break
+                if name != mod["name"]:
                     break
         rows = _block_rows(mod["items"])
         name = _fold_heading(name or mod["name"], rows, "" if page == IMAGE_SECTION else main)

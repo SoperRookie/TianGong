@@ -282,7 +282,7 @@ def test_Axure原型导出包_按站点地图逐页提取文字与说明_跳过�
     doc = parse_file(z)
     text = doc.full_text
     assert doc.doc_type == "zip" and "共 3 个页面" in text
-    assert text.index("页面：首页") < text.index("页面：首页 / 登录") < text.index("页面：设置 / 账号安全")
+    assert text.index("页面：首页") < text.index("页面：登录") < text.index("页面：账号安全") and "首页 / 登录" not in text   # 按站点地图顺序，标题只带页面自己的名字
     assert "欢迎使用" in text and "密码错误 5 次锁定" in text and "修改密码" in text
     assert text.count("登录按钮") == 1  # 同页重复文字去重
     assert "点击登录后跳转首页" in text and "【说明 / 备注】" in text
@@ -613,3 +613,32 @@ def test_Axure流程图_流程框加连接线还原成带分支标签的流程�
     units = build_units("【文件：流程.zip】\n# Axure 原型：流程.zip\n## 页面：流程\n" + text.split("## 页面：流程\n", 1)[-1])
     assert [u["uid"] for u in units] == ["u1", "u2", "u4", "u7", "u8", "u10", "u3", "u12", "u9"]   # 块内行不记；连接线标签控件（是 / 否）与旁边小字仍是单元
     assert all("→" not in u["text"] for u in units)
+
+
+def test_Axure站点地图混淆格式解码_页面按站点地图顺序_同名页面带路径(tmp_path):
+    """Axure 9/10 导出的 document.js 不是 JSON：`_creator` 里 `_(b,_(c,d…),q,_(r,[…]))` 两两配键值、键和值都是变量名，
+    变量表 `var b="configuration",c=…` 在后面。之前只认 JSON，解析失败就按文件名字母序排页面（后台包 12 页全乱）。
+    解码后按站点地图树的顺序列页面（文件夹只作分组、不进标题），同名页面才带路径。"""
+    import zipfile
+
+    from app.parsers.axure import _sitemap
+    from app.parsers.base import parse_file
+
+    js = ('\ufeff$axure.loadDocument(\n(function() {\n    var _ = function() { var r={},a=arguments; for(var i=0; i<a.length; i+=2) r[a[i]]=a[i+1]; return r; }\n'
+          '    var _creator = function() { return _(b,_(c,d,e,f),g,_(h,[_(i,j,k,l,m,n,o,p),_(i,q,k,r,m,s,o,q,t,[_(i,u,k,v,m,n,o,w),_(i,x,k,y,m,n,o,z,t,[_(i,A,k,B,m,n,o,C)])]),_(i,D,k,E,m,s,o,q,t,[_(i,F,k,B,m,n,o,G)])]),H,[I]); };\n'
+          'var b="configuration",c="showPageNotes",d=true,e="useLabels",f=false,g="sitemap",h="rootNodes",i="id",j="a1",k="pageName",l="需求说明",m="type",n="Wireframe",o="url",p="需求说明.html",'
+          'q="",r="活动运营后台",s="Folder",t="children",u="b2",v="活动列表",w="活动列表.html",x="c3",y="连赢活动记录",z="连赢活动记录.html",A="d4",B="操作记录",C="操作记录.html",'
+          'D="e5",E="商户后台, 含逗号",F="f6",G="操作记录2.html",H="additionalJs",I="plugins/x.js";\nreturn _creator();\n})());')
+    assert _sitemap(js) == [("需求说明", "需求说明.html"), ("活动运营后台 / 活动列表", "活动列表.html"), ("活动运营后台 / 连赢活动记录", "连赢活动记录.html"),
+                            ("活动运营后台 / 连赢活动记录 / 操作记录", "操作记录.html"), ("商户后台, 含逗号 / 操作记录", "操作记录2.html")]
+    page = lambda t: f"<html><head><title>{t}</title></head><body><div id='base'><div id='u1' class='ax_default label'><div id='u1_text' class='text'><p>{t}内容</p></div></div></div></body></html>"
+    z = tmp_path / "原型.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("原型/index.html", "<html><body><iframe src='start.html'></iframe></body></html>")
+        zf.writestr("原型/data/document.js", js)
+        zf.writestr("原型/resources/scripts/axure/axure.js", "var $axure = {};")
+        for name in ("需求说明", "活动列表", "连赢活动记录", "操作记录", "操作记录2"):
+            zf.writestr(f"原型/{name}.html", page(name))
+    text = parse_file(z).full_text
+    heads = [l for l in text.splitlines() if l.startswith("## 页面：")]
+    assert heads == ["## 页面：需求说明", "## 页面：活动列表", "## 页面：连赢活动记录", "## 页面：活动运营后台 / 连赢活动记录 / 操作记录", "## 页面：商户后台, 含逗号 / 操作记录"]

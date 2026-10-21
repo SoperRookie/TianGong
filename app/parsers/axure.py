@@ -57,8 +57,93 @@ def axure_root(files: list[tuple[str, Path]]) -> str | None:
     return None
 
 
+_JS_LITERAL_RE = re.compile(r'"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?|true|false|null')
+_JS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _js_literal(tok: str):
+    if tok.startswith('"'):
+        return json.loads(tok)
+    if tok in ("true", "false", "null"):
+        return {"true": True, "false": False, "null": None}[tok]
+    return float(tok) if "." in tok or "e" in tok.lower() else int(tok)
+
+
+def _decode_axure_js(js: str) -> dict | None:
+    """Axure 9/10 导出的 document.js / data.js 是「混淆」格式：`var _creator = function() { return _(b,_(c,d,…),q,_(r,[…])) }`，
+    `_()` 把参数两两配成键值，键和值都是后面 `var b="configuration",c=…` 里的变量。把变量表读出来、按表达式求值还原成字典。"""
+    m = re.search(r"var\s+_creator\s*=\s*function\s*\(\)\s*\{\s*return\s+(.*?);\s*\}", js, re.S)
+    if not m:
+        return None
+    expr = m.group(1)
+    env: dict[str, object] = {}
+    for vm in re.finditer(r"(?m)^\s*var\s+", js):   # 变量表：var b="…",c=…,d=true,…;（逗号在字符串里也不会切错：逐个按字面量吃）
+        i = vm.end()
+        while True:
+            im = _JS_IDENT_RE.match(js, i)
+            if not im:
+                break
+            j = im.end()
+            while j < len(js) and js[j] in " \t":
+                j += 1
+            if j >= len(js) or js[j] != "=":
+                break
+            j += 1
+            while j < len(js) and js[j] in " \t":
+                j += 1
+            lm = _JS_LITERAL_RE.match(js, j)
+            if not lm:
+                break
+            env[im.group(0)] = _js_literal(lm.group(0))
+            j = lm.end()
+            while j < len(js) and js[j] in " \t\r\n":
+                j += 1
+            if j < len(js) and js[j] == ",":
+                i = j + 1
+                while i < len(js) and js[i] in " \t\r\n":
+                    i += 1
+                continue
+            break
+
+    def value(i: int):
+        while i < len(expr) and expr[i] in " \t\r\n":
+            i += 1
+        if expr.startswith("_(", i):
+            items, i = seq(i + 2, ")")
+            return dict(zip(items[0::2], items[1::2])), i
+        if expr[i] == "[":
+            return seq(i + 1, "]")
+        lm = _JS_LITERAL_RE.match(expr, i)
+        if lm:
+            return _js_literal(lm.group(0)), lm.end()
+        im = _JS_IDENT_RE.match(expr, i)
+        if im:
+            return env.get(im.group(0), im.group(0)), im.end()
+        raise ValueError(f"无法解析：{expr[i:i + 20]!r}")
+
+    def seq(i: int, close: str) -> tuple[list, int]:
+        items: list = []
+        while True:
+            while i < len(expr) and expr[i] in " \t\r\n":
+                i += 1
+            if expr[i] == close:
+                return items, i + 1
+            v, i = value(i)
+            items.append(v)
+            while i < len(expr) and expr[i] in " \t\r\n":
+                i += 1
+            if expr[i] == ",":
+                i += 1
+
+    try:
+        data, _end = value(0)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _sitemap(document_js: str) -> list[tuple[str, str]]:
-    """document.js 的站点地图 → [(页面名, url)] 按目录顺序（文件夹节点无 url 时只作为分组名）。"""
+    """document.js 的站点地图 → [(页面名, url)] 按目录顺序（文件夹节点无 url 时只作为分组名）。JSON 与混淆两种格式都认。"""
     start = document_js.find("{")
     if start == -1:
         return []
@@ -74,8 +159,10 @@ def _sitemap(document_js: str) -> list[tuple[str, str]]:
                 end = i
                 break
     pages: list[tuple[str, str]] = []
+    data = _decode_axure_js(document_js) if "_creator" in document_js else None
     try:
-        data = json.loads(document_js[start:end + 1])
+        if data is None:
+            data = json.loads(document_js[start:end + 1])
     except Exception:
         # 兜底：按出现顺序配对 pageName / url
         last = None
@@ -630,9 +717,11 @@ def parse_axure_export(files: list[tuple[str, Path]], source: str, root: str) ->
     html_names = [n for n in by_name if n.lower().endswith(".html") and "/" not in n and n.lower() not in _PLAYER_PAGES]
     ordered: list[tuple[str, str]] = []
     used: set[str] = set()
-    for label, url in pages:
+    short = [label.split(" / ")[-1].strip() or label for label, _u in pages]
+    dup = {n for n in short if short.count(n) > 1}
+    for (label, url), name in zip(pages, short):   # 页面名只取自己那一级（文件夹路径不进标题），同名页面才带上路径区分
         if url in by_name and url not in used:
-            ordered.append((label, url))
+            ordered.append((label if name in dup else name, url))
             used.add(url)
     ordered.extend((Path(n).stem, n) for n in sorted(html_names) if n not in used)  # 站点地图没列的页面补在后面
 
