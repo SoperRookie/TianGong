@@ -241,7 +241,7 @@ table { width:100%; border-collapse:collapse; font-size:12.8px; }
 .md-doc { background:var(--card, #fff); border:1px solid var(--line); border-radius:8px; padding:20px 32px 32px; line-height:1.8; font-size:13.5px; }
 .md-doc h1 { font-size:20px; margin:0 0 12px; } .md-doc h1 + ul { color:var(--ink-3); font-size:12.5px; margin:0 0 6px; padding:8px 14px 8px 30px; border:1px dashed var(--line); border-radius:8px; }
 .md-doc h2 { font-size:16px; margin:24px 0 12px; padding:0 0 8px; border-bottom:2px solid var(--line); } .md-doc h2:first-of-type { margin-top:8px; }
-.md-doc h3 { font-size:14px; margin:20px 0 8px; padding:2px 0 2px 10px; border-left:3px solid var(--primary); } .md-doc h4, .md-doc h5, .md-doc h6 { font-size:13px; margin:10px 0 4px; }
+.md-doc h3 { font-size:14px; margin:20px 0 8px; padding:2px 0 2px 10px; border-left:3px solid var(--primary); } .md-doc h4 { font-size:13.5px; margin:14px 0 6px 10px; padding-left:8px; border-left:2px solid var(--line); } .md-doc h5, .md-doc h6 { font-size:13px; margin:10px 0 4px; }
 .md-doc ul, .md-doc ol { margin:2px 0 8px 22px; padding:0; } .md-doc li { margin:3px 0; } .md-doc li::marker { color:var(--ink-3); } .md-doc li ul, .md-doc li ol { margin:2px 0 2px 18px; }
 .md-doc p { margin:4px 0 8px; } .md-doc p.md-label { margin:12px 0 4px; } .md-doc hr { border:0; border-top:1px dashed var(--line); margin:24px 0 8px; }
 .md-doc table { width:auto; max-width:100%; margin:8px 0 14px; border-collapse:collapse; font-size:12.5px; line-height:1.6; } .md-doc th, .md-doc td { border:1px solid var(--line); padding:5px 10px; vertical-align:top; text-align:left; } .md-doc th { background:var(--line-2); font-weight:600; white-space:nowrap; } .md-doc tbody tr:nth-child(even) td { background:color-mix(in srgb, var(--line-2) 35%, transparent); }
@@ -252,7 +252,7 @@ table { width:100%; border-collapse:collapse; font-size:12.8px; }
 .ex-toc { flex:none; width:220px; position:sticky; top:56px; max-height:calc(100vh - 72px); overflow:auto; font-size:12px; line-height:1.5; border:1px solid var(--line); border-radius:8px; background:var(--card, #fff); padding:10px 0; }
 .ex-toc .ex-toc-t { font-weight:600; color:var(--ink-3); padding:0 12px 6px; font-size:11.5px; letter-spacing:.5px; }
 .ex-toc a { display:block; padding:3px 12px; color:var(--ink-2, inherit); cursor:pointer; text-decoration:none; border-left:2px solid transparent; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.ex-toc a.lv3 { padding-left:24px; color:var(--ink-3); } .ex-toc a:hover { background:var(--line-2); } .ex-toc a.on { color:var(--primary); border-left-color:var(--primary); background:var(--primary-50); }
+.ex-toc a.lv3 { padding-left:24px; color:var(--ink-3); } .ex-toc a.lv4 { padding-left:36px; color:var(--ink-3); font-size:11.5px; } .ex-toc a:hover { background:var(--line-2); } .ex-toc a.on { color:var(--primary); border-left-color:var(--primary); background:var(--primary-50); }
 @media (max-width: 1100px) { .ex-toc { display:none; } }
 .ex-table th, .ex-table td { border:1px solid var(--line); padding:3px 8px; vertical-align:top; text-align:left; line-height:1.5; }
 .ex-table th { background:var(--line-2); font-weight:600; }
@@ -5797,6 +5797,7 @@ function reqExtractionHtml(r, canAI, canEdit) {
     return `<table class="ex-table"><thead>${tr(its[0], 'th')}</thead><tbody>${its.slice(1).map(it => tr(it, 'td')).join('')}</tbody></table>`;
   };
   const outline = ex.outline || ex.modules.map((mod, i) => ({no: String(i+1), title: mod.name, source: '', blocks: [{no: `${i+1}.1`, name: mod.name, module: mod.name, rows: mod.items.map(it => ({t: 'item', id: it.id, lv: 0}))}]}));
+  let curGroup = null;
   const rows = outline.map(sec => {
     const blocks = sec.blocks.map(b => {
       const parts = b.rows.map(r => {
@@ -5820,7 +5821,13 @@ function reqExtractionHtml(r, canAI, canEdit) {
       return `<div style="margin:8px 0 2px 8px"><b>${esc(b.no)} ${esc(b.name)}</b> <span class="hint">${n} 条</span>${b.draft?' <span class="st rejected">疑似遗留草稿</span>':''}</div>` + parts;
     }).join('');
     if (!blocks) return '';
-    return `<div style="margin:14px 0 4px;font-size:14px;border-bottom:2px solid var(--line);padding-bottom:2px"><b>${esc(sec.no)}. ${esc(sec.title)}</b>${sec.source?` <span class="hint">〔来源：${esc(sec.source)}〕</span>`:''}</div>` + blocks;
+    let head = '';
+    if (sec.group && sec.group !== curGroup) head += `<div style="margin:16px 0 4px;font-size:15px;border-bottom:2px solid var(--line);padding-bottom:2px"><b>${esc(sec.gno)}. ${esc(sec.group)}</b></div>`;   // 站点地图的文件夹分组
+    curGroup = sec.group || null;
+    head += sec.group
+      ? `<div style="margin:10px 0 4px 4px;font-size:13.5px;border-left:3px solid var(--primary);padding-left:8px"><b>${esc(sec.no)} ${esc(sec.title)}</b>${sec.source?` <span class="hint">〔来源：${esc(sec.source)}〕</span>`:''}</div>`
+      : `<div style="margin:14px 0 4px;font-size:14px;border-bottom:2px solid var(--line);padding-bottom:2px"><b>${esc(sec.no)}. ${esc(sec.title)}</b>${sec.source?` <span class="hint">〔来源：${esc(sec.source)}〕</span>`:''}</div>`;
+    return head + blocks;
   }).join('');
   return intro + toolbar + bar + filt + `<div class="ex-scroll" style="max-height:600px;overflow:auto;background:var(--line-2);padding:4px 10px;border-radius:8px">${rows || '<div class="empty">没有符合筛选的条目</div>'}</div>` +
     (ex.dropped && ex.dropped.length ? `<div class="hint" style="margin-top:6px">（已剔除：${ex.dropped.map(esc).join('、')}）</div>` : '');
@@ -6167,7 +6174,7 @@ function exDocHtml(text) {
     const h = l.match(/^(#{1,6})\s+(.+)$/);
     if (!h) continue;
     const n = hn++, lv = h[1].length;
-    if (lv === 2 || lv === 3) toc.push({n, lv, text: h[2].split(' 〔')[0].replace(/\*\*/g, '')});
+    if (lv >= 2 && lv <= 4) toc.push({n, lv, text: h[2].split(' 〔')[0].replace(/\*\*/g, '')});
   }
   const nav = toc.length > 1 ? `<nav class="ex-toc"><div class="ex-toc-t">目录</div>${toc.map(t => `<a class="lv${t.lv}" data-to="${t.n}" onclick="exTocGo(this)" title="${esc(t.text)}">${esc(t.text)}</a>`).join('')}</nav>` : '';
   setTimeout(exTocSync, 0);
@@ -6184,7 +6191,7 @@ function exTocSync() {
     _exTocTimer = null;
     const wrap = document.querySelector('.ex-doc'), nav = wrap && wrap.querySelector('.ex-toc'); if (!nav) return;
     let cur = null;
-    for (const h of wrap.querySelectorAll('h2[data-hn], h3[data-hn]')) { if (h.getBoundingClientRect().top <= 80) cur = h.dataset.hn; else break; }
+    for (const h of wrap.querySelectorAll('h2[data-hn], h3[data-hn], h4[data-hn]')) { if (h.getBoundingClientRect().top <= 80) cur = h.dataset.hn; else break; }
     let on = null;
     for (const a of nav.querySelectorAll('a')) { const hit = a.dataset.to === cur; a.classList.toggle('on', hit); if (hit) on = a; }
     if (on) { const r = on.getBoundingClientRect(), nr = nav.getBoundingClientRect(); if (r.top < nr.top || r.bottom > nr.bottom) on.scrollIntoView({block: 'nearest'}); }

@@ -817,3 +817,27 @@ def test_原文小标题成子标题_区块开头的标题并进区块名_页面
     materials = "【文件：后台.zip】\n## 页面：需求说明\n[u1] 一、活动游戏类型说明\n[u2] 导出数据\n[u3] 2.5 列表的导出数据\n[u4] 1、页面说明\n[u5] 2.3 查询功能说明\n"
     acct = account(build_units(materials), md)
     assert {u["uid"]: u["status"] for u in acct["units"]} == {"u1": "in", "u2": "in", "u3": "in", "u4": "in", "u5": "in"}
+
+
+def test_整理稿按站点地图文件夹分组_分组页面区块三级编号_没分组的页面两级():
+    """后台包站点地图：需求说明、活动运营后台（活动列表 / 派奖查询…）、商户管理后台（…）。页面标题带文件夹「活动运营后台 / 活动列表」时
+    整理稿按文件夹分组：## N. 文件夹 › ### N.M 页面 › #### N.M.K 区块；没文件夹的页面仍是 ## N. 页面 › ### N.M 区块；同一文件夹的
+    页面连在一起，需求说明仍排最前；疑点清单编号接在最后一个分组后面。"""
+    from app.agents.extraction import assign_ids, extraction_markdown, extraction_outline, outline_view
+
+    modules = [
+        {"name": "活动列表-字段说明", "items": [{"text": "活动名称", "sources": ["后台.zip › 活动运营后台 / 活动列表"]}]},
+        {"name": "日榜排名-字段说明", "items": [{"text": "排名", "sources": ["后台.zip › 商户管理后台 / 日榜排名"], "doubt": "疑似"}]},
+        {"name": "需求说明-版本记录", "items": [{"text": "1 ｜ 2026-07-18 ｜ 创建文档", "sources": ["后台.zip › 需求说明"]}]},
+        {"name": "派奖查询-查询条件", "items": [{"text": "活动ID", "sources": ["后台.zip › 活动运营后台 / 派奖查询"]}]},
+    ]
+    assign_ids(modules)
+    outline = extraction_outline(modules)
+    assert [(s["gno"], s["no"], s["group"], s["title"]) for s in outline] == [
+        ("", "1", "", "需求说明"), ("2", "2.1", "活动运营后台", "活动列表"), ("2", "2.2", "活动运营后台", "派奖查询"), ("3", "3.1", "商户管理后台", "日榜排名")]
+    assert outline[1]["blocks"][0]["no"] == "2.1.1" and outline[1]["blocks"][0]["name"] == "字段说明" and outline[0]["blocks"][0]["no"] == "1.1"
+    assert outline_view(modules)[1]["group"] == "活动运营后台" and outline_view(modules)[1]["gno"] == "2"
+    md = extraction_markdown(modules)
+    assert ("## 1. 需求说明 〔来源：后台.zip › 需求说明〕\n\n### 1.1 版本记录\n- 1 ｜ 2026-07-18 ｜ 创建文档\n\n---\n\n## 2. 活动运营后台\n\n### 2.1 活动列表 〔来源：后台.zip › 活动运营后台 / 活动列表〕\n\n#### 2.1.1 字段说明\n- 活动名称\n\n"
+            "### 2.2 派奖查询 〔来源：后台.zip › 活动运营后台 / 派奖查询〕\n\n#### 2.2.1 查询条件\n- 活动ID\n\n---\n\n## 3. 商户管理后台\n\n### 3.1 日榜排名") in md
+    assert "## 4. 疑点 / 不一致清单" in md
