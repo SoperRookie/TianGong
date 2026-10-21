@@ -351,3 +351,31 @@ async def test_成员联想_项目管理员可查用户名(client, auth_on):
     assert r.status_code == 200 and {u["username"] for u in r.json()["users"]} >= {"admin", "pa", "t1"}
     assert set(r.json()["users"][0]) == {"username", "name"}   # 不暴露邮箱/手机/登录信息
     assert (await client.get("/api/v1/auth/users/lookup", headers=t1)).status_code == 403
+
+
+async def test_项目名含斜杠_编码后各接口可达(client, auth_on):
+    """「连赢活动10/20」这类带「/」的项目名，前端 encodeURIComponent 成 %2F；路由须原样收到并还原成「/」。"""
+    from urllib.parse import quote
+
+    admin = await _login(client)
+    name = "连赢活动10/20"
+    await _project(client, admin, name)
+    enc = quote(name, safe="")
+    assert "%2F" in enc
+
+    resp = await client.get(f"/api/v1/projects/{enc}", headers=admin)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["project"] == name
+    resp = await client.get(f"/api/v1/projects/{enc}/contents", headers=admin)
+    assert resp.status_code == 200, resp.text
+    assert (await client.get(f"/api/v1/projects/{enc}/members", headers=admin)).status_code == 200
+    # 改名与删除同样走 {name}
+    resp = await client.put(f"/api/v1/projects/{enc}", headers=admin, json={"description": "带斜杠"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["description"] == "带斜杠"
+    assert (await client.delete(f"/api/v1/projects/{enc}", headers=admin)).status_code == 200
+    assert (await client.get(f"/api/v1/projects/{enc}", headers=admin)).status_code == 404
+    # 不含 %2F 的路径不受影响；名字里真有「%2F」三个字的编成 %252F，不与保留的 %2F 混
+    assert (await client.get("/api/v1/projects/不存在", headers=admin)).status_code == 404
+    await _project(client, admin, "x%2Fy")
+    assert (await client.get(f"/api/v1/projects/{quote('x%2Fy', safe='')}", headers=admin)).json()["project"] == "x%2Fy"

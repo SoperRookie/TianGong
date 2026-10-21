@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
 from app import __version__
+from app.api.path_params import KeepEncodedSlashMiddleware
 from app.api.routes import router
 from app.auth import AuthStore
 from app.config import BASE_DIR, get_settings
@@ -201,6 +202,8 @@ app = FastAPI(
     openapi_url="/openapi.json" if _settings_boot.expose_docs else None,
 )
 app.include_router(router)
+# 项目名可含「/」：%2F 过路由时不解码（app/api/path_params.py），须在最外层，先于鉴权中间件看到路径
+app.add_middleware(KeepEncodedSlashMiddleware)
 
 # 前端第三方库本地托管（kity / kityminder-core，MeterSphere 同款脑图内核）：内网部署无外部依赖
 from fastapi.staticfiles import StaticFiles  # noqa: E402
