@@ -143,7 +143,8 @@ def _decode_axure_js(js: str) -> dict | None:
 
 
 def _sitemap(document_js: str) -> list[tuple[str, str]]:
-    """document.js 的站点地图 → [(页面名, url)] 按目录顺序（文件夹节点无 url 时只作为分组名）。JSON 与混淆两种格式都认。"""
+    """document.js 的站点地图 → [(「文件夹 / 页面名」, url)] 按目录顺序：文件夹（无 url 的节点）作分组进路径，页面下挂的子页面
+    不带父页面名。JSON 与混淆两种格式都认。"""
     start = document_js.find("{")
     if start == -1:
         return []
@@ -184,7 +185,8 @@ def _sitemap(document_js: str) -> list[tuple[str, str]]:
             label = f"{prefix}{name}" if name else prefix.rstrip(" / ")
             if url:
                 pages.append((label, url))
-            walk(n.get("children"), f"{label} / " if name else prefix)
+            # 只有文件夹进路径：页面下挂的子页面只记自己的名字（「连赢活动记录 / 日榜排名」里的父页面不算分组）
+            walk(n.get("children"), f"{label} / " if name and not url else prefix)
 
     sitemap = data.get("sitemap") if isinstance(data, dict) else None
     walk((sitemap or {}).get("rootNodes") if isinstance(sitemap, dict) else None, "")
@@ -717,11 +719,12 @@ def parse_axure_export(files: list[tuple[str, Path]], source: str, root: str) ->
     html_names = [n for n in by_name if n.lower().endswith(".html") and "/" not in n and n.lower() not in _PLAYER_PAGES]
     ordered: list[tuple[str, str]] = []
     used: set[str] = set()
-    short = [label.split(" / ")[-1].strip() or label for label, _u in pages]
-    dup = {n for n in short if short.count(n) > 1}
-    for (label, url), name in zip(pages, short):   # 页面名只取自己那一级（文件夹路径不进标题），同名页面才带上路径区分
+    roots = {label.split(" / ")[0] for label, _u in pages if " / " in label}
+    if pages and len(roots) == 1 and all(" / " in label for label, _u in pages):   # 整个站点地图包在一个根文件夹里：根不算分组
+        pages = [(label.split(" / ", 1)[1], url) for label, url in pages]
+    for label, url in pages:   # 页面标题带文件夹路径「活动运营后台 / 活动列表」，整理稿按文件夹分组
         if url in by_name and url not in used:
-            ordered.append((label if name in dup else name, url))
+            ordered.append((label, url))
             used.add(url)
     ordered.extend((Path(n).stem, n) for n in sorted(html_names) if n not in used)  # 站点地图没列的页面补在后面
 
