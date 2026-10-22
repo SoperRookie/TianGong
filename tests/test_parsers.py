@@ -642,3 +642,47 @@ def test_Axure站点地图混淆格式解码_页面按站点地图顺序_同名�
     text = parse_file(z).full_text
     heads = [l for l in text.splitlines() if l.startswith("## 页面：")]
     assert heads == ["## 页面：需求说明", "## 页面：活动运营后台 / 活动列表", "## 页面：活动运营后台 / 连赢活动记录", "## 页面：活动运营后台 / 操作记录", "## 页面：商户后台, 含逗号 / 操作记录"]
+
+
+def test_Axure示例图单元格_说明在前图里短文案紧随其后_流程节点整段说明只取首行(tmp_path):
+    """原型把几张示例小图并排摆、每张上方一行「…示例：」说明，图里的按钮 / 金额是散落的短控件：按坐标逐行读会把几张图的文案交错
+    混在一起、说明先连成一串。按说明划单元格（左右边界是同行相邻说明，下边界是本列下一条说明或第一个长段落）把短控件挪到
+    各自说明后面；连接线指向整段 tips 文字时流程行只取首行加「…」。"""
+    import zipfile
+
+    from app.parsers.base import parse_file
+
+    def t(i, text, cls="_段落"):
+        ps = "".join(f"<p>{x}</p>" for x in text.split("|"))
+        return f"<div id='u{i}' class='ax_default {cls}'><div id='u{i}_text' class='text'>{ps}</div></div>"
+    def conn(i, label):
+        return (f"<div id='u{i}' class='ax_default _连接'><img id='u{i}_seg0' class='img' src='x.svg'/><img id='u{i}_seg1' class='img' src='y.svg'/>"
+                f"<div id='u{i}_text' class='text'><p>{label}</p></div></div>")
+    page = ("<html><head><title>入口</title></head><body><div id='base'>"
+            + t(1, "「B面」展开时：|1、未报名用户：显示奖池金额") + t(2, "未报名用户B面展开示例：") + t(3, "已报名用户B面展开示例：")
+            + t(4, "今日奖池", "box_2") + t(5, "日榜排名", "box_2") + t(6, "¥68", "_三级标题") + t(7, "当前连赢数：6") + t(8, "点击报名", "primary_button")
+            + t(9, "盈利报名未结清示例：") + t(10, "还差4次") + t(11, "参赛报名", "box_2")
+            + t(12, "报名方式说明：|「直接报名」：立即扣除报名费|「盈利报名」：盈利派彩后分批扣除|注：|1.当日「直接报名」后无法取消或修改报名方式。|2.当日「盈利报名」费用未结清时可补齐。")
+            + t(13, "注：以上tips说明文本以运营最终提供为准") + conn(14, "悬浮时tips显示") + "</div></body></html>")
+    css = ("#u1 { left:100px; top:100px; width:600px; height:40px; } #u2 { left:100px; top:200px; width:150px; height:18px; } #u3 { left:500px; top:200px; width:150px; height:18px; }"
+           "#u4 { left:120px; top:260px; width:80px; height:20px; } #u5 { left:520px; top:260px; width:80px; height:20px; } #u6 { left:120px; top:300px; width:40px; height:25px; }"
+           "#u7 { left:520px; top:300px; width:80px; height:17px; } #u8 { left:120px; top:340px; width:140px; height:23px; }"
+           "#u9 { left:100px; top:420px; width:150px; height:18px; } #u10 { left:120px; top:460px; width:60px; height:16px; } #u11 { left:520px; top:460px; width:229px; height:35px; }"
+           "#u12 { left:520px; top:520px; width:275px; height:179px; } #u13 { left:120px; top:720px; width:225px; height:17px; }"
+           "#u14 { left:600px; top:480px; } #u14_seg0 { left:-5px; top:0px; width:10px; height:40px; } #u14_seg1 { left:-10px; top:30px; width:20px; height:20px; }")
+    z = tmp_path / "入口.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("原型/index.html", "<html><body><iframe src='start.html'></iframe></body></html>")
+        zf.writestr("原型/入口.html", page)
+        zf.writestr("原型/files/入口/styles.css", css)
+        zf.writestr("原型/data/document.js", '$axure.loadDocument({"sitemap":{"rootNodes":[{"pageName":"入口","url":"入口.html"}]}});')
+        zf.writestr("原型/resources/scripts/axure/axure.js", "var $axure = {};")
+    text = parse_file(z).full_text
+    body = text.split("## 页面：入口\n", 1)[-1]
+    assert body.startswith("[u1] 「B面」展开时：\n[u1] 1、未报名用户：显示奖池金额\n"
+                           "[u2] 未报名用户B面展开示例：\n[u4] 今日奖池\n[u6] ¥68\n[u8] 点击报名\n"          # 左列：说明 + 本列短文案，到本列下一条说明为止
+                           "[u3] 已报名用户B面展开示例：\n[u5] 日榜排名\n[u7] 当前连赢数：6\n[u11] 参赛报名\n[u14] 悬浮时tips显示\n"   # 右列：没有下一条说明，到长段落为止
+                           "[u9] 盈利报名未结清示例：\n[u10] 还差4次\n"
+                           "[u12] 报名方式说明：\n")                                                       # 长段落不进单元格、原位
+    assert "【流程图结束】\n[u13] 注：以上tips说明文本以运营最终提供为准" in body   # 左列下方的「注：」说明不被没有下边界的说明吸走
+    assert "参赛报名 —悬浮时tips显示→ 报名方式说明：…\n" in body and "分批扣除→" not in body   # 流程节点只取整段的首行

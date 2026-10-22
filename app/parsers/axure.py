@@ -496,6 +496,18 @@ def _attach_labels(controls: list[dict], connectors: list[dict]) -> dict[str, li
     return {cid: [t for _y, _x, t in sorted(v)] for cid, v in out.items()}
 
 
+FLOW_NODE_MAX = 60   # 流程行里一个节点最多这么多字：连接线指向整段说明文字（tips 文案、规则段落）时只取首行，整段另有原行
+
+
+def _node_text(sh: dict) -> str:
+    """流程节点文字：短框整段；多行长段落（连接线指到的「报名方式说明：…」整段 tips）只取首行加「…」，不把整段塞进流程行。"""
+    joined = " ".join(" ".join(sh["lines"]).split())
+    if len(joined) <= FLOW_NODE_MAX or len(sh["lines"]) <= 1:
+        return joined
+    first = " ".join(sh["lines"][0].split())
+    return (first[:FLOW_NODE_MAX] if len(first) > FLOW_NODE_MAX else first) + "…"
+
+
 def _flows(controls: list[dict], connectors: list[dict]) -> list[dict]:
     """流程框 + 连接线 → 流程图：每条连线找到起止两端落在哪个有文字的控件上，得到「A —标签→ B」；按连通分量分成几张图，
     每张图从起点（没有入边的框）开始深度优先列边。返回 [{nodes: [uid…], lines: [...], anchor: 阅读顺序里最后一个节点 uid}]。"""
@@ -522,7 +534,7 @@ def _flows(controls: list[dict], connectors: list[dict]) -> list[dict]:
         edges.append((src["id"], label, dst["id"]))
     if not edges:
         return []
-    text = {sh["id"]: " ".join(" ".join(sh["lines"]).split()) for sh in shapes}
+    text = {sh["id"]: _node_text(sh) for sh in shapes}
     order = {sh["id"]: i for i, sh in enumerate(controls) if sh.get("id") in text}
     parent: dict[str, str] = {}
 
@@ -573,6 +585,73 @@ def _flows(controls: list[dict], connectors: list[dict]) -> list[dict]:
     return out
 
 
+_CAPTION_RE = re.compile(r"(示例|示意图?|参考)\s*[：:]?\s*$")   # 示例图的说明：「未报名用户B面未展开示例：」「入口位置示例」
+_CAPTION_MAX = 40
+_CELL_SHORT_LINES, _CELL_SHORT_CHARS = 3, 40   # 示例图里的界面短文案：按钮名、金额、状态文案
+_CELL_ROW = 30         # 同一行示例说明的纵向容差
+_CELL_SAME_COL = 24    # 正上方同列说明的横向容差
+_CELL_PAD = 8
+
+
+def _is_caption(c: dict) -> bool:
+    return len(c["lines"]) == 1 and len(c["lines"][0]) <= _CAPTION_MAX and bool(_CAPTION_RE.search(c["lines"][0]))
+
+
+_NOTE_RE = re.compile(r"^(注|备注|说明|注意)\s*[:：]")   # 「注：以上文案以运营提供为准」是说明不是图里的文案：不进单元格，并作下边界
+
+
+def _is_short(c: dict) -> bool:
+    return bool(c["lines"]) and len(c["lines"]) <= _CELL_SHORT_LINES and sum(len(l) for l in c["lines"]) <= _CELL_SHORT_CHARS \
+        and c.get("cls") != "table_row" and not _NOTE_RE.match(c["lines"][0])
+
+
+def _example_order(controls: list[dict]) -> list[dict]:
+    """示例图单元格：原型常把几张示例小图并排摆，每张上方一行「…示例：」说明，图里的按钮 / 金额 / 状态文案是散落的短控件。
+    按坐标逐行读会把几张图的文案交错混在一起、说明文字先连成一串。这里给每条说明划一个单元格：左边界是说明的 x，右边界是
+    同一行右侧下一条说明的 x（没有同行说明的沿用正上方同列说明的右边界），下边界是本列下一条说明或本列第一个长段落 / 「注：」说明；
+    单元格里的短控件（≤ 3 行且 ≤ 40 字）挪到该说明后面、相对顺序不变，其余控件原位不动。"""
+    caps = sorted((c for c in controls if _is_caption(c)), key=lambda c: (c["y"], c["x"]))
+    if not caps:
+        return controls
+
+    def cx(c: dict) -> float:
+        return c["x"] + (c.get("w") or 0) / 2
+
+    right: dict[str, float] = {}
+    for c in caps:
+        same_row = [o for o in caps if o is not c and abs(o["y"] - c["y"]) <= _CELL_ROW and o["x"] > c["x"] + 1]
+        if same_row:
+            right[c["id"]] = min(o["x"] for o in same_row)
+            continue
+        above = [o for o in caps if o["y"] < c["y"] - _CELL_ROW and abs(o["x"] - c["x"]) <= _CELL_SAME_COL]
+        right[c["id"]] = right[max(above, key=lambda o: o["y"])["id"]] if above else float("inf")
+    bottom: dict[str, float] = {}
+    for c in caps:
+        left, r = c["x"] - _CELL_PAD, right[c["id"]]
+        nxt = [o["y"] for o in caps if o["y"] > c["y"] + _CELL_ROW and left <= cx(o) < r]
+        longs = [o["y"] for o in controls if o["y"] > c["y"] and o["lines"] and not _is_short(o) and not _is_caption(o) and left <= cx(o) < r]
+        bottom[c["id"]] = min(nxt + longs + [float("inf")])
+    members: dict[str, list[dict]] = {}
+    taken: set[str] = set()
+    for m in controls:
+        if _is_caption(m) or not _is_short(m):
+            continue
+        hits = [c for c in caps if c["x"] - _CELL_PAD <= cx(m) < right[c["id"]] and c["y"] < m["y"] < bottom[c["id"]]]
+        if hits:
+            cap = max(hits, key=lambda c: c["y"])
+            members.setdefault(cap["id"], []).append(m)
+            taken.add(m["id"])
+    if not taken:
+        return controls
+    out: list[dict] = []
+    for c in controls:
+        if c["id"] in taken:
+            continue
+        out.append(c)
+        out.extend(members.get(c["id"], []))
+    return out
+
+
 def _island_note(k: int, members: list[dict], main: list[dict]) -> str:
     """独立区域的标记行（≤ 40 字，底稿不当原文句）：在主体的哪个方向、距离多少、几个控件。"""
     mx = max((c["x"] for c in main), default=0)
@@ -617,7 +696,7 @@ def _page_text(html: str, css: str = "") -> tuple[str, list[str], list[dict], di
     for k in sorted(groups):   # 主体在前；画布上与主体不相连的独立区域各自成块、带标记行，不与主体按坐标穿插
         if k:
             lines.append(_island_note(k, groups[k], groups.get(0, [])))
-        for c in groups[k]:
+        for c in _example_order(groups[k]):   # 示例图的说明在前、图里的短文案紧随其后
             key = "\n".join(c["lines"])
             if key and key in seen:
                 continue   # 整块重复的控件（母版 / 面板状态）只留一份
