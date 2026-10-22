@@ -162,6 +162,8 @@ _IMG_SRC_RE = re.compile(r"图片\s*[:：]?\s*\d+")   # 「图片:7」「图片 
 _PAGE_RANK = [re.compile(r"更新记录|版本记录|修订记录|变更记录|更新日志|版本历史"), re.compile(r"需求说明|需求背景|需求概述|总体说明|概述|总览")]
 _PAGE_PREFIX = re.compile(r"^页面[:：]\s*")
 _MAX_LABEL = 30
+_EXAMPLE_RE = re.compile(r"(示例|示意图?|参考)\s*[：:]?\s*$")   # 示例图的说明行（解析器 _CAPTION_RE 同口径）
+_EXAMPLE_ITEM_MAX = 24   # 示例图里的界面短文案：按钮名 / 金额 / 状态文案，并进说明行
 
 
 def _page_title(source: str) -> str:
@@ -273,12 +275,50 @@ def _block_rows(items: list[dict]) -> list[dict]:
     for k, r in enumerate(rows):
         if r["t"] == "item" and _ROMAN_RE.match(r["item"]["text"]) and k and rows[k - 1]["t"] == "label":
             r["lv"] = 0
+    rows = _fold_examples(rows)
     out: list[dict] = []
     for r in rows:
         if r["t"] == "table" and len(r["items"]) == 1:   # 孤零零一行不成表
             out.append({"t": "item", "item": r["items"][0], "lv": 0, "sub": False})
         else:
             out.append(r)
+    return out
+
+
+def _is_example_caption(text: str) -> bool:
+    return len(text) <= _MAX_LABEL and bool(_EXAMPLE_RE.search(text))
+
+
+def _is_example_item(text: str) -> bool:
+    return len(text) <= _EXAMPLE_ITEM_MAX and not _SENTENCE_RE.search(text) and not _SUB_RE.match(text) and not _LABEL_RE.search(text) \
+        and not _HEAD_RE.match(text) and not _EXAMPLE_RE.search(text)
+
+
+def _fold_examples(rows: list[dict]) -> list[dict]:
+    """示例图：「未报名用户B面展开示例：」这行说明后面紧跟的界面短文案（≤ 24 字、不成句）并成一行「说明：A / B / C」（t=example），
+    不再一条一行竖着排；说明后面没有短文案的（只有一张图）当普通条目，不成空的加粗小标题——几张示例图并排时之前是一串空标题
+    加一大堆散落的按钮名。"""
+    out: list[dict] = []
+    i = 0
+    while i < len(rows):
+        r = rows[i]
+        if r["t"] == "label" and _is_example_caption(r["item"]["text"]):
+            members: list[dict] = []
+            j = i + 1
+            while j < len(rows) and rows[j]["t"] == "item" and _is_example_item(rows[j]["item"]["text"]):
+                members.append(rows[j]["item"])
+                j += 1
+            if members:
+                out.append({"t": "example", "item": r["item"], "items": members})
+                i = j
+                continue
+            nxt = rows[i + 1] if i + 1 < len(rows) else None
+            if nxt is None or nxt["t"] == "label" or (nxt["t"] == "item" and _is_example_caption(nxt["item"]["text"])):
+                out.append({"t": "item", "item": r["item"], "lv": 0, "sub": False})
+                i += 1
+                continue
+        out.append(r)
+        i += 1
     return out
 
 
@@ -362,6 +402,60 @@ def _fold_heading(name: str, rows: list[dict], main: str) -> str:
     return name
 
 
+_NAME_SEPS = ("-", "－", "—", "–", "：", ":", " › ", "›")
+
+
+def _strip_page(name: str, pages: list[str]) -> str:
+    """模块名去掉「页面-」前缀（模块名多半只带页面名，也可能带文件夹路径）。"""
+    for pg in dict.fromkeys(p for p in pages if p):
+        for sep in _NAME_SEPS:
+            if name.startswith(pg + sep) and len(name) > len(pg) + len(sep):
+                return name[len(pg) + len(sep):].strip()
+    return name
+
+
+def enforce_block_names(modules: list[dict], materials: str) -> int:
+    """区块名必须来自材料：模型自拟的区块名（去掉页面前缀后在材料里逐字找不到，如「A面内容」「Banner与实时战况」）换成该区块
+    开头的原文小标题（前两条里以冒号结尾的引导句 / 带编号的章节名，去掉编号与冒号，材料里逐字有）；没有可用的
+    小标题就保留原名。换名后同名区块合并（条目逐字去重）。返回换名数。"""
+    mat = normalize(materials)
+    renamed = 0
+    for mod in modules:
+        main = _module_source(mod)
+        if not main or _IMG_SRC_RE.search(main) or all(it.get("manual") for it in mod["items"]):
+            continue
+        label = _page_title(main)
+        page = label.rsplit(" / ", 1)[-1].strip() if " / " in label else label
+        blk = _strip_page(mod["name"], [label, page])
+        if not blk or normalize(blk) in mat:
+            continue
+        for it in mod["items"][:2]:
+            text = it["text"].split("〔")[0].strip()
+            if it.get("verified") is False or it.get("doubt") or it.get("gap") or it.get("forced") or len(text) > _MAX_LABEL \
+                    or _SENTENCE_RE.search(_LABEL_RE.sub("", text)):
+                continue
+            if not (_LABEL_RE.search(text) or _HEAD_RE.match(text)):   # 只认冒号引导句与带编号的章节名，普通短条目不当标题
+                continue
+            core = _HEAD_STRIP_RE.sub("", _LABEL_RE.sub("", text).strip(), count=1).strip() or _LABEL_RE.sub("", text).strip()
+            if len(core) < 2 or normalize(core) not in mat:
+                continue
+            prefix = mod["name"][:len(mod["name"]) - len(blk)]   # 「页面-」部分照旧
+            mod["name"] = f"{prefix}{core}"
+            renamed += 1
+            break
+    if renamed:   # 同名区块合并
+        merged: dict[str, dict] = {}
+        for mod in modules:
+            key = normalize(mod["name"])
+            if key in merged:
+                seen = {ledger_mod.unit_key(it["text"]) for it in merged[key]["items"]}
+                merged[key]["items"].extend(it for it in mod["items"] if ledger_mod.unit_key(it["text"]) not in seen)
+            else:
+                merged[key] = mod
+        modules[:] = list(merged.values())
+    return renamed
+
+
 def extraction_outline(modules: list[dict]) -> list[dict]:
     """整理稿层级：页面（按模块主来源分组，编号 1. 2. …）› 区块（模块，编号 1.1 …，名字去掉「页面-」前缀）› 条目层级
     （见 _block_rows）。只在图片里出现的文案（来源「图片:N」）归到最后一节「仅出现在图片中的文案」。
@@ -369,6 +463,7 @@ def extraction_outline(modules: list[dict]) -> list[dict]:
     返回 [{no, gno, group, title, source, blocks: [{no, name, module, source, rows}]}]，rows 里是条目对象本身（供成稿与接口两用）。"""
     sections: list[dict] = []
     index: dict[str, dict] = {}
+    by_page: dict[str, dict] = {}
     for mod in modules:
         if not mod["items"]:
             continue
@@ -382,21 +477,23 @@ def extraction_outline(modules: list[dict]) -> list[dict]:
         group, page = label.rsplit(" / ", 1) if (label != IMAGE_SECTION and " / " in label) else ("", label)   # 「活动运营后台 / 活动列表」：文件夹是分组
         group, page = group.strip(), page.strip() or label
         sec = index.get(normalize(label))
+        if sec is None and page != IMAGE_SECTION:
+            twin = by_page.get(normalize(page))
+            if twin is not None and (not group or not twin["group"]):   # 同一页一处来源带文件夹一处不带：并成一节，不拆成两页
+                sec = twin
+                if group and not sec["group"]:
+                    sec["group"], sec["title"] = group, page
+                    if src:
+                        sec["source"] = src
+                index[normalize(label)] = sec
         if sec is None:
             sec = {"title": page, "group": group, "source": src, "blocks": []}
             index[normalize(label)] = sec
+            by_page.setdefault(normalize(page), sec)
             sections.append(sec)
         elif not sec["source"] and src:
             sec["source"] = src
-        name = mod["name"]
-        if page != IMAGE_SECTION:
-            for pg in dict.fromkeys([label, page]):   # 模块名多半只带页面名
-                for sep in ("-", "－", "—", "–", "：", ":", " › ", "›"):
-                    if name.startswith(pg + sep) and len(name) > len(pg) + len(sep):
-                        name = name[len(pg) + len(sep):].strip()
-                        break
-                if name != mod["name"]:
-                    break
+        name = mod["name"] if page == IMAGE_SECTION else _strip_page(mod["name"], [label, page])
         rows = _block_rows(mod["items"])
         name = _fold_heading(name or mod["name"], rows, "" if page == IMAGE_SECTION else main)
         sec["blocks"].append({"name": name, "module": mod["name"], "source": "" if page == IMAGE_SECTION else main,
@@ -438,6 +535,8 @@ def outline_view(modules: list[dict]) -> list[dict]:
                     rows.append({"t": "flow", "ids": [it.get("id") for it in r["items"]]})
                 elif r["t"] == "label":
                     rows.append({"t": "label", "id": r["item"].get("id")})
+                elif r["t"] == "example":
+                    rows.append({"t": "example", "id": r["item"].get("id"), "ids": [it.get("id") for it in r["items"]]})
                 else:
                     rows.append({"t": "item", "id": r["item"].get("id"), "lv": r["lv"]})
             blocks.append({"no": b["no"], "name": b["name"], "module": b["module"], "source": b["source"], "draft": b["draft"], "rows": rows})
@@ -445,10 +544,10 @@ def outline_view(modules: list[dict]) -> list[dict]:
     return out
 
 
-def _item_marks(it: dict, main: str) -> tuple[str, str]:
-    """条目的前缀（⚠）与后缀（〔补漏〕〔兜底〕〔疑点〕〔来源〕）。"""
+def _item_marks(it: dict, main: str, source: bool = True) -> tuple[str, str]:
+    """条目的前缀（⚠）与后缀（〔补漏〕〔兜底〕〔疑点〕〔来源〕；source=False 不带来源）。"""
     mark = "" if it.get("verified", True) else f"{UNVERIFIED_MARK} "
-    others = [sx for sx in it.get("sources") or [] if sx != main]
+    others = [sx for sx in it.get("sources") or [] if sx != main] if source else []
     src = f" 〔来源：{'；'.join(others)}〕" if others else ""
     gap = f" {FORCED_MARK}" if it.get("forced") else (f" {GAP_MARK}" if it.get("gap") else "")
     draft = f" {DRAFT_MARK}" if it.get("draft") else ""
@@ -500,7 +599,7 @@ def extraction_markdown(modules: list[dict], dropped: list[str] | None = None, h
                     art = flow_ascii([it["text"] for it in r["items"]])
                     if art:   # 画成分支树；带标记（⚠ / 补漏 / 疑点）的流程行另列在树下面
                         lines.extend(art)
-                        marked = [(it, *_item_marks(it, main)) for it in r["items"]]
+                        marked = [(it, *_item_marks(it, main, source=False)) for it in r["items"]]   # 只因来源不同不重复列
                         marked = [(it, mk, tl) for it, mk, tl in marked if mk or tl]
                         if marked:
                             lines.append("")
@@ -513,6 +612,12 @@ def extraction_markdown(modules: list[dict], dropped: list[str] | None = None, h
                 elif r["t"] == "label":
                     mark, tail = _item_marks(r["item"], main)
                     lines.append(f"**{mark}{r['item']['text']}**{tail}")
+                elif r["t"] == "example":   # 示例图：说明 + 图里的短文案一行
+                    mark, tail = _item_marks(r["item"], main)
+                    cap = r["item"]["text"].rstrip()
+                    cap = cap if _LABEL_RE.search(cap) else cap + "："
+                    parts = [f"{mk}{it['text']}{tl}" for it in r["items"] for mk, tl in [_item_marks(it, main)]]
+                    lines.append(f"- {mark}{cap}{' / '.join(parts)}{tail}")
                 else:
                     mark, tail = _item_marks(r["item"], main)
                     lines.append(("  " if r["lv"] else "") + f"- {mark}{r['item']['text']}{tail}")
@@ -555,9 +660,55 @@ def _heading_of(line: str) -> tuple[int, str] | None:
     return None
 
 
+def line_headings(lines: list[str]) -> list[tuple[int, str] | None]:
+    """逐行判定结构标题（与 _heading_of 同级别），但按材料的真实结构：
+    - 图片理解块（【文档内图片理解 …】到【图片理解结束 …】）里的「# 图片类型与整体说明」「# 图中文字原文」等是图片理解结果
+      自己的节名，不是材料章节——之前把它们当一级标题，一页被切成几十个假单元、页面路径被冲掉、同一页散进不同调用，模型只好
+      自己起区块名；老材料没有结束标记的，图片理解的固定节名（一级）同样不算，块里的其它子标题（非「页面：」）也不算；
+    - 文件自己的标题（文件头之后、还没有正文就出现的一级标题，且下一个标题比它低一级：Axure 包的「# Axure 原型：…」、文档的
+      大标题）不进路径；
+    - 「## 页面：PC / 活动入口」去掉「页面：」前缀，路径就是「文件 › PC / 活动入口」，与整理稿的来源写法一致。"""
+    out: list[tuple[int, str] | None] = [None] * len(lines)
+    raw: list[tuple[int, str] | None] = [_heading_of(l) for l in lines]
+    in_img = False
+    body_seen = True
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if ledger_mod.IMG_BEGIN.match(s):
+            in_img = True
+            continue
+        if ledger_mod.IMG_END.match(s):
+            in_img = False
+            continue
+        h = raw[i]
+        if h is None:
+            if s and not s.startswith("【"):
+                body_seen = True
+            continue
+        lv, title = h
+        if lv == 0:
+            in_img, body_seen = False, False
+            out[i] = h
+            continue
+        if ledger_mod._is_vision_heading(lv, title):
+            continue   # 图片理解结果的节名（块内；老材料块外也可能出现）
+        if in_img:
+            if lv > 1 and not _PAGE_PREFIX.match(title):
+                continue   # 图片理解里的子标题
+            in_img = False   # 老材料没有结束标记：遇到页面标题说明块已结束
+        if lv == 1 and not body_seen:
+            nxt = next((raw[j] for j in range(i + 1, len(lines)) if raw[j] is not None), None)
+            if nxt is not None and nxt[0] > 1:
+                body_seen = True
+                continue   # 文件自己的标题
+        out[i] = (lv, _PAGE_PREFIX.sub("", title).strip() or title)
+    return out
+
+
 def chunk_contexts(materials: str, chunks: list[str]) -> list[str]:
     """每片开头所处的标题路径（文件 › 页面 › 章节）。片自身开头就是标题的，路径只到它的上一级。"""
     lines = materials.split("\n")
+    heads = line_headings(lines)
     stack: dict[int, str] = {}
     cursor = 0
     out: list[str] = []
@@ -567,14 +718,14 @@ def chunk_contexts(materials: str, chunks: list[str]) -> list[str]:
         if idx is None:
             out.append("")
             continue
-        for line in lines[cursor:idx]:
-            h = _heading_of(line)
+        for i in range(cursor, idx):
+            h = heads[i]
             if h:
                 stack[h[0]] = h[1]
                 for lv in [k for k in stack if k > h[0]]:
                     del stack[lv]
         cursor = idx
-        own = _heading_of(first)
+        own = heads[idx]
         limit = own[0] if own else 99
         out.append(" › ".join(stack[k] for k in sorted(stack) if k < limit))
     return out
@@ -582,29 +733,31 @@ def chunk_contexts(materials: str, chunks: list[str]) -> list[str]:
 
 def structure_units(materials: str, max_chars: int) -> list[dict]:
     """把材料按结构切成调用单元：先按【文件】切，文件内按一 / 二级标题切成页面 / 章节单元；同一文件里相邻的小单元打包到
-    不超过 max_chars，单元本身超限才按三级标题 / 段落再切（路径加「第 k 段」）。返回 [{path, pages: [路径…], text}]。"""
+    不超过 max_chars，单元本身超限才按三级标题 / 段落再切（路径加「第 k 段」）。标题判定见 line_headings（图片理解块里的
+    标题不算、文件标题不进路径、「页面：」前缀去掉）。返回 [{path, pages: [路径…], text}]。"""
     lines = materials.split("\n")
+    heads = line_headings(lines)
     units: list[tuple[str, str, list[str]]] = []   # (file, path, lines)
     stack: dict[int, str] = {}
     file_name = "需求原文"
-    cur: list[str] = []
+    cur: list[tuple[str, bool]] = []   # (行, 是否结构标题)
     cur_path = file_name
 
     def _flush():
-        body = [l for l in cur if l.strip()]
-        if body and all(_heading_of(l) for l in body) and units and units[-1][0] == file_name:
-            units[-1][2].extend(cur)          # 只有标题的空单元并给同文件的上一单元
-        elif body and all(_heading_of(l) for l in body):
-            pending.extend(cur)               # 文件开头只有标题：挂到该文件的第一个正文单元前面
+        body = [l for l, _ in cur if l.strip()]
+        only_heads = bool(body) and all(is_head for l, is_head in cur if l.strip())
+        if only_heads and units and units[-1][0] == file_name:
+            units[-1][2].extend(l for l, _ in cur)          # 只有标题的空单元并给同文件的上一单元
+        elif only_heads:
+            pending.extend(l for l, _ in cur)               # 文件开头只有标题：挂到该文件的第一个正文单元前面
         elif body:
-            units.append((file_name, cur_path, pending + list(cur)))
+            units.append((file_name, cur_path, pending + [l for l, _ in cur]))
             pending.clear()
         cur.clear()
 
     pending: list[str] = []
 
-    for line in lines:
-        h = _heading_of(line)
+    for line, h in zip(lines, heads):
         if h and h[0] <= UNIT_LEVEL:
             _flush()
             if h[0] == 0:
@@ -615,7 +768,7 @@ def structure_units(materials: str, max_chars: int) -> list[dict]:
                 for lv in [k for k in stack if k > h[0]]:
                     del stack[lv]
             cur_path = " › ".join([file_name] + [stack[k] for k in sorted(stack)])
-        cur.append(line)
+        cur.append((line, bool(h)))
     _flush()
     if pending:
         if units:
@@ -668,14 +821,14 @@ def uncovered_lines(materials: str, text: str) -> tuple[list[dict], dict]:
     out: list[dict] = []
     total = covered = 0
     in_flow = False
-    for raw in materials.split("\n"):
+    lines = materials.split("\n")
+    for raw, h in zip(lines, line_headings(lines)):
         s = raw.strip()
         if s.startswith(ledger_mod.FLOW_BEGIN) or s == ledger_mod.FLOW_END:
             in_flow = s.startswith(ledger_mod.FLOW_BEGIN)
             continue
         if in_flow:
             continue   # 流程块是程序从流程框还原的派生内容，框里的文字另有原行
-        h = _heading_of(s)
         if h:
             if h[0] == 0:
                 file_name, stack = h[1], {}
@@ -684,8 +837,8 @@ def uncovered_lines(materials: str, text: str) -> tuple[list[dict], dict]:
                 for lv in [k for k in stack if k > h[0]]:
                     del stack[lv]
             continue
-        if not s or _IMG_HEAD.match(s) or s.startswith(("[[图片", ">", "```", "|---", "【")):
-            continue   # 【独立区域 …】【说明 / 备注】这类程序标记不是需求句
+        if not s or s.startswith(("#", "[[图片", ">", "```", "|---", "【")) or ledger_mod._PARSER_NOTE.match(s):
+            continue   # 【独立区域 …】【说明 / 备注】这类程序标记、图片理解块里的节名、解析器自己的说明行不是需求句
         s = ledger_mod.UNIT_ID_RE.sub("", s).strip()
         if len(_CJK_RE.findall(s)) < MIN_CJK or _NOISE_RE.search(s) or _HEADER_LINE_RE.search(s):
             continue
@@ -939,6 +1092,7 @@ async def run_requirement_extraction(materials: str, llm: LLMClient, model: str 
     gap, ledger = await _gap_fill(materials, modules, llm, model, extra)
     enforce_draft(modules, islands)
     dedupe_flow_nodes(modules)
+    renamed = enforce_block_names(modules, materials)
     stats = verify_modules(modules, materials)
     assign_ids(modules)
     crosscheck = await _crosscheck(modules, llm, model, extra, islands)
@@ -951,6 +1105,8 @@ async def run_requirement_extraction(materials: str, llm: LLMClient, model: str 
                 gap["rounds"], gap["added"], gap["forced"], cov["covered"], cov["lines"],
                 ls["total"], ls["in"], ls["ex"], ls["ex_by"].get("model", 0), ls["ex_by"].get("auto", 0), ls["review"], ls["todo"],
                 (ledger.get("image") or {}).get("total", 0), len(units), model_name)
+    if renamed:
+        logger.info("需求提取：{} 个模型自拟的区块名换成了区块开头的原文小标题", renamed)
     if crosscheck:
         logger.info("需求提取交叉核对：跨页面疑点 +{}，疑似遗留草稿区块 {}", crosscheck["doubts"], crosscheck["drafts"])
     return {"text": text, "modules": modules, "dropped": dropped, "model_name": model_name, "chunks": len(units),

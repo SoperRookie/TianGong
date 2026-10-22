@@ -189,13 +189,13 @@ def test_分片标题路径_切在章节中间的片带上文件与页面():
     assert len(chunks) >= 3
     ctx = chunk_contexts(materials, chunks)
     assert ctx[0] == ""                                   # 第一片从原文开头起，没有上级标题
-    mid = [c for c in ctx if c.startswith("连赢挑战.zip › Axure 原型")]
-    assert mid and any(c.endswith("页面：活动详情页") for c in mid)   # 切在活动详情页中间的片
-    assert any(c.endswith("页面：活动入口 › 游戏内入口") for c in ctx)   # 三级路径
+    mid = [c for c in ctx if c.startswith("连赢挑战.zip › ")]
+    assert mid and "连赢挑战.zip › 活动详情页" in mid                  # 切在活动详情页中间的片：文件自己的标题不进路径、「页面：」前缀去掉
+    assert "连赢挑战.zip › 活动入口 › 游戏内入口" in ctx                # 三级路径
     # 片自身开头就是标题时，路径只到它的上一级
     for c, ch in zip(ctx, chunks):
         if ch.startswith("## 页面：活动入口"):
-            assert c == "连赢挑战.zip › Axure 原型：连赢挑战.zip"
+            assert c == "连赢挑战.zip"
 
 
 async def test_自动提取调用日志带需求归属_提取模型可单独配置(client, extract_on, monkeypatch):
@@ -238,10 +238,10 @@ def test_结构分层切单元_按文件与页面切_不切在页面中间_小�
     paths = [u["pages"] for u in units]
     assert paths[0] == ["需求原文"]
     # 同一文件的小页面打包进一次调用，路径带文件与页面
-    packed = next(u for u in units if "连赢挑战.zip › Axure 原型：连赢挑战.zip › 页面：活动详情页" in u["pages"])
-    assert "连赢挑战.zip › Axure 原型：连赢挑战.zip › 页面：活动入口" in packed["pages"] and "### 游戏内入口" in packed["text"]
+    packed = next(u for u in units if "连赢挑战.zip › 活动详情页" in u["pages"])   # 文件自己的标题不进路径、「页面：」前缀去掉
+    assert "连赢挑战.zip › 活动入口" in packed["pages"] and "### 游戏内入口" in packed["text"] and "# Axure 原型：连赢挑战.zip" in units[1]["text"]
     # 超限的页面按段再切，路径带第 k 段；不同文件不混在一次调用里
-    segs = [p for u in units for p in u["pages"] if "页面：规则说明（第" in p]
+    segs = [p for u in units for p in u["pages"] if "规则说明（第" in p]
     assert len(segs) >= 2 and all(u["path"] == "补充.docx" for u in units if "补充.docx" in u["pages"])
     assert all(len(u["text"]) <= 1200 for u in units)
 
@@ -255,7 +255,7 @@ def test_未覆盖需求句_剔除外观与样例_整理稿覆盖的不算():
     text = "## 报名-日期\n- 报名生效日期提供两个选项：今日、次日\n- 我的昨日战绩包含用户昨日连赢数、昨日积分"
     missing, stats = uncovered_lines(materials, text)
     lines = [m["line"] for m in missing]
-    assert "- 选择次日后，当日将无法再次报名" in lines and all(m["path"] == "原型.zip › 原型 › 页面：报名" for m in missing)
+    assert "- 选择次日后，当日将无法再次报名" in lines and all(m["path"] == "原型.zip › 报名" for m in missing)
     assert any("无对应数据时对应数据项显示 0" in l for l in lines)       # 被改写丢掉句尾的那句算未覆盖
     assert not any("紫色" in l or "蓝色" in l or "GC1826" in l for l in lines)   # 外观与样例数据不算需求句
     assert stats == {"lines": 3, "covered": 1}
@@ -841,3 +841,82 @@ def test_整理稿按站点地图文件夹分组_分组页面区块三级编号_
     assert ("## 1. 需求说明 〔来源：后台.zip › 需求说明〕\n\n### 1.1 版本记录\n- 1 ｜ 2026-07-18 ｜ 创建文档\n\n---\n\n## 2. 活动运营后台\n\n### 2.1 活动列表 〔来源：后台.zip › 活动运营后台 / 活动列表〕\n\n#### 2.1.1 字段说明\n- 活动名称\n\n"
             "### 2.2 派奖查询 〔来源：后台.zip › 活动运营后台 / 派奖查询〕\n\n#### 2.2.1 查询条件\n- 活动ID\n\n---\n\n## 3. 商户管理后台\n\n### 3.1 日榜排名") in md
     assert "## 4. 疑点 / 不一致清单" in md
+
+
+def test_图片理解块里的标题不切单元_页面路径不丢_文件标题不进路径():
+    """Axure 页面里嵌的图片理解结果带「# 图片类型与整体说明」「# 图中文字原文」等一级标题：之前被当成章节，一页被切成几十个
+    假单元、页面路径被冲掉、同一页散进不同调用，模型只好自己起区块名、同一页在整理稿里出现两次。"""
+    from app.agents.extraction import line_headings, structure_units, uncovered_lines
+
+    img = ("【文档内图片理解 [[图片:1]]】\n【大图第 1/2 块】\n# 图片类型与整体说明\n这是活动入口截图\n# 界面元素清单\n- 报名按钮\n# 图中文字原文\n"
+           "参赛报名\n## 图中小节\n细节\n【图片理解结束 [[图片:1]]】\n")
+    page1 = "## 页面：PC / 活动入口\n[u1] 入口规则一：固定位置不可拖动\n" + img + "[u2] 入口规则二：鼠标悬浮展开\n"
+    page2 = "## 页面：PC / 活动详情页\n[u3] 详情规则：无数据时显示 0\n" + img.replace("图片:1", "图片:2") + "[u4] 详情规则二：展开排行榜\n"
+    materials = "【文件：连赢挑战.zip】\n# Axure 原型：连赢挑战.zip\n共 2 个页面，按站点地图顺序\n" + page1 + page2
+    heads = [h for h in line_headings(materials.split("\n")) if h]
+    assert heads == [(0, "连赢挑战.zip"), (2, "PC / 活动入口"), (2, "PC / 活动详情页")]   # 图片理解的节名、块内子标题、文件标题都不算
+    units = structure_units(materials, 20000)
+    assert [u["pages"] for u in units] == [["连赢挑战.zip", "连赢挑战.zip › PC / 活动入口", "连赢挑战.zip › PC / 活动详情页"]]
+    units = structure_units(materials, 300)
+    assert [u["pages"] for u in units] == [["连赢挑战.zip", "连赢挑战.zip › PC / 活动入口"], ["连赢挑战.zip › PC / 活动详情页"]]   # 按页切、页内不切
+    assert "[u2] 入口规则二" in units[0]["text"] and "# 图中文字原文" in units[0]["text"]
+    missing, _ = uncovered_lines(materials, "## 活动入口\n- 入口规则一：固定位置不可拖动")
+    assert {m["path"] for m in missing} == {"连赢挑战.zip › PC / 活动入口", "连赢挑战.zip › PC / 活动详情页"}   # 图片块后面的行仍挂在页面下
+    # 老材料没有结束标记：图片理解的固定节名同样不算标题，遇到下一个页面标题块结束
+    old = "【文件：旧.zip】\n## 页面：A\n[u1] 甲\n【文档内图片理解 [[图片:1]]】\n# 图中文字原文\n乙\n## 页面：B\n[u2] 丙\n"
+    assert [u["pages"] for u in structure_units(old, 20000)] == [["旧.zip › A", "旧.zip › B"]]
+
+
+def test_整理稿示例图_说明与图里短文案并成一行_没有短文案的说明不成空标题_示例行进接口层级():
+    """示例图：原型里几张示例小图并排、每张上方一行「…示例：」，图里的按钮名 / 金额是散落的短控件。整理稿把说明后面的短文案并成一行
+    「说明：A / B / C」；只有图没有文字的说明当普通条目，不再是一串空的加粗小标题。"""
+    from app.agents.extraction import extraction_markdown, outline_view, assign_ids
+
+    items = [{"text": "「B面」展开时：", "sources": ["连赢挑战.zip › PC / 活动入口"]},
+             {"text": "1、未报名用户：显示「当日日榜奖池金额」", "sources": ["连赢挑战.zip › PC / 活动入口"]},
+             {"text": "未报名用户B面未展开示例：", "sources": ["连赢挑战.zip › PC / 活动入口"]},
+             {"text": "未报名用户B面展开示例：", "sources": ["连赢挑战.zip › PC / 活动入口"]},
+             {"text": "今日奖池", "sources": ["连赢挑战.zip › PC / 活动入口"]},
+             {"text": "¥68", "sources": ["连赢挑战.zip › PC / 活动入口"], "verified": False},
+             {"text": "点击报名", "sources": ["连赢挑战.zip › PC / 活动入口"], "gap": True},
+             {"text": "已报名用户B面展开示例：", "sources": ["连赢挑战.zip › PC / 活动入口"]},
+             {"text": "当前连赢数：6", "sources": ["连赢挑战.zip › PC / 活动入口"]},
+             {"text": "点击后打开活动详情弹窗", "sources": ["连赢挑战.zip › PC / 活动入口"]},
+             {"text": "入口位置示例", "sources": ["连赢挑战.zip › PC / 活动入口"]},
+             {"text": "注：以上说明文本以运营提供为准", "sources": ["连赢挑战.zip › PC / 活动入口"]}]
+    modules = [{"name": "活动入口-B面内容", "items": items}]
+    assign_ids(modules)
+    md = extraction_markdown(modules)
+    assert "**「B面」展开时：**\n  - 1、未报名用户" in md                                       # 普通小标题照旧
+    assert "- 未报名用户B面未展开示例：\n" in md and "**未报名用户B面未展开示例：**" not in md   # 没有短文案的说明：普通条目
+    assert "- 未报名用户B面展开示例：今日奖池 / ⚠ ¥68 / 点击报名 〔补漏〕\n" in md             # 短文案并成一行，标记照带
+    assert "- 已报名用户B面展开示例：当前连赢数：6 / 点击后打开活动详情弹窗\n" in md
+    assert "- 入口位置示例\n  - 注：以上说明文本" in md                                        # 不带冒号的说明后面是普通句子：不折
+    rows = outline_view(modules)[0]["blocks"][0]["rows"]
+    ex = [r for r in rows if r["t"] == "example"]
+    assert len(ex) == 2 and ex[0]["id"] == items[3]["id"] and ex[0]["ids"] == [items[4]["id"], items[5]["id"], items[6]["id"]]
+    assert [r["t"] for r in rows] == ["label", "item", "item", "example", "example", "item", "item"]
+
+
+def test_区块名必须来自材料_自拟的换成开头的原文小标题_换名后同名合并_同一页有无文件夹并成一节():
+    from app.agents.extraction import enforce_block_names, extraction_outline
+
+    materials = ("【文件：连赢挑战.zip】\n## 页面：PC / 活动入口\n[u1] 入口显示内容说明:\n[u2] 「A面」未展开时：\n[u3] 【固定内容】:「活动主题文本」\n"
+                 "[u4] 报名规则说明：\n[u5] 1、有效触发任意报名方式后弹窗提示\n[u6] 二、奖池规则\n[u7] 奖池每日结算\n")
+    modules = [
+        {"name": "PC / 活动入口-A面内容", "items": [{"text": "「A面」未展开时：", "sources": ["连赢挑战.zip › PC / 活动入口"]},
+                                                 {"text": "【固定内容】:「活动主题文本」", "sources": ["连赢挑战.zip › PC / 活动入口"]}]},
+        {"name": "活动入口-报名规则说明", "items": [{"text": "1、有效触发任意报名方式后弹窗提示", "sources": ["连赢挑战.zip › 活动入口"]}]},
+        {"name": "活动入口-弹窗与确认", "items": [{"text": "报名规则说明：", "sources": ["连赢挑战.zip › 活动入口"]},
+                                              {"text": "1、有效触发任意报名方式后弹窗提示", "sources": ["连赢挑战.zip › 活动入口"]}]},
+        {"name": "活动入口-奖池结算规则", "items": [{"text": "二、奖池规则", "sources": ["连赢挑战.zip › PC / 活动入口"]},
+                                         {"text": "奖池每日结算", "sources": ["连赢挑战.zip › PC / 活动入口"]}]},
+        {"name": "活动入口-自拟但没有小标题", "items": [{"text": "奖池每日结算", "sources": ["连赢挑战.zip › PC / 活动入口"]}]},
+    ]
+    n = enforce_block_names(modules, materials)
+    assert n == 3
+    assert [m["name"] for m in modules] == ["PC / 活动入口-「A面」未展开时", "活动入口-报名规则说明", "活动入口-奖池规则", "活动入口-自拟但没有小标题"]
+    assert len(modules[1]["items"]) == 2 and modules[1]["items"][1]["text"] == "报名规则说明："   # 换名后与同名区块合并、条目去重
+    secs = extraction_outline(modules)
+    assert [(s["group"], s["title"]) for s in secs] == [("PC", "活动入口")]   # 来源一处带文件夹一处不带：同一页，不拆成两节
+    assert [b["name"] for b in secs[0]["blocks"]] == ["「A面」未展开时", "报名规则说明", "奖池规则", "自拟但没有小标题"]
