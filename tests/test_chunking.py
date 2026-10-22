@@ -114,3 +114,82 @@ def test_标题行不会被单独切成碎片():
     chunks = split_text(text, 100)
     assert chunks[0].startswith("# A\ny") and all(len(c) >= 5 for c in chunks)
     assert "".join(chunks).count("y") == 150 and any("# B" in c for c in chunks)
+
+
+# ---------- 整理稿标题大纲 / 按需求分片 / 疑点清单不单独成片 ----------
+
+
+def _整理稿(title="后台", 区块字数=200):
+    big = "- 规则一条，带数值 100 与条件。\n" * (区块字数 // 18 + 1)
+    return "\n".join([
+        f"# 「{title}」需求整理稿", "", "- 来源：x.zip", "",
+        "## 1. 需求说明 〔来源：x.zip › 需求说明〕", "", "### 1.1 版本记录", "- v1", "### 1.2 创建活动", big,
+        "## 2. 活动运营后台", "", "### 2.1 活动列表 〔来源：x.zip › 活动运营后台 / 活动列表〕", "",
+        "#### 2.1.1 活动列表", "- 列表说明一句", "#### 2.1.2 基本配置", big, "#### 2.1.3 数据配置", big,
+        "#### 2.1.4 旧草稿 〔疑似草稿〕", big,
+        "### 2.2 派奖查询 〔来源：x.zip › 活动运营后台 / 派奖查询〕", "", "#### 2.2.1 派奖查询", "- 一句",
+        "### 2.3 空页面 〔来源：x.zip › 活动运营后台 / 空页面〕", "",
+        "## 3. 疑点 / 不一致清单 〔原句已按原文保留在上文，此处只列疑点，供需求澄清与用例设计〕", "", "- 奖池 25% 与 35% 不一致 —— 疑点（活动列表）", "",
+        "## 4. 疑似遗留草稿 〔画布上与页面主体不相连、与正式内容重复却有出入的区块，已照抄收录但用例不要照它写，请与产品确认〕", "",
+        "- 2.1.4 旧草稿（活动运营后台 / 活动列表-旧草稿）", "", "（已剔除：控件编号）",
+    ])
+
+
+def test_整理稿标题大纲_长区块成模块_短区块并入页面_草稿与疑点清单不进大纲():
+    from app.agents.outline import outline_from_headings
+
+    mods = outline_from_headings(_整理稿())
+    # 需求说明：短的「版本记录」并入「需求说明」，长的「创建活动」单列；活动列表：长区块单列、「活动列表」兜住短区块
+    assert mods == ["需求说明", "需求说明-创建活动", "活动列表", "活动列表-基本配置", "活动列表-数据配置", "派奖查询"]
+    # 区块名与页面同名不重复成「派奖查询-派奖查询」；〔疑似草稿〕区块、疑点清单、遗留草稿、空页面都不在
+    assert not any("草稿" in m or "疑点" in m or "空页面" in m for m in mods)
+    # 不是整理稿格式（没有编号标题）→ 空，交给模型出大纲
+    assert outline_from_headings("# 道具系统\n背包规则。\n# 关卡系统\n选关规则。") == []
+    assert outline_from_headings(_整理稿(), title="后台")[:2] == ["后台-需求说明", "后台-需求说明-创建活动"]
+
+
+def test_多需求简报_按需求切段_片不跨需求_疑点清单挂到本需求最后一片():
+    from app.agents.outline import APPENDIX_NOTE, outline_from_brief, requirement_chunks, requirement_segments
+
+    a, b = _整理稿("后台", 600), _整理稿("前端", 600)
+    brief = f"【需求 1/2：后台】\n【需求整理稿】（AI 摘录）\n{a}\n\n【人工补充说明】\n补充一句\n\n【需求 2/2：前端】\n【需求整理稿】（AI 摘录）\n{b}"
+    segs = requirement_segments(brief)
+    assert [s.title for s in segs] == ["后台", "前端"] and "补充一句" in segs[0].text and "补充一句" not in segs[1].text
+    chunks, titles = requirement_chunks(brief, 1500)
+    assert len(chunks) >= 4 and titles[0] == "后台" and titles[-1] == "前端"
+    # 每片只含一条需求的内容
+    for c, t in zip(chunks, titles):
+        other = "前端" if t == "后台" else "后台"
+        assert f"「{other}」需求整理稿" not in c
+    # 疑点清单 / 遗留草稿不单独成片：带说明挂在本需求最后一片末尾，正文章节仍在前面
+    for t in ("后台", "前端"):
+        mine = [c for c, tt in zip(chunks, titles) if tt == t]
+        assert APPENDIX_NOTE in mine[-1] and "疑点 / 不一致清单" in mine[-1] and "疑似遗留草稿" in mine[-1]
+        assert all(APPENDIX_NOTE not in c for c in mine[:-1])
+    # 多需求时大纲模块带需求标题前缀，两份整理稿同名章节不混
+    mods = outline_from_brief(brief)
+    assert "后台-活动列表-基本配置" in mods and "前端-活动列表-基本配置" in mods
+    # 整篇不超限：原样一片、无标题（与单需求行为一致）
+    assert requirement_chunks(brief, 10**6) == ([brief], [None])
+    # 单需求、没有标记：标题 None，疑点清单仍挂到最后一片
+    chunks, titles = requirement_chunks(a, 1500)
+    assert set(titles) == {None} and APPENDIX_NOTE in chunks[-1]
+
+
+async def test_整理稿分片拆解_大纲按标题生成不调模型_各片带需求前缀():
+    from app.agents.outline import requirement_chunks
+    from app.agents.service import run_analysis
+    from tests.stubs import StubLLM
+
+    a, b = _整理稿("后台", 600), _整理稿("前端", 600)
+    brief = f"【需求 1/2：后台】\n{a}\n\n【需求 2/2：前端】\n{b}"
+    n = len(requirement_chunks(brief, 1500)[0])
+    reply = json.dumps({"modules": [{"module": "后台-活动列表-基本配置", "points": ["必填"]}], "blind_spots": []}, ensure_ascii=False)
+    llm = StubLLM([reply] * n)
+    result = await run_analysis(brief, llm, chunk_max_chars=1500)
+    assert len(llm.calls) == n   # 没有「长需求模块大纲」那一次调用
+    users = [c["messages"][-1]["content"] for c in llm.calls]
+    assert all("全文模块大纲" in u and "前端-活动列表-基本配置" in u for u in users)
+    assert any("本片属于需求「后台」" in u and "「后台 › 页面或章节 › 需求点」" in u for u in users)
+    assert any("本片属于需求「前端」" in u for u in users)
+    assert result.test_points[0]["module"] == "后台-活动列表-基本配置"

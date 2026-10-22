@@ -15,7 +15,7 @@ from app.agents.state import MAX_REVIEW_ROUNDS
 from app.agents.prompts import wrap_data
 from app.config import get_settings
 from app.llm.client import LLMClient
-from app.parsers.chunking import split_text
+from app.agents.outline import outline_from_brief, requirement_chunks
 from app.templates import CustomTemplate, TestCase
 
 
@@ -49,9 +49,15 @@ def _outline_source(requirement: str, chunks: list[str]) -> str:
 
 
 async def _outline_for(llm: LLMClient, requirement: str, chunks: list[str], model: str | None) -> list[str]:
-    """长需求：先用全文出模块大纲，再分片拆解并注入大纲，避免各片各自命名、漏掉跨片的模块；大纲失败不阻塞。"""
+    """长需求：先出全文模块大纲，再分片拆解并注入大纲，避免各片各自命名、漏掉跨片的模块；大纲失败不阻塞。
+    需求是整理稿（带编号标题）时大纲直接按页面 / 区块标题生成，粗细与模型无关（gpt-6-sol 给 6 万字只列 52 个模块，
+    拆解跟着变粗）；多需求合并时模块名带需求标题前缀。不是整理稿格式才让模型出大纲。"""
     if len(chunks) <= 1:
         return []
+    heads = outline_from_brief(requirement)
+    if heads:
+        logger.info("模块大纲按整理稿标题生成：{} 个模块，不调模型", len(heads))
+        return heads
     try:
         return await outline_requirement(llm, _outline_source(requirement, chunks), model)
     except Exception as e:
@@ -108,7 +114,7 @@ async def run_analysis(
     knowledge_cases：历史用例知识（知识管家在拆解阶段注入，覆盖度查漏）。
     """
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
-    chunks = split_text(requirement, chunk_max_chars)
+    chunks, titles = requirement_chunks(requirement, chunk_max_chars)
     if len(chunks) == 1:
         a = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
         return AnalysisResult(test_points=a["test_points"], blind_spots=a["blind_spots"],
@@ -116,8 +122,8 @@ async def run_analysis(
     outline = await _outline_for(llm, requirement, chunks, model)
     analyses = await gather_or_cancel(
         [analyze_requirement(llm, chunk, model, knowledge_cases=knowledge_cases, outline=outline,
-                             chunk_no=i, chunk_total=len(chunks), allow_empty=len(chunks) > 1)
-         for i, chunk in enumerate(chunks, 1)]
+                             chunk_no=i, chunk_total=len(chunks), allow_empty=len(chunks) > 1, req_title=title)
+         for i, (chunk, title) in enumerate(zip(chunks, titles), 1)]
     )
     if all(not a["test_points"] for a in analyses):
         from app.agents.json_utils import LLMOutputError
@@ -179,7 +185,7 @@ async def run_generation(
         )
 
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
-    chunks = split_text(requirement, chunk_max_chars)
+    chunks, titles = requirement_chunks(requirement, chunk_max_chars)
     if len(chunks) == 1:
         return await _analyze_then_generate(
             requirement, llm, model, reviewer_model, template, on_analyzed=on_analyzed,
@@ -191,9 +197,9 @@ async def run_generation(
     outcomes = await asyncio.gather(
         *[
             _analyze_then_generate(chunk, llm, model, reviewer_model, template, on_analyzed=on_analyzed,
-                                   outline=outline, chunk_no=i, chunk_total=len(chunks), **kw,
+                                   outline=outline, chunk_no=i, chunk_total=len(chunks), req_title=title, **kw,
                                    **_chunk_checkpoint(checkpoint, on_analysis, on_module_done, i))
-            for i, chunk in enumerate(chunks, 1)
+            for i, (chunk, title) in enumerate(zip(chunks, titles), 1)
         ],
         return_exceptions=True,
     )
@@ -243,6 +249,7 @@ async def _analyze_then_generate(
     outline: list[str] | None = None,
     chunk_no: int = 0,
     chunk_total: int = 0,
+    req_title: str | None = None,
 ) -> GenerationResult:
     """先拆解，再按模块并行生成（PRD 4.1a 生成 Agent 多实例）。
 
@@ -259,7 +266,7 @@ async def _analyze_then_generate(
         if chunk_total > 1:
             analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases,
                                                  outline=outline, chunk_no=chunk_no, chunk_total=chunk_total,
-                                                 allow_empty=True)
+                                                 allow_empty=True, req_title=req_title)
         else:
             analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
         if not analysis["test_points"]:  # 分片不含可测内容：本片无产出，不进生成
