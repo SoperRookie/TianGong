@@ -71,6 +71,7 @@ class GenerationResult(BaseModel):
     review_rounds: int
     unresolved: list[dict] = Field(default_factory=list, description="超限强制出稿时的未解决问题")
     blind_spots: list[str] = Field(default_factory=list, description="疑似需求盲区")
+    blind_spot_refs: dict[str, dict] = Field(default_factory=dict, description="盲区出处 {盲区文本: {module, ref}}")
     resolved_blind_spots: list[dict] = Field(default_factory=list, description="分片盲区复核：已被需求其他分片说明而剔除的盲区 [{text, evidence, chunk}]")
     missing: list[str] = Field(default_factory=list, description="评审提示的遗漏场景")
     suggestions: list[str] = Field(default_factory=list, description="评审的非阻断优化建议")
@@ -83,6 +84,7 @@ class GenerationResult(BaseModel):
 class AnalysisResult(BaseModel):
     test_points: list[dict]
     blind_spots: list[str] = Field(default_factory=list)
+    blind_spot_refs: dict[str, dict] = Field(default_factory=dict, description="盲区出处 {盲区文本: {module, ref}}")
     resolved_blind_spots: list[dict] = Field(default_factory=list, description="分片盲区复核剔除项（含原文依据）")
     trace: list[dict] = Field(default_factory=list)
 
@@ -118,6 +120,7 @@ async def run_analysis(
     if len(chunks) == 1:
         a = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
         return AnalysisResult(test_points=a["test_points"], blind_spots=a["blind_spots"],
+                              blind_spot_refs=a.get("blind_spot_refs") or {},
                               trace=[{"agent": "需求分析", "model": a["model_name"]}])
     outline = await _outline_for(llm, requirement, chunks, model)
     analyses = await gather_or_cancel(
@@ -131,11 +134,13 @@ async def run_analysis(
         raise LLMOutputError(f"需求拆解未输出任何测试点（{len(chunks)} 个分片均为空，请检查需求内容是否可读）")
     module_points: dict[str, list[str]] = {}
     blind_spots: list[str] = []
+    blind_spot_refs: dict[str, dict] = {}
     trace: list[dict] = []
     for i, a in enumerate(analyses, 1):
         for tp in a["test_points"]:
             module_points.setdefault(str(tp.get("module", "")), []).extend(tp.get("points", []))
         blind_spots.extend(b for b in a["blind_spots"] if b not in blind_spots)
+        blind_spot_refs.update(a.get("blind_spot_refs") or {})
         trace.append({"chunk": i, "agent": "需求分析", "model": a["model_name"], **({"empty": True} if a.get("empty") else {})})
     blind_spots, resolved, extra = await _verify_chunk_blind_spots(llm, chunks, blind_spots, model)
     from app.tasks.points import dedupe_module_points
@@ -147,6 +152,7 @@ async def run_analysis(
     return AnalysisResult(
         test_points=test_points,
         blind_spots=blind_spots,
+        blind_spot_refs=blind_spot_refs,
         resolved_blind_spots=resolved,
         trace=trace + extra,
     )
@@ -266,7 +272,7 @@ async def _analyze_then_generate(
     saved = (checkpoint or {}).get("analysis")
     if saved and saved.get("test_points"):
         analysis = {"test_points": saved["test_points"], "blind_spots": saved.get("blind_spots", []),
-                    "model_name": saved.get("model_name", "")}
+                    "blind_spot_refs": saved.get("blind_spot_refs") or {}, "model_name": saved.get("model_name", "")}
         logger.info("断点续跑：复用已保存的拆解结果（{} 个模块）", len(analysis["test_points"]))
     else:
         if chunk_total > 1:
@@ -280,7 +286,7 @@ async def _analyze_then_generate(
                                     trace=[{"agent": "需求分析", "model": analysis["model_name"], "empty": True}])
         if on_analysis:
             on_analysis({"test_points": analysis["test_points"], "blind_spots": analysis["blind_spots"],
-                         "model_name": analysis.get("model_name", "")})
+                         "blind_spot_refs": analysis.get("blind_spot_refs") or {}, "model_name": analysis.get("model_name", "")})
     if on_analyzed:
         on_analyzed()
     result = await _run_from_points(
@@ -291,6 +297,7 @@ async def _analyze_then_generate(
     for spot in reversed(analysis["blind_spots"]):  # 拆解盲区放最前，且保持拆解时的顺序
         if spot not in result.blind_spots:
             result.blind_spots.insert(0, spot)
+    result.blind_spot_refs = {**(analysis.get("blind_spot_refs") or {}), **result.blind_spot_refs}
     result.trace = (analysis.get("trace") or [{"agent": "需求分析", "model": analysis["model_name"]}]) + result.trace
     return result
 
@@ -491,6 +498,7 @@ def _merge(outcomes: list, modules: list[str] | None = None, points: list[dict] 
                 if note not in seen:
                     seen.add(note)
                     getattr(merged, field).append(note)
+        merged.blind_spot_refs.update(outcome.blind_spot_refs)
         for tp in outcome.test_points:
             module_points.setdefault(str(tp.get("module", "")), []).extend(tp.get("points", []))
         for case in outcome.cases:

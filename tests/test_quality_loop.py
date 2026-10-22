@@ -1018,3 +1018,47 @@ async def test_重复复核分批_每批带模块_没判到的待复核_一批�
     assert by[("TP002", "TP102")]["verdict"] == "重复"
     assert by[("TP003", "TP103")]["verdict"] == "待复核" and "复核失败" in by[("TP003", "TP103")]["suggestion"]  # 故障批
     assert by[("TP004", "TP104")]["verdict"] == "待复核"
+
+
+# ---------- 盲区出处：模型给的 module / ref 优先，没有的按章节号在整理稿里反查 ----------
+
+
+def _整理稿_for_bs():
+    return "\n".join([
+        "【需求 1/2：后台】", "# 「后台」需求整理稿", "", "## 3. 商户管理后台", "",
+        "### 3.4 日榜排名 〔来源：x.zip › 商户管理后台 / 日榜排名〕", "", "#### 3.4.5 字段说明", "- 会员昵称", "#### 3.4.7 查询功能说明", "- 按天排重",
+        "【需求 2/2：前端】", "# 「前端」需求整理稿", "", "## 3. PC", "", "### 3.4 PC-活动规则 〔来源：y.zip › PC / PC-活动规则〕", "", "#### 3.4.7 规则弹窗", "- 关闭",
+    ])
+
+
+def test_盲区出处_模型给的优先_没有的按章节号反查_多需求按模块前缀区分():
+    from app.agents.graph import _blind_spot_refs, _blind_spots
+    from app.tasks.blind_spots import blind_spot_entities, locate_blind_spot
+    from app.tasks.store import TaskRecord
+
+    data = {"modules": [], "blind_spots": [
+        {"text": "排重键未说明", "module": "后台-日榜排名-查询功能说明", "ref": "后台 › 3.4.7 查询功能说明 › 按天排重"},
+        "3.4.5 会员昵称取值时点未说明",
+        {"description": "只有文本的对象形态"},
+    ]}
+    assert _blind_spots(data) == ["排重键未说明", "3.4.5 会员昵称取值时点未说明", "只有文本的对象形态"]
+    assert _blind_spot_refs(data) == {"排重键未说明": {"module": "后台-日榜排名-查询功能说明", "ref": "后台 › 3.4.7 查询功能说明 › 按天排重"}}
+
+    req = _整理稿_for_bs()
+    modules = [{"module": "后台-日榜排名-字段说明", "points": []}, {"module": "后台-日榜排名-查询功能说明", "points": []},
+               {"module": "前端-PC-活动规则", "points": []}]
+    # 章节号 3.4.5 → 祖先链 + 名字含页面 / 区块标题的模块
+    assert locate_blind_spot("3.4.5 会员昵称取值时点未说明", req, modules) == {
+        "module": "后台-日榜排名-字段说明", "ref": "后台 › 3 商户管理后台 › 3.4 日榜排名 › 3.4.5 字段说明"}
+    # 两份整理稿都有 3.4.7：默认取第一份；给了模块前缀「前端-」则取前端那份
+    assert locate_blind_spot("3.4.7 排重键未说明", req, modules)["ref"].startswith("后台 › ")
+    assert locate_blind_spot("3.4.7 弹窗关闭后状态未说明", req, modules, hint_module="前端-PC-活动规则")["ref"] == "前端 › 3 PC › 3.4 PC-活动规则 › 3.4.7 规则弹窗"
+    assert locate_blind_spot("没有章节号的盲区", req, modules) == {}
+
+    rec = TaskRecord(task_id="t1", context={"requirement": req}, analysis={
+        "test_points": modules, "blind_spots": ["排重键未说明", "3.4.5 会员昵称取值时点未说明", "没有章节号的盲区"],
+        "blind_spot_refs": _blind_spot_refs(data)})
+    ents = {e["text"]: e for e in blind_spot_entities(rec)}
+    assert ents["排重键未说明"]["module"] == "后台-日榜排名-查询功能说明" and ents["排重键未说明"]["ref"].endswith("按天排重")
+    assert ents["3.4.5 会员昵称取值时点未说明"]["ref"] == "后台 › 3 商户管理后台 › 3.4 日榜排名 › 3.4.5 字段说明"
+    assert "ref" not in ents["没有章节号的盲区"] and "module" not in ents["没有章节号的盲区"]
