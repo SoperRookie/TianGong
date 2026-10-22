@@ -953,3 +953,68 @@ async def test_删除非空项目_默认拒绝并列出内容_cascade连同需�
     assert (await client.get("/api/v1/tasks", params={"project": "要整删"})).json()["tasks"] == []
     assert any(t["task_id"] == task_id for t in (await client.get("/api/v1/tasks", params={"include_deleted": "true"})).json()["tasks"])   # 任务在回收站
     assert (await client.get("/api/v1/projects/不存在/contents")).status_code == 404
+
+
+# ---------- 查重候选按页面分档 / 同模块同文去重 / 裁判分批带模块 ----------
+
+
+def test_查重候选_同页面按低阈值_不同页面文字几乎一样才算_候选带模块():
+    from app.tasks.points import module_page
+
+    mid = "选择真实会员时仅返回真实会员和机器人记录"   # 与「选择真实会员时仅返回真实会员记录」相似度在 0.45–0.7 之间
+    modules = assign_entities([
+        {"module": "后台-日榜排名-字段说明", "points": ["商户名称取会员所属商户名称", "选择真实会员时仅返回真实会员记录"]},
+        {"module": "后台-日榜排名-查询功能说明", "points": [mid]},
+        {"module": "后台-月榜排名-字段说明", "points": ["商户名称取会员所属商户名称", mid]},
+    ])
+    found = {(p["a"], p["b"]): p for p in duplicate_candidates(modules)}
+    # 同页面（日榜排名）不同区块：中等相似按 0.45 进候选，并带两边模块
+    assert found[("TP002", "TP003")]["a_module"] == "后台-日榜排名-字段说明" and found[("TP002", "TP003")]["b_module"] == "后台-日榜排名-查询功能说明"
+    # 不同页面：同文的「商户名称…」进（1.0 ≥ 0.7）；同样中等相似的那对不进
+    assert found[("TP001", "TP004")]["b_module"] == "后台-月榜排名-字段说明"
+    assert ("TP002", "TP005") not in found
+    # 月榜页内两条同文（TP003 与 TP005 不同页面但同文）→ 进
+    assert ("TP003", "TP005") in found
+    assert module_page("后台-日榜排名-字段说明") == "后台-日榜排名" and module_page("活动运营后台-日榜统计") == "活动运营后台" and module_page("登录") == "登录"
+
+
+def test_拆解结果同模块同文去重_同名模块并一个_不同模块同文不动():
+    from app.tasks.points import dedupe_module_points
+
+    modules = [
+        {"module": "日榜排名-字段说明", "points": [{"point": "会员昵称取会员当前昵称。", "dimension": "数据"}, {"point": "连赢次数取最高连赢次数", "dimension": "数据"}]},
+        {"module": "日榜排名-字段说明", "points": [{"point": "会员昵称取会员当前昵称", "dimension": "数据"}, {"point": "积分取当日积分", "dimension": "数据"}]},
+        {"module": "月榜排名-字段说明", "points": [{"point": "会员昵称取会员当前昵称。", "dimension": "数据"}]},
+    ]
+    assert dedupe_module_points(modules) == 1
+    assert [m["module"] for m in modules] == ["日榜排名-字段说明", "月榜排名-字段说明"]
+    assert [p["point"] for p in modules[0]["points"]] == ["会员昵称取会员当前昵称。", "连赢次数取最高连赢次数", "积分取当日积分"]
+    assert len(modules[1]["points"]) == 1
+
+
+async def test_重复复核分批_每批带模块_没判到的待复核_一批故障只影响该批():
+    from app.agents import quality
+    from app.agents.quality import run_dup_judge
+
+    pairs = [{"a": f"TP{i:03d}", "a_point": f"规则 {i}", "a_module": "日榜排名-字段说明",
+              "b": f"TP{i + 100:03d}", "b_point": f"规则 {i} 的另一种说法", "b_module": "月榜排名-字段说明",
+              "similarity": 0.8, "reason": "文字高度相似"} for i in range(1, 6)]
+    old = quality.DUP_JUDGE_BATCH
+    quality.DUP_JUDGE_BATCH = 2
+    try:
+        r1 = json.dumps({"duplicates": [{"a": "TP001", "b": "TP101", "verdict": "不重复", "reason": "日榜与月榜两个对象"},
+                                        {"a": "TP002", "b": "TP102", "verdict": "重复", "reason": "同一规则"}]}, ensure_ascii=False)
+        r2 = "这不是 JSON"   # 第二批解析失败（_chat_json 重试一次仍失败）
+        r3 = json.dumps({"duplicates": [{"a": "TP005", "b": "TP105", "verdict": "不重复", "reason": "对象不同"}]}, ensure_ascii=False)
+        llm = StubLLM([r1, r2, r2, r3])
+        out = await run_dup_judge(llm, "需求原文", pairs, None)
+    finally:
+        quality.DUP_JUDGE_BATCH = old
+    assert len(llm.calls) == 4   # 3 批 + 第二批重试一次
+    user = llm.calls[0]["messages"][-1]["content"]
+    assert "日榜排名-字段说明" in user and "月榜排名-字段说明" in user and "TP003" not in user   # 每批只带本批的对、带模块
+    by = {(p["a"], p["b"]): p for p in out}
+    assert ("TP001", "TP101") not in by and ("TP005", "TP105") not in by          # 不重复的不再打扰人工
+    assert by[("TP002", "TP102")]["verdict"] == "重复"
+    assert by[("TP003", "TP103")]["verdict"] == "待复核" and "复核失败" in by[("TP003", "TP103")]["suggestion"]  # 故障批
+    assert by[("TP004", "TP104")]["verdict"] == "待复核"

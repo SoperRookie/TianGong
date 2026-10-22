@@ -142,30 +142,57 @@ async def run_blind_spot_verify(
 # ---- 重复复核（需求十一~十三）----
 
 
+# 一次裁判调用最多看多少对：一次塞上千对模型只会判前面一百多对，其余全成「待复核」压给人工
+DUP_JUDGE_BATCH = 40
+
+
+def _pair_view(p: dict) -> dict:
+    """送裁判的一对：编号、所属模块、测试点文本；模块名就是页面 / 功能，裁判靠它判断两条是不是同一个测试对象。"""
+    return {"a": p["a"], "a_module": p.get("a_module", ""), "a_point": p["a_point"],
+            "b": p["b"], "b_module": p.get("b_module", ""), "b_point": p["b_point"]}
+
+
 async def run_dup_judge(
     llm: LLMClient, requirement: str, pairs: list[dict], model: str | None
 ) -> list[dict]:
-    """对文字初筛的疑似重复对做语义复核；LLM 故障时原样返回初筛结果（降级不阻塞）。"""
+    """对文字初筛的疑似重复对做语义复核：按 DUP_JUDGE_BATCH 分批并行，每批带两边模块名；
+    某批 LLM 故障时该批原样返回初筛结果标「待复核」（降级不阻塞）。复核为不重复的对不再打扰人工。"""
     if not pairs:
         return []
-    try:
+    import asyncio
+
+    async def _batch(batch: list[dict]) -> dict[tuple[str, str], dict]:
         data, _ = await _chat_json(
             llm,
             [
                 {"role": "system", "content": prompt_text("dup_judge")},
                 {
                     "role": "user",
-                    "content": f"需求内容：\n{wrap_data('需求原文', requirement[:2000])}\n\n疑似重复测试点对：\n{wrap_data('测试点对', _dump(pairs))}",
+                    "content": f"需求内容：\n{wrap_data('需求原文', requirement[:2000])}\n\n疑似重复测试点对：\n"
+                               f"{wrap_data('测试点对', _dump([_pair_view(p) for p in batch]))}",
                 },
             ],
             model,
         )
-    except Exception as e:
-        logger.warning("重复复核 LLM 故障，降级为文字初筛结果：{}", e)
-        return [dict(p, verdict="待复核", suggestion="LLM 复核失败，请人工判断") for p in pairs]
-    judged = {(str(d.get("a")), str(d.get("b"))): d for d in data.get("duplicates", []) if isinstance(d, dict)}
+        return {(str(d.get("a")), str(d.get("b"))): d for d in data.get("duplicates", []) if isinstance(d, dict)}
+
+    batches = [pairs[i:i + DUP_JUDGE_BATCH] for i in range(0, len(pairs), DUP_JUDGE_BATCH)]
+    outcomes = await asyncio.gather(*(_batch(b) for b in batches), return_exceptions=True)
+    judged: dict[tuple[str, str], dict] = {}
+    failed: set[str] = set()
+    for batch, out in zip(batches, outcomes):
+        if isinstance(out, Exception):
+            logger.warning("重复复核一批（{} 对）LLM 故障，该批降级为文字初筛结果：{}", len(batch), out)
+            failed.update(p["a"] + "|" + p["b"] for p in batch)
+            continue
+        judged.update(out)
+    if len(batches) > 1:
+        logger.info("重复复核 {} 对分 {} 批，{} 批成功", len(pairs), len(batches), len(batches) - sum(isinstance(o, Exception) for o in outcomes))
     merged = []
     for p in pairs:
+        if p["a"] + "|" + p["b"] in failed:
+            merged.append(dict(p, verdict="待复核", suggestion="LLM 复核失败，请人工判断"))
+            continue
         j = judged.get((p["a"], p["b"])) or judged.get((p["b"], p["a"])) or {}
         merged.append(
             dict(
@@ -175,7 +202,6 @@ async def run_dup_judge(
                 suggestion=str(j.get("suggestion", "建议合并或保留其中一条")),
             )
         )
-    # 复核为不重复的对不再打扰人工
     return [p for p in merged if p["verdict"] != "不重复"]
 
 
