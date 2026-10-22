@@ -23,15 +23,24 @@ def add_to_bin(task_id: str, kind: str, entity_id: str, label: str,
     return int(result.inserted_primary_key[0])
 
 
+def _module_of(payload: str | None) -> str:
+    """条目所属模块：从删除时的快照里取（测试点快照带 module，用例快照里用例自带 module）。"""
+    try:
+        data = json.loads(payload or "{}")
+    except ValueError:
+        return ""
+    return str(data.get("module") or (data.get("case") or {}).get("module") or "")
+
+
 def list_bin(task_id: str) -> list[dict]:
     with get_engine().begin() as conn:
         rows = conn.execute(
             select(recycle_bin.c.id, recycle_bin.c.kind, recycle_bin.c.entity_id,
-                   recycle_bin.c.label, recycle_bin.c.deleted_by, recycle_bin.c.deleted_at)
+                   recycle_bin.c.label, recycle_bin.c.deleted_by, recycle_bin.c.deleted_at, recycle_bin.c.payload)
             .where(recycle_bin.c.task_id == task_id)
             .order_by(recycle_bin.c.id.desc())
         ).mappings().all()
-    return [dict(r) for r in rows]
+    return [{**{k: v for k, v in r.items() if k != "payload"}, "module": _module_of(r["payload"])} for r in rows]
 
 
 def list_bin_for_tasks(task_ids: list[str]) -> list[dict]:
@@ -42,11 +51,11 @@ def list_bin_for_tasks(task_ids: list[str]) -> list[dict]:
         rows = conn.execute(
             select(recycle_bin.c.id, recycle_bin.c.task_id, recycle_bin.c.kind,
                    recycle_bin.c.entity_id, recycle_bin.c.label,
-                   recycle_bin.c.deleted_by, recycle_bin.c.deleted_at)
+                   recycle_bin.c.deleted_by, recycle_bin.c.deleted_at, recycle_bin.c.payload)
             .where(recycle_bin.c.task_id.in_(task_ids))
             .order_by(recycle_bin.c.id.desc())
         ).mappings().all()
-    return [dict(r) for r in rows]
+    return [{**{k: v for k, v in r.items() if k != "payload"}, "module": _module_of(r["payload"])} for r in rows]
 
 
 def get_item(task_id: str, item_id: int) -> dict | None:
