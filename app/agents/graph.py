@@ -149,6 +149,10 @@ async def _chat_json(llm: LLMClient, messages: list[dict], model: str | None, **
             return extract_json(result.content), result
         except LLMOutputError as e:
             last_error = e
+            if result.finish_reason == "length" and not (result.content or "").strip():
+                # 推理型模型把整个输出预算花在推理上、一个字正文都没出：下一次推理长度不一样，值得原样再试一次
+                logger.warning("模型推理耗尽输出预算、没有正文（{}），重试一次", result.model_name)
+                continue
             if result.finish_reason == "length":
                 logger.warning(
                     "模型输出被 max_tokens 截断（{}，输出 {} 字），不再原样重试——"
@@ -270,7 +274,7 @@ async def analyze_requirement(
     user += profile_block()  # 项目画像：统一术语与模块命名，带着既有业务认知拆解
     if knowledge_cases:
         user += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))
-    from app.tasks.points import extract_modules, normalize_points
+    from app.tasks.points import dedupe_module_points, extract_modules, normalize_points
 
     messages = [
         {"role": "system", "content": prompt_text("analyst")},
@@ -284,6 +288,9 @@ async def analyze_requirement(
         if modules or allow_empty or attempt:
             break
         logger.warning("需求拆解返回空结果（{}），重试一次", result.model_name)
+    removed = dedupe_module_points(modules)
+    if removed:
+        logger.info("需求拆解同模块同文测试点去重 {} 条", removed)
     logger.info(
         "需求分析完成：{} 个模块 / {} 个测试点 / {} 条盲区",
         len(modules), sum(len(m.get("points", [])) for m in modules), len(data.get("blind_spots", [])),

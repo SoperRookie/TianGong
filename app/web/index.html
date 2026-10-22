@@ -3175,18 +3175,19 @@ const DP_STATUS = {open:'待处置', ignored:'已忽略', resolved:'已处置'};
 function renderDupPairs(t, confirmable) {
   const items = t.dup_pairs || [];
   const open = items.filter(p=>p.status==='open');
+  const modOf = {}; ((t.analysis||{}).test_points||[]).forEach(m => (m.points||[]).forEach(pt => { if (pt.tp_id) modOf[pt.tp_id] = m.module; }));
   const project = (t.context||{}).project;
   const canReview = can(project,'point.review'), canDel = can(project,'point.edit') && canDelete();
   const counts = {}; items.forEach(p => counts[p.status] = (counts[p.status]||0) + 1);
   const kw = dpKw.toLowerCase();
-  const hit = p => !kw || [p.a, p.b, p.a_point, p.b_point, p.reason, p.suggestion, p.verdict, p.note, p.by]
+  const hit = p => !kw || [p.a, p.b, p.a_point, p.b_point, p.a_module||modOf[p.a], p.b_module||modOf[p.b], p.reason, p.suggestion, p.verdict, p.note, p.by]
     .some(x => String(x||'').toLowerCase().includes(kw));
   const filtered = (dpFilter === 'all' ? items : items.filter(p => p.status === dpFilter)).filter(hit);
   const pages = Math.max(1, Math.ceil(filtered.length / dpSize));
   if (dpPage > pages) dpPage = pages;
   const pageItems = filtered.slice((dpPage - 1) * dpSize, dpPage * dpSize);
   const stCls = {open:'pending', ignored:'rejected', resolved:'approved'};
-  const side = (id, text, p) => `<b class="cid">${esc(id)}</b>${(p.deleted||[]).includes(id)?' <span class="tag">已删除</span>':''}<div>${esc(text)}</div>`;
+  const side = (id, text, p, mod) => `<b class="cid">${esc(id)}</b>${(p.deleted||[]).includes(id)?' <span class="tag">已删除</span>':''}${(mod||modOf[id])?`<span class="tag" style="margin-left:6px" title="所属模块">${esc(mod||modOf[id])}</span>`:''}<div>${esc(text)}</div>`;
   for (const k of [...dpSel]) if (!items.some(p => p.key === k)) dpSel.delete(k);
   const selectable = p => canReview && (p.status === 'open' || p.status === 'ignored');
   const pageKeys = pageItems.filter(selectable).map(p => p.key), allKeys = filtered.filter(selectable).map(p => p.key);
@@ -3195,8 +3196,8 @@ function renderDupPairs(t, confirmable) {
   const rows = pageItems.map((p, i) => `<tr class="${dpSel.has(p.key)?'mine':''}">
       <td style="width:30px">${selectable(p)?`<input type="checkbox" ${dpSel.has(p.key)?'checked':''} onchange="selToggle(dpSel, ${jsq(p.key)}, this.checked, renderDetail)">`:''}</td>
       <td style="width:40px" class="hint">${(dpPage - 1) * dpSize + i + 1}</td>
-      <td>${side(p.a, p.a_point, p)}</td>
-      <td>${side(p.b, p.b_point, p)}</td>
+      <td>${side(p.a, p.a_point, p, p.a_module)}</td>
+      <td>${side(p.b, p.b_point, p, p.b_module)}</td>
       <td style="width:150px"><span class="tag">相似度 ${p.similarity}</span>${p.verdict?`<div><span class="tag" style="${p.verdict==='重复'?'background:var(--danger-bg);color:var(--danger)':''}">${esc(p.verdict)}</span></div>`:''}</td>
       <td style="width:220px" class="hint">${p.reason?`原因：${esc(p.reason)}`:''}${p.suggestion?`<div>建议：${esc(p.suggestion)}</div>`:''}</td>
       <td style="width:110px"><span class="st ${stCls[p.status]||'pending'}">${esc(DP_STATUS[p.status]||p.status)}</span>

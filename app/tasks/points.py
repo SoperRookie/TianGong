@@ -458,18 +458,57 @@ def record_dup_pair_action(record, key: str, action: str, by: str | None, note: 
     return next((e for e in dup_pair_entities(record) if e["key"] == key), {"key": key, "status": "open"})
 
 
-def duplicate_candidates(modules: list[dict], threshold: float = 0.45) -> list[dict]:
-    """测试点两两相似候选：文字层初筛（语句不同但语义相同的靠 LLM 复核补充）。bigram 只算一次。"""
+def _point_key(text: str) -> str:
+    return re.sub(r"[\s\W_]+", "", text or "")
+
+
+def dedupe_module_points(modules: list[dict]) -> int:
+    """拆解结果的确定性去重（实体化之前）：同名模块并成一个（模型偶尔把同一模块输出两遍、分片合并也会撞名），
+    同一模块里去掉标点空白后同文的测试点只留第一条。返回去掉的条数。不同模块的同文不动：
+    日榜排名与月榜排名各自的「商户名称取会员所属商户名称」是两个测试对象。"""
+    by_name: dict[str, dict] = {}
+    order: list[str] = []
+    removed = 0
+    for entry in modules:
+        name = str(entry.get("module", ""))
+        if name not in by_name:
+            by_name[name] = {**entry, "points": []}
+            order.append(name)
+        seen = {_point_key(p.get("point", "") if isinstance(p, dict) else str(p)) for p in by_name[name]["points"]}
+        for p in entry.get("points", []):
+            key = _point_key(p.get("point", "") if isinstance(p, dict) else str(p))
+            if key in seen:
+                removed += 1
+                continue
+            seen.add(key)
+            by_name[name]["points"].append(p)
+    modules[:] = [by_name[n] for n in order]
+    return removed
+
+
+def module_page(name: str) -> str:
+    """模块所属页面：标题大纲的「需求-页面-区块」去掉最后一段；两段的「大模块-子模块」取大模块；没有「-」就是自己。"""
+    parts = [x for x in str(name or "").split("-") if x]
+    return "-".join(parts[:-1]) if len(parts) >= 2 else str(name or "")
+
+
+def duplicate_candidates(modules: list[dict], threshold: float = 0.45, cross_page_threshold: float = 0.7) -> list[dict]:
+    """测试点两两相似候选：文字层初筛（语句不同但语义相同的靠 LLM 复核补充）。bigram 只算一次。
+    同一页面内按 threshold；不同页面的两条要文字几乎一样（≥ cross_page_threshold）才算候选——拆细后 20 来字的测试点
+    bigram 重合率天然偏高，日榜 / 月榜 / 报名记录各自的字段与查询规则又本来就相同，全放进去会出上千对；
+    候选带上两边的模块名，交裁判与人工判断时才知道是不是同一个测试对象。"""
     flat = [dict(p, module=entry["module"]) for entry, p in iter_points(modules)]
     grams = [_bigrams(p["point"]) for p in flat]
+    pages = [module_page(p["module"]) for p in flat]
     pairs: list[dict] = []
     for i in range(len(flat)):
         for j in range(i + 1, len(flat)):
             score = _jaccard(grams[i], grams[j])
-            if score >= threshold:
+            need = threshold if pages[i] == pages[j] else cross_page_threshold
+            if score >= need:
                 pairs.append({
-                    "a": flat[i]["tp_id"], "a_point": flat[i]["point"],
-                    "b": flat[j]["tp_id"], "b_point": flat[j]["point"],
+                    "a": flat[i]["tp_id"], "a_point": flat[i]["point"], "a_module": flat[i]["module"],
+                    "b": flat[j]["tp_id"], "b_point": flat[j]["point"], "b_module": flat[j]["module"],
                     "similarity": round(score, 3),
                     "reason": "文字高度相似",
                 })

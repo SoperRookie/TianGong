@@ -460,3 +460,31 @@ async def test_测试点带来源需求点_拆解到确认生成全程保留():
     assert out[0]["ref"] == "x" * 120 and "ref" not in out[1]
     # 生成 Agent 收到的测试点带 ref
     assert "3.2 登录失败处理" in llm.calls[1]["messages"][-1]["content"]
+
+
+async def test_推理耗尽输出预算没有正文时重试一次_有正文被截断不重试():
+    import pytest
+
+    from app.agents.graph import _chat_json
+    from app.agents.json_utils import LLMOutputError
+    from app.llm.client import ChatResult
+    from app.llm.schemas import UsageInfo
+
+    class LenStub:
+        def __init__(self, replies):
+            self.replies, self.calls = list(replies), []
+
+        async def chat(self, messages, model=None, **kw):
+            self.calls.append(messages)
+            content, finish = self.replies.pop(0)
+            return ChatResult(content=content, model_name="stub", provider="stub", usage=UsageInfo(), elapsed_ms=1, finish_reason=finish)
+
+    # 第一次 length 且无正文（推理吃光预算）→ 原样再试一次 → 成功
+    llm = LenStub([("", "length"), ('{"modules": []}', "stop")])
+    data, _ = await _chat_json(llm, [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}], None)
+    assert data == {"modules": []} and len(llm.calls) == 2
+    # 有正文但被截断：不重试，直接报错
+    llm = LenStub([('{"modules": [{"module": "A", "poin', "length")])
+    with pytest.raises(LLMOutputError):
+        await _chat_json(llm, [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}], None)
+    assert len(llm.calls) == 1

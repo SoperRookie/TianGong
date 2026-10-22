@@ -138,8 +138,14 @@ async def run_analysis(
         blind_spots.extend(b for b in a["blind_spots"] if b not in blind_spots)
         trace.append({"chunk": i, "agent": "需求分析", "model": a["model_name"], **({"empty": True} if a.get("empty") else {})})
     blind_spots, resolved, extra = await _verify_chunk_blind_spots(llm, chunks, blind_spots, model)
+    from app.tasks.points import dedupe_module_points
+
+    test_points = [{"module": m, "points": pts} for m, pts in module_points.items()]
+    removed = dedupe_module_points(test_points)
+    if removed:
+        logger.info("分片合并后同模块同文测试点去重 {} 条", removed)
     return AnalysisResult(
-        test_points=[{"module": m, "points": pts} for m, pts in module_points.items()],
+        test_points=test_points,
         blind_spots=blind_spots,
         resolved_blind_spots=resolved,
         trace=trace + extra,
