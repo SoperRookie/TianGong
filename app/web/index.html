@@ -348,6 +348,7 @@ tr.rowlink td { transition:background .1s; }
 input[type=file].mf.drag { outline:2px dashed var(--p1); outline-offset:2px; border-radius:6px; }
 .ref { font-size:12px; color:var(--ink-2); line-height:1.5; word-break:break-all; }
 .ref b { font-weight:600; color:var(--ink); }
+.tag.mod { background:var(--line-2); color:var(--ink-2); max-width:100%; white-space:normal; word-break:break-all; }
 .ref .sep { margin:0 4px; color:var(--ink-3); }
 .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; }
 .filters { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px; }
@@ -1726,7 +1727,7 @@ async function openVersions(kind, entityId, label) {
 function renderVersion(v, kind, total) {
   const c = v.content || {};
   const body = kind === 'point'
-    ? `<div style="margin-top:6px">${esc(c.point||'')} ${c.dimension?`<span class="tag">${esc(c.dimension)}</span>`:''}</div>`
+    ? `<div style="margin-top:6px">${modTag(c.module, (_verCtx||{}).entityId)} ${esc(c.point||'')} ${c.dimension?`<span class="tag">${esc(c.dimension)}</span>`:''}</div>`
     : `<div style="margin-top:6px"><b>${esc(c.title||'')}</b> <span class="prio ${esc(c.priority||'')}">${esc(c.priority||'')}</span></div>
        <div class="hint">${(c.steps||[]).map((s,i)=>`${i+1}. ${esc(s.action||'')} → ${esc(s.expected||'')}`).join('<br>')}</div>`;
   const changes = (v.changes||[]).map(ch =>
@@ -2800,6 +2801,9 @@ async function loadOvPlans(taskId) {
 
 /* ==================== 测试点审核 ==================== */
 const normPoint = p => typeof p === 'string' ? {point:p, tp_id:'', status:'pending', legacy:true} : p;
+/* 测试点所属模块：凡是单独列出测试点的地方（列表 / 对比 / 修改结果 / 提案 / 版本 / 重复对）都带上，不然脱离分组行就不知道它属于哪个页面 */
+const pointModuleOf = id => { const p = currentTask ? allPoints(currentTask).find(x => x.tp_id === id) : null; return p ? (p.module || '') : ''; };
+const modTag = (m, id) => { const v = m || (id ? pointModuleOf(id) : ''); return v ? `<span class="tag mod" title="所属模块">${esc(v)}</span>` : ''; };
 /* 设计需求页来源（ref）：「页面或章节 › 需求点」，页面段加粗便于按页核对；旧数据没有分隔符时整段展示 */
 function refHtml(ref, empty='<span class="hint" title="该测试点没有记录需求来源，可通过「修改」补上">—</span>') {
   if (!ref) return empty;
@@ -2901,6 +2905,7 @@ function renderPointWorkbench(t) {
       <tr>
         <td style="width:30px">${p.legacy?'':`<input type="checkbox" class="ptck" data-tp="${esc(p.tp_id)}" data-mod="${esc(p.module)}">`}</td>
         <td style="width:70px"><span class="cid">${esc(p.tp_id)}</span></td>
+        <td style="width:150px">${modTag(p.module)}</td>
         <td>${esc(p.point)}
           ${(p.warnings||[]).map(w=>`<div class="hint" style="color:var(--warn)">⚠ ${esc(w)}</div>`).join('')}
           ${editingHint('point', p.tp_id)}
@@ -2913,7 +2918,7 @@ function renderPointWorkbench(t) {
           ${p.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${p.reject_count} 次</div>`:''}</td>
         <td style="width:132px">${p.legacy?'':`<div class="rowops">
           ${canReviewPt?`<button class="ibtn ok" title="通过（锁定）" onclick="pointAct(${jsq(p.tp_id)},'approve')">${IC.check}</button>`:''}
-          <button class="ibtn" title="版本历史" onclick="openVersions('point',${jsq(p.tp_id)},${jsq(p.tp_id)})">${IC.clock}</button>
+          <button class="ibtn" title="版本历史" onclick="openVersions('point',${jsq(p.tp_id)},${jsq(p.tp_id + (p.module ? ' · ' + p.module : ''))})">${IC.clock}</button>
           ${canEditPt?`<button class="ibtn" title="修改" onclick="pointModify(${jsq(p.tp_id)})">${IC.edit}</button>`:''}
           ${canReviewPt?`<button class="ibtn bad" title="驳回" onclick="pointReject(${jsq(p.tp_id)})">${IC.x}</button>`:''}
           ${canEditPt&&canDelete()?`<button class="ibtn bad" title="删除" onclick="pointDelete(${jsq(p.tp_id)})">${IC.trash}</button>`:''}
@@ -2926,7 +2931,7 @@ function renderPointWorkbench(t) {
       lastMod = p.module;
       const m = modules.find(x => x.module === p.module) || {points: []};
       const onPage = pageItems.filter(x => x.module === p.module).length;
-      rows += `<tr class="module-head"><td colspan="8">
+      rows += `<tr class="module-head"><td colspan="9">
         <label class="check"><input type="checkbox" onclick="toggleModule(${jsq(p.module)},this.checked)">
         ${esc(p.module)}　<span class="hint">${(m.points||[]).length} 条${onPage<(m.points||[]).length?` · 本页 ${onPage} 条`:''}</span></label></td></tr>`;
     }
@@ -2961,8 +2966,8 @@ function renderPointWorkbench(t) {
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
     ${pts.length && pts.every(p=>p.legacy) ? '<div class="hint" style="margin:6px 0">项目化之前的旧版任务：测试点为只读留档，不支持审核操作</div>' : ''}
     ${pointView==='mind' ? renderPointMind(t, modules, confirmable) : filters + `<div class="tbl-wrap"><table>
-      <tr><th>${pts.some(p=>!p.legacy)?allCheckedHtml('ptck', 'renderBatchBar', '全选本页测试点（批量通过 / 驳回）'):''}</th><th>编号</th><th>测试点</th><th title="设计需求页来源：页面或章节 › 需求点，用于确认与评审时回到需求核对逻辑">需求来源</th><th>维度</th><th>来源</th><th>状态</th><th>操作</th></tr>
-      ${rows || `<tr><td colspan="8"><div class="empty">${pts.length?'没有符合筛选条件的测试点':'暂无测试点'}</div></td></tr>`}
+      <tr><th>${pts.some(p=>!p.legacy)?allCheckedHtml('ptck', 'renderBatchBar', '全选本页测试点（批量通过 / 驳回）'):''}</th><th>编号</th><th>模块</th><th>测试点</th><th title="设计需求页来源：页面或章节 › 需求点，用于确认与评审时回到需求核对逻辑">需求来源</th><th>维度</th><th>来源</th><th>状态</th><th>操作</th></tr>
+      ${rows || `<tr><td colspan="9"><div class="empty">${pts.length?'没有符合筛选条件的测试点':'暂无测试点'}</div></td></tr>`}
     </table></div>` + (filtered.length > PT_PAGE_SIZES[0] || ptPage > 1 ? pagerHtml(filtered.length, ptPage, ptSize, 'ptSet') : '')}
     ${t.pending_fix&&t.pending_fix.kind==='points'?renderFixProposals(t.pending_fix)
       :rejected&&confirmable?`<div class="toolbar"><button class="btn soft sm" onclick="fixPoints()" id="fixPtBtn">AI 修改驳回项（${rejected}）</button>
@@ -3267,7 +3272,7 @@ function renderPointCompare(t) {
   const st = r.stats || {};
   const pct = v => v == null ? '—' : (v*100).toFixed(0) + '%';
   const vTag = v => `<span class="tag" style="${v==='一致'?'background:var(--ok-bg,#e6f7ec);color:var(--ok)':v==='部分覆盖'?'background:var(--warn-bg,#fff4e0);color:var(--warn,#b36b00)':''}">${esc(v)}</span>`;
-  const row = (id, point) => `<b class="cid">${esc(id)}</b>「${esc(point)}」`;
+  const row = (id, point) => `<b class="cid">${esc(id)}</b>${modTag('', id)}「${esc(point)}」`;
   return `<div class="section-t" style="display:flex;align-items:center">人工 vs AI 测试点对比
       <span class="hint" style="margin-left:8px">${esc(fmtTime(r.at))} · ${esc(r.by||'')}${r.model_name?' · '+esc(r.model_name):''}${r.degraded?' · <b style="color:var(--warn)">LLM 复核失败，为文字相似配对，请人工判断</b>':''}</span>
       <button class="btn ghost sm" style="margin-left:auto" onclick="compareHidden=true;renderDetail()">收起</button></div>
@@ -3312,7 +3317,7 @@ async function submitCompare(runCompare) {
 }
 function renderPointDiff(d) {
   return `<div class="section-t">AI 定点修改结果<span class="hint">（修改前 → 修改后）</span></div>${d.diff.map(x=>`
-    <div class="box">${x.comment_type?`<span class="tag">${esc(x.comment_type)}</span> `:''}<span class="cid">${esc(x.tp_id)}</span>
+    <div class="box">${x.comment_type?`<span class="tag">${esc(x.comment_type)}</span> `:''}<span class="cid">${esc(x.tp_id)}</span> ${modTag(x.module, x.tp_id)}
       ${x.action==='split'
         ? `<div><span class="del">${esc(x.before)}</span></div>` + x.after.map(a=>`<div class="add">+ ${esc(a)}</div>`).join('')
         : x.action==='delete'
@@ -3335,7 +3340,7 @@ async function pointDelete(tp) {
   pointsReview([{tp_id:tp, action:'delete'}]);
 }
 async function pointReject(tp) {
-  const rj = await askReject('驳回测试点', tp, {kind:'point'});
+  const rj = await askReject('驳回测试点' + (pointModuleOf(tp) ? '（' + pointModuleOf(tp) + '）' : ''), tp, {kind:'point'});
   if (rj) pointsReview([{tp_id:tp, action:'reject', ...rj}]);
 }
 async function pointModify(tp) {
@@ -3343,7 +3348,7 @@ async function pointModify(tp) {
   jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'start'})
     .then(d => { if (d.holder) toast(`${d.holder.by} 正在编辑此测试点，注意保存冲突`, 'warn'); })
     .catch(()=>{});
-  const v = await askPoint('修改测试点 ' + tp, {point: p?p.point:'', dimension: p?p.dimension:'', ref: p?p.ref:''});
+  const v = await askPoint('修改测试点 ' + tp + (p&&p.module ? '（' + p.module + '）' : ''), {point: p?p.point:'', dimension: p?p.dimension:'', ref: p?p.ref:''});
   jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'stop'}).catch(()=>{});
   if (v) pointsReview([{tp_id:tp, action:'modify', point:v.point, dimension:v.dimension, ref:v.ref,
                         base_version: (p&&p.version)||1}]);
@@ -3907,7 +3912,7 @@ function renderFixProposals(pf) {
     }
     return `<div class="box"><label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer">
       <input type="checkbox" class="fpck" data-pid="${esc(p.proposal_id)}" checked style="margin-top:3px">
-      <div style="flex:1"><div style="margin-bottom:4px"><span class="cid">${esc(label)}</span>
+      <div style="flex:1"><div style="margin-bottom:4px"><span class="cid">${esc(label)}</span> ${pf.kind==='points' ? modTag(p.module, p.tp_id) : ''}
         <span class="tag">${esc(p.comment_type||'')}</span> <span class="hint">${esc(p.note||'')}</span></div>${body}</div>
     </label></div>`;
   }).join('');
@@ -3995,7 +4000,7 @@ async function projRecycleHtml() {
       <tr><th>类型</th><th>内容</th><th>所属任务</th><th>删除人</th><th>删除时间</th><th>操作</th></tr>
       ${items.map(i=>`<tr>
         <td style="width:70px"><span class="tag">${i.kind==='point'?'测试点':'用例'}</span></td>
-        <td>${esc(i.label)}</td>
+        <td>${i.module?`<span class="tag mod" title="所属模块">${esc(i.module)}</span> `:''}${esc(i.label)}</td>
         <td style="width:110px"><a onclick="openTaskFromProject('${i.task_id}')"><code>${esc(i.task_id)}</code></a></td>
         <td style="width:90px" class="hint">${esc(i.deleted_by||'')}</td>
         <td style="width:130px" class="hint">${esc(fmtTime(i.deleted_at))}</td>
