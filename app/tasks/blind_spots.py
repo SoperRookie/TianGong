@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timezone
+from functools import lru_cache
 
 STATUSES = ("open", "question", "point", "explained", "ignored")
 ACTIONS = {"to_question": "question", "to_point": "point", "explain": "explained", "ignore": "ignored", "reopen": "open"}
@@ -46,19 +47,94 @@ def _ai_resolved(record) -> dict[str, dict]:
     return out
 
 
+# ---- 盲区出处：模型给的 {module, ref} 优先，没有的按文字里的章节号在整理稿标题里反查 ----
+
+_SEC_RE = re.compile(r"(?<![\d.])(\d+(?:\.\d+){1,3})(?![\d.])")
+_HEAD_RE = re.compile(r"^(#{1,4}) (?:(\d+(?:\.\d+)*)\.? )?(.+?)\s*$")
+_ANNOT_RE = re.compile(r"\s*〔[^〕]*〕")
+_REQ_TITLE_RE = re.compile(r"^# 「(.+?)」需求整理稿")
+
+
+@lru_cache(maxsize=16)
+def _headings(requirement: str) -> tuple[tuple[int, str, str, str], ...]:
+    """整理稿的编号标题 (层级, 编号, 标题, 所属需求标题)；多需求合并的简报每份整理稿各自从 1 编号，靠需求标题区分。"""
+    out: list[tuple[int, str, str, str]] = []
+    req_title = ""
+    for line in requirement.splitlines():
+        m = _REQ_TITLE_RE.match(line)
+        if m:
+            req_title = m.group(1)
+            continue
+        h = _HEAD_RE.match(line)
+        if h and h.group(2):
+            out.append((len(h.group(1)), h.group(2), _ANNOT_RE.sub("", h.group(3)).strip(), req_title))
+    return tuple(out)
+
+
+def locate_blind_spot(text: str, requirement: str, modules: list[dict] | None = None, hint_module: str = "") -> dict:
+    """按盲区文字开头的章节号（如「3.4.7“按天排重”标为待定」）反查出处：
+    ref = 需求标题 › 2.1 活动列表 › 2.1.3 创建功能说明（祖先链），module = 拆解结果里名字含该页面 / 区块标题的模块。
+    找不到章节号或标题时返回空 dict。"""
+    if not text or not requirement:
+        return {}
+    heads = _headings(requirement)
+    nums = _SEC_RE.findall(text[:80])
+    for num in nums:
+        hits = [h for h in heads if h[1] == num]
+        if not hits:
+            continue
+        hit = next((h for h in hits if hint_module and h[3] and hint_module.startswith(h[3])), hits[0])
+        level, _, _, req_title = hit
+        chain = []
+        parts = num.split(".")
+        for k in range(1, len(parts) + 1):
+            prefix = ".".join(parts[:k])
+            anc = next((h for h in heads if h[1] == prefix and h[3] == req_title), None)
+            if anc:
+                chain.append(f"{anc[1]} {anc[2]}")
+        ref = " › ".join(([req_title] if req_title else []) + chain)
+        titles = [h[2] for h in heads if h[3] == req_title and num.startswith(h[1]) and num[len(h[1]):len(h[1]) + 1] in ("", ".")]
+        module = ""
+        best = 0
+        for m in modules or []:
+            name = str(m.get("module", "")) if isinstance(m, dict) else str(m)
+            score = sum(1 for t in titles if t and t in name)
+            if score > best:
+                best, module = score, name
+        return {"module": module, "ref": ref}
+    return {}
+
+
+def _refs(record) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for source in ((record.analysis or {}).get("blind_spot_refs"), (record.result or {}).get("blind_spot_refs")):
+        for text, loc in (source or {}).items():
+            if isinstance(loc, dict):
+                out.setdefault(_norm(text), {k: str(loc.get(k) or "") for k in ("module", "ref")})
+    return out
+
+
 def blind_spot_entities(record, extra_texts: list[str] | None = None) -> list[dict]:
-    """任务的盲区条目视图：待处置项在前；人工处置优先于 AI 复核结论。
+    """任务的盲区条目视图：待处置项在前；人工处置优先于 AI 复核结论。每条带出处 module / ref（有才带）。
 
     extra_texts：尚未写入 record 的盲区文本（生成完成落盘前算质量摘要时传入）。
     """
     reviews = record.blind_spot_reviews or {}
     resolved = _ai_resolved(record)
+    refs = _refs(record)
+    requirement = str((record.context or {}).get("requirement") or "")
+    modules = (record.analysis or {}).get("test_points") or []
     entities: list[dict] = []
     seen: set[str] = set()
 
     def _entity(text: str, default: dict) -> dict:
         key = bs_id(text)
         base = {"bs_id": key, "text": text, "status": "open", "note": "", "by": None, "at": None, "target": None}
+        loc = refs.get(_norm(text)) or {}
+        if not loc.get("ref"):
+            found = locate_blind_spot(text, requirement, modules, loc.get("module", ""))
+            loc = {"module": loc.get("module") or found.get("module", ""), "ref": found.get("ref", "")}
+        base.update({k: v for k, v in loc.items() if v})
         base.update(default)
         rv = reviews.get(key)
         if rv:

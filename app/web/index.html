@@ -3039,7 +3039,7 @@ function renderBlindSpots(t) {
   const aiResolved = items.filter(b=>b.ai_resolved).length;
   const counts = {}; items.forEach(b => counts[b.status] = (counts[b.status]||0) + 1);
   const kw = bsKw.toLowerCase();
-  const hit = b => !kw || [b.text, b.note, b.by, (b.target||{}).tp_id, (b.target||{}).req_title, (b.target||{}).module]
+  const hit = b => !kw || [b.text, b.note, b.by, b.module, b.ref, (b.target||{}).tp_id, (b.target||{}).req_title, (b.target||{}).module]
     .some(x => String(x||'').toLowerCase().includes(kw));
   const filtered = (bsFilter === 'all' ? items : items.filter(b => b.status === bsFilter)).filter(hit);
   const pages = Math.max(1, Math.ceil(filtered.length / bsSize));
@@ -3065,7 +3065,8 @@ function renderBlindSpots(t) {
   const rows = pageItems.map((b, i) => `<tr class="${bsSel.has(b.bs_id)?'mine':''}">
       <td style="width:30px">${selectable(b)?`<input type="checkbox" ${bsSel.has(b.bs_id)?'checked':''} onchange="selToggle(bsSel, ${jsq(b.bs_id)}, this.checked, renderDetail)">`:''}</td>
       <td style="width:50px" class="hint">${(bsPage - 1) * bsSize + i + 1}</td>
-      <td>${esc(b.text)}${b.stale?' <span class="tag">已不在当前拆解结果</span>':''}${b.ai_resolved&&b.status==='explained'?' <span class="tag">AI 复核</span>':''}
+      <td>${b.module?`<span class="tag mod" title="所属模块">${esc(b.module)}</span> `:''}${esc(b.text)}${b.stale?' <span class="tag">已不在当前拆解结果</span>':''}${b.ai_resolved&&b.status==='explained'?' <span class="tag">AI 复核</span>':''}
+        ${b.ref?`<div class="ref" title="需求该在这里补说明">出处：<b>${esc(b.ref)}</b></div>`:''}
         ${b.note?`<div class="hint">${esc(b.note)}</div>`:''}${tgt(b)}</td>
       <td style="width:120px"><span class="st ${stCls[b.status]||'pending'}">${esc(BS_STATUS[b.status]||b.status)}</span></td>
       <td style="width:150px" class="hint">${b.by?`${esc(b.by)}${b.at?`<div>${esc(fmtTime(b.at))}</div>`:''}`:'—'}</td>
@@ -3112,13 +3113,15 @@ async function bsToQuestion(bsId) {
   const ctx = currentTask.context || {};
   const ids = ctx.requirement_ids && ctx.requirement_ids.length ? ctx.requirement_ids : [ctx.requirement_id];
   const titles = ctx.requirement_titles || [ctx.requirement_title];
-  const v = await askBlindQuestion(bsFind(bsId).text, ids.filter(Boolean).map((id,i)=>({id, title: titles[i]||id})));
+  const b = bsFind(bsId);
+  const v = await askBlindQuestion(b.text + (b.ref ? `（出处：${b.ref}）` : ''), ids.filter(Boolean).map((id,i)=>({id, title: titles[i]||id})));
   if (!v) return;
   const r = await bsAct(bsId, 'to_question', v);
   if (r) toast(`已写入需求「${(r.blind_spot.target||{}).req_title||''}」的待确认事项（${v.level==='suggest'?'建议确认':'必须确认'}）`, 'ok');
 }
 async function bsToPoint(bsId) {
-  const v = await askPoint('盲区转为测试点', {module:'需求盲区', point: bsFind(bsId).text});
+  const b = bsFind(bsId);
+  const v = await askPoint('盲区转为测试点', {module: b.module || '需求盲区', point: b.text, ref: b.ref || ''});
   if (!v) return;
   const r = await bsAct(bsId, 'to_point', v);
   if (r && r.added && r.added.length) toast(`已新增待审核测试点 ${r.added[0].tp_id}`, 'ok');

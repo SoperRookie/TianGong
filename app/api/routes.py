@@ -3020,9 +3020,10 @@ def _apply_blind_spot_action(request: Request, record: TaskRecord, entity: dict,
         if req_id not in req_ids:
             raise HTTPException(status_code=400, detail="req_id 不是本任务的来源需求")
         _req(request, req_id, "requirement.edit")
+        question = entity["text"] + (f"（出处：{entity['ref']}）" if entity.get("ref") and "出处" not in entity["text"] else "")
         try:
             item = request.app.state.requirements.add_question(
-                req_id, entity["text"], operator=operator,
+                req_id, question, operator=operator,
                 level=body.level if body.level in ("must", "suggest") else "must", assumption=body.note)
         except RequirementError as e:
             raise HTTPException(status_code=400, detail=str(e))

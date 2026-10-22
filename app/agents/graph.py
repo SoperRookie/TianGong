@@ -229,8 +229,10 @@ async def outline_requirement(llm: LLMClient, requirement: str, model: str | Non
     return [str(m).strip() for m in data.get("modules", []) if str(m).strip()]
 
 
-def _blind_spots(data: dict) -> list[str]:
-    """盲区列表：兼容键名别名与对象形态（{"description": ...}）。"""
+_BS_TEXT_KEYS = ("description", "desc", "point", "text", "content", "question", "盲区")
+
+
+def _raw_blind_spots(data: dict) -> list:
     keys = ("blind_spots", "blindSpots", "blind_spot", "盲区", "需求盲区")
     raw = next((data[k] for k in keys if isinstance(data.get(k), list)), None)
     if raw is None:  # 与模块列表一样兼容一层 result / data 包装
@@ -240,13 +242,31 @@ def _blind_spots(data: dict) -> list[str]:
                 raw = next((inner[k] for k in keys if isinstance(inner.get(k), list)), None)
                 if raw is not None:
                     break
+    return raw or []
+
+
+def _blind_spots(data: dict) -> list[str]:
+    """盲区列表：兼容键名别名与对象形态（{"description": ...}）。流水线里盲区一直是文本，出处另取（_blind_spot_refs）。"""
     out: list[str] = []
-    raw = raw or []
-    for b in raw:
+    for b in _raw_blind_spots(data):
         if isinstance(b, dict):
-            b = next((v for k in ("description", "desc", "point", "text", "content", "question", "盲区") if isinstance((v := b.get(k)), str)), "")
+            b = next((v for k in _BS_TEXT_KEYS if isinstance((v := b.get(k)), str)), "")
         if isinstance(b, (str, int, float)) and str(b).strip():
             out.append(str(b).strip())
+    return out
+
+
+def _blind_spot_refs(data: dict) -> dict[str, dict]:
+    """盲区出处 {盲区文本: {module, ref}}：模型按对象形态给了 module / ref 才有；字符串形态的盲区由实体层按章节号反查。"""
+    out: dict[str, dict] = {}
+    for b in _raw_blind_spots(data):
+        if not isinstance(b, dict):
+            continue
+        text = next((v for k in _BS_TEXT_KEYS if isinstance((v := b.get(k)), str)), "").strip()
+        module = str(b.get("module") or b.get("模块") or "").strip()
+        ref = str(b.get("ref") or b.get("source") or b.get("来源") or b.get("出处") or "").strip()
+        if text and (module or ref):
+            out[text] = {"module": module, "ref": ref}
     return out
 
 
@@ -297,7 +317,8 @@ async def analyze_requirement(
     )
     if not modules and allow_empty:
         logger.warning("分片 {}/{} 未拆出测试点（可能不含可测内容），跳过该片", chunk_no, chunk_total)
-        return {"test_points": [], "blind_spots": _blind_spots(data), "model_name": result.model_name, "empty": True}
+        return {"test_points": [], "blind_spots": _blind_spots(data), "blind_spot_refs": _blind_spot_refs(data),
+                "model_name": result.model_name, "empty": True}
     if not modules:
         keys = "、".join(map(str, data.keys())) if isinstance(data, dict) else type(data).__name__
         head = (result.content or "").strip().replace("\n", " ")[:300]
@@ -310,6 +331,7 @@ async def analyze_requirement(
     return {
         "test_points": modules,
         "blind_spots": _blind_spots(data),
+        "blind_spot_refs": _blind_spot_refs(data),
         "model_name": result.model_name,
     }
 
