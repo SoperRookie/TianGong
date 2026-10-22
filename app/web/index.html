@@ -118,12 +118,12 @@ tr.mine td { background:rgba(79,70,229,.035); }
 
 /* ================= 卡片 ================= */
 .card { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); }
-.card-h { display:flex; align-items:center; gap:8px; padding:13px 16px; border-bottom:1px solid var(--line-2); }
+.card-h { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:13px 16px; border-bottom:1px solid var(--line-2); }
 .card-h h3 { margin:0; font-size:14px; font-weight:650; letter-spacing:.2px; white-space:nowrap; }
 .card-h .seg { flex-shrink:0; }
 .seg button { white-space:nowrap; }
-.card-h .meta { color:var(--ink-3); font-size:12px; font-weight:400; }
-.card-h .grow { margin-left:auto; display:flex; gap:8px; align-items:center; }
+.card-h .meta { color:var(--ink-3); font-size:12px; font-weight:400; flex:1 1 auto; min-width:min(280px, 100%); }  /* 说明文字至少占 280px，放不下时右侧工具栏整体换行，不再被挤成竖列 */
+.card-h .grow { margin-left:auto; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
 .card-b { padding:14px 16px; }
 .card-f { padding:12px 16px; border-top:1px solid var(--line-2); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 .section-t { font-size:12.5px; font-weight:650; color:var(--ink-2); letter-spacing:.3px;
@@ -5812,12 +5812,19 @@ function reqExtractionHtml(r, canAI, canEdit) {
           const art = flowAscii(r.ids.map(id => byId[id]).filter(Boolean).map(it => it.text));
           return `<div style="margin:4px 6px 6px;padding:4px 0;border-left:3px solid var(--line)">${art?`<pre style="margin:0 0 4px 6px;white-space:pre;overflow-x:auto;font-family:ui-monospace,'SF Mono',Menlo,'PingFang SC',monospace;font-size:12px;line-height:1.6;background:transparent">${esc(art.join('\n'))}</pre>`:''}<div style="font-family:ui-monospace,Menlo,monospace;font-size:12.5px">${its.map(it => itemHtml(it, {main: b.source})).join('')}</div></div>`;
         }
+        if (r.t === 'example') {   // 示例图：说明 + 图里的界面短文案并成一行（编辑其中一条时逐条展开）
+          const cap = byId[r.id], its = r.ids.map(id => byId[id]).filter(Boolean), all = [cap, ...its].filter(Boolean);
+          if (!all.some(keep)) return '';
+          if (all.some(x => x.id === _exEditItem) || _exFilter !== 'all') return all.filter(keep).map(x => itemHtml(x, {main: b.source})).join('');
+          const chip = it => `<span style="display:inline-flex;align-items:center;gap:2px;padding:1px 6px;margin:2px 4px 2px 0;border:1px solid var(--line);border-radius:4px;background:var(--bg-2, transparent)">${badgeOf(it)}${esc(it.text)}${tailOf(it, b.source)}${opsOf(it).replace('margin-left:auto;', '')}</span>`;
+          return `<div style="display:flex;gap:6px;align-items:flex-start;padding:4px 6px;border-bottom:1px solid var(--line)"><span style="flex:1;line-height:1.6">${cap ? `<b>${badgeOf(cap)}${esc(cap.text)}</b>${tailOf(cap, b.source)} ` : ''}${its.map(chip).join('')}</span>${cap ? opsOf(cap) : ''}</div>`;
+        }
         const it = byId[r.id];
         if (!it || !keep(it)) return '';
         return itemHtml(it, {bold: r.t === 'label', lv: r.lv || 0, main: b.source});
       }).join('');
       if (!parts) return '';
-      const n = b.rows.reduce((acc, r) => acc + (r.ids ? r.ids.length : 1), 0);
+      const n = b.rows.reduce((acc, r) => acc + (r.ids ? r.ids.length : 0) + (r.id ? 1 : 0), 0);
       return `<div style="margin:8px 0 2px 8px"><b>${esc(b.no)} ${esc(b.name)}</b> <span class="hint">${n} 条</span>${b.draft?' <span class="st rejected">疑似遗留草稿</span>':''}</div>` + parts;
     }).join('');
     if (!blocks) return '';
