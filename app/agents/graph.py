@@ -249,18 +249,24 @@ def _blind_spots(data: dict) -> list[str]:
 async def analyze_requirement(
     llm: LLMClient, requirement: str, model: str | None, knowledge_cases: str | None = None,
     outline: list[str] | None = None, chunk_no: int = 0, chunk_total: int = 0, allow_empty: bool = False,
+    req_title: str | None = None,
 ) -> dict:
     """需求分析 Agent：测试点拆解 + 盲区识别（拆解确认流程 F-3-3 亦单独调用）。
 
     knowledge_cases：测试用例库检索结果，拆解阶段注入做覆盖度查漏（PRD 检索时机约束）。
     outline / chunk_no：长需求分片拆解时注入全文模块大纲与分片序号，模块命名与大纲一致、只拆本片内容。
+    req_title：多条需求合并设计时本片所属的需求标题，模块名与 ref 都带它作前缀（两份整理稿章节号各自从 1 起，不带就分不清）。
     allow_empty：分片模式下允许本片为空（目录 / 修订记录 / 术语表等不含可测内容），返回空测试点而不报错；
     非分片模式下空结果先重试一次再报错（拆解是最贵的一步，偶发空输出不该直接让任务失败）。
     """
     user = wrap_data("需求原文", requirement)
+    if req_title:
+        user = (f"本片属于需求「{req_title}」（本次设计合并了多条需求，各自的章节编号都从 1 开始）：模块名统一带「{req_title}-」前缀，"
+                f"ref 写成「{req_title} › 页面或章节 › 需求点」。\n") + user
     if outline:
         user = (f"这是一份长需求的第 {chunk_no}/{chunk_total} 片。全文模块大纲如下（模块命名必须与大纲一致；"
-                f"只拆解本片实际包含的内容，本片未涉及的模块不要凭空生成）：\n{wrap_data('全文模块大纲', chr(10).join(outline))}\n\n") + user
+                f"只拆解本片实际包含的内容，本片未涉及的模块不要凭空生成；大纲只约束模块归属、不限制测试点数量，"
+                f"本片里大纲没单列的小标题归入它所在页面的模块）：\n{wrap_data('全文模块大纲', chr(10).join(outline))}\n\n") + user
     user += profile_block()  # 项目画像：统一术语与模块命名，带着既有业务认知拆解
     if knowledge_cases:
         user += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))
