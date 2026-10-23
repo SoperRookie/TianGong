@@ -3115,7 +3115,7 @@ async function bsToQuestion(bsId) {
   const ids = ctx.requirement_ids && ctx.requirement_ids.length ? ctx.requirement_ids : [ctx.requirement_id];
   const titles = ctx.requirement_titles || [ctx.requirement_title];
   const b = bsFind(bsId);
-  const v = await askBlindQuestion(b.text + (b.ref ? `（出处：${b.ref}）` : ''), ids.filter(Boolean).map((id,i)=>({id, title: titles[i]||id})));
+  const v = await askBlindQuestion(b.text + (b.module ? `\n模块：${b.module}` : '') + (b.ref ? `\n出处：${b.ref}（写入需求后按出处标所属模块）` : ''), ids.filter(Boolean).map((id,i)=>({id, title: titles[i]||id})));
   if (!v) return;
   const r = await bsAct(bsId, 'to_question', v);
   if (r) toast(`已写入需求「${(r.blind_spot.target||{}).req_title||''}」的待确认事项（${v.level==='suggest'?'建议确认':'必须确认'}）`, 'ok');
@@ -6511,11 +6511,12 @@ async function _renderRequirementDetail__impl() {
   const openAll = qs.filter(q=>q.status==='open');
   const openN = openAll.filter(q=>(q.level||'must')==='must').length;
   const suggestN = openAll.length - openN;
-  const qTab = `<div class="hint" style="margin-bottom:8px">待确认事项分两级：<b>必须确认</b>（影响规则 / 预期 / 数值 / 分支，不确认不能开始测试设计）与 <b>建议确认</b>（可按假设继续，假设会写进用例备注）。确认结论会作为需求的一部分参与拆解与生成。</div>
-    ${canEdit?`<div class="toolbar" style="margin-bottom:10px"><input type="text" id="rqNewQ" placeholder="人工补充一条待确认事项…" style="flex:1"><select id="rqNewQLevel" style="width:110px"><option value="must">必须确认</option><option value="suggest">建议确认</option></select><button class="btn ghost sm" onclick="addReqQuestion()">添加</button></div>`:''}
-    ${qs.length?`<div class="tbl-wrap"><table><tr><th style="width:36px">#</th><th>问题</th><th style="width:96px">等级</th><th style="width:90px">状态</th><th>确认结论</th><th style="width:120px">确认人</th><th style="width:150px">操作</th></tr>
+  const qTab = `<div class="hint" style="margin-bottom:8px">待确认事项分两级：<b>必须确认</b>（影响规则 / 预期 / 数值 / 分支，不确认不能开始测试设计）与 <b>建议确认</b>（可按假设继续，假设会写进用例备注）。确认结论会作为需求的一部分参与拆解与生成。「模块」列是问题所属的页面 / 区块：AI 分析时按问题所在章节给出，核验降级与复核补充的按原文依据所在章节定，盲区转入的按出处定。</div>
+    ${canEdit?`<div class="toolbar" style="margin-bottom:10px"><input type="text" id="rqNewQ" placeholder="人工补充一条待确认事项…" style="flex:1"><input type="text" id="rqNewQModule" list="rqQModules" placeholder="所属模块（可选）" style="width:170px" title="问题属于哪个页面 / 模块，如「活动列表-基本配置」"><datalist id="rqQModules">${[...new Set(qs.map(q=>q.module).filter(Boolean))].map(m=>`<option value="${esc(m)}">`).join('')}</datalist><select id="rqNewQLevel" style="width:110px"><option value="must">必须确认</option><option value="suggest">建议确认</option></select><button class="btn ghost sm" onclick="addReqQuestion()">添加</button></div>`:''}
+    ${qs.length?`<div class="tbl-wrap"><table><tr><th style="width:36px">#</th><th>问题</th><th style="width:150px">模块</th><th style="width:96px">等级</th><th style="width:90px">状态</th><th>确认结论</th><th style="width:120px">确认人</th><th style="width:150px">操作</th></tr>
       ${qs.map((q,i)=>`<tr>
         <td class="hint">${i+1}</td><td>${esc(q.question)}${q.source==='manual'?' <span class="tag">人工</span>':''}${q.kind==='unverified'?' <span class="tag" style="background:var(--danger-bg);color:var(--danger)">原文核验降级</span>':q.kind==='review'?' <span class="tag">复核补充</span>':''}${q.reason?`<div class="hint">${esc(q.reason)}</div>`:''}${(q.level||'must')==='suggest'&&q.status==='open'?`<div class="hint">不确认时假设：${esc(q.assumption||'按行业惯例处理')}</div>`:''}</td>
+        <td>${q.module?`<span class="tag" title="${esc(q.ref?`出处：${q.ref}`:'所属页面 / 模块')}">${esc(q.module)}</span>`:'<span class="hint" title="整体性问题，或模型 / 章节号都没定到模块">—</span>'}</td>
         <td>${(q.level||'must')==='must'?'<span class="tag" style="background:var(--danger-bg);color:var(--danger)">必须确认</span>':'<span class="tag">建议确认</span>'}${canEdit&&q.status==='open'?`<div><a class="hint" onclick="setReqQuestionLevel('${q.q_id}','${(q.level||'must')==='must'?'suggest':'must'}')">${(q.level||'must')==='must'?'降为建议':'升为必须'}</a></div>`:''}</td>
         <td>${q.status==='open'?'<span class="st rejected">待确认</span>':'<span class="st approved">已确认</span>'}</td>
         <td>${q.status==='open'?(canEdit?`<input type="text" id="qa-${q.q_id}" placeholder="填写确认结论（产品/开发口径）" style="width:100%;box-sizing:border-box">`:'<span class="hint">—</span>'):esc(q.answer)}</td>
@@ -6635,7 +6636,7 @@ async function analyzeReq() {
 }
 async function addReqQuestion() {
   const q = $('rqNewQ').value.trim(); if (!q) return;
-  try { await jpost(`/api/v1/requirements/${curReq}/questions`, {question: q, level: ($('rqNewQLevel')||{}).value || 'must'}); renderRequirementDetail(); }
+  try { await jpost(`/api/v1/requirements/${curReq}/questions`, {question: q, level: ($('rqNewQLevel')||{}).value || 'must', module: (($('rqNewQModule')||{}).value || '').trim()}); renderRequirementDetail(); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function setReqQuestionLevel(qid, level) {

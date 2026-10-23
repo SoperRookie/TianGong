@@ -335,3 +335,52 @@ def test_分片直接生成的检查点按片隔离():
     out["on_analysis"]({"test_points": []}); out["on_module_done"]("登录", None)
     assert saved_analysis == [{"test_points": [], "chunk_no": 2}] and saved_mods == ["2:登录"]
     assert _chunk_checkpoint(None, None, None, 1) == {"checkpoint": None, "on_analysis": None, "on_module_done": None}
+
+
+HEADED = """【需求整理稿】
+# 「后台」需求整理稿
+## 1. 需求说明
+活动类型为连赢挑战。
+## 2. 活动运营后台
+### 2.1 活动列表
+#### 2.1.1 基本配置
+活动名称最长 30 个字符，超出不允许保存。
+### 2.2 派奖查询
+按会员账号查询派奖记录。
+## 3. 商户管理后台
+### 3.4 日榜排名
+#### 3.4.7 查询功能说明
+按天排重，同一会员一天只算一次。
+"""
+
+
+def test_待确认事项所属模块_按依据所在章节定_没依据按章节号反查_都没有为空():
+    from app.agents.analysis import _merge_outputs, section_module
+
+    assert section_module(HEADED, quote="活动名称最长 30 个字符") == "活动运营后台-活动列表-基本配置"
+    assert section_module(HEADED, quote="同一会员一天只算一次") == "商户管理后台-日榜排名-查询功能说明"
+    assert section_module(HEADED, quote="完全不在原文里的话") == ""
+    assert section_module(HEADED, text="3.4.7 “按天排重”未说明跨天怎么算？") == "商户管理后台-日榜排名-查询功能说明"
+    assert section_module(HEADED, text="2.2 派奖查询是否支持导出？") == "活动运营后台-派奖查询"
+    assert section_module("没有标题的纯文本", quote="纯文本") == ""
+    # 核验降级的按 quote 所在章节定；AI 问题模型给了模块的照用、没给的按章节号反查；复核补充未过核验的同样带模块
+    analysis = {"rules": [{"text": "活动名称最长 30 个字符", "quote": "活动名称最长 30 个字符，超出不允许保存"},   # 依据对上 → 保留
+                          {"text": "同一会员一天只算一次，跨天重新计", "quote": "同一会员一天只算一次，跨天重新计"}],   # 命中 69% < 70% → 降级，但 ≥ 50% 能定位到章节
+                "boundaries": [],
+                "open_questions": [{"question": "锁定期间允许找回密码？", "level": "must", "module": "登录"},
+                                   {"question": "3.4.7 按天排重是否按活动日历天？", "level": "must"}]}
+    out = verify_analysis(analysis, HEADED)
+    qs = out["open_questions"]
+    assert [q["module"] for q in qs[:2]] == ["登录", "商户管理后台-日榜排名-查询功能说明"]
+    assert texts(out["rules"]) == ["活动名称最长 30 个字符"]
+    demoted = [q for q in qs if q.get("kind") == "unverified"]
+    assert len(demoted) == 1 and demoted[0]["module"] == "商户管理后台-日榜排名-查询功能说明"
+    assert section_module(HEADED, quote="完全不在原文里的话，一个字都对不上") == ""   # 最像的章节命中不到一半：不乱标
+    out = apply_review(out, {"issues": [], "missing": [{"key": "permissions", "text": "只有运营能改活动名称",
+                                                        "quote": "活动名称最长 30 个字符，由运营修改"}]}, HEADED, "r")   # 命中 69%：未过核验转待确认，仍定位到章节
+    assert out["open_questions"][-1]["kind"] == "review" and out["open_questions"][-1]["module"] == "活动运营后台-活动列表-基本配置"
+
+    class _R:
+        model_name = "m"
+    merged, _ = _merge_outputs([({"open_questions": [{"question": "a？", "module": " 活动列表 "}, {"question": "b？"}]}, _R())])
+    assert [q["module"] for q in merged["open_questions"]] == ["活动列表", ""]
