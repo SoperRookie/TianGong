@@ -363,6 +363,11 @@ def test_待确认事项所属模块_按依据所在章节定_没依据按章节
     assert section_module(HEADED, text="3.4.7 “按天排重”未说明跨天怎么算？") == "商户管理后台-日榜排名-查询功能说明"
     assert section_module(HEADED, text="2.2 派奖查询是否支持导出？") == "活动运营后台-派奖查询"
     assert section_module("没有标题的纯文本", quote="纯文本") == ""
+    # 没依据没章节号的按文字定位：点到章节标题的取该节（标题更长 / 更深的优先），否则与哪节正文二字组合重合最多
+    assert section_module(HEADED, text="日榜排名的按天排重是否按自然日计算？") == "商户管理后台-日榜排名"
+    assert section_module(HEADED, text="基本配置的活动名称允许重名吗？") == "活动运营后台-活动列表-基本配置"
+    assert section_module(HEADED, text="活动名称超过 30 个字符时的提示文案是什么？") == "活动运营后台-活动列表-基本配置"
+    assert section_module(HEADED, text="整体是否支持多语言？") == "" and section_module(HEADED, text="需求说明里没写？") == ""
     # 核验降级的按 quote 所在章节定；AI 问题模型给了模块的照用、没给的按章节号反查；复核补充未过核验的同样带模块
     analysis = {"rules": [{"text": "活动名称最长 30 个字符", "quote": "活动名称最长 30 个字符，超出不允许保存"},   # 依据对上 → 保留
                           {"text": "同一会员一天只算一次，跨天重新计", "quote": "同一会员一天只算一次，跨天重新计"}],   # 命中 69% < 70% → 降级，但 ≥ 50% 能定位到章节

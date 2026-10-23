@@ -870,18 +870,21 @@ def repair_migrated_titles(requirements: RequirementStore, tasks=None) -> int:
 
 
 _SOURCE_REF_RE = re.compile(r"（出处：(.+?)）\s*$")
+_MODULE_BACKFILL_V = 2   # 1：依据 / 出处 / 章节号；2：加按文字定位（含章节标题、与某节正文重合最多）
 
 
 def backfill_question_modules(requirements: RequirementStore) -> int:
     """存量回填（幂等）：本版之前的待确认事项没有 module 字段，启动时按与新数据同样的规则补一次：
     有原文依据的（核验降级 / 复核补充）按依据所在章节，盲区转入的按问题末尾「（出处：…）」，其余按问题文字里的章节号；
-    定不到的也写成空串，下次启动不再算。返回补上模块名的条数。"""
+    定不到的也写成空串并记 module_v，下次启动不再算；定位规则升级（加了按文字定位）时抬高 _MODULE_BACKFILL_V，
+    空模块的会再算一次。返回补上模块名的条数。"""
     from app.agents.analysis import section_module
     from app.tasks.blind_spots import ref_to_module
 
     filled = 0
     for item in requirements.list(include_deleted=True):
-        todo = [q for q in item.get("questions") or [] if "module" not in q]
+        todo = [q for q in item.get("questions") or []
+                if "module" not in q or (not q["module"] and q.get("module_v", 0) < _MODULE_BACKFILL_V)]
         if not todo:
             continue
         source = design_brief({**item, "analysis": None, "questions": []})
@@ -893,8 +896,8 @@ def backfill_question_modules(requirements: RequirementStore) -> int:
                 module = ref_to_module(m.group(1), item.get("title") or "")
                 q.setdefault("ref", m.group(1))
             else:
-                module = section_module(source, text=q.get("question") or "")
-            q["module"] = module
+                module = section_module(source, text=f"{q.get('question') or ''} {q.get('reason') or ''}")
+            q["module"], q["module_v"] = module, _MODULE_BACKFILL_V
             filled += bool(module)
         requirements._persist(item)
     return filled
