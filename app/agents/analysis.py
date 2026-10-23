@@ -118,16 +118,16 @@ def _module_name(chain: tuple[str, ...]) -> str:
 
 
 @_lru_cache(maxsize=4)
-def _sections(source: str) -> tuple[tuple[str, str, str], ...]:
-    """整理稿按编号标题切成 (模块名, 章节号, 规范化正文)；没有标题的文本得到空元组。"""
-    out: list[tuple[str, str, str]] = []
+def _sections(source: str) -> tuple[tuple[str, str, str, str], ...]:
+    """整理稿按编号标题切成 (模块名, 章节号, 规范化正文, 叶子标题)；没有标题的文本得到空元组。"""
+    out: list[tuple[str, str, str, str]] = []
     stack: list[tuple[int, str]] = []
     buf: list[str] = []
     num = ""
 
     def flush() -> None:
         if stack:
-            out.append((_module_name(tuple(t for _, t in stack)), num, normalize("".join(buf))))
+            out.append((_module_name(tuple(t for _, t in stack)), num, normalize("".join(buf)), stack[-1][1]))
 
     for line in source.splitlines():
         m = _SEC_HEAD_RE.match(line)
@@ -156,14 +156,14 @@ def section_module(source: str, quote: str = "", text: str = "") -> str:
         return ""
     q = normalize(quote)
     if len(q) >= _MIN_QUOTE_CHARS:
-        for name, _, body in sections:
+        for name, _, body, _ in sections:
             if q in body:
                 return name
         segs = [normalize(x) for x in _SEG_SPLIT_RE.split(quote)]
         segs = [x for x in segs if len(x) >= 3]
         total = sum(len(x) for x in segs)
         best, best_ratio = "", 0.0
-        for name, _, body in sections:
+        for name, _, body, _ in sections:
             hit = sum(len(x) for x in segs if x in body)
             ratio = hit / total if total else 0.0
             if ratio > best_ratio:
@@ -171,48 +171,62 @@ def section_module(source: str, quote: str = "", text: str = "") -> str:
         if best_ratio >= _LOCATE_HIT_RATIO:
             return best
     for n in _SEC_NUM_RE.findall((text or "")[:80]):
-        hit = next((name for name, num, _ in sections if num == n), "")
+        hit = next((name for name, num, _, _ in sections if num == n), "")
         if hit:
             return hit
     return _section_by_text(sections, text)
 
 
-# 按文字定位：问题里点到了章节标题（最长的标题优先、同长取更深的节），否则问题与哪一节正文的字对重合最多
-_TEXT_MIN_BIGRAM_RATIO = 0.35
+# 按文字定位：问题里点到了章节标题（≥ 3 字、整理稿里只出现一次的叶子标题；「字段说明」「人工收录」这类每页都有的不算），
+# 几个标题都点到时取正文与问题重合更多的；没点到标题就看问题的二字组合与哪一节正文重合最多
+_TEXT_MIN_BIGRAM_RATIO = 0.2
 _TEXT_MIN_BODY_CHARS = 10
-_GENERIC_TITLES = {"需求说明", "概述", "说明", "备注", "其他", "附录"}
+_TITLE_MIN_CHARS = 3
+# 点到也不算的泛称标题：问题里的「需求说明里没写」「人工收录中…」指的不是这一节
+_GENERIC_TITLES = {"需求说明", "需求背景", "更新记录", "版本记录", "人工收录", "功能清单", "概述", "说明", "备注", "其他", "附录"}
 
 
 def _bigrams(norm: str) -> set[str]:
     return {norm[i:i + 2] for i in range(len(norm) - 1)}
 
 
-def _section_by_text(sections: tuple[tuple[str, str, str], ...], text: str) -> str:
-    """没有依据、没有章节号的问题（老数据、模型没给 module 的整体性问题）：
-    1. 问题文字里含某节的叶子标题（≥ 2 字、不是「需求说明」这类泛称）→ 该节，标题更长的优先、同长取路径更深的；
-    2. 否则问题的二字组合在哪一节正文里出现得最多（占比 ≥ 35%，正文 ≥ 10 字）→ 该节；都不到返回空串。"""
+def _section_by_text(sections: tuple[tuple[str, str, str, str], ...], text: str) -> str:
+    """没有依据、没有章节号的问题（老数据、模型没给 module 的整体性问题）按文字定位：
+    1. 问题文字里含某节的叶子标题（去掉标点后 ≥ 3 字，且该标题在整理稿里只出现一次——「日榜」「导出」「人工收录」
+       「字段说明」这类到处都有的、「需求说明」「版本记录」这类泛称不算）→ 该节；几个都含时标题更长的优先、
+       再取路径更深的、再取正文与问题重合更多的；
+    2. 否则问题的二字组合在哪一节正文里出现占比最高（≥ 20%，正文 ≥ 10 字）→ 该节；都不到返回空串。"""
     norm = normalize(text)
     if len(norm) < 4:
         return ""
-    best, best_key = "", (0, 0)
-    for name, _, _ in sections:
-        leaf = name.rsplit("-", 1)[-1]
-        if len(leaf) < 2 or leaf in _GENERIC_TITLES:
-            continue
-        if normalize(leaf) in norm and (len(leaf), name.count("-")) > best_key:
-            best, best_key = name, (len(leaf), name.count("-"))
-    if best:
-        return best
     grams = _bigrams(norm)
     if not grams:
         return ""
+
+    def ratio(body: str) -> float:
+        return sum(1 for g in grams if g in body) / len(grams)
+
+    leaf_count: dict[str, int] = {}
+    for _, _, _, leaf in sections:
+        key = normalize(leaf)
+        leaf_count[key] = leaf_count.get(key, 0) + 1
+    best, best_key = "", (0, -1, -1.0)
+    for name, _, body, leaf in sections:
+        key = normalize(leaf)
+        if len(key) < _TITLE_MIN_CHARS or leaf in _GENERIC_TITLES or leaf_count[key] > 1 or key not in norm:
+            continue
+        cand = (len(key), name.count("-"), ratio(body))
+        if cand > best_key:
+            best, best_key = name, cand
+    if best:
+        return best
     best_ratio = 0.0
-    for name, _, body in sections:
+    for name, _, body, _ in sections:
         if len(body) < _TEXT_MIN_BODY_CHARS:
             continue
-        ratio = sum(1 for g in grams if g in body) / len(grams)
-        if ratio > best_ratio:
-            best, best_ratio = name, ratio
+        r = ratio(body)
+        if r > best_ratio:
+            best, best_ratio = name, r
     return best if best_ratio >= _TEXT_MIN_BIGRAM_RATIO else ""
 
 

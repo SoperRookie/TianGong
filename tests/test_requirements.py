@@ -509,15 +509,17 @@ async def test_存量待确认事项回填模块_按依据_出处_章节号_幂�
         {"q_id": "q4", "question": "整体是否支持多语言？", "status": "open", "level": "suggest", "source": "ai"},
         {"q_id": "q5", "question": "按天排重是否按自然日？", "reason": "影响日榜排名的统计口径", "status": "open", "level": "must", "source": "ai"},
         {"q_id": "q6", "question": "早就算过定不到的", "status": "open", "level": "must", "source": "ai", "module": "", "module_v": 1},
+        {"q_id": "q7", "question": "模型给的模块不动", "status": "open", "level": "must", "source": "ai", "module": "登录"},
     ]
     app.state.requirements._persist(item)
     assert backfill_question_modules(app.state.requirements) == 4
+    assert app.state.requirements.get(r["req_id"])["questions"][6] == {"q_id": "q7", "question": "模型给的模块不动", "status": "open", "level": "must", "source": "ai", "module": "登录"}
     qs = {q["q_id"]: q for q in app.state.requirements.get(r["req_id"])["questions"]}
     assert qs["q1"]["module"] == "商户管理后台-日榜排名" and qs["q2"]["module"] == "商户管理后台-日榜排名"
     assert qs["q2"]["ref"] == "后台 › 3 商户管理后台 › 3.4 日榜排名"
     assert qs["q3"]["module"] == "活动运营后台-活动列表" and qs["q4"]["module"] == ""
     assert qs["q5"]["module"] == "商户管理后台-日榜排名"   # 没章节号：问题 + reason 点到了章节标题
-    assert qs["q6"]["module"] == "" and qs["q6"]["module_v"] == 2   # 旧版本算过为空的，规则升级后再算一次
+    assert qs["q6"]["module"] == "" and qs["q6"]["module_v"] == 3   # 旧版本规则算过的，规则升级后再算一次
     assert backfill_question_modules(app.state.requirements) == 0   # 定不到的也写了空串并记版本：第二次不再算
     assert (await client.get(f"/api/v1/requirements/{r['req_id']}")).json()["questions"][0]["module"] == "商户管理后台-日榜排名"
 
