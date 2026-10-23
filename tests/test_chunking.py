@@ -140,7 +140,8 @@ def test_整理稿标题大纲_长区块成模块_短区块并入页面_草稿�
 
     mods = outline_from_headings(_整理稿())
     # 需求说明：短的「版本记录」并入「需求说明」，长的「创建活动」单列；活动列表：长区块单列、「活动列表」兜住短区块
-    assert mods == ["需求说明", "需求说明-创建活动", "活动列表", "活动列表-基本配置", "活动列表-数据配置", "派奖查询"]
+    assert mods == ["需求说明", "需求说明-创建活动", "活动运营后台-活动列表", "活动运营后台-活动列表-基本配置",
+                    "活动运营后台-活动列表-数据配置", "活动运营后台-派奖查询"]
     # 区块名与页面同名不重复成「派奖查询-派奖查询」；〔疑似草稿〕区块、疑点清单、遗留草稿、空页面都不在
     assert not any("草稿" in m or "疑点" in m or "空页面" in m for m in mods)
     # 不是整理稿格式（没有编号标题）→ 空，交给模型出大纲
@@ -168,7 +169,7 @@ def test_多需求简报_按需求切段_片不跨需求_疑点清单挂到本�
         assert all(APPENDIX_NOTE not in c for c in mine[:-1])
     # 多需求时大纲模块带需求标题前缀，两份整理稿同名章节不混
     mods = outline_from_brief(brief)
-    assert "后台-活动列表-基本配置" in mods and "前端-活动列表-基本配置" in mods
+    assert "后台-活动运营后台-活动列表-基本配置" in mods and "前端-活动运营后台-活动列表-基本配置" in mods
     # 整篇不超限：原样一片、无标题（与单需求行为一致）
     assert requirement_chunks(brief, 10**6) == ([brief], [None])
     # 单需求、没有标记：标题 None，疑点清单仍挂到最后一片
@@ -184,12 +185,42 @@ async def test_整理稿分片拆解_大纲按标题生成不调模型_各片带
     a, b = _整理稿("后台", 600), _整理稿("前端", 600)
     brief = f"【需求 1/2：后台】\n{a}\n\n【需求 2/2：前端】\n{b}"
     n = len(requirement_chunks(brief, 1500)[0])
-    reply = json.dumps({"modules": [{"module": "后台-活动列表-基本配置", "points": ["必填"]}], "blind_spots": []}, ensure_ascii=False)
+    reply = json.dumps({"modules": [{"module": "后台-活动运营后台-活动列表-基本配置", "points": ["必填"]}], "blind_spots": []}, ensure_ascii=False)
     llm = StubLLM([reply] * n)
     result = await run_analysis(brief, llm, chunk_max_chars=1500)
     assert len(llm.calls) == n   # 没有「长需求模块大纲」那一次调用
     users = [c["messages"][-1]["content"] for c in llm.calls]
-    assert all("全文模块大纲" in u and "前端-活动列表-基本配置" in u for u in users)
+    assert all("全文模块大纲" in u and "前端-活动运营后台-活动列表-基本配置" in u for u in users)
     assert any("本片属于需求「后台」" in u and "「后台 › 页面或章节 › 需求点」" in u for u in users)
     assert any("本片属于需求「前端」" in u for u in users)
-    assert result.test_points[0]["module"] == "后台-活动列表-基本配置"
+    assert result.test_points[0]["module"] == "后台-活动运营后台-活动列表-基本配置"
+
+
+def test_文件夹名进模块名_页面名已带文件夹名的不重复():
+    from app.agents.outline import outline_from_headings
+
+    big = "- 规则一条，带数值 100 与条件。\n" * 12
+    text = "\n".join([
+        "# 「前端」需求整理稿", "", "## 3. PC", "", "### 3.1 PC-活动入口说明 〔来源：x.zip › PC / PC-活动入口说明〕", "",
+        "#### 3.1.1 入口说明", big, "#### 3.1.2 报名规则说明", big,
+        "## 4. 移动", "", "### 4.1 移动-活动入口说明 〔来源：x.zip › 移动 / 移动-活动入口说明〕", "", "#### 4.1.1 入口说明", big,
+    ])
+    mods = outline_from_headings(text)
+    assert mods == ["PC-活动入口说明-入口说明", "PC-活动入口说明-报名规则说明", "移动-活动入口说明-入口说明"]
+
+
+def test_三片以上小尾巴并入前片_第一片不被覆盖_内容不丢():
+    """回归：曾写成 parts[-2] = ... parts.pop()，右边先 pop 使 parts[-2] 变成第一片，第一片被第二片覆盖——
+    线上「后台」整理稿的需求说明 / 活动运营后台 / 3.1–3.4 整段没拆、3.4.5 之后拆了两遍。"""
+    from app.agents.outline import requirement_chunks
+
+    sec = lambda n, k: f"## {n}. 章节{n}\n" + f"章节{n}的规则第 X 条。\n".replace("X", str(k)) * 1  # noqa: E731
+    body = "\n".join(f"## {n}. 章节{n}\n" + "".join(f"- 章节{n}规则{i}\n" for i in range(40)) for n in range(1, 6))
+    body += "\n## 6. 小尾巴\n- 尾巴一句"
+    brief = f"【需求 1/1：后台】\n{body}"
+    chunks, titles = requirement_chunks(brief, 1200)
+    assert len(chunks) >= 2 and chunks[0].startswith("【需求 1/1：后台】")
+    joined = "\n".join(chunks)
+    for n in range(1, 6):
+        assert joined.count(f"## {n}. 章节{n}") == 1, n   # 每章恰好出现一次：不丢、不重
+    assert joined.count("## 6. 小尾巴") == 1 and "小尾巴" in chunks[-1]

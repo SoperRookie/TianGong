@@ -93,7 +93,8 @@ def requirement_chunks(brief: str, max_chars: int) -> tuple[list[str], list[str 
         main, appendix = split_appendix(seg.text)
         parts = split_text(main, max_chars) if main else []
         if len(parts) > 1 and len(parts[-1]) < max_chars // 8:   # 章节装包剩下的小尾巴并入前片（略超阈值无妨）
-            parts[-2] = f"{parts[-2]}\n\n{parts.pop()}"
+            tail = parts.pop()   # 先 pop 再赋值：写成 parts[-2] = ... parts.pop() 时右边先执行，三片会把第一片覆盖掉
+            parts[-1] = f"{parts[-1]}\n\n{tail}"
         if appendix:
             if parts:
                 parts[-1] = f"{parts[-1]}\n\n{APPENDIX_NOTE}\n{appendix}"
@@ -159,7 +160,8 @@ def _modules_of_page(page: _Node, blocks: list[_Node], prefix: str) -> list[str]
 
 def outline_from_headings(text: str, title: str | None = None) -> list[str]:
     """按整理稿的编号标题生成模块大纲，不经模型：
-    - 有文件夹的三级结构 `## 文件夹 › ### 页面 › #### 区块`：模块 = 「页面-区块」，短区块并入「页面」；
+    - 有文件夹的三级结构 `## 文件夹 › ### 页面 › #### 区块`：模块 = 「文件夹-页面-区块」，短区块并入「文件夹-页面」
+      （页面名已带文件夹名的不重复）；
     - 两级结构 `## 页面 › ### 区块`（需求说明、没文件夹的页面）同样处理；没有子标题的页面自成一个模块；
     - 疑点清单 / 疑似遗留草稿章节与〔疑似草稿〕区块不进大纲；没有正文的空标题不进大纲。
     title 给了就作为每个模块名的前缀（多需求合并设计时区分来源）。不是整理稿格式时返回空列表。"""
@@ -170,16 +172,18 @@ def outline_from_headings(text: str, title: str | None = None) -> list[str]:
             continue
         subs = top.children
         is_group = any(c.children for c in subs)
-        if is_group:   # 文件夹：每个三级标题是页面
+        if is_group:   # 文件夹：每个三级标题是页面，模块名带文件夹名（活动运营后台 / 商户管理后台分得开）
             if top.chars:
                 out.append(f"{prefix}{top.title}")
             for page in subs:
                 if page.draft:
                     continue
+                # 页面名本身已带文件夹名（「PC」下的「PC-活动入口说明」）不重复
+                pp = prefix if page.title == top.title or page.title.startswith(f"{top.title}-") else f"{prefix}{top.title}-"
                 if page.children:
-                    out.extend(_modules_of_page(page, page.children, prefix))
+                    out.extend(_modules_of_page(page, page.children, pp))
                 elif page.chars:
-                    out.append(f"{prefix}{page.title}")
+                    out.append(f"{pp}{page.title}")
         elif subs:   # 页面 › 区块
             out.extend(_modules_of_page(top, subs, prefix))
         elif top.chars:
