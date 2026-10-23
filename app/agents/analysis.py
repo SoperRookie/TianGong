@@ -149,7 +149,8 @@ def _sections(source: str) -> tuple[tuple[str, str, str], ...]:
 
 def section_module(source: str, quote: str = "", text: str = "") -> str:
     """待确认事项属于整理稿的哪个模块：先按 quote 找所在章节（整段命中，否则切段命中 ≥ 50% 的最佳章节），
-    quote 没有或找不到再按文字里的章节号（「3.4.7 …」）反查；都没有返回空串。"""
+    quote 没有或找不到再按文字里的章节号（「3.4.7 …」）反查，再按文字定位（含章节标题 / 与某节正文重合最多）；
+    都没有返回空串。"""
     sections = _sections(source or "")
     if not sections:
         return ""
@@ -173,7 +174,46 @@ def section_module(source: str, quote: str = "", text: str = "") -> str:
         hit = next((name for name, num, _ in sections if num == n), "")
         if hit:
             return hit
-    return ""
+    return _section_by_text(sections, text)
+
+
+# 按文字定位：问题里点到了章节标题（最长的标题优先、同长取更深的节），否则问题与哪一节正文的字对重合最多
+_TEXT_MIN_BIGRAM_RATIO = 0.35
+_TEXT_MIN_BODY_CHARS = 10
+_GENERIC_TITLES = {"需求说明", "概述", "说明", "备注", "其他", "附录"}
+
+
+def _bigrams(norm: str) -> set[str]:
+    return {norm[i:i + 2] for i in range(len(norm) - 1)}
+
+
+def _section_by_text(sections: tuple[tuple[str, str, str], ...], text: str) -> str:
+    """没有依据、没有章节号的问题（老数据、模型没给 module 的整体性问题）：
+    1. 问题文字里含某节的叶子标题（≥ 2 字、不是「需求说明」这类泛称）→ 该节，标题更长的优先、同长取路径更深的；
+    2. 否则问题的二字组合在哪一节正文里出现得最多（占比 ≥ 35%，正文 ≥ 10 字）→ 该节；都不到返回空串。"""
+    norm = normalize(text)
+    if len(norm) < 4:
+        return ""
+    best, best_key = "", (0, 0)
+    for name, _, _ in sections:
+        leaf = name.rsplit("-", 1)[-1]
+        if len(leaf) < 2 or leaf in _GENERIC_TITLES:
+            continue
+        if normalize(leaf) in norm and (len(leaf), name.count("-")) > best_key:
+            best, best_key = name, (len(leaf), name.count("-"))
+    if best:
+        return best
+    grams = _bigrams(norm)
+    if not grams:
+        return ""
+    best_ratio = 0.0
+    for name, _, body in sections:
+        if len(body) < _TEXT_MIN_BODY_CHARS:
+            continue
+        ratio = sum(1 for g in grams if g in body) / len(grams)
+        if ratio > best_ratio:
+            best, best_ratio = name, ratio
+    return best if best_ratio >= _TEXT_MIN_BIGRAM_RATIO else ""
 
 
 def _question(text: str, kind: str, key: str, item: dict, reason: str, module: str = "") -> dict:
