@@ -441,7 +441,9 @@ def dup_pair_entities(record) -> list[dict]:
         out.append({**p, "key": key, "status": status, "deleted": gone,
                     "note": rv.get("note", ""), "by": rv.get("by"), "at": rv.get("at")})
     order = {"open": 0, "ignored": 1, "resolved": 2}
-    out.sort(key=lambda e: (order.get(e["status"], 9), -float(e.get("similarity") or 0)))
+    # 同文不同对象（相似度 1.0）是供确认的说明，排在真要处置的「重复 / 待复核」后面
+    verdict_order = {"同文不同对象": 1}
+    out.sort(key=lambda e: (order.get(e["status"], 9), verdict_order.get(e.get("verdict"), 0), -float(e.get("similarity") or 0)))
     return out
 
 
@@ -460,6 +462,11 @@ def record_dup_pair_action(record, key: str, action: str, by: str | None, note: 
 
 def _point_key(text: str) -> str:
     return re.sub(r"[\s\W_]+", "", text or "")
+
+
+def same_point_text(a: str, b: str) -> bool:
+    """两条测试点去掉标点空白后是否同文。"""
+    return bool(_point_key(a)) and _point_key(a) == _point_key(b)
 
 
 def dedupe_module_points(modules: list[dict]) -> int:
@@ -487,19 +494,39 @@ def dedupe_module_points(modules: list[dict]) -> int:
 
 
 def module_page(name: str) -> str:
-    """模块所属页面：标题大纲的「需求-页面-区块」去掉最后一段；两段的「大模块-子模块」取大模块；没有「-」就是自己。"""
+    """单个模块名猜所属页面：「需求-页面-区块」去掉最后一段；两段的「大模块-子模块」取大模块；没有「-」就是自己。
+    只看一个名字分不出「后台-日榜排名」（需求-页面）与「登录-密码」（页面-区块），有整组模块名时用 module_pages。"""
     parts = [x for x in str(name or "").split("-") if x]
     return "-".join(parts[:-1]) if len(parts) >= 2 else str(name or "")
 
 
+def module_pages(names: list[str]) -> dict[str, str]:
+    """整组模块名 → 各自所属页面。按模块之间的父子关系定：有子模块（别的模块名以「它-」开头）的自己就是页面；
+    否则父模块在组里的归父模块；都没有再按 module_page 去掉最后一段。
+    「后台-日榜排名」有子模块「后台-日榜排名-字段说明」，是页面，不会和「后台-月榜排名」一起被当成页面「后台」。"""
+    uniq = list(dict.fromkeys(str(n or "") for n in names))
+    pool = set(uniq)
+    has_child = {n for n in uniq if any(o.startswith(n + "-") for o in uniq if o != n)}
+    out: dict[str, str] = {}
+    for n in uniq:
+        if n in has_child:
+            out[n] = n
+            continue
+        parts = [x for x in n.split("-") if x]
+        parent = next(("-".join(parts[:k]) for k in range(len(parts) - 1, 0, -1) if "-".join(parts[:k]) in pool), None)
+        out[n] = parent if parent is not None else module_page(n)
+    return out
+
+
 def duplicate_candidates(modules: list[dict], threshold: float = 0.45, cross_page_threshold: float = 0.7) -> list[dict]:
     """测试点两两相似候选：文字层初筛（语句不同但语义相同的靠 LLM 复核补充）。bigram 只算一次。
-    同一页面内按 threshold；不同页面的两条要文字几乎一样（≥ cross_page_threshold）才算候选——拆细后 20 来字的测试点
+    同一页面内（module_pages 按模块父子关系定页面）按 threshold；不同页面的两条要文字几乎一样（≥ cross_page_threshold）才算候选——拆细后 20 来字的测试点
     bigram 重合率天然偏高，日榜 / 月榜 / 报名记录各自的字段与查询规则又本来就相同，全放进去会出上千对；
     候选带上两边的模块名，交裁判与人工判断时才知道是不是同一个测试对象。"""
     flat = [dict(p, module=entry["module"]) for entry, p in iter_points(modules)]
     grams = [_bigrams(p["point"]) for p in flat]
-    pages = [module_page(p["module"]) for p in flat]
+    page_of = module_pages([p["module"] for p in flat])
+    pages = [page_of[p["module"]] for p in flat]
     pairs: list[dict] = []
     for i in range(len(flat)):
         for j in range(i + 1, len(flat)):

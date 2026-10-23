@@ -144,6 +144,8 @@ async def run_blind_spot_verify(
 
 # 一次裁判调用最多看多少对：一次塞上千对模型只会判前面一百多对，其余全成「待复核」压给人工
 DUP_JUDGE_BATCH = 40
+# 文字完全一样、裁判却判不重复的对（不同页面 / 对象各验一次）在列表里的判定文字
+SAME_TEXT_VERDICT = "同文不同对象"
 
 
 def _pair_view(p: dict) -> dict:
@@ -156,10 +158,13 @@ async def run_dup_judge(
     llm: LLMClient, requirement: str, pairs: list[dict], model: str | None
 ) -> list[dict]:
     """对文字初筛的疑似重复对做语义复核：按 DUP_JUDGE_BATCH 分批并行，每批带两边模块名；
-    某批 LLM 故障时该批原样返回初筛结果标「待复核」（降级不阻塞）。复核为不重复的对不再打扰人工。"""
+    某批 LLM 故障时该批原样返回初筛结果标「待复核」（降级不阻塞）。复核为不重复的对不再打扰人工——
+    但两条文字完全一样却判不重复的（日榜 / 月榜各一条「商户名称取会员所属商户名称」）留在列表里标「同文不同对象」，
+    人看到同一句话出现两遍时能知道这是 AI 有意保留的两个测试对象，确认后点忽略、不认可就删一条。"""
     if not pairs:
         return []
     import asyncio
+    from app.tasks.points import same_point_text
 
     async def _batch(batch: list[dict]) -> dict[tuple[str, str], dict]:
         data, _ = await _chat_json(
@@ -194,14 +199,12 @@ async def run_dup_judge(
             merged.append(dict(p, verdict="待复核", suggestion="LLM 复核失败，请人工判断"))
             continue
         j = judged.get((p["a"], p["b"])) or judged.get((p["b"], p["a"])) or {}
-        merged.append(
-            dict(
-                p,
-                verdict=str(j.get("verdict", "待复核")),
-                reason=str(j.get("reason", p.get("reason", ""))),
-                suggestion=str(j.get("suggestion", "建议合并或保留其中一条")),
-            )
-        )
+        verdict = str(j.get("verdict", "待复核"))
+        suggestion = str(j.get("suggestion", "建议合并或保留其中一条"))
+        if verdict == "不重复" and same_point_text(p.get("a_point", ""), p.get("b_point", "")):
+            verdict = SAME_TEXT_VERDICT
+            suggestion = "同一条规则在两个页面 / 对象下各验一次；确认保留两条点「忽略」，认为只需一条就删掉其中一条"
+        merged.append(dict(p, verdict=verdict, reason=str(j.get("reason", p.get("reason", ""))), suggestion=suggestion))
     return [p for p in merged if p["verdict"] != "不重复"]
 
 
