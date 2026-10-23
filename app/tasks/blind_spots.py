@@ -105,6 +105,26 @@ def locate_blind_spot(text: str, requirement: str, modules: list[dict] | None = 
     return {}
 
 
+def ref_to_module(ref: str, requirement_title: str = "") -> str:
+    """出处「后台 › 3 商户管理后台 › 3.4 日榜排名 › 3.4.7 查询功能说明」→ 需求内的模块名「商户管理后台-日榜排名-查询功能说明」：
+    去掉开头的需求标题（与需求标题相同，或后面紧跟编号章节而自己没编号）与各级章节号，子标题已带上级名的不重复。
+    写回需求待确认事项时用：需求自己的事项列表里不需要「后台-」这层前缀。"""
+    parts = [x.strip() for x in str(ref or "").split("›") if x.strip()]
+    if parts and (parts[0] == requirement_title
+                  or (len(parts) > 1 and not re.match(r"^\d", parts[0]) and re.match(r"^\d", parts[1]))):
+        parts = parts[1:]
+    out: list[str] = []
+    for part in parts:
+        title = re.sub(r"^\d+(?:\.\d+)*\.?\s*", "", part).strip()
+        if not title:
+            continue
+        if out and (title == out[-1] or title.startswith(f"{out[-1]}-")):
+            out[-1] = title
+        else:
+            out.append(title)
+    return "-".join(out)
+
+
 def _refs(record) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for source in ((record.analysis or {}).get("blind_spot_refs"), (record.result or {}).get("blind_spot_refs")):

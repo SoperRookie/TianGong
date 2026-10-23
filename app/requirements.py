@@ -428,11 +428,14 @@ class RequirementStore:
                 old = existing[text]
                 old.setdefault("level", meta.get("level") or "must")
                 old.setdefault("reason", meta.get("reason", "")); old.setdefault("assumption", meta.get("assumption", ""))
+                if meta.get("module") and not old.get("module"):   # 旧问题没定过模块、这次定到了就补上
+                    old["module"] = str(meta["module"])
                 questions.append(old)
             else:
                 questions.append({"q_id": _hex8(), "question": text, "status": "open",
                                   "level": meta.get("level") if meta.get("level") in ("must", "suggest") else "must",
                                   "reason": str(meta.get("reason", "")), "assumption": str(meta.get("assumption", "")),
+                                  "module": str(meta.get("module") or ""),
                                   "answer": "", "by": None, "at": None, "source": "ai",
                                   # 核验降级 / 复核补充的条目：记下来源项与原文本，确认成立后可一键采纳回分析结果
                                   "kind": meta.get("kind") or "question", "key": meta.get("key"),
@@ -546,15 +549,19 @@ class RequirementStore:
         return item
 
     def add_question(self, req_id: str, question: str, operator: str | None = None, level: str = "must",
-                     assumption: str = "") -> dict:
+                     assumption: str = "", module: str = "", ref: str = "") -> dict:
+        """人工补充 / 盲区转入的待确认事项；module 为所属页面 / 模块（盲区转入时沿用盲区的模块与出处 ref）。"""
         item = self._get_alive(req_id)
         question = (question or "").strip()
         if not question:
             raise RequirementError("待确认事项不能为空")
-        item["questions"].append({"q_id": _hex8(), "question": question, "status": "open",
-                                  "level": level if level in ("must", "suggest") else "must", "reason": "",
-                                  "assumption": (assumption or "").strip(),
-                                  "answer": "", "by": operator, "at": _now(), "source": "manual"})
+        q = {"q_id": _hex8(), "question": question, "status": "open",
+             "level": level if level in ("must", "suggest") else "must", "reason": "",
+             "assumption": (assumption or "").strip(), "module": (module or "").strip(),
+             "answer": "", "by": operator, "at": _now(), "source": "manual"}
+        if (ref or "").strip():
+            q["ref"] = ref.strip()
+        item["questions"].append(q)
         self._refresh_status(item)
         self._persist(item)
         return item
@@ -775,6 +782,11 @@ def extraction_status(item: dict) -> str:
     return "current" if extraction_current(item) else "outdated"
 
 
+
+def _q_module(q: dict) -> str:
+    """待确认事项的所属模块写进拆解上下文：「问（活动列表-基本配置）：…」，没有模块的还是「问：…」。"""
+    return f"（{q['module']}）" if q.get("module") else ""
+
 def design_brief(item: dict) -> str:
     """发起测试设计 / AI 分析时喂给 Agent 的需求文本：整理稿（或原始材料）+ 人工补充 + 已确认结论（原文不改）。
 
@@ -794,11 +806,11 @@ def design_brief(item: dict) -> str:
     confirmed = [q for q in item.get("questions", []) if q["status"] == "confirmed" and q.get("answer")]
     if confirmed:
         parts.append("【待确认事项的确认结论（以此为准）】\n" + "\n".join(
-            f"- 问：{q['question']}\n  确认：{q['answer']}" for q in confirmed))
+            f"- 问{_q_module(q)}：{q['question']}\n  确认：{q['answer']}" for q in confirmed))
     assumed = [q for q in item.get("questions", []) if q["status"] == "open" and (q.get("level") or "must") == "suggest"]
     if assumed:
         parts.append("【未确认的建议级事项（按下列假设处理，并在用例 remark 中注明假设）】\n" + "\n".join(
-            f"- 问：{q['question']}\n  假设：{q.get('assumption') or '按行业惯例处理'}" for q in assumed))
+            f"- 问{_q_module(q)}：{q['question']}\n  假设：{q.get('assumption') or '按行业惯例处理'}" for q in assumed))
     analysis = item.get("analysis") or {}
     # 独立复核标了理解错 / 无依据、人还没处理的条目不进上下文：拆解 Agent 会把它当「人工过目」的事实
     lines = []

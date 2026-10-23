@@ -115,7 +115,9 @@ REQUIREMENT_ANALYSIS_SYSTEM = """你是一名资深需求分析师兼测试架�
 11. open_questions：待确认事项——需求缺失、含糊、自相矛盾、需要产品/开发确认才能设计测试的问题。
     每条分级：level 为 must（必须确认：影响业务规则、预期结果、数值、流程分支或权限，不确认会导致用例错误或漏逻辑）
     或 suggest（建议确认：文案、样式、体验细节或可按行业惯例假设的点）；suggest 级必须给出 assumption
-    （不确认时按什么假设处理），must 级 assumption 可为空
+    （不确认时按什么假设处理），must 级 assumption 可为空。
+    每条带 module：问题属于哪个页面 / 模块，取需求原文里该问题所在章节的标题（有上级章节用「-」连接，
+    如「活动列表-基本配置」「日榜排名」）；跨多个模块的整体性问题 module 留空
 
 **原文依据（quote）规则**：
 - quote 必须是需求原文中**逐字连续**的一段文字（20~80 字，含关键数值与术语），不得改写、不得拼接多处、不得自行总结；
@@ -134,7 +136,7 @@ REQUIREMENT_ANALYSIS_SYSTEM = """你是一名资深需求分析师兼测试架�
 只输出 JSON：
 {"features": [{"text": "账号密码登录", "quote": "用户输入账号密码登录"}], "rules": [{"text": "密码连续错误 5 次锁定账号 30 分钟", "quote": "密码错误 5 次锁定 30 分钟"}],
  "preconditions": [], "normal_flows": [], "exception_flows": [], "boundaries": [], "state_changes": [], "permissions": [], "dependencies": [], "risks": [{"text": "…", "quote": ""}],
- "open_questions": [{"question": "锁定期间是否允许找回密码？", "level": "must", "reason": "决定锁定态下找回密码的预期结果", "assumption": ""}]}"""
+ "open_questions": [{"question": "锁定期间是否允许找回密码？", "level": "must", "reason": "决定锁定态下找回密码的预期结果", "assumption": "", "module": "登录"}]}"""
 
 # 需求提取（分析前置）：从用户上传的全部材料里逐字摘录需求内容，按模块归整成整理稿，剔除导航 / 框架 / 脚本等噪音。
 # 原型导出包、整页截图的图片理解结果、多份文档混在一起时，直接拿去分析会被噪音与重复稀释；先提取再分析。

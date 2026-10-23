@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache as _lru_cache
 
 from loguru import logger
 
@@ -36,6 +37,8 @@ REVIEW_MAX_CHARS = 60_000
 _MIN_QUOTE_CHARS = 4
 # 分段容错：quote 按标点切段后命中段落字数占比达到该值即视为找到（PDF / Vision 解析的原文有断行与个别字差）
 _SEGMENT_HIT_RATIO = 0.7
+# 定位所属模块时的下限：只是找最像的章节而不是证明有依据，依据对不上（< 0.7）的降级条目也要知道出自哪一节
+_LOCATE_HIT_RATIO = 0.5
 
 _STRIP_RE = re.compile(r"[\W_]+")
 # 只按标点与换行切段，不按空格：按空格切会把「5 次」拆成孤立数字而失去数值校验
@@ -97,8 +100,84 @@ def quote_found(quote: str, source_norm: str) -> bool:
     return hit / total >= _SEGMENT_HIT_RATIO
 
 
-def _question(text: str, kind: str, key: str, item: dict, reason: str) -> dict:
-    return {"question": text, "level": "must", "reason": reason, "assumption": "",
+# ---- 待确认事项所属模块：按 quote 落在整理稿的哪一节、或问题文字里的章节号反查 ----
+_SEC_HEAD_RE = re.compile(r"^(#{2,4}) (?:(\d+(?:\.\d+)*)\.? )?(.+?)\s*$")
+_SEC_NUM_RE = re.compile(r"(?<![\d.])(\d+(?:\.\d+){1,3})(?![\d.])")
+_SEC_ANNOT_RE = re.compile(r"\s*〔[^〕]*〕")
+
+
+def _module_name(chain: tuple[str, ...]) -> str:
+    """标题链 → 模块名「文件夹-页面-区块」：子标题已带上级名的不重复（「PC」下的「PC-活动入口说明」）。"""
+    out: list[str] = []
+    for title in chain:
+        if out and (title == out[-1] or title.startswith(f"{out[-1]}-")):
+            out[-1] = title
+        else:
+            out.append(title)
+    return "-".join(out)
+
+
+@_lru_cache(maxsize=4)
+def _sections(source: str) -> tuple[tuple[str, str, str], ...]:
+    """整理稿按编号标题切成 (模块名, 章节号, 规范化正文)；没有标题的文本得到空元组。"""
+    out: list[tuple[str, str, str]] = []
+    stack: list[tuple[int, str]] = []
+    buf: list[str] = []
+    num = ""
+
+    def flush() -> None:
+        if stack:
+            out.append((_module_name(tuple(t for _, t in stack)), num, normalize("".join(buf))))
+
+    for line in source.splitlines():
+        m = _SEC_HEAD_RE.match(line)
+        if m:
+            flush()
+            buf = []
+            level, num = len(m.group(1)), m.group(2) or ""
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, _SEC_ANNOT_RE.sub("", m.group(3)).strip()))
+        elif line.startswith("# "):   # 一级标题（整理稿文头 / 下一份整理稿）：重置
+            flush()
+            buf, stack, num = [], [], ""
+        else:
+            buf.append(line)
+    flush()
+    return tuple(out)
+
+
+def section_module(source: str, quote: str = "", text: str = "") -> str:
+    """待确认事项属于整理稿的哪个模块：先按 quote 找所在章节（整段命中，否则切段命中 ≥ 50% 的最佳章节），
+    quote 没有或找不到再按文字里的章节号（「3.4.7 …」）反查；都没有返回空串。"""
+    sections = _sections(source or "")
+    if not sections:
+        return ""
+    q = normalize(quote)
+    if len(q) >= _MIN_QUOTE_CHARS:
+        for name, _, body in sections:
+            if q in body:
+                return name
+        segs = [normalize(x) for x in _SEG_SPLIT_RE.split(quote)]
+        segs = [x for x in segs if len(x) >= 3]
+        total = sum(len(x) for x in segs)
+        best, best_ratio = "", 0.0
+        for name, _, body in sections:
+            hit = sum(len(x) for x in segs if x in body)
+            ratio = hit / total if total else 0.0
+            if ratio > best_ratio:
+                best, best_ratio = name, ratio
+        if best_ratio >= _LOCATE_HIT_RATIO:
+            return best
+    for n in _SEC_NUM_RE.findall((text or "")[:80]):
+        hit = next((name for name, num, _ in sections if num == n), "")
+        if hit:
+            return hit
+    return ""
+
+
+def _question(text: str, kind: str, key: str, item: dict, reason: str, module: str = "") -> dict:
+    return {"question": text, "level": "must", "reason": reason, "assumption": "", "module": module,
             "kind": kind, "key": key, "text": item["text"], "quote": item.get("quote", "")}
 
 
@@ -129,12 +208,16 @@ def verify_analysis(analysis: dict, source: str) -> dict:
             items.append(it)
         out[key] = items
     questions = [q for q in (analysis.get("open_questions") or []) if q]
+    for q in questions:   # 模型没给所属模块的，按问题文字里的章节号在整理稿标题里反查
+        if isinstance(q, dict) and not q.get("module"):
+            q["module"] = section_module(source, text=q.get("question", ""))
     for key, it in demoted:
         label = REQUIREMENT_ANALYSIS_LABELS[key]
         why = (f"AI 给出的依据「{it['quote']}」在原文中对不上" if it["quote"] else "AI 未给出原文依据")
         questions.append(_question(
             f"AI 整理的{label}「{it['text']}」在需求原文中找不到依据，是否确实如此？", "unverified", key, it,
-            f"{why}；无依据的内容不作为事实进入测试设计，请确认是否成立（成立请补充到需求原文或人工补充说明后重新分析）"))
+            f"{why}；无依据的内容不作为事实进入测试设计，请确认是否成立（成立请补充到需求原文或人工补充说明后重新分析）",
+            module=section_module(source, quote=it["quote"], text=it["text"])))
     out["open_questions"] = questions
     out["verification"] = stats
     return out
@@ -183,7 +266,8 @@ def apply_review(analysis: dict, data: dict, source: str, model_name: str = "") 
             stats["unverified_added"] += 1
             analysis.setdefault("open_questions", []).append(_question(
                 f"独立复核认为需求中还有{label}「{it['text']}」，但未找到原文依据，是否成立？", "review", key, it,
-                "复核 Agent 补充的内容没有通过原文核验，请人工判断"))
+                "复核 Agent 补充的内容没有通过原文核验，请人工判断",
+                module=section_module(source, quote=it["quote"], text=it["text"])))
             continue
         it["review"] = {"verdict": "added", "fix": "", "note": "独立复核认为首轮分析遗漏了这一条"}
         analysis.setdefault(key, []).append(it)
@@ -218,7 +302,8 @@ def _merge_outputs(outputs) -> tuple[dict, str]:
                     level = str(meta.get("level", "must")).strip().lower()
                     merged[key].append({"question": q, "level": level if level in ("must", "suggest") else "must",
                                         "reason": str(meta.get("reason", "")).strip(),
-                                        "assumption": str(meta.get("assumption", "")).strip()})
+                                        "assumption": str(meta.get("assumption", "")).strip(),
+                                        "module": str(meta.get("module") or "").strip()})
                 else:
                     it = as_item(item)
                     if it["text"]:

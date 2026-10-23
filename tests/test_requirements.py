@@ -457,7 +457,8 @@ async def test_盲区转需求待确认事项_多需求任务可选需求(client
     a = await _req(client, title="登录需求")
     b = await _req(client, title="注册需求", text="用户填写手机号与验证码完成注册。")
     analyst = json.dumps({"modules": [{"module": "登录", "points": ["正常登录"]}],
-                          "blind_spots": ["未说明验证码有效期"]}, ensure_ascii=False)
+                          "blind_spots": [{"text": "未说明验证码有效期", "module": "注册-注册-验证码",
+                                           "ref": "注册需求 › 1 注册 › 1.2 验证码"}]}, ensure_ascii=False)
     gap = json.dumps({"coverage": {}, "additions": []})
     app.state.llm = StubLLM([analyst, gap])
     resp = await client.post("/api/v1/requirements/design",
@@ -465,6 +466,7 @@ async def test_盲区转需求待确认事项_多需求任务可选需求(client
     assert resp.status_code == 200, resp.text
     task_id = resp.json()["task_id"]
     spot = (await client.get(f"/api/v1/tasks/{task_id}")).json()["blind_spots"][0]
+    assert spot["module"] == "注册-注册-验证码" and spot["ref"] == "注册需求 › 1 注册 › 1.2 验证码"
     assert (await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{spot['bs_id']}",
                               json={"action": "to_question", "req_id": "nope"})).status_code == 400
     resp = await client.post(f"/api/v1/tasks/{task_id}/blind-spots/{spot['bs_id']}",
@@ -474,8 +476,32 @@ async def test_盲区转需求待确认事项_多需求任务可选需求(client
     assert tgt["req_id"] == b["req_id"] and tgt["req_title"] == "注册需求" and tgt["level"] == "suggest"
     r = (await client.get(f"/api/v1/requirements/{b['req_id']}")).json()
     q = next(x for x in r["questions"] if x["q_id"] == tgt["q_id"])
-    assert q["question"] == "未说明验证码有效期" and q["level"] == "suggest" and q["assumption"] == "按 5 分钟" and q["source"] == "manual"
+    assert q["question"] == "未说明验证码有效期（出处：注册需求 › 1 注册 › 1.2 验证码）" and q["level"] == "suggest"
+    assert q["assumption"] == "按 5 分钟" and q["source"] == "manual"
+    # 所属模块按出处定：去掉需求标题与章节号（需求自己的列表里不要「注册-」这层前缀），出处原样留着
+    assert q["module"] == "注册-验证码" and q["ref"] == "注册需求 › 1 注册 › 1.2 验证码"
     assert all(x["question"] != "未说明验证码有效期" for x in (await client.get(f"/api/v1/requirements/{a['req_id']}")).json()["questions"])
+    # 人工补充可带模块；确认结论进设计上下文时带「问（模块）：」，没模块的仍是「问：」
+    a2 = (await client.post(f"/api/v1/requirements/{b['req_id']}/questions",
+                            json={"question": "验证码几位？", "module": " 注册-验证码 "})).json()
+    q2 = next(x for x in a2["questions"] if x["question"] == "验证码几位？")
+    assert q2["module"] == "注册-验证码" and "ref" not in q2
+    await client.post(f"/api/v1/requirements/{b['req_id']}/questions/{q2['q_id']}", json={"answer": "6 位"})
+    q3 = (await client.post(f"/api/v1/requirements/{b['req_id']}/questions", json={"question": "是否限频？"})).json()["questions"][-1]
+    await client.post(f"/api/v1/requirements/{b['req_id']}/questions/{q3['q_id']}", json={"answer": "每分钟 1 次"})
+    from app.requirements import design_brief
+    brief = design_brief(app.state.requirements.get(b["req_id"]))
+    assert "- 问（注册-验证码）：验证码几位？\n  确认：6 位" in brief and "- 问：是否限频？\n  确认：每分钟 1 次" in brief
+
+
+def test_盲区出处转模块名_去需求标题与章节号_子标题已带上级名不重复():
+    from app.tasks.blind_spots import ref_to_module
+
+    assert ref_to_module("后台 › 3 商户管理后台 › 3.4 日榜排名 › 3.4.7 查询功能说明", "后台") == "商户管理后台-日榜排名-查询功能说明"
+    assert ref_to_module("后台 › 3 商户管理后台 › 3.4 日榜排名", "别的标题") == "商户管理后台-日榜排名"   # 没编号的开头紧跟编号章节：也是需求标题
+    assert ref_to_module("活动列表 › 创建功能说明", "后台") == "活动列表-创建功能说明"                   # 模型给的无编号出处：整条都是章节
+    assert ref_to_module("前端 › 3 PC › 3.1 PC-活动入口说明", "前端") == "PC-活动入口说明"
+    assert ref_to_module("", "x") == "" and ref_to_module("后台", "后台") == ""
 
 
 async def test_需求列表_筛选与分页(client):
