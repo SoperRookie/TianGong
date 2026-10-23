@@ -100,6 +100,10 @@ async def lifespan(app: FastAPI):
     repaired = repair_migrated_titles(app.state.requirements, app.state.tasks)
     if repaired:
         logger.info("迁移需求标题修复：{} 条由文件名改为正文标题", repaired)
+    from app.requirements import backfill_question_modules
+    filled = backfill_question_modules(app.state.requirements)
+    if filled:
+        logger.info("待确认事项所属模块回填：{} 条存量事项补上了模块", filled)
     if migrated:
         logger.info("M2 需求迁移：{} 个历史任务已建为需求实体并回填关联", migrated)
     from app.prompts import PromptStore, set_current
