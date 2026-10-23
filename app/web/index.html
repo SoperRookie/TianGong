@@ -2914,6 +2914,7 @@ function renderPointWorkbench(t) {
         <td style="width:84px">${p.dimension?`<span class="tag">${esc(p.dimension)}</span>`:'<span class="hint">—</span>'}</td>
         <td style="width:76px">${p.legacy?'':srcChip(p.source||'ai')}</td>
         <td style="width:92px"><span class="st ${p.status}">${pStatusText[p.status]||p.status}</span>
+          ${reviewerLine(t, p)}
           ${t.status==='completed'&&p.status==='approved'?(generatedIds.has(p.tp_id)?'<div class="hint">已生成用例</div>':pendingGen.includes(p.tp_id)?'<div class="hint" style="color:var(--warn)">待生成用例</div>':''):''}
           ${p.reject_count>1?`<div class="hint" style="color:var(--warn)">驳回 ${p.reject_count} 次</div>`:''}</td>
         <td style="width:132px">${p.legacy?'':`<div class="rowops">
@@ -3206,7 +3207,7 @@ function renderDupPairs(t, confirmable) {
       <td style="width:40px" class="hint">${(dpPage - 1) * dpSize + i + 1}</td>
       <td>${side(p.a, p.a_point, p, p.a_module)}</td>
       <td>${side(p.b, p.b_point, p, p.b_module)}</td>
-      <td style="width:150px"><span class="tag">相似度 ${p.similarity}</span>${p.verdict?`<div><span class="tag" style="${p.verdict==='重复'?'background:var(--danger-bg);color:var(--danger)':''}">${esc(p.verdict)}</span></div>`:''}</td>
+      <td style="width:150px"><span class="tag">相似度 ${p.similarity}</span>${p.verdict?`<div><span class="tag" style="${p.verdict==='重复'?'background:var(--danger-bg);color:var(--danger)':p.verdict==='同文不同对象'?'background:var(--warn-bg,var(--well));color:var(--warn)':''}" title="${p.verdict==='同文不同对象'?'两条文字一样，但 AI 判断是不同页面 / 对象下各验一次，不算重复；确认保留两条点「忽略」，只要一条就删掉其中一条':''}">${esc(p.verdict)}</span></div>`:''}</td>
       <td style="width:220px" class="hint">${p.reason?`原因：${esc(p.reason)}`:''}${p.suggestion?`<div>建议：${esc(p.suggestion)}</div>`:''}</td>
       <td style="width:110px"><span class="st ${stCls[p.status]||'pending'}">${esc(DP_STATUS[p.status]||p.status)}</span>
         ${p.note?`<div class="hint">${esc(p.note)}</div>`:''}${p.by?`<div class="hint">${esc(p.by)}${p.at?' · '+esc(fmtTime(p.at)):''}</div>`:''}</td>
@@ -3236,7 +3237,7 @@ function renderDupPairs(t, confirmable) {
           .filter(([k]) => k==='open' || k==='all' || counts[k])
           .map(([k,v])=>`<button class="${dpFilter===k?'on':''}" onclick="dpSet('filter',${jsq(k)})">${v}${k==='all'?'':` ${counts[k]||0}`}</button>`).join('')}
         </div></div></div>
-    <div class="hint" style="margin:0 0 8px">处置去向：<b>删除其中一条</b>（进回收站，可恢复，该组自动变为已处置）；<b>忽略</b> = 人工判定不重复或都需保留；修改测试点文本后点「重新检查」刷新。</div>
+    <div class="hint" style="margin:0 0 8px">处置去向：<b>删除其中一条</b>（进回收站，可恢复，该组自动变为已处置）；<b>忽略</b> = 人工判定不重复或都需保留；修改测试点文本后点「重新检查」刷新。${items.some(p=>p.verdict==='同文不同对象')?`<br>「<b>同文不同对象</b>」${items.filter(p=>p.verdict==='同文不同对象').length} 组：两条文字一样，AI 判断是不同页面 / 对象（如日榜排名与月榜排名）各验一次、不算重复，列出来供确认——认可就「忽略」，只要一条就删掉其中一条。`:''}</div>
     ${batch}
     <div class="tbl-wrap"><table>
       <tr><th>${pageKeys.length?`<input type="checkbox" title="全选本页" ${pageAll?'checked':''} onclick="selSetAll(dpSel, JSON.parse(${jsq(JSON.stringify(pageKeys))}), this.checked, renderDetail)">`:''}</th><th>#</th><th>测试点 A</th><th>测试点 B</th><th>相似度 / 判定</th><th>原因 / 建议</th><th>状态</th><th>操作</th></tr>
@@ -3330,11 +3331,34 @@ function renderPointDiff(d) {
     ${d.added && d.added.length ? '<div class="chips plain" style="margin-top:6px">'+d.added.map(a=>`<span>新增：${esc(a.point)}</span>`).join('')+'</div>' : ''}`;
 }
 
+// 测试点最近一次审核动作（通过 / 驳回 / 解锁）的人与时间：多人同时审核一个任务时，看得出哪条是谁锁的
+function lastReview(t, tp) {
+  const log = (t && t.point_review_log) || [];
+  for (let i = log.length - 1; i >= 0; i--) {
+    const e = log[i];
+    if (e.tp_id === tp && (e.action === 'approve' || e.action === 'reject' || e.action === 'unlock')) return e;
+  }
+  return null;
+}
+function reviewerLine(t, p) {
+  if (p.status !== 'approved' && p.status !== 'rejected') return '';
+  const e = lastReview(t, p.tp_id);
+  if (!e || !e.by) return '';
+  return `<div class="hint" title="${p.status==='approved'?'通过（锁定）':'驳回'}人与时间">${esc(e.by)}${e.at?' · '+esc(fmtTime(e.at)):''}</div>`;
+}
+const lockedIds = t => new Set(allPoints(t).filter(p => p.locked || p.status === 'approved').map(p => p.tp_id));
 async function pointsReview(items) {
   try {
+    const before = lockedIds(currentTask), mine = new Set(items.map(i => i.tp_id)), me = curUser ? curUser.username : '';
     const data = await jpost(`/api/v1/tasks/${currentTask.task_id}/points/review`, {items});
     lastHints = data.hints || [];
     await openTask(currentTask.task_id, true);
+    // 刷新后多出来的锁定不是这次操作锁的：是别的审核人同时在审（否则看起来像「审一条锁了一批」）
+    const others = [...lockedIds(currentTask)].filter(id => !before.has(id) && !mine.has(id));
+    if (others.length) {
+      const who = [...new Set(others.map(id => (lastReview(currentTask, id)||{}).by).filter(x => x && x !== me))];
+      toast(`另有 ${others.length} 条是${who.length ? who.join('、') : '其他审核人'}刚通过的（${others.slice(0, 5).join('、')}${others.length > 5 ? '…' : ''}），不是这次操作锁定的`, 'warn');
+    }
   } catch (e) { toast('操作失败：' + e.message, 'err'); }
 }
 const pointAct = (tp, action) => pointsReview([{tp_id:tp, action}]);

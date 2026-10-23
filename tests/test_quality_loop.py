@@ -978,6 +978,30 @@ def test_查重候选_同页面按低阈值_不同页面文字几乎一样才算
     assert module_page("后台-日榜排名-字段说明") == "后台-日榜排名" and module_page("活动运营后台-日榜统计") == "活动运营后台" and module_page("登录") == "登录"
 
 
+def test_模块所属页面按父子关系定_需求前缀下的页面级模块不并成同一页():
+    from app.tasks.points import module_pages
+
+    names = ["后台-日榜排名", "后台-日榜排名-字段说明", "后台-月榜排名", "后台-月榜排名-总计",
+             "后台-API接口-会员流水", "前端-PC-活动入口说明", "前端-PC-活动入口说明-报名规则说明", "登录-密码", "登录-验证码"]
+    pages = module_pages(names)
+    # 有子模块的自己就是页面：「后台-日榜排名」与「后台-月榜排名」是两个页面，不会都算成「后台」
+    assert pages["后台-日榜排名"] == "后台-日榜排名" and pages["后台-月榜排名"] == "后台-月榜排名"
+    assert pages["后台-日榜排名-字段说明"] == "后台-日榜排名" and pages["后台-月榜排名-总计"] == "后台-月榜排名"
+    assert pages["前端-PC-活动入口说明"] == "前端-PC-活动入口说明" == pages["前端-PC-活动入口说明-报名规则说明"]
+    # 没有父模块也没有子模块：按名字去掉最后一段
+    assert pages["后台-API接口-会员流水"] == "后台-API接口" and pages["登录-密码"] == pages["登录-验证码"] == "登录"
+    # 查重候选随之：日榜页与月榜页的页面级同文测试点按跨页面阈值（1.0 进）、中等相似不进
+    modules = assign_entities([
+        {"module": "后台-日榜排名", "points": ["总人数为当前查询结果按会员账号去重后的数量", "切换商户币种后总计金额按对应币种更新"]},
+        {"module": "后台-日榜排名-字段说明", "points": ["会员昵称取会员当前昵称"]},
+        {"module": "后台-月榜排名", "points": ["总人数为当前查询结果按会员账号去重后的数量", "切换商户币种后列表奖励金额按对应币种显示"]},
+        {"module": "后台-月榜排名-字段说明", "points": ["会员昵称取会员当前昵称"]},
+    ])
+    found = {(p["a"], p["b"]) for p in duplicate_candidates(modules)}
+    assert ("TP001", "TP004") in found and ("TP003", "TP006") in found
+    assert ("TP002", "TP005") not in found
+
+
 def test_拆解结果同模块同文去重_同名模块并一个_不同模块同文不动():
     from app.tasks.points import dedupe_module_points
 
@@ -1018,6 +1042,26 @@ async def test_重复复核分批_每批带模块_没判到的待复核_一批�
     assert by[("TP002", "TP102")]["verdict"] == "重复"
     assert by[("TP003", "TP103")]["verdict"] == "待复核" and "复核失败" in by[("TP003", "TP103")]["suggestion"]  # 故障批
     assert by[("TP004", "TP104")]["verdict"] == "待复核"
+
+
+async def test_重复复核_同文却判不重复的留在列表标同文不同对象_文字不同的不重复才去掉():
+    from app.agents.quality import run_dup_judge
+
+    pairs = [
+        {"a": "TP001", "a_point": "商户名称取会员所属商户名称。", "a_module": "后台-日榜排名-字段说明",
+         "b": "TP201", "b_point": "商户名称取会员所属商户名称", "b_module": "后台-月榜排名-字段说明", "similarity": 1.0, "reason": "文字高度相似"},
+        {"a": "TP002", "a_point": "跨度超过 90 天不允许查询", "a_module": "后台-日榜排名-查询功能说明",
+         "b": "TP202", "b_point": "跨度超过 3 个月不允许查询", "b_module": "后台-月榜排名-查询功能说明", "similarity": 0.75, "reason": "文字高度相似"},
+    ]
+    llm = StubLLM([json.dumps({"duplicates": [
+        {"a": "TP001", "b": "TP201", "verdict": "不重复", "reason": "日榜与月榜两个页面各验一次"},
+        {"a": "TP002", "b": "TP202", "verdict": "不重复", "reason": "日榜按天、月榜按月，条件不同"},
+    ]}, ensure_ascii=False)])
+    out = await run_dup_judge(llm, "需求原文", pairs, None)
+    assert [p["a"] for p in out] == ["TP001"]
+    assert out[0]["verdict"] == "同文不同对象" and "各验一次" in out[0]["reason"] and "忽略" in out[0]["suggestion"]
+    system = llm.calls[0]["messages"][0]["content"]
+    assert "合写复述算重复" in system
 
 
 # ---------- 盲区出处：模型给的 module / ref 优先，没有的按章节号在整理稿里反查 ----------
