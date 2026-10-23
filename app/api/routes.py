@@ -3019,12 +3019,16 @@ def _apply_blind_spot_action(request: Request, record: TaskRecord, entity: dict,
         req_id = body.req_id or req_ids[0]
         if req_id not in req_ids:
             raise HTTPException(status_code=400, detail="req_id 不是本任务的来源需求")
-        _req(request, req_id, "requirement.edit")
+        req_item = _req(request, req_id, "requirement.edit")
         question = entity["text"] + (f"（出处：{entity['ref']}）" if entity.get("ref") and "出处" not in entity["text"] else "")
+        # 所属模块：有出处按出处定（去掉需求标题与章节号，需求自己的列表里不要「后台-」前缀），没有出处沿用盲区模块
+        from app.tasks.blind_spots import ref_to_module
+        module = ref_to_module(entity.get("ref") or "", req_item.get("title") or "") or str(entity.get("module") or "")
         try:
             item = request.app.state.requirements.add_question(
                 req_id, question, operator=operator,
-                level=body.level if body.level in ("must", "suggest") else "must", assumption=body.note)
+                level=body.level if body.level in ("must", "suggest") else "must", assumption=body.note,
+                module=module, ref=entity.get("ref") or "")
         except RequirementError as e:
             raise HTTPException(status_code=400, detail=str(e))
         q = item["questions"][-1]
@@ -5664,6 +5668,7 @@ class QuestionBody(BaseModel):
     question: str
     level: str = "must"        # must：必须确认后才能生成；suggest：可带假设继续
     assumption: str = ""
+    module: str = ""           # 所属页面 / 模块（可选）
 
 
 class QuestionLevelBody(BaseModel):
@@ -5691,7 +5696,8 @@ async def add_requirement_question(request: Request, req_id: str, body: Question
     _req(request, req_id, "requirement.edit")
     try:
         item = request.app.state.requirements.add_question(req_id, body.question, operator=_operator(request),
-                                                           level=body.level, assumption=body.assumption)
+                                                           level=body.level, assumption=body.assumption,
+                                                           module=body.module)
     except RequirementError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return _req_view(request, item)
