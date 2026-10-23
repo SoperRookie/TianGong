@@ -494,6 +494,30 @@ async def test_盲区转需求待确认事项_多需求任务可选需求(client
     assert "- 问（注册-验证码）：验证码几位？\n  确认：6 位" in brief and "- 问：是否限频？\n  确认：每分钟 1 次" in brief
 
 
+async def test_存量待确认事项回填模块_按依据_出处_章节号_幂等(client):
+    from app.requirements import backfill_question_modules
+
+    text = ("## 1. 需求说明\n活动类型为连赢挑战。\n## 2. 活动运营后台\n### 2.1 活动列表\n活动名称最长 30 个字符，超出不允许保存。\n"
+            "## 3. 商户管理后台\n### 3.4 日榜排名\n按天排重，同一会员一天只算一次。")
+    r = await _req(client, title="后台", text=text)
+    item = app.state.requirements.get(r["req_id"])
+    item["questions"] = [   # 老版本数据：没有 module 字段
+        {"q_id": "q1", "question": "AI 整理的业务规则「…」找不到依据？", "status": "open", "level": "must", "source": "ai",
+         "kind": "unverified", "key": "rules", "text": "同一会员一天只算一次，跨天重新计", "quote": "同一会员一天只算一次，跨天重新计"},
+        {"q_id": "q2", "question": "未说明跨天怎么算（出处：后台 › 3 商户管理后台 › 3.4 日榜排名）", "status": "open", "level": "must", "source": "manual"},
+        {"q_id": "q3", "question": "2.1 活动名称是否允许重名？", "status": "confirmed", "answer": "允许", "level": "must", "source": "ai"},
+        {"q_id": "q4", "question": "整体是否支持多语言？", "status": "open", "level": "suggest", "source": "ai"},
+    ]
+    app.state.requirements._persist(item)
+    assert backfill_question_modules(app.state.requirements) == 3
+    qs = {q["q_id"]: q for q in app.state.requirements.get(r["req_id"])["questions"]}
+    assert qs["q1"]["module"] == "商户管理后台-日榜排名" and qs["q2"]["module"] == "商户管理后台-日榜排名"
+    assert qs["q2"]["ref"] == "后台 › 3 商户管理后台 › 3.4 日榜排名"
+    assert qs["q3"]["module"] == "活动运营后台-活动列表" and qs["q4"]["module"] == ""
+    assert backfill_question_modules(app.state.requirements) == 0   # 定不到的也写了空串：第二次不再算
+    assert (await client.get(f"/api/v1/requirements/{r['req_id']}")).json()["questions"][0]["module"] == "商户管理后台-日榜排名"
+
+
 def test_盲区出处转模块名_去需求标题与章节号_子标题已带上级名不重复():
     from app.tasks.blind_spots import ref_to_module
 

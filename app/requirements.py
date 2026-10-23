@@ -869,6 +869,37 @@ def repair_migrated_titles(requirements: RequirementStore, tasks=None) -> int:
     return fixed
 
 
+_SOURCE_REF_RE = re.compile(r"（出处：(.+?)）\s*$")
+
+
+def backfill_question_modules(requirements: RequirementStore) -> int:
+    """存量回填（幂等）：本版之前的待确认事项没有 module 字段，启动时按与新数据同样的规则补一次：
+    有原文依据的（核验降级 / 复核补充）按依据所在章节，盲区转入的按问题末尾「（出处：…）」，其余按问题文字里的章节号；
+    定不到的也写成空串，下次启动不再算。返回补上模块名的条数。"""
+    from app.agents.analysis import section_module
+    from app.tasks.blind_spots import ref_to_module
+
+    filled = 0
+    for item in requirements.list(include_deleted=True):
+        todo = [q for q in item.get("questions") or [] if "module" not in q]
+        if not todo:
+            continue
+        source = design_brief({**item, "analysis": None, "questions": []})
+        for q in todo:
+            m = _SOURCE_REF_RE.search(q.get("question") or "")
+            if q.get("quote"):
+                module = section_module(source, quote=q["quote"], text=q.get("text") or "")
+            elif m:
+                module = ref_to_module(m.group(1), item.get("title") or "")
+                q.setdefault("ref", m.group(1))
+            else:
+                module = section_module(source, text=q.get("question") or "")
+            q["module"] = module
+            filled += bool(module)
+        requirements._persist(item)
+    return filled
+
+
 def migrate_task(record, requirements: RequirementStore, tasks=None) -> bool:
     """单个历史任务 → 需求实体（「一个任务 = 一条需求」）并回填关联；已迁移 / 无项目 / 无需求文本则跳过。"""
     ctx = record.context or {}
