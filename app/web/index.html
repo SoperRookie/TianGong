@@ -760,10 +760,10 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 <div class="layout" id="view-rules" style="display:none"><div class="page" style="max-width:1180px">
   <div class="card">
     <div class="card-h"><h3>学习规则</h3>
-      <span class="meta">从人工审核修改留痕提炼规则候选，负责人确认范围后自动注入后续生成</span>
+      <span class="meta">从人工审核修改留痕按项目提炼规则候选，负责人确认范围后自动注入该项目的后续生成</span>
       <div class="grow">
-        <input type="text" id="ruleProject" placeholder="项目名（可选）" style="width:180px">
-        <button class="btn" onclick="analyzeLearning()" id="learnBtn">分析修改习惯</button>
+        <select id="ruleProject" style="width:200px" onchange="refreshRules()" title="选项目：只看、只分析这个项目的留痕与规则（全局规则一并显示）；全部项目：按项目分别分析、分组显示"><option value="">全部项目</option></select>
+        <button class="btn" onclick="analyzeLearning()" id="learnBtn" title="选了项目只分析该项目的留痕；全部项目时每个有留痕的项目各分析一次，候选归到各自项目">分析修改习惯</button>
       </div></div>
     <div class="card-b" id="ruleList"></div>
   </div>
@@ -2196,34 +2196,56 @@ async function init() {
 /* ---------- 学习规则视图 ---------- */
 const scopeText = {system:'系统级', team:'团队级', project:'项目级', module:'模块级'};
 async function refreshRules() {
-  const data = await api('/api/v1/learning/rules');
+  const sel = $('ruleProject');
+  try {
+    const projects = (await getProjects()).filter(p => !p.builtin);
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">全部项目</option>' + projects.map(p => `<option value="${esc(p.project)}" ${p.project===keep?'selected':''}>${esc(p.project)}${p.status==='archived'?'（已归档）':''}</option>`).join('');
+  } catch (e) { /* 项目列表拿不到时仍能看全部规则 */ }
+  const proj = sel.value;
+  const data = await api('/api/v1/learning/rules' + (proj ? `?project=${encodeURIComponent(proj)}` : ''));
   window._rules = data.rules;
   const rules = data.rules.filter(r => r.status !== 'ignored');
   if (!rules.length) {
-    $('ruleList').innerHTML = '<div class="empty">暂无规则。点击「分析修改习惯」从人工审核留痕中提炼候选</div>';
+    $('ruleList').innerHTML = `<div class="empty">${proj ? `项目「${esc(proj)}」还没有规则` : '暂无规则'}。点击「分析修改习惯」从人工审核留痕中提炼候选</div>`;
     return;
   }
-  $('ruleList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
-    <tr><th>规则内容</th><th>依据</th><th style="width:70px">可信度</th><th style="width:110px">状态 / 范围</th><th style="width:100px">操作</th></tr>
-    ${rules.map(r => `<tr>
+  // 按项目分组：全局（系统级 / 团队级生效的）一组，其余按所属项目各一组，没有项目归属的最后
+  const isGlobal = r => r.status === 'active' && (r.scope === 'system' || r.scope === 'team');
+  const groups = new Map();
+  for (const r of rules) {
+    const key = isGlobal(r) ? '\u0000global' : (r.project || '\u0001none');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  const keys = [...groups.keys()].sort((a, b) => a.localeCompare(b, 'zh'));
+  const groupTitle = k => k === '\u0000global' ? '全局规则（系统级 / 团队级，所有项目的生成都注入）' : k === '\u0001none' ? '无项目归属（任务未指定项目的留痕）' : `项目「${esc(k)}」`;
+  const rowOf = r => `<tr>
       <td>${esc(r.content)}</td>
       <td class="hint">${esc(r.evidence||'—')}${r.occurrences?`（${r.occurrences} 次）`:''}</td>
       <td>${esc(r.confidence||'—')}</td>
       <td>${r.status==='candidate' ? '<span class="st candidate">候选待确认</span>'
-          : `<span class="st approved">${scopeText[r.scope]||r.scope}生效</span>${r.scope==='module'&&r.module?`<div class="hint">${esc(r.module)}</div>`:''}${r.project?`<div class="hint">${esc(r.project)}</div>`:''}`}</td>
+          : `<span class="st approved">${scopeText[r.scope]||r.scope}生效</span>${r.scope==='module'&&r.module?`<div class="hint">${esc(r.module)}</div>`:''}`}</td>
       <td><div class="rowops">
         ${r.status==='candidate'
           ? `<button class="ibtn ok" title="确认生效" onclick="confirmRule('${r.rule_id}')">${IC.check}</button>
              <button class="ibtn" title="忽略" onclick="ignoreRule('${r.rule_id}')">${IC.x}</button>`
           : `<button class="ibtn bad" title="删除" onclick="deleteRule('${r.rule_id}')">${IC.trash}</button>`}
-      </div></td></tr>`).join('')}
+      </div></td></tr>`;
+  $('ruleList').innerHTML = `<div class="tbl-wrap" style="margin-top:0"><table>
+    <tr><th>规则内容</th><th>依据</th><th style="width:70px">可信度</th><th style="width:110px">状态 / 范围</th><th style="width:100px">操作</th></tr>
+    ${keys.map(k => {
+      const rs = groups.get(k), cand = rs.filter(r=>r.status==='candidate').length, act = rs.length - cand;
+      return `<tr class="module-head"><td colspan="5">${groupTitle(k)}　<span class="hint">${act ? `${act} 条生效` : ''}${act && cand ? ' · ' : ''}${cand ? `<b style="color:var(--warn)">${cand}</b> 条候选待确认` : ''}</span></td></tr>` + rs.map(rowOf).join('');
+    }).join('')}
   </table></div>`;
 }
 async function analyzeLearning() {
   const btn = $('learnBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 分析中';
   try {
     const data = await jpost('/api/v1/learning/analyze', {project: ($('ruleProject')?.value || '').trim() || null});
-    toast(data.message || `分析 ${data.samples} 条留痕，新增 ${data.candidates.length} 条规则候选`, 'ok');
+    const by = (data.by_project || []).map(g => `${g.project || '无项目'} ${g.error ? '失败' : g.added + ' 条'}`).join('、');
+    toast(data.message || `分析 ${data.samples} 条留痕，新增 ${data.candidates.length} 条规则候选${by ? `（${by}）` : ''}`, 'ok');
     refreshRules();
   } catch (e) { toast('分析失败：' + e.message, 'err'); }
   btn.disabled = false; btn.textContent = '分析修改习惯';
@@ -2233,8 +2255,10 @@ function confirmRule(id) {
   _confirmingRule = id;
   const r = (window._rules||[]).find(x=>x.rule_id===id);
   $('rdContent').textContent = r ? r.content : '';
-  $('rdScope').value = 'team'; ruleScopeChange();
-  $('rdProject').value = $('projectInput').value.trim();
+  // 候选归属哪个项目就默认项目级、项目名预填；没有项目归属的默认团队级
+  $('rdScope').value = r && r.project ? (r.scope === 'module' ? 'module' : 'project') : 'team'; ruleScopeChange();
+  $('rdProject').value = (r && r.project) || $('projectInput').value.trim();
+  $('rdModule').value = (r && r.module) || '';
   $('ruleDlg').showModal();
 }
 function ruleScopeChange() {

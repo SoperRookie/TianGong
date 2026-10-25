@@ -1219,3 +1219,64 @@ async def test_拆解时自动经验延伸_开关打开时拆完明文紧接着�
     assert all(p["basis"] for p in points if p["source"] == "derived") and len({p["tp_id"] for p in points}) == 6
     ext_user = app.state.llm.calls[1]["messages"][-1]["content"]
     assert "正确账号密码登录成功" in ext_user   # 延伸看到了全部明文点
+
+
+# ---- 学习规则按项目划分 ----
+
+
+def test_rule_store_候选按项目去重_同内容不同项目各自成候选_全局规则挡住所有项目(tmp_path):
+    from app.learning.store import RuleStore
+
+    store = RuleStore(tmp_path / "rules.json")
+    cand = [{"content": "主流程用例统一 P0", "evidence": "改了 3 次", "occurrences": 3, "scope_hint": "project"}]
+    assert len(store.add_candidates(cand, project="德州")) == 1
+    assert len(store.add_candidates(cand, project="百家乐")) == 1       # 另一个项目的同一习惯各自成候选
+    assert len(store.add_candidates(cand, project="德州")) == 0         # 同项目重复只更新次数
+    assert [r.project for r in store.list("candidate", "德州")] == ["德州"]   # 按项目看只见自己的
+    team = store.add_candidates([{"content": "步骤不超过 5 步", "scope_hint": "team"}], project="德州")[0]
+    store.confirm(team.rule_id, "team")
+    assert store.add_candidates([{"content": "步骤不超过 5 步"}], project="百家乐") == []   # 已有全局规则，别的项目不再成候选
+    assert [r.content for r in store.list(None, "百家乐")] == ["步骤不超过 5 步", "主流程用例统一 P0"][::-1] or \
+        {r.content for r in store.list(None, "百家乐")} == {"步骤不超过 5 步", "主流程用例统一 P0"}
+    assert store.delete_project("德州") == 1 and store.get(team.rule_id) is not None   # 删项目只删项目级，全局留着
+
+
+async def test_learning_analyze_不选项目时按项目分别分析_候选归各自项目_列表与报表按项目(client):
+    async def _task_with_edit(project: str, title: str):
+        app.state.llm = StubLLM([__import__("tests.stubs", fromlist=["ANALYST_REPLY"]).ANALYST_REPLY,
+                                 generator_reply(make_case(title=title)), review_reply(True)])
+        tid = (await client.post("/api/v1/tasks", data={"text": "登录需求", "project": project})).json()["task_id"]
+        await client.post(f"/api/v1/tasks/{tid}/review", json={"items": [
+            {"case_id": "TC-登录-001", "action": "modify", "feedback": f"{project} 的改法",
+             "case": make_case(title=title + "（改）", steps=[{"action": "登录", "expected": "进入首页"}])}]})
+        return tid
+
+    await _task_with_edit("德州", "德州登录")
+    await _task_with_edit("百家乐", "百家乐登录")
+    reply = lambda content: json.dumps({"candidates": [{"content": content, "evidence": "改 2 次", "occurrences": 2,
+                                                         "confidence": "中", "scope_hint": "project"}]}, ensure_ascii=False)
+    # 两个项目各调一次（并行）
+    app.state.llm = StubLLM([reply("第一批：步骤合成一步"), reply("第二批：步骤合成一步")])
+    resp = await client.post("/api/v1/learning/analyze", json={})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert sorted((g["project"], g["added"]) for g in body["by_project"]) == [("德州", 1), ("百家乐", 1)]
+    assert {c["project"] for c in body["candidates"]} == {"德州", "百家乐"}
+    heads = [c["messages"][1]["content"][:40] for c in app.state.llm.calls]
+    assert any("项目「百家乐」" in h for h in heads) and any("项目「德州」" in h for h in heads)
+    for c in app.state.llm.calls:   # 每批只含本项目的留痕
+        user = c["messages"][1]["content"]
+        assert not ("德州登录" in user and "百家乐登录" in user)
+    # 列表按项目过滤：只见本项目候选
+    rules = (await client.get("/api/v1/learning/rules", params={"project": "德州"})).json()["rules"]
+    assert [r["project"] for r in rules] == ["德州"]
+    # 选了项目只分析该项目
+    app.state.llm = StubLLM([reply("德州：标题去掉「验证」")])
+    body = (await client.post("/api/v1/learning/analyze", json={"project": "德州"})).json()
+    assert [(g["project"], g["added"]) for g in body["by_project"]] == [("德州", 1)]
+    assert "百家乐登录" not in app.state.llm.calls[0]["messages"][1]["content"]
+    # 报表的规则计数按项目
+    rep = (await client.get("/api/v1/reports/summary", params={"project": "德州"})).json()
+    assert rep["rules"]["candidates"] == 2
+    rep_all = (await client.get("/api/v1/reports/summary")).json()
+    assert rep_all["rules"]["candidates"] == 3

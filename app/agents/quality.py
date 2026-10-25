@@ -873,16 +873,22 @@ async def run_requirement_diff(
 
 
 async def run_learning_analysis(
-    llm: LLMClient, samples: list[dict], model: str | None
+    llm: LLMClient, samples: list[dict], model: str | None, project: str | None = None,
 ) -> list[dict]:
-    """从人工修改留痕提炼规则候选；样本不足或无模式时返回空列表。"""
+    """从人工修改留痕提炼规则候选；样本不足或无模式时返回空列表。
+
+    project：这批留痕所属的项目（调用方按项目分组后各调一次），写进 user 消息让 scope_hint 的「project」有所指；
+    None 表示没有项目归属的留痕。
+    """
     if not samples:
         return []
+    head = (f"以下留痕全部来自项目「{project}」（scope_hint 的 project 指它；只有确实与项目业务无关、换个项目也成立的写法习惯才建议 system / team）。"
+            if project else "以下留痕没有项目归属（任务未指定项目）。")
     data, _ = await _chat_json(
         llm,
         [
             {"role": "system", "content": prompt_text("learning")},
-            {"role": "user", "content": f"人工修改留痕样本（共 {len(samples)} 条）：\n{wrap_data('修改留痕', _dump(samples))}"},
+            {"role": "user", "content": f"{head}\n人工修改留痕样本（共 {len(samples)} 条）：\n{wrap_data('修改留痕', _dump(samples))}"},
         ],
         model,
     )
