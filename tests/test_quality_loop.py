@@ -1160,3 +1160,62 @@ async def test_查漏按章节分批_各批只带本批章节的测试点_矩阵
     assert Q.gap_batches(plain, [{"module": "登录", "points": [{"tp_id": "TP001", "point": "正常登录"}]}]) == [(plain, [{"module": "登录", "points": [{"tp_id": "TP001", "point": "正常登录"}]}])]
     assert Q.merge_coverage([{"网络": "不适用"}, {"网络": "不适用"}])["网络"] == "不适用"
     assert Q.merge_coverage([{"网络": "不适用"}, {"网络": "待确认"}])["网络"] == "待确认"
+
+
+# ---- 经验延伸：测试点页手动再跑一轮 / 拆解时自动跑 ----
+
+
+async def test_points_extend_手动经验延伸_只新增标来源与依据_确认后依据进生成_导出带依据列(client, tmp_path):
+    from openpyxl import load_workbook
+
+    from tests.test_agents import EXTEND_REPLY
+
+    data = await _create_confirm_task(client)
+    task_id = data["task_id"]
+    app.state.llm = StubLLM([EXTEND_REPLY])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/points/extend")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # 明文 2 条 + 查漏 1 条 = 3 条已有 → 上限 max(3, 1) = 3；复述 / 没依据 / 模块对不上的跳过
+    assert [p["source"] for p in body["added"]] == ["derived"] * 3
+    assert all(p["basis"] and p["status"] == "pending" and p["tp_id"].startswith("TP") for p in body["added"])
+    reasons = "｜".join(s["reason"] for s in body["skipped"])
+    assert "没有写为什么要测" in reasons and "模块不在已有测试点里" in reasons and "超出延伸上限" in reasons
+    added_ids = [p["tp_id"] for p in body["added"]]
+    # 任务详情里带 basis，前端据此显示「延伸」与依据
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    pts = {p["tp_id"]: p for m in t["analysis"]["test_points"] for p in m["points"]}
+    assert pts[added_ids[0]]["source"] == "derived" and pts[added_ids[0]]["basis"].startswith("弱网")
+    # 导出：来源列「经验延伸」，末列延伸依据
+    r = await client.get(f"/api/v1/tasks/{task_id}/points/export")
+    f = tmp_path / "pts.xlsx"
+    f.write_bytes(r.content)
+    rows = [[str(c) if c is not None else "" for c in row] for row in load_workbook(str(f)).active.iter_rows(values_only=True)]
+    assert rows[0][-1] == "延伸依据"
+    by_id = {row[0]: row for row in rows[1:]}
+    assert by_id[added_ids[0]][5] == "经验延伸" and by_id[added_ids[0]][-1].startswith("弱网")
+    assert by_id["TP001"][-1] == ""
+    # 通过一条明文 + 一条延伸后确认生成：延伸点连依据一起进生成 Prompt
+    await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [
+        {"tp_id": "TP001", "action": "approve"}, {"tp_id": added_ids[0], "action": "approve"}]})
+    app.state.llm = StubLLM([generator_reply(make_case()), review_reply(True)])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={})
+    assert resp.status_code == 200, resp.text
+    gen_prompt = app.state.llm.calls[0]["messages"][1]["content"]
+    assert "登录请求发出后断网再恢复" in gen_prompt and "弱网下请求重发导致重复登录是常见缺陷" in gen_prompt
+
+
+async def test_拆解时自动经验延伸_开关打开时拆完明文紧接着延伸再查漏(client, monkeypatch):
+    from app.config import get_settings
+    from tests.test_agents import EXTEND_REPLY
+
+    monkeypatch.setattr(get_settings(), "point_extension", True)
+    app.state.llm = StubLLM([ANALYST_REPLY_V2, EXTEND_REPLY, GAP_REPLY])
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求：账号密码登录，连续错误5次锁定", "confirm_points": "true"})
+    assert resp.status_code == 200, resp.text
+    points = resp.json()["test_points"][0]["points"]
+    srcs = [p["source"] for p in points]
+    assert srcs == ["ai", "ai", "derived", "derived", "derived", "gap"]   # 明文 → 延伸（上限 3）→ 查漏新增
+    assert all(p["basis"] for p in points if p["source"] == "derived") and len({p["tp_id"] for p in points}) == 6
+    ext_user = app.state.llm.calls[1]["messages"][-1]["content"]
+    assert "正确账号密码登录成功" in ext_user   # 延伸看到了全部明文点

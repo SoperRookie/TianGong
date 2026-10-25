@@ -32,6 +32,7 @@ class ParsedDocument(BaseModel):
     )
     controls: dict = Field(default_factory=dict, description="原型控件索引 {uid: {cls, x, y, hidden?, img?}}（Axure：底稿核对按编号查类型 / 位置 / 隐藏态）")
     check: dict | None = Field(default=None, description="解析自校验（Axure：整页字符多重集 vs 提取行，{ok, missing, pages[...]}）")
+    vision: dict | None = Field(default=None, description="内嵌图片理解统计 {total, done, failed, skipped, error}：failed>0 时图里的文字没进原文，附件标部分解析")
 
     @property
     def full_text(self) -> str:

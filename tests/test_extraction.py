@@ -920,3 +920,76 @@ def test_区块名必须来自材料_自拟的换成开头的原文小标题_换
     secs = extraction_outline(modules)
     assert [(s["group"], s["title"]) for s in secs] == [("PC", "活动入口")]   # 来源一处带文件夹一处不带：同一页，不拆成两节
     assert [b["name"] for b in secs[0]["blocks"]] == ["「A面」未展开时", "报名规则说明", "奖池规则", "自拟但没有小标题"]
+
+
+async def test_底稿人工决定沿用_同项目同材料的新需求与本需求重新提取都不用再点一遍(client, extract_on):
+    """线上「连赢10/23」底稿人工收录 102 句、确认 54 句，同两份 zip 再上传成「1024」后 95 句又要人看。改法：整理稿落下后
+    先沿用本需求上一版、再沿用同项目材料重合 ≥ 60% 的其他需求（含回收站）里人做过的决定：人工收录的按原句收进来、
+    人工排除的记排除并撤掉兜底条目、需复核已看过的沿用；模型自己的判定不沿用。"""
+    from tests.test_requirements import _wait_parsed
+
+    async def _extracted(rid):
+        r = (await client.get(f"/api/v1/requirements/{rid}")).json()
+        for _ in range(200):
+            if r["extraction_status"] == "current" and not r.get("extracting"):
+                return r
+            await asyncio.sleep(0.02)
+            r = (await client.get(f"/api/v1/requirements/{rid}")).json()
+        raise AssertionError("提取未完成")
+
+    async def _new(title, project="P"):
+        app.state.llm = StubLLM([GAP_FIRST, GAP_REPLY, NO_GAP])
+        r = (await client.post(f"/api/v1/requirements", data={"project": project, "title": title},
+                               files=[("files", ("原型.txt", GAP_MATERIAL.encode(), "text/plain"))])).json()
+        await _wait_parsed(client, r["req_id"])
+        return await _extracted(r["req_id"])
+
+    async def _ledger(rid):
+        led = (await client.get(f"/api/v1/requirements/{rid}/extraction/ledger")).json()
+        return {u["uid"]: u for pg in led["pages"] for u in pg["units"]}, led["stats"]
+
+    await client.post("/api/v1/projects", json={"name": "P"})
+    await client.post("/api/v1/projects", json={"name": "Q"})
+    a = await _new("连赢 10/23"); ra = a["req_id"]
+    assert not a["extraction"]["ledger"].get("inherited")       # 第一条：没有可沿用的
+    # 人在 A 上做的三种决定：收录模型排除的第 4 条、排除兜底收进来的第 7 条、确认需复核的第 6 条
+    await client.post(f"/api/v1/requirements/{ra}/extraction/ledger", json={"uid": "F1-0004", "action": "include"})
+    await client.post(f"/api/v1/requirements/{ra}/extraction/ledger", json={"uid": "F1-0007", "action": "exclude", "reason": "页面提示"})
+    r = (await client.post(f"/api/v1/requirements/{ra}/extraction/ledger", json={"uid": "F1-0006", "action": "confirm"})).json()
+    assert r["extraction"]["ledger"]["stats"]["review_open"] == 0 and r["extraction"]["ledger"]["stats"]["ex_by"]["user"] == 1
+
+    # 同两份材料再上传成 B：三个决定都沿用过来，摘要记来源与重合度；人工收录条目 / 判定上带 inherited
+    b = await _new("1024"); rb = b["req_id"]
+    inh = b["extraction"]["ledger"]["inherited"]
+    assert inh == [{"req_id": ra, "title": "连赢 10/23", "overlap": 1.0, "include": 1, "exclude": 1, "checked": 1}]
+    units, st = await _ledger(rb)
+    assert units["F1-0004"]["status"] == "in" and units["F1-0004"]["manual"] is True
+    assert units["F1-0007"]["status"] == "ex" and units["F1-0007"]["by"] == "user" and units["F1-0007"]["reason"] == "页面提示"
+    assert units["F1-0006"]["status"] == "ex" and units["F1-0006"]["checked"]["inherited"] == {"req_id": ra, "title": "连赢 10/23"}
+    assert st["review_open"] == 0 and st["ex_by"]["user"] == 1 and st["todo"] == 0
+    it = next(x for m in b["extraction"]["modules"] for x in m["items"] if x.get("unit") == "F1-0004")
+    assert it["manual"] is True and it["inherited"] == {"req_id": ra, "title": "连赢 10/23"} and it["review"]["status"] == "included"
+    assert "第 7 条报名规则" not in b["extraction"]["text"] and "- 第 4 条报名规则" in b["extraction"]["text"]
+    assert b["extraction"]["meta"]["rev"] == 0 and b["extraction"]["meta"]["checked"] == sum(len(m["items"]) for m in b["extraction"]["modules"])
+    # 沿用的不算这条需求自己的「人看过」：B 上完成审核照样要走流程（这里只验证可以直接完成，因为需复核与待处理都为 0）
+    assert (await client.post(f"/api/v1/requirements/{rb}/extraction/review-done")).status_code == 200
+
+    # 别的项目同样材料不沿用；本项目材料重合不够也不沿用
+    c = await _new("别的项目", project="Q")
+    assert not c["extraction"]["ledger"].get("inherited")
+    app.state.llm = StubLLM([GAP_FIRST, GAP_REPLY, NO_GAP])
+    r = (await client.post(f"/api/v1/requirements", data={"project": "P", "title": "另一份文档"},
+                           files=[("files", ("原型.txt", GAP_MATERIAL.replace("报名规则", "提现规则").encode(), "text/plain"))])).json()
+    await _wait_parsed(client, r["req_id"])
+    d = await _extracted(r["req_id"])
+    assert not d["extraction"]["ledger"].get("inherited")
+
+    # A 自己重新提取：上一版人点过的也不丢（上一版优先于别的需求，摘要里标 self）
+    app.state.llm = StubLLM([GAP_FIRST, GAP_REPLY, NO_GAP])
+    assert (await client.post(f"/api/v1/requirements/{ra}/extract", json={})).status_code == 200
+    a2 = await _extracted(ra)
+    assert a2["extraction"]["ledger"]["inherited"][0] == {"req_id": ra, "title": "连赢 10/23", "self": True, "overlap": 1.0,
+                                                          "include": 1, "exclude": 1, "checked": 1}
+    units, st = await _ledger(ra)
+    assert units["F1-0004"]["status"] == "in" and units["F1-0007"]["by"] == "user" and units["F1-0006"]["checked"]
+    assert len(a2["extraction_history"]) if "extraction_history" in a2 else True

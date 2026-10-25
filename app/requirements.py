@@ -137,6 +137,17 @@ class RequirementStore:
         self._persist(item)
         return item
 
+    def remove_attachment(self, req_id: str, att_id: str, operator: str | None = None) -> dict:
+        """删掉一个附件记录（换新版本文档前删旧的）。原文不动；整理稿 / 分析按输入指纹自然变成过期。"""
+        item = self._get_alive(req_id)
+        before = len(item["attachments"])
+        item["attachments"] = [a for a in item["attachments"] if a["att_id"] != att_id]
+        if len(item["attachments"]) == before:
+            raise RequirementError(f"附件不存在: {att_id}")
+        item["updated_by"], item["updated_at"] = operator, _now()
+        self._persist(item)
+        return item
+
     def replace_attachment(self, req_id: str, att_id: str, parsed: dict) -> dict:
         item = self._get_alive(req_id)
         for att in item["attachments"]:
@@ -168,14 +179,122 @@ class RequirementStore:
         """写入 AI 提取的整理稿（正文 + 逐条结构）；上一版留档。整理稿换版后分析指纹变化，分析结果标过期。"""
         item = self._get_alive(req_id)
         self._archive_extraction(item)
+        previous = (item.get("extraction_history") or [None])[-1]
         meta = {**meta, "rev": 0}
         item["extraction"] = {"text": data["text"], "meta": meta, "edited": None,
                               "modules": data.get("modules"), "dropped": data.get("dropped") or [], "reviewed": None,
                               "ledger": data.get("ledger") or {"stats": None, "decisions": {}}}
         item["extracting"], item["extraction_error"] = False, None
+        self._inherit_ledger(item, previous)
         self._render_text(item)
         self._persist(item)
         return item
+
+    def _inherit_sources(self, item: dict, previous: dict | None) -> tuple[list[dict], list[tuple[dict, dict, list[dict], float]]]:
+        """可以沿用底稿决定的来源，按优先级排：本需求的上一版整理稿（材料大体没变、换版不该把人点过的丢掉）在前，
+        然后是同项目里材料重合 ≥ INHERIT_MIN_OVERLAP 的其他需求（含回收站里的——重复导入后把旧的删了 / 合并了也算），
+        重合度高的在前。返回 (本需求材料的单元清单, [(来源说明, 整理稿, 该来源材料的单元清单, 重合度)])。"""
+        from app.agents.ledger import INHERIT_MIN_OVERLAP, build_units, has_human_decisions, unit_overlap
+
+        units = build_units(source_materials(item))
+        out: list[tuple[dict, dict, list[dict], float]] = []
+        if has_human_decisions(previous):
+            out.append(({"req_id": item["req_id"], "title": item.get("title") or "", "self": True}, previous, units, 1.0))
+        scored = []
+        for other in self.list(item["project"], include_deleted=True):
+            if other["req_id"] == item["req_id"] or not has_human_decisions(other.get("extraction")):
+                continue
+            theirs = build_units(source_materials(other))
+            ratio = unit_overlap(units, theirs)
+            if ratio >= INHERIT_MIN_OVERLAP:
+                scored.append((ratio, other, theirs))
+        scored.sort(key=lambda x: -x[0])
+        out.extend(({"req_id": o["req_id"], "title": o.get("title") or ""}, o["extraction"], th, round(r, 3)) for r, o, th in scored)
+        return units, out
+
+    def _inherit_ledger(self, item: dict, previous: dict | None) -> None:
+        """新整理稿落下后，把人做过的底稿决定按原句沿用过来（同一句话上次人已经判过，不该再问一遍）：
+        人工收录过、这版又没收进来的句子按原句收进「页面-人工收录」；人工排除过的（这版没有正式摘录）记人工排除，
+        兜底收进来的条目一并撤掉；需复核已看过的沿用已看过。先用的优先，每句只沿用一次；模型自己的判定不沿用。
+        沿用摘要记在 extraction.ledger.inherited，条目 / 判定上带 inherited={req_id, title} 可追溯。"""
+        from app.agents.extraction import extraction_markdown
+        from app.agents.ledger import STATUS_EX, STATUS_IN, BY_MODEL, account, human_decisions, page_of, source_of, unit_key
+
+        ex = item["extraction"]
+        if not ex.get("modules"):
+            return
+        units, sources = self._inherit_sources(item, previous)
+        if not sources:
+            return
+        led = ex.setdefault("ledger", {"stats": None, "decisions": {}})
+        decisions = led.setdefault("decisions", {})
+        rows = {r["uid"]: r for r in account(units, ex.get("text") or "", decisions)["units"]}
+        own_by_uid: dict[str, list[tuple[dict, dict]]] = {}
+        for m in ex["modules"]:
+            for it in m["items"]:
+                if it.get("unit"):
+                    own_by_uid.setdefault(it["unit"], []).append((m, it))
+        done: set[str] = set()
+        summary: list[dict] = []
+        now = _now()
+        for src, src_ex, src_units, ratio in sources:
+            H = human_decisions(src_ex, src_units)
+            n = {"include": 0, "exclude": 0, "checked": 0}
+            tag = {"req_id": src["req_id"], "title": src["title"]}
+            for u in units:
+                key = unit_key(u["text"])
+                if key in done:
+                    continue
+                row = rows[u["uid"]]
+                own = [pair for x in u["uids"] for pair in own_by_uid.get(x, [])]
+                if key in H["include"]:
+                    if row["status"] == STATUS_IN:
+                        continue   # 这版模型自己收进来了，不用人工收录
+                    name = f"{page_of(u['path'])}-人工收录"
+                    mod = next((m for m in ex["modules"] if m["name"] == name), None)
+                    if mod is None:
+                        mod = {"name": name, "items": []}
+                        ex["modules"].append(mod)
+                    mod["items"].append({"text": u["text"], "sources": [source_of(u["path"])], "manual": True, "unit": u["uid"],
+                                         "verified": True, "id": self._unit_item_id(name, u["text"]),
+                                         "review": {"status": "included", "by": H["include"][key].get("who"), "at": now},
+                                         "inherited": tag})
+                    for x in u["uids"]:
+                        decisions.pop(x, None)
+                    done.add(key)
+                    n["include"] += 1
+                elif key in H["exclude"]:
+                    if row["status"] == STATUS_IN and any(not it.get("forced") for _, it in own):
+                        continue   # 这版正式摘录了这句：收录优先，人要排除得再点一次
+                    if row["status"] == STATUS_IN and not own:
+                        continue   # 稿里逐字有但没有带编号的条目：不知道删哪条，不动
+                    for mod, it in own:
+                        mod["items"].remove(it)
+                        if not mod["items"]:
+                            ex["modules"].remove(mod)
+                    for x in u["uids"]:
+                        decisions.pop(x, None)
+                        own_by_uid.pop(x, None)
+                    decisions[u["uid"]] = {"r": H["exclude"][key]["r"], "by": "user", "who": H["exclude"][key].get("who"),
+                                           "at": now, "inherited": tag}
+                    done.add(key)
+                    n["exclude"] += 1
+                elif key in H["checked"]:
+                    if row["status"] != STATUS_EX or row.get("by") != BY_MODEL or row.get("checked"):
+                        continue
+                    k = next((x for x in u["uids"] if x in decisions), u["uid"])
+                    decisions[k] = {**decisions.get(k, {"r": row.get("reason") or "", "by": BY_MODEL}),
+                                    "checked": {**H["checked"][key], "inherited": tag}}
+                    done.add(key)
+                    n["checked"] += 1
+            if any(n.values()):
+                summary.append({**src, "overlap": ratio, **n})
+        if not summary:
+            return
+        led["inherited"] = summary
+        ex["text"] = extraction_markdown(ex["modules"], ex.get("dropped"))
+        self._recount(ex)
+        ex["meta"]["ledger"] = self._refresh_ledger(item)["stats"]
 
     @staticmethod
     def _render_text(item: dict) -> None:
@@ -283,6 +402,15 @@ class RequirementStore:
         return item
 
     @staticmethod
+    def _recount(ex: dict) -> None:
+        """逐条结构变了之后重算 meta 里的条目统计（条数 / 核验 / 模块数 / 字数）。"""
+        ex["meta"]["checked"] = sum(len(m["items"]) for m in ex["modules"])
+        ex["meta"]["unverified"] = sum(1 for m in ex["modules"] for x in m["items"] if x.get("verified") is False)
+        ex["meta"]["verified"] = ex["meta"]["checked"] - ex["meta"]["unverified"]
+        ex["meta"]["modules"] = len(ex["modules"])
+        ex["meta"]["chars"] = len(ex["text"])
+
+    @staticmethod
     def _unit_item_id(module: str, text: str) -> str:
         from app.agents.extraction import _item_id
 
@@ -292,11 +420,7 @@ class RequirementStore:
         """逐条 / 底稿改动后的公共收尾：统计、rev +1（分析指纹变化）、审核标记作废、底稿重算、落库。"""
         ex = item["extraction"]
         ex["meta"]["rev"] = int(ex["meta"].get("rev") or 0) + 1
-        ex["meta"]["checked"] = sum(len(m["items"]) for m in ex["modules"])
-        ex["meta"]["unverified"] = sum(1 for m in ex["modules"] for x in m["items"] if x.get("verified") is False)
-        ex["meta"]["verified"] = ex["meta"]["checked"] - ex["meta"]["unverified"]
-        ex["meta"]["modules"] = len(ex["modules"])
-        ex["meta"]["chars"] = len(ex["text"])
+        self._recount(ex)
         ex["reviewed"] = None
         self._refresh_ledger(item)
         self._render_text(item)
@@ -418,28 +542,45 @@ class RequirementStore:
         item["analysis_meta"] = meta
         item["analysis_edits"] = []  # 新一版分析：上一版的人工修改留痕随历史走
         existing = {q["question"]: q for q in item["questions"]}
+        history = self._confirmed_question_pool(item)
         questions = []
+        used: set[str] = set()
         for q in analysis.get("open_questions") or []:
             meta = q if isinstance(q, dict) else {"question": str(q)}
             text = str(meta.get("question", "")).strip()
             if not text:
                 continue
-            if text in existing:
-                old = existing[text]
+            # 同一需求里问过的问题：原文相同，或换了说法但说的是同一件事（相似度 ≥ QUESTION_SIM_AUTO 且数字一致）→ 沿用原记录
+            old = existing.get(text) or find_similar_question(text, item["questions"], QUESTION_SIM_AUTO, same_numbers=True)[0]
+            if old is not None:
+                if old["q_id"] in used:
+                    continue   # 这次分析把同一件事问了两遍：只留一条
+                used.add(old["q_id"])
                 old.setdefault("level", meta.get("level") or "must")
                 old.setdefault("reason", meta.get("reason", "")); old.setdefault("assumption", meta.get("assumption", ""))
                 if meta.get("module") and not old.get("module"):   # 旧问题没定过模块、这次定到了就补上
                     old["module"] = str(meta["module"])
                 questions.append(old)
             else:
-                questions.append({"q_id": _hex8(), "question": text, "status": "open",
-                                  "level": meta.get("level") if meta.get("level") in ("must", "suggest") else "must",
-                                  "reason": str(meta.get("reason", "")), "assumption": str(meta.get("assumption", "")),
-                                  "module": str(meta.get("module") or ""),
-                                  "answer": "", "by": None, "at": None, "source": "ai",
-                                  # 核验降级 / 复核补充的条目：记下来源项与原文本，确认成立后可一键采纳回分析结果
-                                  "kind": meta.get("kind") or "question", "key": meta.get("key"),
-                                  "text": str(meta.get("text") or ""), "quote": str(meta.get("quote") or "")})
+                new = {"q_id": _hex8(), "question": text, "status": "open",
+                       "level": meta.get("level") if meta.get("level") in ("must", "suggest") else "must",
+                       "reason": str(meta.get("reason", "")), "assumption": str(meta.get("assumption", "")),
+                       "module": str(meta.get("module") or ""),
+                       "answer": "", "by": None, "at": None, "source": "ai",
+                       # 核验降级 / 复核补充的条目：记下来源项与原文本，确认成立后可一键采纳回分析结果
+                       "kind": meta.get("kind") or "question", "key": meta.get("key"),
+                       "text": str(meta.get("text") or ""), "quote": str(meta.get("quote") or "")}
+                # 同项目其他需求（同一份文档重新上传、新版本）已经确认过的同一问题：结论直接带进来，标来源、可重新打开；
+                # 像但没到自动沿用门槛的只作参考，页面预填、人点确认才算
+                hit, score = find_similar_question(text, history, QUESTION_SIM_HINT)
+                if hit is not None:
+                    src = {"req_id": hit["_req_id"], "title": hit["_title"], "question": hit["question"], "score": round(score, 2)}
+                    if score >= QUESTION_SIM_AUTO and _same_numbers(text, hit["question"]):
+                        new.update(status="confirmed", answer=hit["answer"], by=hit.get("by"), at=hit.get("at") or _now(),
+                                   inherited=src, module=new["module"] or str(hit.get("module") or ""))
+                    else:
+                        new["suggested"] = {**src, "answer": hit["answer"], "by": hit.get("by")}
+                questions.append(new)
         # 分析结果里的待确认事项统一存成问题文本，便于展示与比对
         item["analysis"]["open_questions"] = [q["question"] for q in questions]
         # 人工补充的问题保留
@@ -449,6 +590,18 @@ class RequirementStore:
         self._refresh_status(item)
         self._persist(item)
         return item
+
+    def _confirmed_question_pool(self, item: dict) -> list[dict]:
+        """同项目其他需求（含回收站里的）已确认、有结论的待确认事项，供新分析沿用；每条带 _req_id / _title 记来源。
+        新的需求在前（同一问题多条需求都确认过时，以最近的结论为准）。"""
+        pool: list[dict] = []
+        for other in self.list(item["project"], include_deleted=True):
+            if other["req_id"] == item["req_id"]:
+                continue
+            for q in other.get("questions") or []:
+                if q.get("status") == "confirmed" and (q.get("answer") or "").strip():
+                    pool.append({**q, "_req_id": other["req_id"], "_title": other.get("title") or ""})
+        return pool
 
     def confirm_analysis(self, req_id: str, by: str | None) -> dict:
         """人工确认当前分析结果：快照留存（知识沉淀以快照为准），重新分析后需再次确认才会更新知识库。"""
@@ -588,6 +741,7 @@ class RequirementStore:
         item = self._get_alive(req_id)
         for q in item["questions"]:
             if q["q_id"] == q_id:
+                q.pop("inherited", None); q.pop("suggested", None)   # 人自己定了：沿用 / 参考的历史结论标记撤掉
                 if reopen:
                     q.update({"status": "open"})
                 else:
@@ -781,6 +935,51 @@ def extraction_status(item: dict) -> str:
         return "none"
     return "current" if extraction_current(item) else "outdated"
 
+
+
+QUESTION_SIM_AUTO = 0.6    # 待确认事项相似度：到这个值且数字一致，算同一问题（线上同一需求里不同问题之间最高 0.57，且那几对本就是一问两提）
+QUESTION_SIM_HINT = 0.4    # 到这个值只作「历史结论参考」预填，人点确认才算
+_QUESTION_MIN_CHARS = 10   # 规范化后不足这个字数的问题只认原文相同（短句字对两两重合太容易撞）
+_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _bigrams(s: str) -> set[str]:
+    return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) > 1 else ({s} if s else set())
+
+
+def question_similarity(a: str, b: str) -> float:
+    """两个问题说的是不是同一件事：规范化（去标点空白、全角转半角、小写）后字对（相邻两字）的 Dice 系数；
+    原文相同为 1。模型重新分析常把同一问题换个说法（「按操作人、页签还是全系统计时」/「按操作人、活动、页签还是全系统计算」），
+    逐字相等认不出来，字对重合对中文改写够稳。"""
+    from app.agents.analysis import normalize
+
+    na, nb = normalize(a), normalize(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb:
+        return 1.0
+    if min(len(na), len(nb)) < _QUESTION_MIN_CHARS:
+        return 0.0
+    A, B = _bigrams(na), _bigrams(nb)
+    return 2 * len(A & B) / (len(A) + len(B))
+
+
+def _same_numbers(a: str, b: str) -> bool:
+    """两个问题里出现的数字一样（「前 10 名」和「前 20 名」说法再像也不是同一问题）。"""
+    import unicodedata
+
+    return set(_NUM_RE.findall(unicodedata.normalize("NFKC", a))) == set(_NUM_RE.findall(unicodedata.normalize("NFKC", b)))
+
+
+def find_similar_question(text: str, candidates: list[dict], min_score: float, same_numbers: bool = False) -> tuple[dict | None, float]:
+    """candidates（每条带 question）里与 text 最像的一条及相似度；没到 min_score 返回 (None, 0)。
+    same_numbers=True 时还要求数字一致。几条同分时取先出现的（候选按优先级排好）。"""
+    best, best_score = None, 0.0
+    for q in candidates:
+        sc = question_similarity(text, q.get("question") or "")
+        if sc > best_score and sc >= min_score and (not same_numbers or _same_numbers(text, q.get("question") or "")):
+            best, best_score = q, sc
+    return best, best_score
 
 
 def _q_module(q: dict) -> str:
