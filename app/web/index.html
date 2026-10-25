@@ -1247,6 +1247,11 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <button class="btn" id="rqSaveBtn" onclick="saveReqDlg()">创建</button>
   </div>
 </dialog>
+<dialog id="reqDupDlg" style="width:620px">
+  <div class="dlg-h"><h3>同名文件已在本项目里</h3></div>
+  <div class="dlg-b" id="reqDupBody"></div>
+  <div class="dlg-f" id="reqDupFoot"></div>
+</dialog>
 
 <!-- 需求：发起测试设计 -->
 <dialog id="designDlg">
@@ -2815,9 +2820,11 @@ function allPoints(t) {
   const modules = (t.analysis||{}).test_points || [];
   return modules.flatMap(m => (m.points||[]).map(p => ({...normPoint(p), module:m.module})));
 }
-const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增', blind_spot:'盲区转入'};
+const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增', blind_spot:'盲区转入', derived:'经验延伸'};
 const BS_STATUS = {open:'待处置', question:'已转待确认事项', point:'已转测试点', explained:'需求已说明', ignored:'已忽略'};
-const srcChip = src => src === 'manual' || src === 'blind_spot'
+const srcChip = src => src === 'derived'
+  ? `<span class="tag" style="color:var(--purple)" title="需求没写、按资深测试经验补的场景；依据见测试点下方">延伸</span><div class="hint">经验延伸</div>`
+  : src === 'manual' || src === 'blind_spot'
   ? `<span class="tag" style="background:var(--warn-bg,#fff4e0);color:var(--warn,#b36b00)">人工</span>${src==='blind_spot'?'<div class="hint">盲区转入</div>':''}`
   : `<span class="tag">AI</span><div class="hint">${esc(srcText[src]||src||'AI 拆解')}</div>`;
 const pStatusText = {pending:'待审核', approved:'已通过', rejected:'已驳回'};
@@ -2880,6 +2887,7 @@ function renderPointWorkbench(t) {
   const approved = pts.filter(p=>p.status==='approved').length;
   const rejected = pts.filter(p=>p.status==='rejected').length;
   const pending = pts.length - approved - rejected;
+  const derivedCnt = pts.filter(p=>p.source==='derived').length;
   const confirmable = t.status === 'awaiting_confirmation';
   const pendingGen = t.points_pending_generation || [];
   const generatedIds = new Set((t.context||{}).generated_tp_ids || []);
@@ -2907,6 +2915,7 @@ function renderPointWorkbench(t) {
         <td style="width:70px"><span class="cid">${esc(p.tp_id)}</span></td>
         <td style="width:150px">${modTag(p.module)}</td>
         <td>${esc(p.point)}
+          ${p.basis?`<div class="hint" style="color:var(--purple)" title="经验延伸：为什么要测">依据：${esc(p.basis)}</div>`:''}
           ${(p.warnings||[]).map(w=>`<div class="hint" style="color:var(--warn)">⚠ ${esc(w)}</div>`).join('')}
           ${editingHint('point', p.tp_id)}
           ${rejectInfoLine(p)}</td>
@@ -2947,18 +2956,19 @@ function renderPointWorkbench(t) {
     </div>` : '';
 
   return sub + `<div class="toolbar" style="margin-top:0">
-      <span class="hint">共 ${pts.length} 条 · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b></span>
+      <span class="hint">共 ${pts.length} 条 · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b>${derivedCnt?` · 经验延伸 <b style="color:var(--purple)" title="需求没写、按资深测试经验补的场景">${derivedCnt}</b>`:''}</span>
       <div class="seg">
         <button class="${pointView==='table'?'on':''}" onclick="pointView='table';renderDetail()">表格</button>
         <button class="${pointView==='mind'?'on':''}" onclick="pointView='mind';renderDetail()">脑图</button>
       </div>
       <div style="margin-left:auto;display:flex;gap:8px">
         ${confirmable?`<button class="btn ghost sm" onclick="gapCheck()">查漏补缺</button>
+        <button class="btn ghost sm" onclick="extendPoints()" title="按资深测试经验补需求没写到的场景（并发 / 中断 / 跨天 / 越权 / 脏数据），只新增、待审核、每条带依据；拆解时已自动跑过一遍，这里是再补一轮">经验延伸</button>
         <button class="btn ghost sm" onclick="dupCheck()">重复检查</button>
         <button class="btn ghost sm" onclick="supplementPoints()">AI 补充</button>
         <button class="btn ghost sm" onclick="manualAddPoint()">手工新增</button>`:''}
         ${canEditPt&&!pts.every(p=>p.legacy)?`<button class="btn ghost sm" onclick="openCompareDlg()" title="录入人工编写的测试点，与 AI 生成的逐条对比">人工对比</button>`:''}
-        ${pts.length?`<button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export')}+(exportApprovedOnly?'?scope=approved':''), '测试点.xlsx')" title="导出测试点 Excel：编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例">导出 xlsx</button>
+        ${pts.length?`<button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export')}+(exportApprovedOnly?'?scope=approved':''), '测试点.xlsx')" title="导出测试点 Excel：编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例、延伸依据">导出 xlsx</button>
         <label class="check" title="勾选后只导出已通过的测试点"><input type="checkbox" ${exportApprovedOnly?'checked':''} onchange="exportApprovedOnly=this.checked"> 只导已通过</label>`:''}
       </div></div>
     ${renderCoverage(t)}
@@ -2990,9 +3000,10 @@ function buildPointMinderJson(t, modules) {
     children: modules.map(m => ({
       data: {text: `${m.module}（${(m.points||[]).length}）`, kind: 'module'},
       children: (m.points||[]).map(normPoint).map(p => ({
-        data: {text: p.point, kind: 'point', tpId: p.tp_id, resource: [p.tp_id, ...(p.dimension ? [p.dimension] : []), label[p.status] || p.status]},
+        data: {text: p.point, kind: 'point', tpId: p.tp_id, resource: [p.tp_id, ...(p.dimension ? [p.dimension] : []), ...(p.source === 'derived' ? ['延伸'] : []), label[p.status] || p.status]},
         children: [
           ...(p.ref ? [{data: {text: `来源：${p.ref}`, kind: 'note', resource: ['需求来源']}}] : []),
+          ...(p.basis ? [{data: {text: `依据：${p.basis}`, kind: 'note', resource: ['经验延伸']}}] : []),
           ...(p.status === 'rejected' && (p.comment || p.fix_request) ? [{data: {text: `驳回：${p.comment || ''}${p.fix_request ? '｜要求：' + p.fix_request : ''}`, kind: 'note', resource: ['驳回意见']}}] : []),
           ...((p.warnings||[]).map(w => ({data: {text: w, kind: 'note', resource: ['提示']}}))),
         ],
@@ -3400,6 +3411,15 @@ async function gapCheck() {
     toast(`查漏完成：新增 ${data.added.length} 条待审核测试点（存量不变）`, 'ok');
   } catch (e) { toast('查漏失败：' + e.message, 'err'); }
 }
+async function extendPoints() {
+  toast('经验延伸执行中：按资深测试经验补需求没写到的场景…');
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/points/extend`, {method:'POST'});
+    await openTask(currentTask.task_id, true);
+    const skipped = (data.skipped || []).length;
+    toast(`经验延伸完成：新增 ${data.added.length} 条待审核测试点（标「延伸」并带依据）${skipped ? `，${skipped} 条与已有测试点重复或没依据已跳过` : ''}`, data.added.length ? 'ok' : 'warn');
+  } catch (e) { toast('经验延伸失败：' + e.message, 'err'); }
+}
 async function dupCheck() {
   toast('重复检查执行中…');
   try {
@@ -3484,7 +3504,7 @@ function renderCases(t) {
       <td style="width:30px"><input type="checkbox" class="cck" data-cid="${esc(c.case_id)}"></td>
       <td style="width:104px"><span class="cid">${esc(c.case_id)}</span><div class="hint">v${c.version||1}</div></td>
       <td style="width:80px">${esc(c.module)}</td>
-      <td style="min-width:180px">${esc(c.title)}
+      <td style="min-width:180px">${esc(c.title)}${/^经验延伸[:：]/.test(c.remark||'')?` <span class="tag" style="color:var(--purple)" title="${esc(c.remark)}">延伸</span>`:''}
         ${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}
         ${(c.point_ids||[]).length?`<div class="hint" title="来源测试点">${c.point_ids.map(x=>`<code title="${esc((ptMap.get(x)||{}).point||'')}">${esc(x)}</code>`).join(' ')}</div>
         ${refsOf(c).length?`<div class="hint">需求来源：${refsOf(c).map(x=>refHtml(x)).join('<span class="hint">；</span>')}</div>`:''}`:''}
@@ -5788,7 +5808,7 @@ function reqExtractionHtml(r, canAI, canEdit) {
   if (st === 'running') bar = `<div class="hint" style="margin-bottom:10px"><span class="spin"></span> 正在从原文与附件提取需求内容（分层提取 → 核验 → 自动补漏），可离开页面，完成后自动刷新</div>`;
   else if (r.extraction_error) bar = `<div class="hint" style="margin-bottom:10px;color:var(--danger)">上次提取失败：${esc(r.extraction_error)}</div>`;
   if (st === 'outdated') bar += `<div class="hint" style="margin-bottom:10px;color:var(--warn)">⚠ 提取之后附件有追加或重新解析，整理稿基于旧材料：AI 分析与测试设计会先重新提取（或点「重新提取」）</div>`;
-  else if (st === 'none' && r.extraction_wanted) bar += `<div class="hint" style="margin-bottom:10px;color:var(--warn)">有已解析的附件但还没有整理稿${r.content_warnings&&r.content_warnings.length?'（附件疑似非需求文本，自动提取已跳过）':''}：点「提取需求」，或直接 AI 分析时会先自动提取</div>`;
+  else if (st === 'none' && r.extraction_wanted) bar += `<div class="hint" style="margin-bottom:10px;color:var(--warn)">有已解析的附件但还没有整理稿${r.content_warnings&&r.content_warnings.length?'（附件有告警：疑似非需求文本 / 图片识图失败，自动提取已跳过——识图失败的先「重新解析」）':''}：点「提取需求」，或直接 AI 分析时会先自动提取</div>`;
   else if (st === 'none') bar += `<div class="hint" style="margin-bottom:10px">没有附件的需求直接用原文分析，不需要整理稿；原文很长或夹杂无关内容时也可以提取</div>`;
   if (m.dropped && m.dropped.length) bar += `<div class="hint" style="margin-bottom:10px">已剔除：${m.dropped.map(esc).join('、')}</div>`;
   if (!ex) return intro + toolbar + bar + '<div class="empty">还没有整理稿</div>';
@@ -5810,7 +5830,7 @@ function reqExtractionHtml(r, canAI, canEdit) {
   if (_exFilter === 'preview') return intro + toolbar + bar + filt + exDocHtml(ex.text);
   const keep = it => _exFilter==='all' || (_exFilter==='unverified' && it.verified===false && !it.review) || (_exFilter==='gap' && it.gap && !it.forced) || (_exFilter==='forced' && it.forced) || (_exFilter==='doubt' && it.doubt) || (_exFilter==='draft' && it.draft) || (_exFilter==='reviewed' && it.review);
   const byId = Object.fromEntries(all.map(it => [it.id, it]));
-  const badgeOf = it => `${it.verified===false?'<span style="color:var(--warn)" title="未在材料中逐字找到">⚠</span> ':''}${it.forced?`<span class="st rejected" title="模型没判定去向，程序按原句收进来的（单元 ${esc(it.unit||'')}）；请核对：留下、改归模块，或在底稿核对里排除">兜底</span> `:it.gap?'<span class="st candidate" title="模型判定是需求后补进的原句">补漏</span> ':''}${it.manual?`<span class="st approved" title="底稿核对里人工按原句收录（单元 ${esc(it.unit||'')}）">人工收录</span> `:''}${it.draft?`<span class="st rejected" title="画布上与页面主体不相连、与正式内容重复却有出入的区块（旧版本 / 备用稿）：已照抄收录，用例不要照它写，请与产品确认">疑似草稿</span> `:''}${it.review?`<span class="st ${it.review.status==='ok'?'approved':'candidate'}" title="${esc(it.review.by||'')} ${esc(relTime(it.review.at))}">${it.review.status==='ok'?'已核对':'已修改'}</span> `:''}`;
+  const badgeOf = it => `${it.verified===false?'<span style="color:var(--warn)" title="未在材料中逐字找到">⚠</span> ':''}${it.forced?`<span class="st rejected" title="模型没判定去向，程序按原句收进来的（单元 ${esc(it.unit||'')}）；请核对：留下、改归模块，或在底稿核对里排除">兜底</span> `:it.gap?'<span class="st candidate" title="模型判定是需求后补进的原句">补漏</span> ':''}${it.manual?`<span class="st approved" title="${it.inherited?`沿用需求「${esc(it.inherited.title||'')}」底稿核对时的人工收录（单元 ${esc(it.unit||'')}）`:`底稿核对里人工按原句收录（单元 ${esc(it.unit||'')}）`}">人工收录${it.inherited?'·沿用':''}</span> `:''}${it.draft?`<span class="st rejected" title="画布上与页面主体不相连、与正式内容重复却有出入的区块（旧版本 / 备用稿）：已照抄收录，用例不要照它写，请与产品确认">疑似草稿</span> `:''}${it.review?`<span class="st ${it.review.status==='ok'?'approved':'candidate'}" title="${esc(it.review.by||'')} ${esc(relTime(it.review.at))}">${it.review.status==='ok'?'已核对':'已修改'}</span> `:''}`;
   const tailOf = (it, main) => { const others = (it.sources||[]).filter(x => x !== main);   // 来源与区块主来源相同的不重复标，与整理稿正文一致
     return `${it.doubt?`<span class="hint" style="margin-left:6px;color:var(--warn)">〔疑点：${esc(it.doubt)}〕</span>`:''}${others.length ? `<span class="hint" style="margin-left:6px">〔${esc(others.join('；'))}〕</span>` : ''}`; };
   const opsOf = it => canEdit && _exEditItem !== it.id ? `<span style="margin-left:auto;display:flex;gap:2px;flex-shrink:0">
@@ -5884,9 +5904,11 @@ function exLedgerHtml(r, canEdit) {
   const byMap = {model:'模型', auto:'程序', user:'人工'};
   const CTL = {table_cell:'单元格', table_row:'表格行', _段落:'段落', label:'标签', box_1:'流程框', box_2:'矩形', box_3:'矩形', flow_shape:'流程框', _连接:'连接线', _连接线:'连接线', droplist:'下拉框', text_field:'输入框', text_area:'文本域', checkbox1:'复选框', radio_button:'单选框', primary_button:'按钮', button:'按钮', heading_1:'标题', heading_2:'标题', _二级标题:'标题', _三级标题:'标题', placeholder:'占位区', image:'图片', _图片:'图片', table:'表格', ellipse:'椭圆', shape:'形状', shape1:'形状', icon:'图标', line:'线', arrow:'箭头'};
   const ctlTag = c => c ? ` <span class="hint" title="原型控件类型 ${esc(c.cls||'')}，坐标 (${c.x},${c.y})${c.hidden?'，页面上默认隐藏（动态面板 / 弹窗的另一状态），照样提取':''}${c.region?'，在画布上与页面主体不相连的独立区域（旧版本 / 备用稿常这样）':''}">〔${esc(CTL[(c.cls||'').split(' ')[0]]||c.cls||'控件')}${c.hidden?' · 隐藏态':''}${c.region?` · <span style="color:var(--danger)">独立区域 ${c.region}</span>`:''}〕</span>` : '';
+  const inh = (((r||{}).extraction||{}).ledger||{}).inherited || [];
+  if (inh.length) out += `<div class="hint" style="margin:0 0 6px">已沿用人工底稿决定（同一句话上次人已判过，不再问第二遍；条目 / 判定上标「沿用」，不对可以再点）：${inh.map(x => `${x.self?'本需求上一版':`需求「${esc(x.title||'')}」`}${x.self?'':`（材料重合 ${Math.round((x.overlap||0)*100)}%）`}：收录 ${x.include||0} · 排除 ${x.exclude||0} · 已看过 ${x.checked||0}`).join('；')}</div>`;
   if ((L.checks||[]).length) out += `<div class="hint" style="margin:0 0 6px">原型解析自校验（整页字符 vs 提取行，与控件解析相互独立）：${L.checks.map(c => c.ok ? `${esc(c.filename)} <span class="st approved">0 缺字</span> <span class="hint">${c.pages} 页</span>` : `${esc(c.filename)} <span class="st rejected">缺 ${c.missing} 字</span>`).join('　')}</div>`;
   const row = u => {
-    const badge = u.status==='in' ? `<span class="st approved">${u.forced?'兜底收录':u.manual?'人工收录':'收录'}</span>` : u.status==='ex' ? `<span class="st rejected" title="${esc(u.reason||'')}">排除</span> <span class="hint">${esc(u.reason||'')}（${byMap[u.by]||esc(u.by||'')}${u.checked?`，${esc(u.checked.by||'')} 已确认`:''}）</span>` : `<span class="st candidate" style="color:var(--danger)">待处理</span>${u.partial?` <span class="hint">整理稿已有其中 ${Math.round(u.partial*100)}%</span>`:''}`;
+    const badge = u.status==='in' ? `<span class="st approved">${u.forced?'兜底收录':u.manual?'人工收录':'收录'}</span>` : u.status==='ex' ? `<span class="st rejected" title="${esc(u.reason||'')}">排除</span> <span class="hint">${esc(u.reason||'')}（${byMap[u.by]||esc(u.by||'')}${u.checked?`，${esc(u.checked.by||'')} 已确认${u.checked.inherited?`〔沿用「${esc(u.checked.inherited.title||'')}」〕`:''}`:''}）</span>` : `<span class="st candidate" style="color:var(--danger)">待处理</span>${u.partial?` <span class="hint">整理稿已有其中 ${Math.round(u.partial*100)}%</span>`:''}`;
     const times = (u.count>1 ? `<span class="hint" title="${esc((u.pages||[]).join('\n'))}">×${u.count}${(u.pages||[]).length>1?`，${u.pages.length} 页`:''}</span>` : '') + (u.kind==='image' ? ` <span class="hint" title="${esc(u.path)}">〔${esc(u.path.split(' › ').pop())}${u.image?` · 图片 ${u.image}`:''}〕</span>` : '');
     const asking = _exLedgerReasonFor === u.uid;
     const ops = canEdit && !asking ? `<span style="margin-left:auto;display:flex;gap:4px;flex-shrink:0">
@@ -6439,7 +6461,40 @@ async function openReqDlg() {
   await fillReqRefs($('rqProject').value);
   $('reqDlg').showModal();
 }
-async function saveReqDlg() {
+async function showReqDupDlg() {
+  // 返回 true 表示已接管（用户在对话框里选了替换 / 取消，或仍新建会由对话框自己再调 saveReqDlg(true)）
+  const files = Array.from($('rqFiles').files).map(f => f.name);
+  const qs = files.map(n => 'filename=' + encodeURIComponent(n)).join('&');
+  let m;
+  try { m = (await api(`/api/v1/requirements/same-files?project=${encodeURIComponent($('rqProject').value)}&${qs}`)).matches || []; } catch (e) { return false; }
+  if (!m.length) return false;
+  const top = m[0];
+  $('reqDupBody').innerHTML = `<div class="hint" style="margin-bottom:8px">同一份文档再上传，多半是<b>新版本</b>或<b>重复导入</b>。替换到已有需求的附件：旧文件删掉、新文件重新解析并提取，底稿核对里人工收录 / 排除过的句子按原句自动沿用，已确认的待确认事项重新分析后也保留；新建一条则是白板（同项目里的人工决定与确认结论也会尽量沿用过来，但任务、追溯链不在一起）。</div>
+    <table><tr><th>需求</th><th style="width:80px">状态</th><th>同名文件</th><th style="width:150px">创建</th></tr>
+    ${m.map(x => `<tr><td><b>${esc(x.title)}</b>${x.task_count?` <span class="hint">${x.task_count} 个任务</span>`:''}${x.question_count?` <span class="hint">${x.question_count} 条待确认事项</span>`:''}</td><td>${esc(x.status_label||x.status)}</td><td class="hint">${x.filenames.map(esc).join('、')}</td><td class="hint">${esc(x.created_by||'')} ${fmtTime(x.created_at)}</td></tr>`).join('')}</table>`;
+  $('reqDupFoot').innerHTML = `<button class="btn ghost" onclick="$('reqDupDlg').close()">取消</button>
+    <button class="btn ghost" onclick="$('reqDupDlg').close(); saveReqDlg(true)">仍新建一条需求</button>
+    <button class="btn" onclick="replaceReqAttachments('${top.req_id}', ${jsq(JSON.stringify(top.filenames))})" title="删掉「${esc(top.title)}」里的同名旧附件，把这次选的文件追加进去并重新解析">作为新版本替换到「${esc(top.title)}」</button>`;
+  $('reqDupDlg').showModal();
+  return true;
+}
+async function replaceReqAttachments(reqId, namesJson) {
+  const names = new Set(JSON.parse(namesJson));
+  const files = Array.from($('rqFiles').files);
+  const foot = $('reqDupFoot'); foot.querySelectorAll('button').forEach(b => b.disabled = true);
+  try {
+    const r = await api('/api/v1/requirements/' + reqId);
+    for (const a of (r.attachments || [])) if (names.has(a.filename)) await api(`/api/v1/requirements/${reqId}/attachments/${a.att_id}`, {method:'DELETE'});
+    const fd = new FormData(); for (const f of files) fd.append('files', f);
+    const desc = $('rqDesc').value.trim();
+    await api(`/api/v1/requirements/${reqId}/attachments`, {method:'POST', body: fd});
+    if (desc) await jput(`/api/v1/requirements/${reqId}`, {description: ((r.description||'').trim() + '\n\n' + desc).trim()});
+    $('reqDupDlg').close(); $('reqDlg').close();
+    toast(`已替换「${r.title}」的 ${names.size} 个附件，正在后台解析；解析完会自动重提整理稿`, 'ok');
+    openRequirement(reqId);
+  } catch (e) { toast(e.message, 'err'); foot.querySelectorAll('button').forEach(b => b.disabled = false); }
+}
+async function saveReqDlg(force = false) {
   const fd = new FormData();
   fd.append('project', $('rqProject').value); fd.append('title', $('rqTitle').value.trim());
   fd.append('text', $('rqText').value); fd.append('description', $('rqDesc').value);
@@ -6448,6 +6503,7 @@ async function saveReqDlg() {
   for (const f of $('rqFiles').files) fd.append('files', f);
   if (!$('rqTitle').value.trim()) return toast('请填写需求标题', 'warn');
   if (!$('rqText').value.trim() && !$('rqFiles').files.length && !$('rqUrls').value.trim()) return toast('请粘贴需求原文、上传文件或填写链接', 'warn');
+  if (!force && $('rqFiles').files.length && await showReqDupDlg()) return;   // 同项目已有同名附件的需求：先问是新版本还是重复导入
   const btn = $('rqSaveBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 解析中';
   try {
     const r = await api('/api/v1/requirements', {method:'POST', body: fd});
@@ -6493,8 +6549,8 @@ async function _renderRequirementDetail__impl() {
   const attRows = r.attachments.map(a => `<tr>
     <td>${a.stored?`<a onclick="downloadFile(${jsq('/api/v1/requirements/'+r.req_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a>`:esc(a.filename)}${a.source_url?`<div class="hint" style="word-break:break-all"><span class="tag">链接</span> <a href="${esc(a.source_url)}" target="_blank" rel="noopener">${esc(a.source_url.length>70?a.source_url.slice(0,70)+'…':a.source_url)}</a></div>`:''}</td>
     <td class="hint">${a.size?(a.size/1024).toFixed(1)+' KB':'—'}</td>
-    <td>${a.parsing?`<span class="st candidate">${a.source_url&&!a.stored?'抓取中':'解析中'}</span> <span class="spin"></span><div class="hint">${a.source_url?'链接下载与解析在后台进行':'PDF 提取 / 图片理解在后台进行'}，可离开页面</div>`:a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>${a.check?(a.check.ok?`<div class="hint" title="每页去掉脚本 / 样式 / 注释后的整页文字字符多重集，减去按控件提取的行，差集为空即没有漏字（与控件解析相互独立）">自校验 ✓ 0 缺字（${(a.check.pages||[]).length} 页）</div>`:`<div class="hint" style="color:var(--danger)" title="${esc((a.check.pages||[]).filter(p=>p.missing||p.error).map(p=>`${p.page}：${p.error||('缺 '+p.missing+' 字 '+(p.missing_chars||''))}`).join('\n'))}">自校验 ⚠ 缺 ${a.check.missing} 字，见底稿核对</div>`):''}${a.warning?`<div class="hint" style="color:var(--warn)">⚠ ${esc(a.warning)}</div>`:''}`:`<span class="st rejected">${a.source_url&&!a.stored?'抓取失败':'解析失败'}</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
-    <td style="white-space:nowrap">${a.parsed?`<button class="btn ghost sm" onclick="openAttText('${a.att_id}')" title="按文档格式查看解析全文（表格、流程图树、独立区域）">查看解析</button> `:''}${canEdit&&(a.stored||a.source_url)&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">${a.source_url&&!a.stored?'重新抓取':'重新解析'}</button>`:''}</td>
+    <td>${a.parsing?`<span class="st candidate">${a.source_url&&!a.stored?'抓取中':'解析中'}</span> <span class="spin"></span><div class="hint">${a.source_url?'链接下载与解析在后台进行':'PDF 提取 / 图片理解在后台进行'}，可离开页面</div>`:a.parsed?`${a.vision&&a.vision.failed?`<span class="st candidate" title="内嵌图片 ${a.vision.total} 张：识图成功 ${a.vision.done}、失败 ${a.vision.failed}、小图跳过 ${a.vision.skipped||0}">部分解析</span>`:'<span class="st approved">已解析</span>'} <span class="hint">${a.chars} 字</span>${a.check?(a.check.ok?`<div class="hint" title="每页去掉脚本 / 样式 / 注释后的整页文字字符多重集，减去按控件提取的行，差集为空即没有漏字（与控件解析相互独立）">自校验 ✓ 0 缺字（${(a.check.pages||[]).length} 页）</div>`:`<div class="hint" style="color:var(--danger)" title="${esc((a.check.pages||[]).filter(p=>p.missing||p.error).map(p=>`${p.page}：${p.error||('缺 '+p.missing+' 字 '+(p.missing_chars||''))}`).join('\n'))}">自校验 ⚠ 缺 ${a.check.missing} 字，见底稿核对</div>`):''}${a.warning?`<div class="hint" style="color:var(--warn)">⚠ ${esc(a.warning)}</div>`:''}`:`<span class="st rejected">${a.source_url&&!a.stored?'抓取失败':'解析失败'}</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
+    <td style="white-space:nowrap">${a.parsed?`<button class="btn ghost sm" onclick="openAttText('${a.att_id}')" title="按文档格式查看解析全文（表格、流程图树、独立区域）">查看解析</button> `:''}${canEdit&&(a.stored||a.source_url)&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">${a.source_url&&!a.stored?'重新抓取':'重新解析'}</button>`:''}${canEdit&&!a.parsing?` <button class="btn ghost sm danger" onclick="deleteReqAtt('${a.att_id}', ${jsq(a.filename||'')})" title="删掉这个附件（换新版本文档时先删旧的再追加）">删除</button>`:''}</td>
     <td class="hint" style="white-space:pre-wrap;max-width:420px">${a.parsed?esc((a.preview||'').slice(0,300))+((a.preview||'').length>300?'…':''):''}</td></tr>`).join('');
   const rawTab = `<div class="section-t">需求原文<span class="hint">（永久保留，AI 结果不覆盖）</span></div>
     <pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:420px;overflow:auto;font:inherit">${esc(r.raw_text||'（原文来自附件）')}</pre>
@@ -6515,11 +6571,11 @@ async function _renderRequirementDetail__impl() {
     ${canEdit?`<div class="toolbar" style="margin-bottom:10px"><input type="text" id="rqNewQ" placeholder="人工补充一条待确认事项…" style="flex:1"><input type="text" id="rqNewQModule" list="rqQModules" placeholder="所属模块（可选）" style="width:170px" title="问题属于哪个页面 / 模块，如「活动列表-基本配置」"><datalist id="rqQModules">${[...new Set(qs.map(q=>q.module).filter(Boolean))].map(m=>`<option value="${esc(m)}">`).join('')}</datalist><select id="rqNewQLevel" style="width:110px"><option value="must">必须确认</option><option value="suggest">建议确认</option></select><button class="btn ghost sm" onclick="addReqQuestion()">添加</button></div>`:''}
     ${qs.length?`<div class="tbl-wrap"><table><tr><th style="width:36px">#</th><th>问题</th><th style="width:150px">模块</th><th style="width:96px">等级</th><th style="width:90px">状态</th><th>确认结论</th><th style="width:120px">确认人</th><th style="width:150px">操作</th></tr>
       ${qs.map((q,i)=>`<tr>
-        <td class="hint">${i+1}</td><td>${esc(q.question)}${q.source==='manual'?' <span class="tag">人工</span>':''}${q.kind==='unverified'?' <span class="tag" style="background:var(--danger-bg);color:var(--danger)">原文核验降级</span>':q.kind==='review'?' <span class="tag">复核补充</span>':''}${q.reason?`<div class="hint">${esc(q.reason)}</div>`:''}${(q.level||'must')==='suggest'&&q.status==='open'?`<div class="hint">不确认时假设：${esc(q.assumption||'按行业惯例处理')}</div>`:''}</td>
+        <td class="hint">${i+1}</td><td>${esc(q.question)}${q.source==='manual'?' <span class="tag">人工</span>':''}${q.kind==='unverified'?' <span class="tag" style="background:var(--danger-bg);color:var(--danger)">原文核验降级</span>':q.kind==='review'?' <span class="tag">复核补充</span>':''}${q.inherited?` <span class="tag" title="同项目需求「${esc(q.inherited.title||'')}」已确认过同一问题（当时问法：${esc(q.inherited.question||'')}），结论直接沿用；不对就「重新打开」再答">沿用「${esc(q.inherited.title||'')}」</span>`:''}${q.reason?`<div class="hint">${esc(q.reason)}</div>`:''}${q.status==='open'&&q.suggested?`<div class="hint" title="问法相近但没到自动沿用的门槛（或数字不同），只作参考：结论已预填，点「确认」才算">历史结论参考（「${esc(q.suggested.title||'')}」：${esc(q.suggested.question||'')}）→ ${esc(q.suggested.answer||'')}</div>`:''}${(q.level||'must')==='suggest'&&q.status==='open'?`<div class="hint">不确认时假设：${esc(q.assumption||'按行业惯例处理')}</div>`:''}</td>
         <td>${q.module?`<span class="tag" title="${esc(q.ref?`出处：${q.ref}`:'所属页面 / 模块')}">${esc(q.module)}</span>`:'<span class="hint" title="整体性问题，或模型 / 章节号都没定到模块">—</span>'}</td>
         <td>${(q.level||'must')==='must'?'<span class="tag" style="background:var(--danger-bg);color:var(--danger)">必须确认</span>':'<span class="tag">建议确认</span>'}${canEdit&&q.status==='open'?`<div><a class="hint" onclick="setReqQuestionLevel('${q.q_id}','${(q.level||'must')==='must'?'suggest':'must'}')">${(q.level||'must')==='must'?'降为建议':'升为必须'}</a></div>`:''}</td>
         <td>${q.status==='open'?'<span class="st rejected">待确认</span>':'<span class="st approved">已确认</span>'}</td>
-        <td>${q.status==='open'?(canEdit?`<input type="text" id="qa-${q.q_id}" placeholder="填写确认结论（产品/开发口径）" style="width:100%;box-sizing:border-box">`:'<span class="hint">—</span>'):esc(q.answer)}</td>
+        <td>${q.status==='open'?(canEdit?`<input type="text" id="qa-${q.q_id}" placeholder="填写确认结论（产品/开发口径）" style="width:100%;box-sizing:border-box" value="${esc((q.suggested||{}).answer||'')}">`:'<span class="hint">—</span>'):esc(q.answer)}</td>
         <td class="hint">${q.status==='open'?'':`${esc(q.by||'')}<div>${esc(fmtTime(q.at))}</div>`}</td>
         <td><div class="rowops">${canEdit?(q.status==='open'?`${q.key&&q.text?`<button class="btn ghost sm" onclick="adoptReqQuestion('${q.q_id}')" title="确认该条成立：采纳回「${esc((r.analysis_labels||{})[q.key]||q.key)}」并记为已确认">采纳</button>`:''}<button class="btn sm" onclick="answerReqQuestion('${q.q_id}')">确认</button>`:`<button class="btn ghost sm" onclick="answerReqQuestion('${q.q_id}',true)">重新打开</button>`):''}</div></td></tr>`).join('')}
     </table></div>`:'<div class="empty">暂无待确认事项</div>'}
@@ -6580,6 +6636,11 @@ async function doMerge() {
   const into = $('mergeInto').value; if (!into) return;
   if (!await uiConfirm('合并需求', '合并后本需求进入回收站，任务与附件归到目标需求。继续？', true)) return;
   try { const r = await jpost(`/api/v1/requirements/${curReq}/merge`, {into}); $('mergeDlg').close(); toast(`已合并到「${r.title}」`, 'ok'); openRequirement(into); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function deleteReqAtt(attId, name) {
+  if (!await uiConfirm(`删除附件「${name}」？`, '原文与其他附件不动；整理稿与分析会按输入变化标为过期，重新提取时底稿里人工收录 / 排除过的句子按原句沿用。', true)) return;
+  try { await api(`/api/v1/requirements/${curReq}/attachments/${attId}`, {method:'DELETE'}); toast('附件已删除', 'ok'); renderRequirementDetail(); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function uploadReqAtt(input) {

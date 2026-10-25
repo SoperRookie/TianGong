@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     requirement_extract_model: str = ""
     requirement_extract_crosscheck: bool = True   # 提取最后整稿交叉核对（跨页面矛盾、疑似遗留草稿），多一次模型调用
     analysis_eval_auto_sample: bool = True
+    # 经验延伸：拆解测试点之后再调一次模型，按资深测试经验补需求没写到的场景（并发 / 中断 / 跨天 / 越权 / 脏数据），
+    # 条目标「经验延伸」并带依据、待审核；关掉则只在测试点页手动点「经验延伸」时跑
+    point_extension: bool = True
 
     # 历史用例复用提示阈值（需求二十九）：向量相似度达到该值提示「高度相关，可复用」
     reuse_hint_score: float = 0.78

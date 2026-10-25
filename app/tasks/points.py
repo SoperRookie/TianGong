@@ -154,7 +154,7 @@ def normalize_points(modules: list[dict]) -> list[dict]:
                     item["ref"] = ref
                 # 保留实体字段（已实体化的测试点二次归一化时不丢状态）
                 for key in ("tp_id", "status", "locked", "comment", "reject_count", "source", "warnings",
-                            "version", *REJECT_FIELDS):
+                            "version", "basis", *REJECT_FIELDS):
                     if key in p:
                         item[key] = p[key]
                 points.append(item)
@@ -341,7 +341,8 @@ def confirmable_points(modules: list[dict]) -> list[dict]:
         wanted = [
             {"point": p["point"], "dimension": p.get("dimension", ""),
              **({"tp_id": p["tp_id"]} if p.get("tp_id") else {}),
-             **({"ref": p["ref"]} if p.get("ref") else {})}
+             **({"ref": p["ref"]} if p.get("ref") else {}),
+             **({"basis": p["basis"]} if p.get("basis") else {})}
             for p in entry["points"]
             if (p.get("status") == "approved" if any_approved else p.get("status") != "rejected")
         ]
@@ -350,7 +351,7 @@ def confirmable_points(modules: list[dict]) -> list[dict]:
     return result
 
 
-AI_SOURCES = ("ai", "gap", "supplement", "ai_fix")
+AI_SOURCES = ("ai", "gap", "supplement", "ai_fix", "derived")   # derived：经验延伸（需求之外、带依据）
 
 
 def add_points(modules: list[dict], additions: list[dict], source: str, seq_floor: int = 0,
@@ -376,6 +377,7 @@ def add_points(modules: list[dict], additions: list[dict], source: str, seq_floo
             "tp_id": f"TP{seq:03d}", "point": text,
             "dimension": str(item.get("dimension", "")).strip(),
             **({"ref": ref} if (ref := point_ref(item)) else {}),
+            **({"basis": basis} if (basis := str(item.get("basis") or "").strip()) else {}),
             "status": "pending", "locked": False, "comment": "",
             "reject_count": 0, "source": source, "version": 1,
             "warnings": coarse_warnings(text),

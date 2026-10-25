@@ -42,7 +42,8 @@ def _points_view(modules: list[dict]) -> list[dict]:
         {
             "module": e.get("module", ""),
             "points": [
-                {"tp_id": p.get("tp_id", ""), "point": p.get("point", ""), "dimension": p.get("dimension", "")}
+                {"tp_id": p.get("tp_id", ""), "point": p.get("point", ""), "dimension": p.get("dimension", ""),
+                 **({"basis": p["basis"]} if p.get("basis") else {})}
                 for p in e.get("points", [])
             ],
         }

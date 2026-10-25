@@ -10,7 +10,7 @@ import re
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app.agents.graph import analyze_requirement, build_graph, outline_requirement
+from app.agents.graph import analyze_requirement, apply_extensions, build_graph, extend_points, outline_requirement
 from app.agents.state import MAX_REVIEW_ROUNDS
 from app.agents.prompts import wrap_data
 from app.config import get_settings
@@ -104,28 +104,60 @@ async def _verify_chunk_blind_spots(
     return kept, resolved, trace
 
 
+def _extend_enabled(extend: bool | None) -> bool:
+    return get_settings().point_extension if extend is None else bool(extend)
+
+
+async def _analyze_and_extend(
+    llm: LLMClient, requirement: str, model: str | None, extend: bool | None, knowledge_cases: str | None = None, **kw,
+) -> dict:
+    """拆解明文测试点，再按资深测试经验补需求没写到的场景（经验延伸，`point_extension` 开关 / 参数 extend 控制）。
+
+    延伸是独立的第二次调用：明文拆解只认需求原文、宁多勿漏，延伸只补需求之外、条数受限、每条带依据，两边职责分开
+    模型才不会把「需求里有」和「经验上该测」混成一团。延伸点以 source=derived 追加进对应模块；延伸故障只丢延伸，
+    明文测试点照常返回。analysis["trace"] 记两步各自的模型。
+    """
+    analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases, **kw)
+    trace = [{"agent": "需求分析", "model": analysis["model_name"], **({"empty": True} if analysis.get("empty") else {})}]
+    if _extend_enabled(extend) and analysis["test_points"]:
+        try:
+            ext = await extend_points(llm, requirement, analysis["test_points"], model,
+                                      knowledge_cases=knowledge_cases, req_title=kw.get("req_title"))
+            added = apply_extensions(analysis["test_points"], ext["additions"])
+            analysis["extension"] = {"added": added, "skipped": ext["skipped"], "model_name": ext["model_name"]}
+            trace.append({"agent": "经验延伸", "model": ext["model_name"], "added": added, "skipped": len(ext["skipped"])})
+        except Exception as e:  # 延伸是锦上添花：故障不影响明文测试点
+            logger.warning("经验延伸故障，跳过（明文测试点不受影响）：{}", e)
+            analysis["extension"] = {"error": str(e)}
+            trace.append({"agent": "经验延伸", "error": str(e)})
+    analysis["trace"] = trace
+    return analysis
+
+
 async def run_analysis(
     requirement: str,
     llm: LLMClient,
     model: str | None = None,
     chunk_max_chars: int | None = None,
     knowledge_cases: str | None = None,
+    extend: bool | None = None,
 ) -> AnalysisResult:
     """仅执行需求分析（拆解确认流程 F-3-3 第一阶段）；超长需求分片并行拆解后合并。
 
     knowledge_cases：历史用例知识（知识管家在拆解阶段注入，覆盖度查漏）。
+    extend：拆解后是否再做经验延伸（None 取配置 point_extension）；分片模式各片拆完各自延伸。
     """
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     requirement = clean_manual_sections(requirement)   # 「人工收录」小节去样例留规则、并入所在页面（模型会整节跳过）
     chunks, titles = requirement_chunks(requirement, chunk_max_chars)
     if len(chunks) == 1:
-        a = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
+        a = await _analyze_and_extend(llm, requirement, model, extend, knowledge_cases=knowledge_cases)
         return AnalysisResult(test_points=a["test_points"], blind_spots=a["blind_spots"],
                               blind_spot_refs=a.get("blind_spot_refs") or {},
-                              trace=[{"agent": "需求分析", "model": a["model_name"]}])
+                              trace=a["trace"])
     outline = await _outline_for(llm, requirement, chunks, model)
     analyses = await gather_or_cancel(
-        [analyze_requirement(llm, chunk, model, knowledge_cases=knowledge_cases, outline=outline,
+        [_analyze_and_extend(llm, chunk, model, extend, knowledge_cases=knowledge_cases, outline=outline,
                              chunk_no=i, chunk_total=len(chunks), allow_empty=len(chunks) > 1, req_title=title)
          for i, (chunk, title) in enumerate(zip(chunks, titles), 1)]
     )
@@ -142,7 +174,7 @@ async def run_analysis(
             module_points.setdefault(str(tp.get("module", "")), []).extend(tp.get("points", []))
         blind_spots.extend(b for b in a["blind_spots"] if b not in blind_spots)
         blind_spot_refs.update(a.get("blind_spot_refs") or {})
-        trace.append({"chunk": i, "agent": "需求分析", "model": a["model_name"], **({"empty": True} if a.get("empty") else {})})
+        trace.extend({"chunk": i, **t} for t in a["trace"])
     blind_spots, resolved, extra = await _verify_chunk_blind_spots(llm, chunks, blind_spots, model)
     from app.tasks.points import dedupe_module_points
 
@@ -175,6 +207,7 @@ async def run_generation(
     checkpoint: dict | None = None,
     on_module_done=None,
     on_analysis=None,
+    extend: bool | None = None,
 ) -> GenerationResult:
     """执行「拆解 → 生成 → 评审（≤3 轮回环）」全流程。
 
@@ -188,10 +221,12 @@ async def run_generation(
     knowledge_refs / knowledge_cases：知识管家产出的分类知识（F-7-6 差异化注入时机）。
     memory_notes：用户偏好与项目记忆（F-8-7），独立预算注入生成 Agent。
     on_analyzed：拆解完成回调（任务进度上报用，F-6-2）。
+    extend：直接生成模式下拆解后是否做经验延伸（None 取配置 point_extension）；已确认测试点的路径不再延伸。
     """
     kw = {"knowledge_refs": knowledge_refs, "knowledge_cases": knowledge_cases,
           "memory_notes": memory_notes, "rule_notes": rule_notes}
     ck = {"checkpoint": checkpoint, "on_module_done": on_module_done}
+    ag = {"extend": extend}
     if test_points:
         return await _run_from_points(
             requirement, llm, model, reviewer_model, template, test_points, **kw, **ck
@@ -203,7 +238,7 @@ async def run_generation(
     if len(chunks) == 1:
         return await _analyze_then_generate(
             requirement, llm, model, reviewer_model, template, on_analyzed=on_analyzed,
-            on_analysis=on_analysis, **kw, **ck
+            on_analysis=on_analysis, **kw, **ck, **ag
         )
 
     logger.info("需求 {} 字超过分片阈值，切分为 {} 片并行处理", len(requirement), len(chunks))
@@ -211,7 +246,7 @@ async def run_generation(
     outcomes = await asyncio.gather(
         *[
             _analyze_then_generate(chunk, llm, model, reviewer_model, template, on_analyzed=on_analyzed,
-                                   outline=outline, chunk_no=i, chunk_total=len(chunks), req_title=title, **kw,
+                                   outline=outline, chunk_no=i, chunk_total=len(chunks), req_title=title, **kw, **ag,
                                    **_chunk_checkpoint(checkpoint, on_analysis, on_module_done, i))
             for i, (chunk, title) in enumerate(zip(chunks, titles), 1)
         ],
@@ -264,6 +299,7 @@ async def _analyze_then_generate(
     chunk_no: int = 0,
     chunk_total: int = 0,
     req_title: str | None = None,
+    extend: bool | None = None,
 ) -> GenerationResult:
     """先拆解，再按模块并行生成（PRD 4.1a 生成 Agent 多实例）。
 
@@ -278,11 +314,11 @@ async def _analyze_then_generate(
         logger.info("断点续跑：复用已保存的拆解结果（{} 个模块）", len(analysis["test_points"]))
     else:
         if chunk_total > 1:
-            analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases,
+            analysis = await _analyze_and_extend(llm, requirement, model, extend, knowledge_cases=knowledge_cases,
                                                  outline=outline, chunk_no=chunk_no, chunk_total=chunk_total,
                                                  allow_empty=True, req_title=req_title)
         else:
-            analysis = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
+            analysis = await _analyze_and_extend(llm, requirement, model, extend, knowledge_cases=knowledge_cases)
         if not analysis["test_points"]:  # 分片不含可测内容：本片无产出，不进生成
             return GenerationResult(cases=[], passed=True, review_rounds=0, blind_spots=analysis["blind_spots"],
                                     trace=[{"agent": "需求分析", "model": analysis["model_name"], "empty": True}])

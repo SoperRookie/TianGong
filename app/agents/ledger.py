@@ -33,6 +33,7 @@ _VISION_SECTIONS = ("图片类型与整体说明", "界面元素清单", "交互
 _IMG_TEXT_HEAD = re.compile(r"^#{1,6}\s*图中文字原文")
 _BULLET = re.compile(r"^[\-•·*]\s+")
 _PARSER_NOTE = re.compile(r"^共 \d+ 个页面，按站点地图顺序")   # Axure 解析器自己写的说明行，不是产品原文
+_IMG_NOTE = re.compile(r"^[（(]?\[\[图片:\d+\]\] ?(解析失败|为装饰性小图)")   # 识图失败 / 小图跳过的占位说明：程序写的，不进底稿
 FLOW_BEGIN, FLOW_END = "【流程图 ", "【流程图结束】"   # 解析器从流程框 + 连接线还原的流程块：派生内容，各框的文字已是单元，块内行不再记
 _CJK = re.compile(r"[一-鿿]")
 _HEADING_TAIL = re.compile(r"[:：]\s*$")
@@ -135,7 +136,7 @@ def build_units(materials: str) -> list[dict]:
             for k in [k for k in stack if k > lv]:
                 del stack[k]
             continue
-        if not s or s.startswith(("[[图片", "```", "|---", ">")) or _PARSER_NOTE.match(s):
+        if not s or s.startswith(("[[图片", "```", "|---", ">")) or _PARSER_NOTE.match(s) or _IMG_NOTE.match(s):
             continue
         if _MARK_LINE.match(s):
             if in_img and not img_file and s.startswith("【说明"):
@@ -371,6 +372,51 @@ def account(units: list[dict], draft_text: str, decisions: dict | None = None) -
                 st["review_open"] += 1
         out.append(row)
     return {"units": out, "stats": stats, "image": img}
+
+
+INHERIT_MIN_OVERLAP = 0.6   # 另一条需求的材料与本需求的原文单元重合到这个比例以上，才沿用它的人工底稿决定
+
+
+def human_decisions(ex: dict, units: list[dict]) -> dict:
+    """一版整理稿里**人**做过的底稿决定，按原句键（unit_key）归类，供换版 / 同材料的另一条需求沿用：
+    include = 底稿核对里人工按原句收进来的条目（modules 里 manual=True）；exclude = 人工排除（decisions by=user）；
+    checked = 模型排除的需复核句人已看过。units 是该版材料的单元清单，用来把 decisions 里的编号换成原句；
+    模型 / 程序自己的判定不算人的决定，不沿用（新一版模型自己会判）。"""
+    by_uid = {x: u for u in units for x in u["uids"]}
+    out: dict[str, dict] = {"include": {}, "exclude": {}, "checked": {}}
+    for m in ex.get("modules") or []:
+        for it in m["items"]:
+            if it.get("manual") and it.get("text"):
+                out["include"][unit_key(it["text"])] = {"text": it["text"], "who": (it.get("review") or {}).get("by")}
+    for uid, d in ((ex.get("ledger") or {}).get("decisions") or {}).items():
+        u = by_uid.get(uid)
+        if u is None or not isinstance(d, dict):
+            continue
+        key = unit_key(u["text"])
+        if d.get("by") == BY_USER:
+            out["exclude"][key] = {"r": d.get("r") or "人工排除", "who": d.get("who")}
+        elif d.get("checked"):
+            out["checked"][key] = dict(d["checked"])
+    return out
+
+
+def has_human_decisions(ex: dict | None) -> bool:
+    """这版整理稿里有没有人做过的底稿决定（没有就不必为它算单元重合度）。"""
+    if not ex:
+        return False
+    if any(it.get("manual") for m in ex.get("modules") or [] for it in m["items"]):
+        return True
+    return any(isinstance(d, dict) and (d.get("by") == BY_USER or d.get("checked"))
+               for d in ((ex.get("ledger") or {}).get("decisions") or {}).values())
+
+
+def unit_overlap(units: list[dict], other: list[dict]) -> float:
+    """本需求原文单元里有多大比例在另一份材料里逐字出现（图中文字单元不算）。"""
+    mine = {unit_key(u["text"]) for u in units if u["kind"] == KIND_SOURCE}
+    if not mine:
+        return 0.0
+    theirs = {unit_key(u["text"]) for u in other if u["kind"] == KIND_SOURCE}
+    return len(mine & theirs) / len(mine)
 
 
 def todo_units(ledger: dict) -> list[dict]:

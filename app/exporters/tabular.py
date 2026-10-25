@@ -135,14 +135,15 @@ def export_csv(
 
 # ---- 测试点导出（xlsx）----
 
-_POINT_HEADERS = ["编号", "模块", "测试点", "维度", "需求来源", "来源", "状态", "审核意见", "驳回类型", "已生成用例", "覆盖用例编号"]
-_POINT_SOURCE = {"ai": "AI 拆解", "gap": "查漏新增", "supplement": "AI 补充", "manual": "人工", "ai_fix": "修改新增", "blind_spot": "盲区转入"}
+_POINT_HEADERS = ["编号", "模块", "测试点", "维度", "需求来源", "来源", "状态", "审核意见", "驳回类型", "已生成用例", "覆盖用例编号", "延伸依据"]
+_POINT_SOURCE = {"ai": "AI 拆解", "gap": "查漏新增", "supplement": "AI 补充", "manual": "人工", "ai_fix": "修改新增", "blind_spot": "盲区转入",
+                 "derived": "经验延伸"}
 _POINT_STATUS = {"pending": "待审核", "approved": "已通过", "rejected": "已驳回"}
 
 
 def export_points_excel(modules: list[dict], path: str | Path, case_links: dict[str, list[str]] | None = None,
                         generated: set[str] | None = None, approved_only: bool = False) -> Path:
-    """测试点 → Excel：编号 / 模块 / 测试点 / 维度 / 来源 / 状态 / 审核意见 / 驳回类型 / 是否已生成用例 / 覆盖的用例编号。"""
+    """测试点 → Excel：编号 / 模块 / 测试点 / 维度 / 来源 / 状态 / 审核意见 / 驳回类型 / 是否已生成用例 / 覆盖的用例编号 / 延伸依据（经验延伸点为什么要测）。"""
     path = Path(path)
     case_links = case_links or {}
     generated = generated or set()
@@ -166,7 +167,7 @@ def export_points_excel(modules: list[dict], path: str | Path, case_links: dict[
                    str(p.get("ref") or ""), _POINT_SOURCE.get(p.get("source", "ai"), str(p.get("source", ""))),
                    _POINT_STATUS.get(p.get("status", "pending"), str(p.get("status", ""))),
                    str(p.get("comment") or ""), "、".join(p.get("reject_types") or []),
-                   "是" if (tp in generated or linked) else "否", "、".join(linked)]
+                   "是" if (tp in generated or linked) else "否", "、".join(linked), str(p.get("basis") or "")]
             ws.append([safe_cell(v) for v in row])
             for cell in ws[ws.max_row]:
                 cell.data_type = "s"
