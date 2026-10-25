@@ -2745,8 +2745,9 @@ function renderOverview(t) {
   const qi = [];
   (r && r.unresolved || []).forEach(u =>
     qi.push(`<div class="qi"><span class="tag" style="color:var(--warn)">评审</span><span><b>${esc(u.case_id)}</b> ${esc(u.problem)}</span></div>`));
-  ((t.quality||{})['疑似重复用例对']||[]).forEach(p =>
-    qi.push(`<div class="qi"><span class="tag">重复</span><span>${esc(p.a)}「${esc(p.a_title)}」≈ ${esc(p.b)}「${esc(p.b_title)}」（${p.similarity}）</span></div>`));
+  const judgedCases = (t.case_dup_pairs||[]).filter(p=>p.status==='open');
+  (judgedCases.length ? judgedCases : ((t.quality||{})['疑似重复用例对']||[])).forEach(p =>
+    qi.push(`<div class="qi"><span class="tag">${esc(p.verdict||'重复')}</span><span>${esc(p.a)}「${esc(p.a_title)}」≈ ${esc(p.b)}「${esc(p.b_title)}」（${p.similarity}${p.verdict?'':'，待 AI 复核'}）</span></div>`));
   (t.blind_spots||[]).forEach(b =>
     qi.push(`<div class="qi"><span class="tag" style="color:var(--purple)">盲区</span><span>${esc(b.text)}${b.status!=='open'?` <span class="tag">${esc(BS_STATUS[b.status]||b.status)}</span>`:''}</span></div>`));
   (t.memories||[]).forEach(m =>
@@ -2912,6 +2913,7 @@ function renderPointWorkbench(t) {
   const rejected = pts.filter(p=>p.status==='rejected').length;
   const pending = pts.length - approved - rejected;
   const derivedCnt = pts.filter(p=>p.source==='derived').length;
+  const aiReviewCnt = pts.filter(p=>p.ai_review).length;
   const confirmable = t.status === 'awaiting_confirmation';
   const pendingGen = t.points_pending_generation || [];
   const generatedIds = new Set((t.context||{}).generated_tp_ids || []);
@@ -2929,7 +2931,7 @@ function renderPointWorkbench(t) {
   if (ptSub === 'dup') return sub + renderDupPairs(t, confirmable);
 
   // 测试点列表：按模块 / 状态筛选后分页，页内保留模块分组行
-  const filtered = pts.filter(p => (!ptModule || p.module === ptModule) && (!ptStatus || p.status === ptStatus));
+  const filtered = pts.filter(p => (!ptModule || p.module === ptModule) && (!ptStatus || (ptStatus === 'ai_review' ? !!p.ai_review : p.status === ptStatus)));
   const pages = Math.max(1, Math.ceil(filtered.length / ptSize));
   if (ptPage > pages) ptPage = pages;
   const pageItems = filtered.slice((ptPage - 1) * ptSize, ptPage * ptSize);
@@ -2940,6 +2942,7 @@ function renderPointWorkbench(t) {
         <td style="width:150px">${modTag(p.module)}</td>
         <td>${esc(p.point)}
           ${p.basis?`<div class="hint" style="color:var(--purple)" title="经验延伸：为什么要测">依据：${esc(p.basis)}</div>`:''}
+          ${p.ai_review?`<div class="hint" style="color:var(--danger)" title="${esc(p.ai_review.quote?'原文：'+p.ai_review.quote:'独立评审 Agent 的意见，不改动测试点；通过 / 驳回 / 修改后撤掉')}">AI 评审·${esc(p.ai_review.verdict)}${p.ai_review.unverified?'（引文未核验）':''}：${esc(p.ai_review.fix||p.ai_review.note||'')}${p.ai_review.fix&&p.ai_review.note?`<span class="hint">（${esc(p.ai_review.note)}）</span>`:''}${canEditPt&&p.ai_review.fix&&!['UI 外观','超出需求','维度不符'].includes(p.ai_review.verdict)?` <a onclick="pointModify(${jsq(p.tp_id)}, ${jsq(p.ai_review.fix)})" title="打开修改框，预填 AI 建议的写法">按建议修改</a>`:''}</div>`:''}
           ${(p.warnings||[]).map(w=>`<div class="hint" style="color:var(--warn)">⚠ ${esc(w)}</div>`).join('')}
           ${editingHint('point', p.tp_id)}
           ${rejectInfoLine(p)}</td>
@@ -2975,18 +2978,20 @@ function renderPointWorkbench(t) {
       <select style="width:180px" onchange="ptSet('module', this.value)"><option value="">全部模块</option>
         ${modules.map(m=>`<option value="${esc(m.module)}" ${ptModule===m.module?'selected':''}>${esc(m.module)}（${(m.points||[]).length}）</option>`).join('')}</select>
       <select style="width:110px" onchange="ptSet('status', this.value)"><option value="">全部状态</option>
-        ${Object.entries(pStatusText).map(([k,v])=>`<option value="${k}" ${ptStatus===k?'selected':''}>${v}</option>`).join('')}</select>
+        ${Object.entries(pStatusText).map(([k,v])=>`<option value="${k}" ${ptStatus===k?'selected':''}>${v}</option>`).join('')}
+        ${aiReviewCnt?`<option value="ai_review" ${ptStatus==='ai_review'?'selected':''}>有 AI 评审意见（${aiReviewCnt}）</option>`:''}</select>
       ${ptModule||ptStatus?`<span class="hint">筛选出 ${filtered.length} 条</span>`:''}
     </div>` : '';
 
   return sub + `<div class="toolbar" style="margin-top:0">
-      <span class="hint">共 ${pts.length} 条 · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b>${derivedCnt?` · 经验延伸 <b style="color:var(--purple)" title="需求没写、按资深测试经验补的场景">${derivedCnt}</b>`:''}</span>
+      <span class="hint">共 ${pts.length} 条 · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b>${derivedCnt?` · 经验延伸 <b style="color:var(--purple)" title="需求没写、按资深测试经验补的场景">${derivedCnt}</b>`:''}${aiReviewCnt?` · <a onclick="ptSet('status','ai_review')" title="独立评审 Agent 标出的硬伤：合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符">AI 评审意见 <b style="color:var(--danger)">${aiReviewCnt}</b></a>`:''}</span>
       <div class="seg">
         <button class="${pointView==='table'?'on':''}" onclick="pointView='table';renderDetail()">表格</button>
         <button class="${pointView==='mind'?'on':''}" onclick="pointView='mind';renderDetail()">脑图</button>
       </div>
       <div style="margin-left:auto;display:flex;gap:8px">
         ${confirmable?`<button class="btn ghost sm" onclick="gapCheck()">查漏补缺</button>
+        <button class="btn ghost sm" onclick="aiReviewPoints()" title="独立评审 Agent 逐条挑硬伤（合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符），意见标到待审核的条目上，不改动测试点；拆解时已自动跑过一遍">AI 评审</button>
         <button class="btn ghost sm" onclick="extendPoints()" title="按资深测试经验补需求没写到的场景（并发 / 中断 / 跨天 / 越权 / 脏数据），只新增、待审核、每条带依据；拆解时已自动跑过一遍，这里是再补一轮">经验延伸</button>
         <button class="btn ghost sm" onclick="dupCheck()">重复检查</button>
         <button class="btn ghost sm" onclick="supplementPoints()">AI 补充</button>
@@ -3406,12 +3411,12 @@ async function pointReject(tp) {
   const rj = await askReject('驳回测试点' + (pointModuleOf(tp) ? '（' + pointModuleOf(tp) + '）' : ''), tp, {kind:'point'});
   if (rj) pointsReview([{tp_id:tp, action:'reject', ...rj}]);
 }
-async function pointModify(tp) {
+async function pointModify(tp, prefill) {
   const p = allPoints(currentTask).find(x=>x.tp_id===tp);
   jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'start'})
     .then(d => { if (d.holder) toast(`${d.holder.by} 正在编辑此测试点，注意保存冲突`, 'warn'); })
     .catch(()=>{});
-  const v = await askPoint('修改测试点 ' + tp + (p&&p.module ? '（' + p.module + '）' : ''), {point: p?p.point:'', dimension: p?p.dimension:'', ref: p?p.ref:''});
+  const v = await askPoint('修改测试点 ' + tp + (p&&p.module ? '（' + p.module + '）' : ''), {point: prefill || (p?p.point:''), dimension: p?p.dimension:'', ref: p?p.ref:''});
   jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'stop'}).catch(()=>{});
   if (v) pointsReview([{tp_id:tp, action:'modify', point:v.point, dimension:v.dimension, ref:v.ref,
                         base_version: (p&&p.version)||1}]);
@@ -3435,6 +3440,15 @@ async function gapCheck() {
     await openTask(currentTask.task_id, true);
     toast(`查漏完成：新增 ${data.added.length} 条待审核测试点（存量不变）`, 'ok');
   } catch (e) { toast('查漏失败：' + e.message, 'err'); }
+}
+async function aiReviewPoints() {
+  toast('AI 评审执行中：逐条挑硬伤…');
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/points/ai-review`, {method:'POST'});
+    if (data.marked) { ptStatus = 'ai_review'; ptPage = 1; }
+    await openTask(currentTask.task_id, true);
+    toast(`AI 评审完成：${data.reviewed} 条送评，${data.marked} 条标出意见${data.failed?`，${data.failed} 批失败`:''}`, data.marked ? 'warn' : 'ok');
+  } catch (e) { toast('AI 评审失败：' + e.message, 'err'); }
 }
 async function extendPoints() {
   toast('经验延伸执行中：按资深测试经验补需求没写到的场景…');
@@ -3576,8 +3590,10 @@ function renderCases(t) {
       <div style="margin-left:auto;display:flex;gap:6px">
         ${canEditCases?`<button class="btn ghost sm" onclick="openManualCaseDlg()">＋ 新建用例</button>
         <button class="btn ghost sm" onclick="openImportDlg()">导入 Excel</button>`:''}
+        ${canEditCases?`<button class="btn ghost sm" onclick="caseDupCheck()" title="文字初筛 + AI 语义裁判：判重复 / 可合并 / 不重复，AI 不删，人工处置">重复检查</button>`:''}
         ${nRejected&&!(t.pending_fix&&t.pending_fix.kind==='cases')?`<button class="btn soft sm" onclick="fixCases()" id="fixCaseBtn">AI 修改驳回用例（${nRejected}）</button>`:''}
       </div></div>
+    ${renderCaseDupPairs(t, canEditCases, canReview)}
     ${t.pending_fix&&t.pending_fix.kind==='cases'?renderFixProposals(t.pending_fix):''}
     ${caseView==='mind' ? renderCaseMind(t, visible) : `<div class="toolbar" style="margin:6px 0 0">${stepsToggleHtml()}<span class="hint">操作步骤 / 预期结果</span></div><div class="tbl-wrap"><table>
       <tr><th><input type="checkbox" class="allck" title="全选本页用例" onclick="checkAll('cck', this.checked, renderBatchBar)"></th>
@@ -3940,6 +3956,46 @@ function renderCaseDiff(d) {
     : `<div class="box"><span class="add">新增 ${esc(x.case_id)}：${esc((x.after||{}).title||'')}</span></div>`).join('')}`;
 }
 
+/* 用例疑似重复：裁判判「重复 / 可合并 / 待复核」的对，人工删一条 / 忽略 / 重开；删除后自动变为已处置 */
+let cdpShowAll = false;
+function renderCaseDupPairs(t, canEdit, canReview) {
+  const items = t.case_dup_pairs || [];
+  if (!items.length) return '';
+  const open = items.filter(p => p.status === 'open');
+  const shown = cdpShowAll ? items : open;
+  const stCls = {open:'pending', ignored:'rejected', resolved:'approved'};
+  const vStyle = v => v==='重复' ? 'background:var(--danger-bg);color:var(--danger)' : v==='可合并' ? 'background:var(--warn-bg,#fff4e0);color:var(--warn,#b36b00)' : '';
+  const rows = shown.map(p => `<tr>
+      <td><b class="cid">${esc(p.a)}</b>${(p.deleted||[]).includes(p.a)?' <span class="tag">已删除</span>':''}<div class="hint">${esc(p.a_title||'')}</div></td>
+      <td><b class="cid">${esc(p.b)}</b>${(p.deleted||[]).includes(p.b)?' <span class="tag">已删除</span>':''}<div class="hint">${esc(p.b_title||'')}</div></td>
+      <td style="width:150px"><span class="tag">相似度 ${p.similarity}</span>${p.verdict?`<div><span class="tag" style="${vStyle(p.verdict)}">${esc(p.verdict)}</span>${p.keep?`<span class="hint"> 建议保留 ${esc(p.keep==='a'?p.a:p.b)}</span>`:''}</div>`:''}</td>
+      <td style="width:240px" class="hint">${p.reason?esc(p.reason):''}${p.merged_title?`<div>合并后标题：${esc(p.merged_title)}</div>`:''}</td>
+      <td style="width:100px"><span class="st ${stCls[p.status]||'pending'}">${esc(DP_STATUS[p.status]||p.status)}</span>${p.note?`<div class="hint">${esc(p.note)}</div>`:''}</td>
+      <td style="width:220px"><div class="rowops" style="flex-wrap:wrap;gap:4px">
+        ${p.status==='open' ? `${canEdit&&canDelete()?`<button class="btn ghost sm" onclick="caseDelete(${jsq(p.a)})">删除 ${esc(p.a)}</button><button class="btn ghost sm" onclick="caseDelete(${jsq(p.b)})">删除 ${esc(p.b)}</button>`:''}
+          ${canReview?`<button class="btn ghost sm" onclick="cdpAct(${jsq(p.key)},'ignore')" title="人工判定不重复或都保留">忽略</button>`:''}`
+        : p.status==='ignored' && canReview ? `<button class="btn ghost sm" onclick="cdpAct(${jsq(p.key)},'reopen')">重开</button>` : ''}
+      </div></td></tr>`).join('');
+  return `<div class="box" style="margin:8px 0">
+    <div class="toolbar" style="margin:0 0 6px"><b>疑似重复用例</b><span class="hint">文字初筛 + AI 语义裁判 · 共 ${items.length} 组 · 待处置 <b style="color:${open.length?'var(--warn)':'var(--ok)'}">${open.length}</b> · 「可合并」= 条件相同只是预期多一项，合并后删另一条</span>
+      <a style="margin-left:auto" onclick="cdpShowAll=!cdpShowAll;renderDetail()">${cdpShowAll?'只看待处置':'看全部'}</a></div>
+    ${shown.length?`<div class="tbl-wrap"><table><tr><th>用例 A</th><th>用例 B</th><th>判定</th><th>原因</th><th>状态</th><th>操作</th></tr>${rows}</table></div>`:'<div class="hint">全部疑似重复已处置</div>'}</div>`;
+}
+async function caseDupCheck() {
+  toast('用例重复检查执行中…');
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/cases/dup-check`, {method:'POST'});
+    await openTask(currentTask.task_id, true);
+    const open = (data.case_dup_pairs||[]).filter(p=>p.status==='open').length;
+    toast(open ? `文字初筛 ${data.candidates} 对，AI 判出 ${open} 组需处置` : data.candidates ? `文字初筛 ${data.candidates} 对，AI 复核均不重复` : '未发现疑似重复用例', open?'warn':'ok');
+  } catch (e) { toast('重复检查失败：' + e.message, 'err'); }
+}
+async function cdpAct(key, action) {
+  try {
+    await jpost(`/api/v1/tasks/${currentTask.task_id}/cases/dup-pairs/${encodeURIComponent(key)}`, {action});
+    await openTask(currentTask.task_id, true);
+  } catch (e) { toast('处置失败：' + e.message, 'err'); }
+}
 async function casesReview(items) {
   try {
     const data = await jpost(`/api/v1/tasks/${currentTask.task_id}/review`, {items});

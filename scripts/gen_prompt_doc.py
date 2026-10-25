@@ -52,8 +52,14 @@ META = {
         "人工编写的测试点 + AI 测试点 + 需求", "`{matches, manual_only, ai_only:[{tp_id, reason, valuable}]}`；每条最多匹配一次",
         "评估 AI 覆盖度与遗漏；带 basis 的延伸点按场景合理性判价值。"),
     "point_supplement": ("测试设计 · AI 补充", "`routes.py` `POST .../points/add`（instruction 形态）", "默认",
-        "需求 + 已有测试点 + 用户补充要求", "`{additions:[{module, point, dimension}]}`；`add_points(source=supplement)`，相似跳过",
-        "按用户一句话要求只补新增。**当前默认文本只有一句话，见缺口 G3。**"),
+        "需求 + 已有测试点 + 用户补充要求 + 画像", "`{additions:[{module, point, dimension, ref, reason}]}`；`add_points(source=supplement)`，相似跳过、模块归位；没 ref 的 reason 作「依据」",
+        "只补要求范围内的、宁少勿错；有需求依据写 ref，经验场景写 reason；不复述、不越界、不写 UI。"),
+    "point_review": ("测试设计 · 独立评审", "`quality.run_point_review` ← 拆解后自动 `_run_point_quality_checks`（查漏、查重之后，配置 `TIANGONG_POINT_REVIEW`）/ 手动 `POST .../points/ai-review`；按 `gap_batches` 分批并行", "默认",
+        "本批原文 + 本批待审核的测试点（tp_id / point / dimension / ref / basis）+ 画像", "`{issues:[{tp_id, verdict, fix, note, quote}]}`；只收批内编号与七类判定、一条点一个意见；数值改写 / ref 对不上 / 超出需求的 quote 用 `quote_found` 核验，对不上标 `unverified`；`apply_ai_review` 标到 `p.ai_review`，不改测试点，人处理后撤掉",
+        "宁少勿错，只报七类硬伤（合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符）；不改、不删、不补。"),
+    "case_dup_judge": ("测试设计 · 用例查重", "`quality.run_case_dup_judge` ← 用例页「重复检查」`POST .../cases/dup-check`；`case_duplicate_candidates` 候选按 40 对一批并行", "默认",
+        "候选对（两条用例的模块 / 标题 / 前置 / 步骤 / point_ids）+ 需求前 2000 字", "`{duplicates:[{a, b, verdict: 重复|可合并|不重复, reason, keep, merged_title}]}`；不重复不进列表、没判到待复核、一批故障全待复核；存 `dup_report.cases`，人工删 / 忽略 / 重开",
+        "不同端 / 页面 / 角色 / 状态各验一次是两个对象；等价类不同类不算重复；AI 不删。"),
     "point_fix": ("测试设计 · 测试点驳回修改", "`quality.run_point_fix` ← 「AI 修改驳回项」，产出提案人工逐项确认", "默认",
         "被驳回测试点 + 结构化驳回信息（类型 / 原因 / 修改要求 / 范围）+ 需求", "`{fixes:[{tp_id, comment_type, action: split|modify|delete, point, dimension, split_into, note}], additions}`；`build_point_proposals` 只接受驳回列表内的 tp_id",
         "只处理被驳回项；修改要求优先级最高；按驳回类型选 split / modify / delete。"),
@@ -93,8 +99,8 @@ META = {
 
 ORDER = [
     ("一、需求中心", ["requirement_extract", "requirement_extract_gap", "requirement_extract_crosscheck", "requirement_analysis", "requirement_analysis_review", "analysis_judge"]),
-    ("二、测试设计：拆解与质量闭环", ["requirement_outline", "analyst", "point_extend", "blind_spot_verify", "gap_check", "dup_judge", "point_compare", "point_supplement", "point_fix"]),
-    ("三、测试设计：生成与评审", ["generator", "reviewer", "fix_instruction", "case_fix", "requirement_diff"]),
+    ("二、测试设计：拆解与质量闭环", ["requirement_outline", "analyst", "point_extend", "blind_spot_verify", "gap_check", "dup_judge", "point_review", "point_compare", "point_supplement", "point_fix"]),
+    ("三、测试设计：生成与评审", ["generator", "reviewer", "fix_instruction", "case_dup_judge", "case_fix", "requirement_diff"]),
     ("四、沉淀与知识", ["learning", "profile_extract", "dependency_infer", "vision_image"]),
     ("五、注入块", ["knowledge_cases_block", "knowledge_refs_block", "rules_block", "memory_block", "profile_block"]),
 ]

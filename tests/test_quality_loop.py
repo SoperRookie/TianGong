@@ -1316,3 +1316,128 @@ def test_AI新增测试点模块归到已有模块_裸名与前缀名不再分�
     assert added[0]["module"] == "商户管理后台-新版操作记录-调整说明" and len(mods) == 2
     add_points(mods, [{"module": "新版操作记录", "point": "人工填的点"}], source="manual", skip_similar=False)
     assert [m["module"] for m in mods][-1] == "新版操作记录"                                  # 人工新增不归位
+
+
+# ---- P0 三件：AI 补充完整版 / 测试点独立评审 / 用例语义查重 ----
+
+
+async def test_AI补充完整版_Prompt带颗粒度与ref规则_没ref的reason作依据(client):
+    data = await _create_confirm_task(client)
+    task_id = data["task_id"]
+    app.state.llm = StubLLM([json.dumps({"additions": [
+        {"module": "登录", "point": "弱网下点击登录 10 秒无响应提示网络超时并可重试", "dimension": "网络", "ref": "", "reason": "需求未写，按常见缺陷补"},
+        {"module": "登录", "point": "锁定 30 分钟后自动解锁可再次登录", "dimension": "状态转换", "ref": "登录 › 连续错误5次锁定", "reason": "需求明文"},
+    ]}, ensure_ascii=False)])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/points/add", json={"instruction": "补网络与解锁场景"})
+    assert resp.status_code == 200, resp.text
+    added = resp.json()["added"]
+    assert [p["source"] for p in added] == ["supplement"] * 2
+    assert added[0]["basis"] == "需求未写，按常见缺陷补" and "ref" not in added[0]        # 没 ref 的 reason 作依据
+    assert added[1]["ref"] == "登录 › 连续错误5次锁定" and "basis" not in added[1]      # 有 ref 的不带
+    system = app.state.llm.calls[0]["messages"][0]["content"]
+    assert "宁少勿错" in system and "ref 写「页面或章节 › 需求点」" in system and "dimension 取值仅限" in system
+
+
+REVIEW_REPLY = json.dumps({"issues": [
+    {"tp_id": "TP001", "verdict": "合写", "fix": "①账号正确密码正确登录成功；②记住登录态", "note": "", "quote": ""},
+    {"tp_id": "TP002", "verdict": "数值改写", "fix": "连续错误 5 次锁定", "note": "测试点写成 3 次", "quote": "连续错误5次锁定"},
+    {"tp_id": "TP003", "verdict": "超出需求", "fix": "", "note": "原文没有密码为空的规则", "quote": "原文里根本没有这句话也对不上"},
+    {"tp_id": "TP999", "verdict": "合写", "fix": "x", "note": "", "quote": ""},
+    {"tp_id": "TP002", "verdict": "维度不符", "fix": "异常流程", "note": "", "quote": ""},
+    {"tp_id": "TP001", "verdict": "瞎编的类型", "fix": "", "note": "", "quote": ""},
+]}, ensure_ascii=False)
+
+
+async def test_测试点独立评审_只收批内编号与七类判定_引文核验_标到条目_人处理后撤掉(client):
+    data = await _create_confirm_task(client)       # TP001 / TP002 拆解 + TP003 查漏
+    task_id = data["task_id"]
+    app.state.llm = StubLLM([REVIEW_REPLY])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/points/ai-review")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["reviewed"] == 3 and body["batches"] == 1 and body["marked"] == 3
+    # TP999 不在批内丢掉；TP002 第二条意见丢掉（一条点只留一个）；瞎编的 verdict 丢掉
+    issues = {i["tp_id"]: i for i in body["issues"]}
+    assert set(issues) == {"TP001", "TP002", "TP003"}
+    assert issues["TP002"]["verdict"] == "数值改写" and not issues["TP002"].get("unverified")   # 引文在原文里
+    assert issues["TP003"]["unverified"] is True                                                 # 引文对不上原文
+    user = app.state.llm.calls[0]["messages"][1]["content"]
+    assert "待评审的测试点" in user and "需求原文" in user and "宁少勿错" in app.state.llm.calls[0]["messages"][0]["content"]
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    pts = {p["tp_id"]: p for m in t["analysis"]["test_points"] for p in m["points"]}
+    assert pts["TP001"]["ai_review"]["verdict"] == "合写" and pts["TP001"]["ai_review"]["fix"].startswith("①")
+    assert pts["TP001"]["point"] == "正确账号密码登录成功"            # 意见不改动测试点
+    assert t["point_review"]["issues"] == 3 and t["point_review"]["reviewed"] == 3
+    # 人通过 / 修改后意见撤掉
+    await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [
+        {"tp_id": "TP001", "action": "approve"},
+        {"tp_id": "TP002", "action": "modify", "point": "连续错误 5 次锁定账号", "base_version": 1}]})
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    pts = {p["tp_id"]: p for m in t["analysis"]["test_points"] for p in m["points"]}
+    assert "ai_review" not in pts["TP001"] and "ai_review" not in pts["TP002"] and pts["TP003"]["ai_review"]["verdict"] == "超出需求"
+    # 再评一次：已通过的不送评，这次没意见的点清掉上次的
+    app.state.llm = StubLLM([json.dumps({"issues": []})])
+    body = (await client.post(f"/api/v1/tasks/{task_id}/points/ai-review")).json()
+    assert body["reviewed"] == 2 and body["marked"] == 0
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert not any(p.get("ai_review") for m in t["analysis"]["test_points"] for p in m["points"])
+
+
+async def test_拆解时自动独立评审_开关打开时查漏查重之后跑_故障只跳过(client, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "point_review", True)
+    app.state.llm = StubLLM([ANALYST_REPLY_V2, GAP_REPLY, REVIEW_REPLY])   # 两条点无查重候选 → 不调裁判
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求：账号密码登录，连续错误5次锁定", "confirm_points": "true"})
+    assert resp.status_code == 200, resp.text
+    points = resp.json()["test_points"][0]["points"]
+    assert [bool(p.get("ai_review")) for p in points] == [True, True, True]
+    assert len(app.state.llm.calls) == 3
+    # 评审故障：拆解照常、没有意见
+    app.state.llm = StubLLM([ANALYST_REPLY_V2, GAP_REPLY])
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求：账号密码登录，连续错误5次锁定", "confirm_points": "true"})
+    assert resp.status_code == 200 and not any(p.get("ai_review") for p in resp.json()["test_points"][0]["points"])
+
+
+async def test_用例语义查重_文字候选交裁判_重复可合并进列表_不重复不进_没判到待复核_删一条自动处置_忽略重开(client):
+    c1 = make_case("TC-登录-001", title="密码为空点击登录被拦截", steps=[{"action": "密码留空点击登录", "expected": "提示请输入密码"}])
+    c2 = make_case("TC-登录-002", title="密码为空提交登录提示", steps=[{"action": "密码留空点击登录", "expected": "提示请输入密码，停留本页"}])
+    c3 = make_case("TC-登录-003", title="密码为空点击登录被拦截（移动端）", steps=[{"action": "密码留空点击登录", "expected": "提示请输入密码"}])
+    c4 = make_case("TC-登录-004", title="密码为空点击登录被拦住", steps=[{"action": "密码留空点击登录", "expected": "提示请输入密码"}])
+    task_id = await _create_completed_task(client, c1, c2, c3, c4)
+    cands = {(x["a"], x["b"]) for x in case_duplicate_candidates([c1, c2, c3, c4])}
+    assert ("TC-登录-001", "TC-登录-002") in cands and ("TC-登录-003", "TC-登录-004") in cands and len(cands) >= 4
+    pending = next(pr for pr in sorted(cands) if pr not in {("TC-登录-001", "TC-登录-002"), ("TC-登录-003", "TC-登录-004")})
+    verdicts = {("TC-登录-001", "TC-登录-002"): ("可合并", "预期多一项停留本页", "b", "密码为空点击登录被拦截并停留本页"),
+                ("TC-登录-003", "TC-登录-004"): ("重复", "同一条", "a", "")}
+    judge = json.dumps({"duplicates": [
+        {"a": a, "b": b, "verdict": v[0], "reason": v[1], "keep": v[2], "merged_title": v[3]}
+        for (a, b) in sorted(cands) if (a, b) != pending
+        for v in [verdicts.get((a, b), ("不重复", "不同端 / 不同对象", "", ""))]
+    ]}, ensure_ascii=False)   # pending 这一对没判 → 待复核
+    app.state.llm = StubLLM([judge])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/cases/dup-check")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["candidates"] == len(cands)
+    by = {(d["a"], d["b"]): d for d in body["duplicates"]}
+    assert by[("TC-登录-001", "TC-登录-002")]["verdict"] == "可合并" and by[("TC-登录-001", "TC-登录-002")]["merged_title"].endswith("停留本页")
+    assert by[("TC-登录-003", "TC-登录-004")]["verdict"] == "重复" and by[("TC-登录-003", "TC-登录-004")]["keep"] == "a"
+    assert by[pending]["verdict"] == "待复核"
+    assert len(by) == 3                                                                 # 不重复的不进列表
+    user = app.state.llm.calls[0]["messages"][1]["content"]
+    assert "a_case" in user and "停留本页" in user                                    # 带步骤与预期
+    pairs = {p["key"]: p for p in body["case_dup_pairs"]}
+    assert all(p["status"] == "open" for p in pairs.values()) and len(pairs) == 3
+    # 忽略 / 重开
+    key = next(k for k, p in pairs.items() if p["verdict"] == "待复核")
+    r = (await client.post(f"/api/v1/tasks/{task_id}/cases/dup-pairs/{key}", json={"action": "ignore", "note": "人看过"})).json()
+    assert r["dup_pair"]["status"] == "ignored" and r["dup_pair"]["note"] == "人看过"
+    r = (await client.post(f"/api/v1/tasks/{task_id}/cases/dup-pairs/{key}", json={"action": "reopen"})).json()
+    assert r["dup_pair"]["status"] == "open"
+    assert (await client.post(f"/api/v1/tasks/{task_id}/cases/dup-pairs/no-such", json={"action": "ignore"})).status_code == 404
+    # 删掉重复对里的一条 → 该组自动已处置
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": "TC-登录-004", "action": "delete"}]})
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    st = {p["key"]: p["status"] for p in t["case_dup_pairs"]}
+    assert st["TC-登录-003|TC-登录-004"] == "resolved" and st["TC-登录-001|TC-登录-002"] == "open"

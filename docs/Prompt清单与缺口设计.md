@@ -71,12 +71,14 @@ flowchart LR
 | `blind_spot_verify` | 分片盲区复核 | 测试设计 · 盲区复核 | `quality.run_blind_spot_verify`，多片时每片对照全部盲区各一次 | 默认 | 294 |
 | `gap_check` | 覆盖查漏 | 测试设计 · 覆盖查漏 | `quality.run_gap_check` ← 拆解后自动 `_run_point_quality_checks` / 手动 `POST .../points/gap-check`；按章节分批（≤ 8000 字）并行 | 默认 | 1126 |
 | `dup_judge` | 测试点语义查重 | 测试设计 · 语义查重 | `quality.run_dup_judge`，bigram 候选（同页面 ≥ 0.45、跨页面 ≥ 0.7）按 40 对一批并行 | 默认 | 739 |
+| `point_review` | 测试点独立评审 | 测试设计 · 独立评审 | `quality.run_point_review` ← 拆解后自动 `_run_point_quality_checks`（查漏、查重之后，配置 `TIANGONG_POINT_REVIEW`）/ 手动 `POST .../points/ai-review`；按 `gap_batches` 分批并行 | 默认 | 942 |
 | `point_compare` | 人工与 AI 测试点对比 | 测试设计 · 人工对比 | `quality.run_point_compare` ← 测试点页「人工对比」 | 默认 | 562 |
-| `point_supplement` | 测试点人工补充 | 测试设计 · AI 补充 | `routes.py` `POST .../points/add`（instruction 形态） | 默认 | 39 |
+| `point_supplement` | 测试点人工补充 | 测试设计 · AI 补充 | `routes.py` `POST .../points/add`（instruction 形态） | 默认 | 618 |
 | `point_fix` | 测试点驳回修改 | 测试设计 · 测试点驳回修改 | `quality.run_point_fix` ← 「AI 修改驳回项」，产出提案人工逐项确认 | 默认 | 1017 |
 | `generator` | 用例生成 | 测试设计 · 用例生成 | `graph.py` `generate` 节点 ← `service._run_single`，按模块并行（每模块一次调用） | 默认；任务模型 | 2905 |
 | `reviewer` | 用例评审 | 测试设计 · 用例评审 | `graph.py` `review` 节点，≤ 3 轮回环，超限强制出稿标 unresolved | 默认；`reviewer_model or model` | 1476 |
 | `fix_instruction` | 评审问题定点修正指令 | 测试设计 · 定点修正（user） | `graph.py` `generate` 节点在有 issues 时作为 user 消息 | 默认 | 353 |
+| `case_dup_judge` | 用例语义查重 | 测试设计 · 用例查重 | `quality.run_case_dup_judge` ← 用例页「重复检查」`POST .../cases/dup-check`；`case_duplicate_candidates` 候选按 40 对一批并行 | 默认 | 589 |
 | `case_fix` | 用例驳回修改 | 测试设计 · 用例驳回修改 / 需求变更更新 | `quality.run_case_fix` ← 「AI 修改驳回项」；`routes.py` 需求变更后更新受影响用例 | 默认 | 909 |
 | `requirement_diff` | 需求变更分析 | 测试设计 · 需求变更分析 | `quality.run_requirement_diff` ← 任务「需求变更」 | 默认 | 599 |
 | `learning` | 修改习惯学习 | 学习规则 | `quality.run_learning_analysis` ← `POST /learning/analyze`，按项目分组各调一次 | 默认 | 645 |
@@ -516,6 +518,34 @@ additions 不得提出 UI 检查类测试点（页面布局 / 样式 / 字体 / 
 {"duplicates": [{"a": "TP001", "b": "TP008", "verdict": "重复|不重复", "reason": "两条均验证密码为空时禁止登录", "suggestion": "建议合并保留一条"}]}
 ```
 
+#### `point_review` · 测试点独立评审
+
+- **kind**：system
+- **阶段**：测试设计 · 独立评审
+- **调用位置**：`quality.run_point_review` ← 拆解后自动 `_run_point_quality_checks`（查漏、查重之后，配置 `TIANGONG_POINT_REVIEW`）/ 手动 `POST .../points/ai-review`；按 `gap_batches` 分批并行
+- **推理强度 / 模型**：默认
+- **输入**：本批原文 + 本批待审核的测试点（tp_id / point / dimension / ref / basis）+ 画像
+- **输出与程序兜底**：`{issues:[{tp_id, verdict, fix, note, quote}]}`；只收批内编号与七类判定、一条点一个意见；数值改写 / ref 对不上 / 超出需求的 quote 用 `quote_found` 核验，对不上标 `unverified`；`apply_ai_review` 标到 `p.ai_review`，不改测试点，人处理后撤掉
+- **设计意图**：宁少勿错，只报七类硬伤（合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符）；不改、不删、不补。
+
+```text
+你是独立的测试点评审专家，与拆解者相互独立。本步策略：宁少勿错——只报有把握的硬伤，不为凑数挑刺，表述风格不是问题。
+
+下面是需求的一段原文与从它拆出的测试点（含「经验延伸」点，带 basis）。逐条检查，只找七类问题（verdict 只能取这七个值）：
+1. 合写：一条里有两条规则（必填与格式、成功与失败、两个角色、两个边界、两个结果），fix 给出拆开后的写法（用「①②」分开）；
+2. 不可验证：没有触发条件或没有可核对的结果（「验证 XX 功能正常」「展示正确」「符合预期」），fix 给出补上条件与预期的写法；
+3. 数值改写：次数 / 金额 / 比例 / 时长 / 名次 / 方向（大于 / 小于、允许 / 禁止、含 / 不含）与原文不一致，quote 逐字引用原文那句（≤ 80 字），fix 给出按原文改正的写法；
+4. ref 对不上：ref 指向的需求点在原文里找不到，或测试点说的不是 ref 那条规则，quote 引用它实际对应的原文句（找不到留空）；
+5. UI 外观：只验颜色 / 字体 / 位置 / 间距 / 动效 / 适配，没有业务结果；
+6. 超出需求：没有 basis 的明文点却在这段原文里找不到任何依据（带 basis 的经验延伸点不算，它本来就是需求之外的）；
+7. 维度不符：dimension 与内容明显不符（讲权限却标数据、讲断网却标正常流程），fix 写正确维度。
+
+不改测试点、不删测试点、不补新点（补漏是别的环节）；一条测试点最多报一个最主要的问题；没有问题的不要出现在输出里。
+只输出 JSON：
+{"issues": [{"tp_id": "TP012", "verdict": "合写", "fix": "①榜单名次必填，空值不可提交；②名次只能输入 1-4 位数字，非数字 / 超过 4 位不可提交", "note": "", "quote": ""},
+            {"tp_id": "TP031", "verdict": "数值改写", "fix": "密码连续错误 5 次锁定 30 分钟", "note": "测试点写成 15 分钟", "quote": "密码错误 5 次锁定 30 分钟"}]}
+```
+
 #### `point_compare` · 人工与 AI 测试点对比
 
 - **kind**：system
@@ -548,12 +578,23 @@ additions 不得提出 UI 检查类测试点（页面布局 / 样式 / 字体 / 
 - **阶段**：测试设计 · AI 补充
 - **调用位置**：`routes.py` `POST .../points/add`（instruction 形态）
 - **推理强度 / 模型**：默认
-- **输入**：需求 + 已有测试点 + 用户补充要求
-- **输出与程序兜底**：`{additions:[{module, point, dimension}]}`；`add_points(source=supplement)`，相似跳过
-- **设计意图**：按用户一句话要求只补新增。**当前默认文本只有一句话，见缺口 G3。**
+- **输入**：需求 + 已有测试点 + 用户补充要求 + 画像
+- **输出与程序兜底**：`{additions:[{module, point, dimension, ref, reason}]}`；`add_points(source=supplement)`，相似跳过、模块归位；没 ref 的 reason 作「依据」
+- **设计意图**：只补要求范围内的、宁少勿错；有需求依据写 ref，经验场景写 reason；不复述、不越界、不写 UI。
 
 ```text
-你是资深测试分析师，负责按用户要求补充测试点。一个测试点对应一个明确验证目标。
+你是资深测试分析师，负责按用户的补充要求给已有测试点集补新增点。本步策略：只补要求范围内的，宁少勿错。
+
+规则：
+1. 只生成满足「补充要求」的新增测试点，不复述、不改写、不删除已有测试点；与已有点意思相同的不输出；
+2. 一条测试点只验一个结果，写成「条件 → 操作 → 预期」能落成一条用例的颗粒度；必填与格式、成功与失败、不同角色 / 状态分条；
+3. 要求里提到的场景在需求里有依据的，ref 写「页面或章节 › 需求点」；需求里没有、属于经验场景的，ref 留空并在 reason 写明依据（常见缺陷 / 行业惯例）；
+4. module 用已有模块名（场景依附在哪个页面 / 功能上），没有合适的才按「页面-区块」新建；
+5. dimension 取值仅限：正常流程 / 异常流程 / 输入校验 / 边界值 / 状态转换 / 权限 / 数据 / 重复操作 / 中断 / 网络；
+6. 不写 UI 外观检查（颜色 / 字体 / 位置 / 动效 / 适配）；触发手段要是测试人员能构造的，需要开发 / 环境支持的在描述末尾写明。
+
+只输出 JSON：
+{"additions": [{"module": "登录页", "point": "弱网下点击登录 10 秒无响应时提示网络超时并可重试", "dimension": "网络", "ref": "", "reason": "用户要求补网络场景；需求未写，按常见缺陷补"}]}
 ```
 
 #### `point_fix` · 测试点驳回修改
@@ -757,6 +798,29 @@ missing 仅允许提出「需求明文描述的规则完全没有用例覆盖」
 
 当前用例全集：
 {cases}
+```
+
+#### `case_dup_judge` · 用例语义查重
+
+- **kind**：system
+- **阶段**：测试设计 · 用例查重
+- **调用位置**：`quality.run_case_dup_judge` ← 用例页「重复检查」`POST .../cases/dup-check`；`case_duplicate_candidates` 候选按 40 对一批并行
+- **推理强度 / 模型**：默认
+- **输入**：候选对（两条用例的模块 / 标题 / 前置 / 步骤 / point_ids）+ 需求前 2000 字
+- **输出与程序兜底**：`{duplicates:[{a, b, verdict: 重复|可合并|不重复, reason, keep, merged_title}]}`；不重复不进列表、没判到待复核、一批故障全待复核；存 `dup_report.cases`，人工删 / 忽略 / 重开
+- **设计意图**：不同端 / 页面 / 角色 / 状态各验一次是两个对象；等价类不同类不算重复；AI 不删。
+
+```text
+你是测试用例查重专家。以下是文字层初筛出的疑似重复用例对（每条带模块、标题、前置、步骤与预期、来源测试点）。
+从「测试对象、前置、输入、操作、预期」判断，verdict 三选一：
+- 重复：对象 + 条件 + 操作 + 预期相同，只是措辞或样例数据不同；keep 写保留哪条（a / b：步骤更完整、预期更具体的那条）；
+- 可合并：条件相同、只是预期多一项或少一项、或步骤多一步校验，合成一条更完整——merged_title 给合并后的标题，keep 写以哪条为底；
+- 不重复：同一规则在不同页面 / 不同端 / 不同角色 / 不同状态下各验一次（PC 与移动端、日榜与月榜、普通与 VIP、报名前与报名后）是两个测试对象；
+  等价类里不同类（有效 / 无效、边界内 / 边界外、成功 / 失败）不算重复；来源测试点不同且各自验的规则不同的不算重复。
+每一对都必须给结论，不要漏判；reason 一句话。
+你不能删除或修改任何用例，只输出判定与建议，由人工决定删 / 合并 / 保留。
+只输出 JSON：
+{"duplicates": [{"a": "TC-登录-003", "b": "TC-登录-011", "verdict": "重复", "reason": "均验证密码为空点击登录被拦截", "keep": "a", "merged_title": ""}]}
 ```
 
 #### `case_fix` · 用例驳回修改
@@ -1064,9 +1128,9 @@ missing 仅允许提出「需求明文描述的规则完全没有用例覆盖」
 
 | # | key | 名称 | 优先级 | 补的是哪一环 |
 |---|---|---|---|---|
-| G1 | `point_review` | 测试点独立评审 | P0 | 拆解 → 人工审核之间没有质量门禁，1483 条全靠人看 |
-| G2 | `case_dup_judge` | 用例语义查重裁判 | P0 | 用例只有文字相似候选，没有语义裁判；测试点有 `dup_judge` 用例没有 |
-| G3 | `point_supplement` | AI 补充测试点（完整版） | P0 | 现在默认文本 39 字，没有颗粒度 / ref / 不复述 / 不越界要求 |
+| G1 | `point_review` | 测试点独立评审 | P0 · **已落地** | 拆解 → 人工审核之间没有质量门禁，1483 条全靠人看 |
+| G2 | `case_dup_judge` | 用例语义查重裁判 | P0 · **已落地** | 用例只有文字相似候选，没有语义裁判；测试点有 `dup_judge` 用例没有 |
+| G3 | `point_supplement` | AI 补充测试点（完整版） | P0 · **已落地** | 现在默认文本 39 字，没有颗粒度 / ref / 不复述 / 不越界要求 |
 | G4 | `question_suggest` | 待确认事项推荐答案 | P1 | must 级事项没有推荐答案，需求负责人从零想 |
 | G5 | `plan_case_select` | 测试计划用例挑选 | P1 | 冒烟 / 回归 / 变更影响集靠人勾，用例上千条勾不动 |
 | G6 | `exec_triage` | 执行失败归因与缺陷单 | P1 | 失败分类靠人选，缺陷单靠人写；归因「用例问题」才进学习语料 |
@@ -1314,6 +1378,8 @@ blockers 每条写「哪个模块 › 哪条问题 › 不解决会怎样」。�
 ```
 
 ## 6. 落地顺序建议
+
+> 2026-10-26：G1 / G2 / G3 已按下面第 2、3 步落地（`point_review` / `case_dup_judge` / `point_supplement` 完整版），实现与草案的差别：评审意见不进 `warnings` 而是单独的 `ai_review` 字段（`warnings` 在实体化时会被重算）；用例查重的忽略 / 重开复用测试点那套 `dup_report.resolved`。
 
 1. **先做横向评审 1、11、5、4**（共享片段抽取、策略一句话、reviewer 限定本模块、P0 规则）：都是改 Prompt 文本与少量拼接代码，一次提交。
 2. **G3 补齐 `point_supplement`**：改默认文本即可。
