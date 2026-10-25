@@ -1106,6 +1106,7 @@ async def _run_point_quality_checks(app, task_id: str, requirement: str, model: 
     try:
         gap = await run_gap_check(app.state.llm, requirement, modules, model)
         record.coverage = gap["coverage"]
+        record.coverage_notes = gap.get("coverage_notes") or {}
         added = add_points(
             modules,
             [{"module": a.get("module", ""), "point": a.get("point", ""),
@@ -2970,6 +2971,7 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
     except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     record.coverage = gap["coverage"]
+    record.coverage_notes = gap.get("coverage_notes") or {}
     added = add_points(
         modules,
         [{"module": a.get("module", ""), "point": a.get("point", ""),
@@ -2978,7 +2980,7 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
     )
     bump_tp_seq(record.analysis)
     store.save(record)
-    return {"task_id": task_id, "coverage": gap["coverage"], "added": added, "test_points": modules}
+    return {"task_id": task_id, "coverage": gap["coverage"], "coverage_notes": record.coverage_notes, "added": added, "test_points": modules}
 
 
 @router.post("/api/v1/tasks/{task_id}/points/extend")
@@ -6393,6 +6395,7 @@ async def delete_project(request: Request, name: str, cascade: bool = False) -> 
         for t in st.tasks.list(limit=100000, project=name):
             st.tasks.delete(t.task_id, by=user["username"])
         st.dependencies.drop_project(name)
+        st.rules.delete_project(name)   # 项目级 / 模块级学习规则与候选随项目删，全局规则不动
     st.requirements.purge_project(name)  # 回收站里的需求随项目一并清理
     try:
         st.projects.delete(name)
@@ -7235,10 +7238,10 @@ async def reports_summary(
                else request.app.state.tasks.list(limit=100000, projects=_visible_projects(request)))
     data = summarize(records, days=max(0, days), project=project,
                      plans=request.app.state.plans.list())
-    rules = request.app.state.rules
+    rules = request.app.state.rules   # 选了项目只数该项目的（含全局规则）
     data["rules"] = {
-        "candidates": len(rules.list("candidate")),
-        "active": len(rules.list("active")),
+        "candidates": len(rules.list("candidate", project)),
+        "active": len(rules.list("active", project)),
     }
     return data
 
@@ -7266,20 +7269,40 @@ async def analyze_learning(request: Request, body: LearningAnalyzeBody | None = 
     from app.learning import collect_samples
 
     body = body or LearningAnalyzeBody()
-    samples = collect_samples(request.app.state.tasks, project=body.project,
+    project = (body.project or "").strip() or None
+    samples = collect_samples(request.app.state.tasks, project=project,
                               plans=request.app.state.plans, requirements=request.app.state.requirements)
     if not samples:
-        return {"candidates": [], "samples": 0, "message": "暂无人工修改留痕可供学习"}
-    try:
-        candidates = await run_learning_analysis(request.app.state.llm, samples, body.model)
-    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
-        raise HTTPException(status_code=502, detail=str(e))
-    added = request.app.state.rules.add_candidates(candidates, project=body.project)
-    logger.info("学习分析：样本 {} 条 → 新候选 {} 条", len(samples), len(added))
+        return {"candidates": [], "samples": 0, "by_project": [], "message": "暂无人工修改留痕可供学习"}
+    # 按项目分组各调一次：不同项目的修改习惯不能混在一批里归纳（A 项目「主流程统一 P0」会被当成 B 项目的规则），
+    # 候选归到各自的项目；没选项目时就是把每个有留痕的项目各分析一遍。任务项目为「-」/ 空的归「无项目」
+    groups: dict[str, list[dict]] = {}
+    for smp in samples:
+        key = project or (str(smp.get("项目") or "").strip() if str(smp.get("项目") or "").strip() not in ("", "-") else "")
+        groups.setdefault(key, []).append(smp)
+    order = sorted(groups, key=lambda k: (k == "", k))
+
+    async def _one(key: str) -> dict:
+        try:
+            cands = await run_learning_analysis(request.app.state.llm, groups[key], body.model, project=key or None)
+        except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+            return {"project": key or None, "samples": len(groups[key]), "added": [], "error": str(e)}
+        added = request.app.state.rules.add_candidates(cands, project=key or None)
+        return {"project": key or None, "samples": len(groups[key]), "added": added}
+
+    import asyncio as _asyncio
+    results = await _asyncio.gather(*[_one(k) for k in order])
+    if all(r.get("error") for r in results):
+        raise HTTPException(status_code=502, detail="；".join(str(r["error"]) for r in results))
+    added = [r for res in results for r in res["added"]]
+    logger.info("学习分析：{} 个项目 / 样本 {} 条 → 新候选 {} 条（{}）", len(order), len(samples), len(added),
+                "，".join(f"{r['project'] or '无项目'} {len(r['added'])}" for r in results))
     return {
         "candidates": [r.model_dump() for r in added],
         "samples": len(samples),
-        "total_candidates": len(request.app.state.rules.list("candidate")),
+        "by_project": [{"project": r["project"], "samples": r["samples"], "added": len(r["added"]),
+                        **({"error": r["error"]} if r.get("error") else {})} for r in results],
+        "total_candidates": len(request.app.state.rules.list("candidate", project)),
     }
 
 

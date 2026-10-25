@@ -301,16 +301,46 @@ def _is_manual_noise(line: str) -> bool:
     return bool(probe) and len(_ASCII_RE.findall(probe)) / len(probe) >= _MANUAL_SAMPLE_RATIO
 
 
+FLOW_NOTE = "【流程图：每条箭头「──►」「→」是一步，分支标签（是 / 否 / Y / N）是条件；每条分支的条件与结果都是正式规则，须逐条拆成测试点，不是示意图】"
+FLOW_END = "【流程图结束】"
+_FLOW_CHARS = ("──", "──►", "→", "─►")
+
+
+def _annotate_flow_fences(lines: list[str]) -> tuple[list[str], bool]:
+    """整理稿把流程图画成 ``` 代码块里的分支树（`flow_ascii`）。模型把代码块当示意 / 代码跳过——线上「活动流程总览」
+    一节 0 条自己的测试点，「报名费未扣完 → 取消当日参赛资格、当日记录不计入月榜」这条分支只靠查漏补了一条。
+    这里把含箭头的代码块的围栏换成说明行：开头告诉模型这是流程、每条分支是规则，结尾标结束；树的缩进原样保留。
+    不含箭头的代码块（真代码 / 文本示例）不动。"""
+    out: list[str] = []
+    changed = False
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == "```":
+            j = i + 1
+            while j < len(lines) and lines[j].strip() != "```":
+                j += 1
+            body = lines[i + 1:j]
+            if j < len(lines) and any(any(ch in l for ch in _FLOW_CHARS) for l in body):
+                out.extend([FLOW_NOTE, *body, FLOW_END])
+                changed = True
+                i = j + 1
+                continue
+        out.append(lines[i])
+        i += 1
+    return out, changed
+
+
 def clean_manual_sections(text: str) -> str:
-    """整理稿里的「人工收录」小节（`页面-人工收录`，底稿核对 include 进来的材料原句）：拆解时模型把它整节当噪音跳过
+    """拆解 / 查漏 / 延伸前的整理稿清洗（名字沿用最早只清人工收录小节时的）：
+    1. 流程图代码块的围栏换成「【流程图：…】」说明行（`_annotate_flow_fences`），模型不再把它当代码跳过；
+    2. 「人工收录」小节（`页面-人工收录`，底稿核对 include 进来的材料原句）：拆解时模型把它整节当噪音跳过
     （线上 10 个这样的小节 0 条测试点），其中夹着真规则（撤销按钮的展示条件、导出文件名、下拉选项）。
     这里去掉纯样例行（账号 / 日期 / 金额占比高）、控件文案（「请输入」「下一步」）、分隔线与转录说明，
     剩下的规则以说明行代替标题留在所在页面末尾（不再是独立章节，大纲里也不再出一个「人工收录」模块）；
     清完一行不剩的整节删掉。只动这些小节，其余原样。"""
-    lines = text.splitlines()
+    lines, changed = _annotate_flow_fences(text.splitlines())
     out: list[str] = []
     i = 0
-    changed = False
     while i < len(lines):
         m = _HEAD_RE.match(lines[i])
         if m is None or _ANNOT_RE.sub("", m.group(3)).strip() != _MANUAL_TITLE:
