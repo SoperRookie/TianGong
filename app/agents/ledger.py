@@ -373,6 +373,51 @@ def account(units: list[dict], draft_text: str, decisions: dict | None = None) -
     return {"units": out, "stats": stats, "image": img}
 
 
+INHERIT_MIN_OVERLAP = 0.6   # 另一条需求的材料与本需求的原文单元重合到这个比例以上，才沿用它的人工底稿决定
+
+
+def human_decisions(ex: dict, units: list[dict]) -> dict:
+    """一版整理稿里**人**做过的底稿决定，按原句键（unit_key）归类，供换版 / 同材料的另一条需求沿用：
+    include = 底稿核对里人工按原句收进来的条目（modules 里 manual=True）；exclude = 人工排除（decisions by=user）；
+    checked = 模型排除的需复核句人已看过。units 是该版材料的单元清单，用来把 decisions 里的编号换成原句；
+    模型 / 程序自己的判定不算人的决定，不沿用（新一版模型自己会判）。"""
+    by_uid = {x: u for u in units for x in u["uids"]}
+    out: dict[str, dict] = {"include": {}, "exclude": {}, "checked": {}}
+    for m in ex.get("modules") or []:
+        for it in m["items"]:
+            if it.get("manual") and it.get("text"):
+                out["include"][unit_key(it["text"])] = {"text": it["text"], "who": (it.get("review") or {}).get("by")}
+    for uid, d in ((ex.get("ledger") or {}).get("decisions") or {}).items():
+        u = by_uid.get(uid)
+        if u is None or not isinstance(d, dict):
+            continue
+        key = unit_key(u["text"])
+        if d.get("by") == BY_USER:
+            out["exclude"][key] = {"r": d.get("r") or "人工排除", "who": d.get("who")}
+        elif d.get("checked"):
+            out["checked"][key] = dict(d["checked"])
+    return out
+
+
+def has_human_decisions(ex: dict | None) -> bool:
+    """这版整理稿里有没有人做过的底稿决定（没有就不必为它算单元重合度）。"""
+    if not ex:
+        return False
+    if any(it.get("manual") for m in ex.get("modules") or [] for it in m["items"]):
+        return True
+    return any(isinstance(d, dict) and (d.get("by") == BY_USER or d.get("checked"))
+               for d in ((ex.get("ledger") or {}).get("decisions") or {}).values())
+
+
+def unit_overlap(units: list[dict], other: list[dict]) -> float:
+    """本需求原文单元里有多大比例在另一份材料里逐字出现（图中文字单元不算）。"""
+    mine = {unit_key(u["text"]) for u in units if u["kind"] == KIND_SOURCE}
+    if not mine:
+        return 0.0
+    theirs = {unit_key(u["text"]) for u in other if u["kind"] == KIND_SOURCE}
+    return len(mine & theirs) / len(mine)
+
+
 def todo_units(ledger: dict) -> list[dict]:
     """要送模型 / 兜底的：原文单元里的待处理。图中文字单元不送、不兜底。"""
     return [u for u in ledger["units"] if u["status"] == STATUS_TODO and u["kind"] == KIND_SOURCE]

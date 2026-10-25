@@ -5350,7 +5350,7 @@ def _extraction_view(item: dict) -> dict | None:
     from app.requirements import extraction_head, tidy_modules
 
     led = ex.get("ledger") or {}
-    out = {**ex, "ledger": {"stats": led.get("stats"), "image": led.get("image")}, "outline": None}
+    out = {**ex, "ledger": {"stats": led.get("stats"), "image": led.get("image"), "inherited": led.get("inherited")}, "outline": None}
     if ex.get("modules"):
         view = copy.deepcopy(item)   # 在副本上按当前规则收口（草稿只认独立区域、流程框不重复），不改库里的数据
         tidy_modules(view)

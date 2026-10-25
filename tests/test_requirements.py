@@ -129,11 +129,14 @@ async def test_AI分析_待确认事项_确认后才能测试设计_追溯(clien
     await client.post(f"/api/v1/requirements/{rid}/questions/{q2}", json={"answer": "按账号"})
     a = (await client.post(f"/api/v1/requirements/{rid}/questions/{q3}", json={"answer": "支持 7 天"})).json()
     assert a["status"] == "confirmed" and a["open_questions"] == 0
-    # 再次 AI 分析：已确认的问题保留结论，新问题追加
-    app.state.llm = StubLLM([ANALYSIS_REPLY.replace("按设备统计？", "按设备统计？？")])
+    # 再次 AI 分析：已确认的问题保留结论（换了说法、只差标点的也认出来是同一问题），真正的新问题追加
+    app.state.llm = StubLLM([ANALYSIS_REPLY.replace("锁定期间是否允许找回密码？", "锁定期间是否还允许找回密码？")
+                             .replace("按设备统计？", "按设备统计？？").replace('"]}', '", "是否记录登录失败日志？"]}')])
     a = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
     kept = next(q for q in a["questions"] if q["q_id"] == q1)
-    assert kept["status"] == "confirmed" and a["open_questions"] == 1
+    assert kept["status"] == "confirmed" and kept["question"] == "锁定期间是否允许找回密码？" and a["open_questions"] == 1
+    assert next(q for q in a["questions"] if q["q_id"] == q2)["status"] == "confirmed"
+    assert [q["question"] for q in a["questions"] if q["status"] == "open"] == ["是否记录登录失败日志？"]
     await client.post(f"/api/v1/requirements/{rid}/questions/{next(q['q_id'] for q in a['questions'] if q['status']=='open')}",
                       json={"answer": "按设备"})
 
@@ -558,3 +561,46 @@ async def test_需求列表_筛选与分页(client):
     assert (await client.get("/api/v1/requirements", params={"project": "P", "source_type": "manual"})).json()["total"] == 24
     assert (await client.get("/api/v1/requirements", params={"project": "P", "source_type": "file"})).json()["total"] == 0
     assert (await client.get("/api/v1/requirements", params={"project": "P", "created_by": "nobody"})).json()["total"] == 0
+
+
+async def test_同项目再上传同一需求_已确认的待确认事项按相似问题沿用结论_像但数字不同只作参考_人工定了标记撤掉(client):
+    """同一份文档重新上传成新需求（或新版本）后，上一条需求里人已经确认过的问题不该再问一遍：新分析出的问题与同项目
+    其他需求（含回收站里的）已确认问题相似度 ≥ 0.6 且数字一致 → 直接带确认结论进来、标来源；0.4～0.6 或数字不同只作参考预填。"""
+    from app.requirements import question_similarity
+
+    # 线上同一需求里不同问题之间最高 0.57（且那几对本就是一问两提）；改写后的同一问题要在 0.6 以上；短句只认原文相同
+    assert question_similarity("锁定期间是否允许找回密码？", "锁定期间是否还允许找回密码？") > 0.8
+    assert question_similarity("导出间隔≥1分钟是按操作人、页签、导出类型还是全系统计时；不足1分钟时如何处理？",
+                               "新增机器人占位的活动ID是否必填，未输入或活动不存在时分别如何提示和处理？") < 0.4
+    assert question_similarity("活动ID是否必填", "活动名称是否必填") == 0 and question_similarity("x", "x") == 1.0
+
+    a = await _req(client, title="登录 v1")
+    app.state.llm = StubLLM([ANALYSIS_REPLY])
+    a = (await client.post(f"/api/v1/requirements/{a['req_id']}/analyze", json={})).json()
+    q1, q2 = [q["q_id"] for q in a["questions"]]
+    await client.post(f"/api/v1/requirements/{a['req_id']}/questions/{q1}", json={"answer": "允许找回密码"})
+    await client.post(f"/api/v1/requirements/{a['req_id']}/questions/{q2}", json={"answer": "按账号"})
+    await client.delete(f"/api/v1/requirements/{a['req_id']}")   # 旧的进了回收站也照样沿用
+
+    b = await _req(client, title="登录 v2")
+    reply = ANALYSIS_REPLY.replace("锁定期间是否允许找回密码？", "锁定期间是否还允许找回密码？") \
+        .replace("锁定次数是否按账号还是按设备统计？", "锁定次数是否按账号还是按设备统计（上限 5 次）？") \
+        .replace('"]}', '", "是否记录登录失败日志？"]}')
+    app.state.llm = StubLLM([reply])
+    b = (await client.post(f"/api/v1/requirements/{b['req_id']}/analyze", json={})).json()
+    by_text = {q["question"]: q for q in b["questions"]}
+    got = by_text["锁定期间是否还允许找回密码？"]
+    assert got["status"] == "confirmed" and got["answer"] == "允许找回密码" and got["source"] == "ai"
+    assert got["inherited"]["req_id"] == a["req_id"] and got["inherited"]["title"] == "登录 v1" and got["inherited"]["score"] > 0.8
+    hint = by_text["锁定次数是否按账号还是按设备统计（上限 5 次）？"]      # 像，但多了个数字：不自动沿用，只预填参考
+    assert hint["status"] == "open" and "inherited" not in hint and hint["suggested"]["answer"] == "按账号"
+    assert hint["suggested"]["question"] == "锁定次数是否按账号还是按设备统计？"
+    other = by_text["是否记录登录失败日志？"]
+    assert other["status"] == "open" and "suggested" not in other and "inherited" not in other
+    assert b["open_questions"] == 2 and b["status"] == "pending_confirm"
+    # 人自己确认 / 重新打开后，沿用与参考标记都撤掉
+    b = (await client.post(f"/api/v1/requirements/{b['req_id']}/questions/{hint['q_id']}", json={"answer": "按账号，无上限"})).json()
+    assert "suggested" not in next(q for q in b["questions"] if q["q_id"] == hint["q_id"])
+    b = (await client.post(f"/api/v1/requirements/{b['req_id']}/questions/{got['q_id']}", json={"answer": "", "reopen": True})).json()
+    re = next(q for q in b["questions"] if q["q_id"] == got["q_id"])
+    assert re["status"] == "open" and "inherited" not in re and re["answer"] == "允许找回密码"
