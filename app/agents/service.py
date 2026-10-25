@@ -15,7 +15,7 @@ from app.agents.state import MAX_REVIEW_ROUNDS
 from app.agents.prompts import wrap_data
 from app.config import get_settings
 from app.llm.client import LLMClient
-from app.agents.outline import outline_from_brief, requirement_chunks
+from app.agents.outline import clean_manual_sections, outline_from_brief, requirement_chunks
 from app.templates import CustomTemplate, TestCase
 
 
@@ -116,6 +116,7 @@ async def run_analysis(
     knowledge_cases：历史用例知识（知识管家在拆解阶段注入，覆盖度查漏）。
     """
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
+    requirement = clean_manual_sections(requirement)   # 「人工收录」小节去样例留规则、并入所在页面（模型会整节跳过）
     chunks, titles = requirement_chunks(requirement, chunk_max_chars)
     if len(chunks) == 1:
         a = await analyze_requirement(llm, requirement, model, knowledge_cases=knowledge_cases)
@@ -197,6 +198,7 @@ async def run_generation(
         )
 
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
+    requirement = clean_manual_sections(requirement)
     chunks, titles = requirement_chunks(requirement, chunk_max_chars)
     if len(chunks) == 1:
         return await _analyze_then_generate(

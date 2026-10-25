@@ -82,19 +82,279 @@ def split_appendix(text: str) -> tuple[str, str]:
     return "\n".join(main).strip(), "\n".join(appendix).strip()
 
 
+# ---- 简报里的问答块（确认结论 / 建议级假设）：分片时按模块回到对应片，不再整块落在最后一片 ----
+
+# design_brief 拼在整理稿后面的两段问答：「- 问（模块）：…\n  确认：…」「- 问（模块）：…\n  假设：…」
+_QA_BLOCK_HEADS = ("【待确认事项的确认结论", "【未确认的建议级事项")
+_QA_ITEM_RE = re.compile(r"^- 问(?:（(.*?)）)?：")
+QA_CHUNK_NOTE = "（以下条目涉及本片章节，是人工确认过的正式规则，与整理稿正文同等对待：须拆成测试点并归入所标模块）"
+
+
+@dataclass
+class QABlock:
+    head: str                                   # 块的标题行（【…】原样）
+    items: list[tuple[str, str]]                # (模块名, 条目全文「- 问（模块）：…\n  确认：…」)
+
+
+def split_qa_blocks(text: str) -> tuple[str, list[QABlock]]:
+    """把简报里的确认结论 / 建议级假设块摘出来：返回 (去掉这两块的文本, 块列表)。
+    块从标题行到下一个【…】行或文末；条目以「- 问」行开头、延续到下一个「- 问」行。没有这两块时文本原样。"""
+    lines = text.splitlines()
+    rest: list[str] = []
+    blocks: list[QABlock] = []
+    cur: QABlock | None = None
+    item: list[str] = []
+
+    def flush_item() -> None:
+        if cur is not None and item:
+            m = _QA_ITEM_RE.match(item[0])
+            cur.items.append(((m.group(1) or "").strip() if m else "", "\n".join(item).rstrip()))
+        item.clear()
+
+    for line in lines:
+        if line.startswith(_QA_BLOCK_HEADS):
+            flush_item()
+            cur = QABlock(line.strip(), [])
+            blocks.append(cur)
+            continue
+        if cur is not None and _BRIEF_PART_RE.match(line):
+            flush_item()
+            cur = None
+        if cur is None:
+            rest.append(line)
+            continue
+        if _QA_ITEM_RE.match(line):
+            flush_item()
+            item.append(line)
+        elif item:
+            item.append(line)
+        elif line.strip():   # 块头与第一条之间的零散说明：留在块头里
+            cur.head = f"{cur.head}\n{line}"
+    flush_item()
+    if not blocks:
+        return text, []
+    return "\n".join(rest).strip(), [b for b in blocks if b.items]
+
+
+def heading_modules(text: str) -> dict[str, str]:
+    """编号标题行 → 该节的模块名（标题链「文件夹-页面-区块」，与大纲 / 待确认事项的模块名同一套命名）。
+    键是标题行原文（去掉首尾空白），用来在分片里认出各节。"""
+    out: dict[str, str] = {}
+    stack: list[tuple[int, str]] = []
+    for line in text.splitlines():
+        m = _HEAD_RE.match(line)
+        if m is None:
+            if line.startswith("# "):
+                stack = []
+            continue
+        level = len(m.group(1))
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        stack.append((level, _ANNOT_RE.sub("", m.group(3)).strip()))
+        out[line.strip()] = module_name_of(tuple(t for _, t in stack))
+    return out
+
+
+def module_name_of(chain: tuple[str, ...]) -> str:
+    """标题链 → 模块名：子标题已带上级名的不重复（「PC」下的「PC-活动入口说明」）。与 analysis._module_name 同规则。"""
+    out: list[str] = []
+    for title in chain:
+        if out and (title == out[-1] or title.startswith(f"{out[-1]}-")):
+            out[-1] = title
+        else:
+            out.append(title)
+    return "-".join(out)
+
+
+def match_module(module: str, names: list[str]) -> list[str]:
+    """一个模块名在一组章节模块名里对到哪些：完全相同 › 章节名以「-模块名」结尾（模型给的模块常不带文件夹名）›
+    模块名比章节更细（「报名记录-撤销」对「商户管理后台-报名记录」，取最长的那个）› 模块名是章节的上级（取全部子节）。
+    对不到返回空列表；对到多个由调用方决定（落在同一片就用、分散在几片算定不到）。"""
+    module = (module or "").strip()
+    if not module:
+        return []
+    if module in names:
+        return [module]
+    hit = [n for n in names if n.endswith(f"-{module}")]
+    if hit:
+        return hit
+    parents = [n for n in names if module.startswith(f"{n}-")]
+    if parents:
+        return [max(parents, key=len)]
+    return [n for n in names if n.startswith(f"{module}-")]
+
+
+def _attach_qa(parts: list[str], full_text: str, blocks: list[QABlock]) -> list[str]:
+    """问答块按条目所标模块分到对应片末尾：条目的模块对到哪一片的章节就跟哪一片；没标模块、对不到、
+    或对到的章节分散在几片的（整体性问题）放第一片。每片的块保留原块头并加说明。"""
+    if not blocks or not parts:
+        return parts
+    heads = heading_modules(full_text)
+    part_names: list[list[str]] = []
+    for p in parts:
+        part_names.append([heads[l.strip()] for l in p.splitlines() if l.strip() in heads])
+    all_names = [n for names in part_names for n in names]
+    per_part: list[dict[str, list[str]]] = [{} for _ in parts]   # 片 → {块头: [条目]}
+    for block in blocks:
+        for module, item in block.items:
+            hit = match_module(module, all_names)
+            where = {i for i, names in enumerate(part_names) if any(n in names for n in hit)}
+            target = where.pop() if len(where) == 1 else 0
+            per_part[target].setdefault(block.head, []).append(item)
+    out: list[str] = []
+    for p, qa in zip(parts, per_part):
+        for head, items in qa.items():
+            first, _, more = head.partition("\n")
+            p = f"{p}\n\n{first}{QA_CHUNK_NOTE}" + (f"\n{more}" if more else "") + "\n" + "\n".join(items)
+        out.append(p)
+    return out
+
+
+# ---- 人工补充说明：用户自己写的几句话，每一片都带（原来只在整理稿末尾所在的那一片）----
+
+_NOTE_HEAD = "【人工补充说明】"
+NOTE_EVERY_CHUNK_MAX = 2000   # 补充说明不超过这么多字时每片都带；更长的只放第一片
+
+
+def split_manual_note(text: str) -> tuple[str, str]:
+    """摘出「【人工补充说明】」块（到下一个【…】行为止）：返回 (去掉该块的文本, 块全文)。没有时块为空串。"""
+    lines = text.splitlines()
+    rest: list[str] = []
+    note: list[str] = []
+    on = False
+    for line in lines:
+        if line.startswith(_NOTE_HEAD):
+            on = True
+        elif on and _BRIEF_PART_RE.match(line):
+            on = False
+        (note if on else rest).append(line)
+    if not note:
+        return text, ""
+    return "\n".join(rest).strip(), "\n".join(note).strip()
+
+
+# ---- 分片从页面中间开始时补一行所属章节：第 2 片开头是「#### 3.2.26 对应备注内容格式说明」，模型不知道它在哪个页面下 ----
+
+CONTEXT_PREFIX = "〔接上文〕所属章节："
+
+
+def _context_lines(main: str, parts: list[str]) -> list[str]:
+    """每片开头所在的标题链（不含本片第一个标题自身）：「3. PC › 3.2 活动详情页界面说明」；第一片或开头就是顶层章节的为空串。"""
+    lines = main.splitlines()
+    stack_at: list[list[tuple[int, str]]] = []   # 每行开始时的标题栈
+    stack: list[tuple[int, str]] = []
+    for line in lines:
+        stack_at.append(list(stack))
+        m = _HEAD_RE.match(line)
+        if m:
+            level = len(m.group(1))
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, f"{m.group(2)} {_ANNOT_RE.sub('', m.group(3)).strip()}"))
+        elif line.startswith("# "):
+            stack = []
+    out: list[str] = []
+    pos = 0
+    for k, part in enumerate(parts):
+        first = part.splitlines()[0] if part else ""
+        idx = next((i for i in range(pos, len(lines)) if lines[i].strip() == first.strip()), None) if first.strip() else None
+        if idx is None or k == 0:
+            out.append("")
+            continue
+        pos = idx
+        m = _HEAD_RE.match(lines[idx])
+        if m:   # 片从标题开始：只给它的上级链（同级的前一节已经不在链上）
+            chain = [t for lvl, t in stack_at[idx] if lvl < len(m.group(1))]
+        else:   # 从段落中间切开：连本节标题一起给，标「续」
+            chain = [t for _, t in stack_at[idx]]
+            if chain:
+                chain[-1] += "（续）"
+        out.append(f"{CONTEXT_PREFIX}{' › '.join(chain)}" if chain else "")
+    return out
+
+
+# ---- 「人工收录」小节：底稿核对时人工收进来的原句，拆解前清掉样例与控件文案、并入所在页面 ----
+
+_MANUAL_TITLE = "人工收录"
+MANUAL_NOTE = "**底稿核对时人工补入本页面的需求原句（正式需求，与上文同等对待，须一并拆解）：**"
+_MANUAL_SKIP_RE = re.compile(r"^(-{3,}|\|[-| ]+\||\*\*按.*转录[:：]\*\*|（已剔除[:：].*）|-\s*参考示例)\s*$")
+_ASCII_RE = re.compile(r"[0-9A-Za-z,.:/%+#¥$\-]")
+_PLACEHOLDER_X_RE = re.compile(r"[Xx]{2,}")
+_MANUAL_SAMPLE_RATIO = 0.35   # 数字 / 字母占比到这么多的行是样例数据（账号、日期、金额、流水号），不是规则
+_MANUAL_MIN_CHARS = 7         # 更短又没有「：」的是控件文案（「请输入」「下一步」「搜索 重置」）
+
+
+def _is_manual_noise(line: str) -> bool:
+    core = line.strip().lstrip("-•*·").strip().strip("*").strip()
+    if not core or _MANUAL_SKIP_RE.match(line.strip()):
+        return True
+    core = core.replace("｜", "|")
+    text = "".join(c.strip("|").strip() for c in core.split("|")) if "|" in core else core
+    text = re.sub(r"\s+", "", text)
+    if not text:
+        return True
+    if text.startswith(("请输入", "请选择")):
+        return True
+    if len(text) < _MANUAL_MIN_CHARS and "：" not in text:
+        return True
+    probe = _PLACEHOLDER_X_RE.sub("", text)
+    return bool(probe) and len(_ASCII_RE.findall(probe)) / len(probe) >= _MANUAL_SAMPLE_RATIO
+
+
+def clean_manual_sections(text: str) -> str:
+    """整理稿里的「人工收录」小节（`页面-人工收录`，底稿核对 include 进来的材料原句）：拆解时模型把它整节当噪音跳过
+    （线上 10 个这样的小节 0 条测试点），其中夹着真规则（撤销按钮的展示条件、导出文件名、下拉选项）。
+    这里去掉纯样例行（账号 / 日期 / 金额占比高）、控件文案（「请输入」「下一步」）、分隔线与转录说明，
+    剩下的规则以说明行代替标题留在所在页面末尾（不再是独立章节，大纲里也不再出一个「人工收录」模块）；
+    清完一行不剩的整节删掉。只动这些小节，其余原样。"""
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    changed = False
+    while i < len(lines):
+        m = _HEAD_RE.match(lines[i])
+        if m is None or _ANNOT_RE.sub("", m.group(3)).strip() != _MANUAL_TITLE:
+            out.append(lines[i])
+            i += 1
+            continue
+        changed = True
+        j = i + 1
+        while j < len(lines) and not (lines[j].startswith("#") or _BRIEF_PART_RE.match(lines[j])):
+            j += 1
+        kept = [l for l in lines[i + 1:j] if l.strip() and not _is_manual_noise(l)]
+        if kept:
+            out.extend(["", MANUAL_NOTE, *kept, ""])
+        i = j
+    return "\n".join(out) if changed else text
+
+
 def requirement_chunks(brief: str, max_chars: int) -> tuple[list[str], list[str | None]]:
     """拆解用的分片：先按需求切段（片不跨需求），每段再按章节分片；疑点清单 / 遗留草稿不单独成片，
-    带说明挂到本需求最后一片末尾。返回 (分片列表, 每片所属需求标题)。整篇不超限时与原来一样只有一片。"""
+    带说明挂到本需求最后一片末尾；确认结论 / 建议级假设按条目所标模块回到对应片（原来整块落在最后一片，
+    那一片的模型按「只拆本片内容」把它们全跳过）。返回 (分片列表, 每片所属需求标题)。整篇不超限时与原来一样只有一片。"""
     if len(brief) <= max_chars:
         return [brief], [None]
     chunks: list[str] = []
     titles: list[str | None] = []
     for seg in requirement_segments(brief):
         main, appendix = split_appendix(seg.text)
+        main, qa_blocks = split_qa_blocks(main)
+        main, note = split_manual_note(main)
         parts = split_text(main, max_chars) if main else []
         if len(parts) > 1 and len(parts[-1]) < max_chars // 8:   # 章节装包剩下的小尾巴并入前片（略超阈值无妨）
             tail = parts.pop()   # 先 pop 再赋值：写成 parts[-2] = ... parts.pop() 时右边先执行，三片会把第一片覆盖掉
             parts[-1] = f"{parts[-1]}\n\n{tail}"
+        if len(parts) > 1:   # 从页面中间开始的片补一行所属章节
+            parts = [f"{ctx}\n{p}" if ctx else p for ctx, p in zip(_context_lines(main, parts), parts)]
+        if note:
+            if not parts:
+                parts = [note]
+            elif len(note) <= NOTE_EVERY_CHUNK_MAX:   # 用户自己写的说明每片都带（全文适用）
+                parts = [f"{p}\n\n{note}" for p in parts]
+            else:
+                parts[0] = f"{parts[0]}\n\n{note}"
+        if qa_blocks:
+            parts = _attach_qa(parts, main, qa_blocks) if parts else ["\n\n".join(f"{b.head}\n" + "\n".join(t for _, t in b.items) for b in qa_blocks)]
         if appendix:
             if parts:
                 parts[-1] = f"{parts[-1]}\n\n{APPENDIX_NOTE}\n{appendix}"
