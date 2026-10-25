@@ -61,17 +61,25 @@ class RuleStore:
     def _persist(self) -> None:
         self._doc.put("doc", {"rules": [r.model_dump() for r in self._rules.values()]})
 
+    def _same(self, key: str, project: str | None) -> Rule | None:
+        """同一条规则已存在：同项目同内容，或已有一条全局（系统级 / 团队级）同内容的——别的项目的同内容不算，
+        各项目的修改习惯各自成候选、各自确认。"""
+        for r in self._rules.values():
+            if _normalize(r.content) != key:
+                continue
+            if r.scope in ("system", "team") or r.project == project:
+                return r
+        return None
+
     def add_candidates(self, candidates: list[dict], project: str | None = None) -> list[Rule]:
-        """入库规则候选，按归一化内容去重（已存在的仅更新依据与次数）。"""
+        """入库规则候选（归到 project；None 为没有项目归属的留痕），按项目内归一化内容去重（已存在的仅更新依据与次数）。"""
         added: list[Rule] = []
-        index = {_normalize(r.content): r for r in self._rules.values()}
         for c in candidates:
             content = str(c.get("content", "")).strip()
             if not content:
                 continue
             key = _normalize(content)
-            if key in index:
-                rule = index[key]
+            if (rule := self._same(key, project)) is not None:
                 rule.occurrences = max(rule.occurrences, int(c.get("occurrences", 0) or 0))
                 rule.evidence = str(c.get("evidence", rule.evidence))
                 rule.updated_at = _now()
@@ -86,7 +94,6 @@ class RuleStore:
                 confidence=str(c.get("confidence", "中")),
             )
             self._rules[rule.rule_id] = rule
-            index[key] = rule
             added.append(rule)
         if added:
             self._persist()
@@ -101,7 +108,17 @@ class RuleStore:
         if changed:
             self._persist()
 
+    def delete_project(self, project: str) -> int:
+        """项目连同内容删除时清掉它的项目级 / 模块级规则与候选；全局规则不动。返回删掉的条数。"""
+        gone = [rid for rid, r in self._rules.items() if r.project == project and r.scope not in ("system", "team")]
+        for rid in gone:
+            self._rules.pop(rid)
+        if gone:
+            self._persist()
+        return len(gone)
+
     def list(self, status: str | None = None, project: str | None = None) -> list[Rule]:
+        """project 给了：该项目的规则 + 全局（系统级 / 团队级）规则，别的项目的不出现。"""
         rules = [
             r for r in self._rules.values()
             if (status is None or r.status == status)

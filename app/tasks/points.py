@@ -354,17 +354,37 @@ def confirmable_points(modules: list[dict]) -> list[dict]:
 AI_SOURCES = ("ai", "gap", "supplement", "ai_fix", "derived")   # derived：经验延伸（需求之外、带依据）
 
 
+RESOLVE_MODULE_SIM = 0.6   # AI 补的点模块名对不上已有模块时，名字相似度到这么多才归到最像的那个
+
+
+def resolve_module(name: str, modules: list[dict]) -> str:
+    """AI 新增测试点的模块归位：同名 › 与某个已有模块名互相包含（取最短的那个）› 名字 bigram 相似度 ≥ RESOLVE_MODULE_SIM；
+    都不是才按原名新建。查漏第 8 批（从页面中间切开、没有章节标题）把点写成裸名「新版操作记录」，与大纲里的
+    「商户管理后台-新版操作记录-调整说明」分成了两个模块，61 条点落在裸名下。人工新增不走这里，人填什么就是什么。"""
+    name = (name or "").strip()
+    names = [str(e.get("module", "")) for e in modules]
+    if not name or name in names or not names:
+        return name
+    hit = [n for n in names if n and (name in n or n in name)]
+    if hit:
+        return min(hit, key=len)
+    best = max(names, key=lambda n: similarity(name, n))
+    return best if similarity(name, best) >= RESOLVE_MODULE_SIM else name
+
+
 def add_points(modules: list[dict], additions: list[dict], source: str, seq_floor: int = 0,
                skipped: list | None = None, skip_similar: bool = True) -> list[dict]:
     """只允许新增（需求十/五十六）：新测试点以待审核状态追加，存量不动。
 
-    additions: [{module, point, dimension?}]；模块不存在则新建分组。
+    additions: [{module, point, dimension?}]；模块不存在则新建分组（AI 来源的先按 resolve_module 归到已有模块）。
     skip_similar=False 用于人工测试点对比录入：与 AI 相同的点正是对比要统计的「一致」项，不能跳过。
     """
     seq = _max_tp_seq(modules, seq_floor)
     added: list[dict] = []
     for item in additions:
         module = str(item.get("module", "")).strip() or "未分组"
+        if source != "manual":
+            module = resolve_module(module, modules) or module
         text = str(item.get("point", "")).strip()
         if not text:
             continue

@@ -232,7 +232,8 @@ async def test_confirm_flow_实体化与自动查漏(client):
     points = data["test_points"][0]["points"]
     assert [p["tp_id"] for p in points] == ["TP001", "TP002", "TP003"]
     assert points[2]["source"] == "gap"
-    assert data["coverage"]["输入校验"] == "未覆盖"
+    # 查漏判「输入校验」未覆盖并补了 1 条 → 补完就是已覆盖；「重复操作」判未覆盖没补 → 仍未覆盖
+    assert data["coverage"]["输入校验"] == "已覆盖" and data["coverage"]["重复操作"] == "未覆盖"
 
 
 async def test_points_review_批量与驳回后定点修改(client):
@@ -381,7 +382,7 @@ async def test_confirm_points_后台执行可见可管理(client):
     assert task["status"] == "awaiting_confirmation"
     points = task["analysis"]["test_points"][0]["points"]
     assert points[0]["tp_id"] == "TP001"  # 实体化完成
-    assert task["coverage"]["输入校验"] == "未覆盖"  # 后台查漏已补充
+    assert task["coverage"]["输入校验"] == "已覆盖" and task["coverage_notes"]["输入校验"] == "查漏补充 1 条"  # 后台查漏已补充
 
 
 async def test_cancel_运行中的后台任务(client):
@@ -1151,7 +1152,9 @@ async def test_查漏按章节分批_各批只带本批章节的测试点_矩阵
     llm = StubLLM(replies)
     gap = await Q.run_gap_check(llm, req, modules, None)
     assert gap["batches"] == n and len(llm.calls) == n + 1
-    assert gap["coverage"]["输入校验"] == "未覆盖" and gap["coverage"]["正常流程"] == "已覆盖" and gap["coverage"]["网络"] == "不适用"
+    # 第 1 批判「输入校验」未覆盖且补了 1 条 → 已覆盖并注明；「正常流程」各批都已覆盖又补了 1 条 → 只注明补充
+    assert gap["coverage"]["输入校验"] == "已覆盖" and gap["coverage"]["正常流程"] == "已覆盖" and gap["coverage"]["网络"] == "不适用"
+    assert gap["coverage_notes"]["输入校验"] == f"1/{n - 1} 批判未覆盖，查漏补充 1 条" and gap["coverage_notes"]["正常流程"] == "查漏补充 1 条"   # 故障的那批不算
     assert [a["point"] for a in gap["additions"]] == ["名称超长不可提交", "驳回状态可查"]
     first = llm.calls[0]["messages"][-1]["content"]
     assert "第 1/" in first and "活动名称必填" in first and "奖池比例 75%" not in first and "每批都带" in first
@@ -1219,3 +1222,97 @@ async def test_拆解时自动经验延伸_开关打开时拆完明文紧接着�
     assert all(p["basis"] for p in points if p["source"] == "derived") and len({p["tp_id"] for p in points}) == 6
     ext_user = app.state.llm.calls[1]["messages"][-1]["content"]
     assert "正确账号密码登录成功" in ext_user   # 延伸看到了全部明文点
+
+
+# ---- 学习规则按项目划分 ----
+
+
+def test_rule_store_候选按项目去重_同内容不同项目各自成候选_全局规则挡住所有项目(tmp_path):
+    from app.learning.store import RuleStore
+
+    store = RuleStore(tmp_path / "rules.json")
+    cand = [{"content": "主流程用例统一 P0", "evidence": "改了 3 次", "occurrences": 3, "scope_hint": "project"}]
+    assert len(store.add_candidates(cand, project="德州")) == 1
+    assert len(store.add_candidates(cand, project="百家乐")) == 1       # 另一个项目的同一习惯各自成候选
+    assert len(store.add_candidates(cand, project="德州")) == 0         # 同项目重复只更新次数
+    assert [r.project for r in store.list("candidate", "德州")] == ["德州"]   # 按项目看只见自己的
+    team = store.add_candidates([{"content": "步骤不超过 5 步", "scope_hint": "team"}], project="德州")[0]
+    store.confirm(team.rule_id, "team")
+    assert store.add_candidates([{"content": "步骤不超过 5 步"}], project="百家乐") == []   # 已有全局规则，别的项目不再成候选
+    assert [r.content for r in store.list(None, "百家乐")] == ["步骤不超过 5 步", "主流程用例统一 P0"][::-1] or \
+        {r.content for r in store.list(None, "百家乐")} == {"步骤不超过 5 步", "主流程用例统一 P0"}
+    assert store.delete_project("德州") == 1 and store.get(team.rule_id) is not None   # 删项目只删项目级，全局留着
+
+
+async def test_learning_analyze_不选项目时按项目分别分析_候选归各自项目_列表与报表按项目(client):
+    async def _task_with_edit(project: str, title: str):
+        app.state.llm = StubLLM([__import__("tests.stubs", fromlist=["ANALYST_REPLY"]).ANALYST_REPLY,
+                                 generator_reply(make_case(title=title)), review_reply(True)])
+        tid = (await client.post("/api/v1/tasks", data={"text": "登录需求", "project": project})).json()["task_id"]
+        await client.post(f"/api/v1/tasks/{tid}/review", json={"items": [
+            {"case_id": "TC-登录-001", "action": "modify", "feedback": f"{project} 的改法",
+             "case": make_case(title=title + "（改）", steps=[{"action": "登录", "expected": "进入首页"}])}]})
+        return tid
+
+    await _task_with_edit("德州", "德州登录")
+    await _task_with_edit("百家乐", "百家乐登录")
+    reply = lambda content: json.dumps({"candidates": [{"content": content, "evidence": "改 2 次", "occurrences": 2,
+                                                         "confidence": "中", "scope_hint": "project"}]}, ensure_ascii=False)
+    # 两个项目各调一次（并行）
+    app.state.llm = StubLLM([reply("第一批：步骤合成一步"), reply("第二批：步骤合成一步")])
+    resp = await client.post("/api/v1/learning/analyze", json={})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert sorted((g["project"], g["added"]) for g in body["by_project"]) == [("德州", 1), ("百家乐", 1)]
+    assert {c["project"] for c in body["candidates"]} == {"德州", "百家乐"}
+    heads = [c["messages"][1]["content"][:40] for c in app.state.llm.calls]
+    assert any("项目「百家乐」" in h for h in heads) and any("项目「德州」" in h for h in heads)
+    for c in app.state.llm.calls:   # 每批只含本项目的留痕
+        user = c["messages"][1]["content"]
+        assert not ("德州登录" in user and "百家乐登录" in user)
+    # 列表按项目过滤：只见本项目候选
+    rules = (await client.get("/api/v1/learning/rules", params={"project": "德州"})).json()["rules"]
+    assert [r["project"] for r in rules] == ["德州"]
+    # 选了项目只分析该项目
+    app.state.llm = StubLLM([reply("德州：标题去掉「验证」")])
+    body = (await client.post("/api/v1/learning/analyze", json={"project": "德州"})).json()
+    assert [(g["project"], g["added"]) for g in body["by_project"]] == [("德州", 1)]
+    assert "百家乐登录" not in app.state.llm.calls[0]["messages"][1]["content"]
+    # 报表的规则计数按项目
+    rep = (await client.get("/api/v1/reports/summary", params={"project": "德州"})).json()
+    assert rep["rules"]["candidates"] == 2
+    rep_all = (await client.get("/api/v1/reports/summary")).json()
+    assert rep_all["rules"]["candidates"] == 3
+
+
+# ---- 线上 670484f8579b 复盘：矩阵把补之前的「未覆盖」当结论、查漏新增落到裸名模块 ----
+
+
+def test_查漏矩阵把补上的算进去_补了就是已覆盖并注明几批未覆盖补了几条_没补的仍未覆盖():
+    from app.agents.quality import apply_additions_to_coverage, merge_coverage
+
+    parts = [{"正常流程": "未覆盖", "权限": "未覆盖", "数据": "已覆盖"},
+             {"正常流程": "已覆盖", "权限": "未覆盖", "数据": "已覆盖"},
+             {"正常流程": "已覆盖", "权限": "不适用", "数据": "未覆盖"}]
+    merged = merge_coverage(parts)
+    assert merged["正常流程"] == merged["权限"] == merged["数据"] == "未覆盖"     # 任一批未覆盖即未覆盖：补之前的状态
+    adds = [{"dimension": "正常流程"}, {"dimension": "正常流程"}, {"dimension": "数据"}]
+    cov, notes = apply_additions_to_coverage(merged, adds, parts)
+    assert cov["正常流程"] == "已覆盖" and notes["正常流程"] == "1/3 批判未覆盖，查漏补充 2 条"
+    assert cov["数据"] == "已覆盖" and notes["数据"] == "1/3 批判未覆盖，查漏补充 1 条"
+    assert cov["权限"] == "未覆盖" and notes["权限"] == "2/3 批判未覆盖"          # 补了 0 条才留未覆盖
+    assert cov["网络"] == "待确认" and "网络" not in notes
+
+
+def test_AI新增测试点模块归到已有模块_裸名与前缀名不再分成两个模块_人工填什么是什么():
+    from app.tasks.points import add_points, resolve_module
+
+    mods = assign_entities([{"module": "商户管理后台-新版操作记录-调整说明", "points": ["字段 A"]},
+                            {"module": "商户管理后台-报名记录", "points": ["字段 B"]}])
+    assert resolve_module("新版操作记录", mods) == "商户管理后台-新版操作记录-调整说明"      # 互相包含取最短
+    assert resolve_module("商户管理后台-报名记录-通用功能", mods) == "商户管理后台-报名记录"
+    assert resolve_module("活动列表", mods) == "活动列表"                                   # 对不上的按原名
+    added = add_points(mods, [{"module": "新版操作记录", "point": "撤销报名后记一条操作记录"}], source="gap")
+    assert added[0]["module"] == "商户管理后台-新版操作记录-调整说明" and len(mods) == 2
+    add_points(mods, [{"module": "新版操作记录", "point": "人工填的点"}], source="manual", skip_similar=False)
+    assert [m["module"] for m in mods][-1] == "新版操作记录"                                  # 人工新增不归位

@@ -339,3 +339,16 @@ def test_分片从页面中间开始补所属章节行_人工补充说明每片�
     long_brief = f"【需求整理稿】（AI 摘录）\n{a}\n\n【人工补充说明】\n" + "补充一句。" * 500
     chunks, _ = requirement_chunks(long_brief, 1500)
     assert "【人工补充说明】" in chunks[0] and all("【人工补充说明】" not in c for c in chunks[1:])
+
+
+def test_流程图代码块拆解前换成说明行_模型不再当代码跳过_真代码块不动():
+    from app.agents.outline import FLOW_END, FLOW_NOTE, clean_manual_sections
+
+    text = ("### 2.5 活动流程总览\n```\n用户报名 ──┬─ 直接报名 ──► 用户游戏投注 ──► 日/月榜排名派奖\n"
+            "           └─ 盈利报名 ──► 当日报名费是否扣除完毕 ─ N ─► 取消当日参赛资格\n```\n"
+            "### 2.6 示例\n```\n{\"a\": 1}\n```\n正文。")
+    out = clean_manual_sections(text)
+    assert FLOW_NOTE in out and FLOW_END in out and "```\n用户报名" not in out
+    assert "           └─ 盈利报名 ──► 当日报名费是否扣除完毕 ─ N ─► 取消当日参赛资格" in out   # 树的缩进原样
+    assert out.count("```") == 2 and "{\"a\": 1}" in out                                        # 真代码块不动
+    assert out.index(FLOW_NOTE) < out.index("用户报名") < out.index(FLOW_END) < out.index("### 2.6")
