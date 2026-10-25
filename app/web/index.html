@@ -1247,6 +1247,11 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <button class="btn" id="rqSaveBtn" onclick="saveReqDlg()">创建</button>
   </div>
 </dialog>
+<dialog id="reqDupDlg" style="width:620px">
+  <div class="dlg-h"><h3>同名文件已在本项目里</h3></div>
+  <div class="dlg-b" id="reqDupBody"></div>
+  <div class="dlg-f" id="reqDupFoot"></div>
+</dialog>
 
 <!-- 需求：发起测试设计 -->
 <dialog id="designDlg">
@@ -5788,7 +5793,7 @@ function reqExtractionHtml(r, canAI, canEdit) {
   if (st === 'running') bar = `<div class="hint" style="margin-bottom:10px"><span class="spin"></span> 正在从原文与附件提取需求内容（分层提取 → 核验 → 自动补漏），可离开页面，完成后自动刷新</div>`;
   else if (r.extraction_error) bar = `<div class="hint" style="margin-bottom:10px;color:var(--danger)">上次提取失败：${esc(r.extraction_error)}</div>`;
   if (st === 'outdated') bar += `<div class="hint" style="margin-bottom:10px;color:var(--warn)">⚠ 提取之后附件有追加或重新解析，整理稿基于旧材料：AI 分析与测试设计会先重新提取（或点「重新提取」）</div>`;
-  else if (st === 'none' && r.extraction_wanted) bar += `<div class="hint" style="margin-bottom:10px;color:var(--warn)">有已解析的附件但还没有整理稿${r.content_warnings&&r.content_warnings.length?'（附件疑似非需求文本，自动提取已跳过）':''}：点「提取需求」，或直接 AI 分析时会先自动提取</div>`;
+  else if (st === 'none' && r.extraction_wanted) bar += `<div class="hint" style="margin-bottom:10px;color:var(--warn)">有已解析的附件但还没有整理稿${r.content_warnings&&r.content_warnings.length?'（附件有告警：疑似非需求文本 / 图片识图失败，自动提取已跳过——识图失败的先「重新解析」）':''}：点「提取需求」，或直接 AI 分析时会先自动提取</div>`;
   else if (st === 'none') bar += `<div class="hint" style="margin-bottom:10px">没有附件的需求直接用原文分析，不需要整理稿；原文很长或夹杂无关内容时也可以提取</div>`;
   if (m.dropped && m.dropped.length) bar += `<div class="hint" style="margin-bottom:10px">已剔除：${m.dropped.map(esc).join('、')}</div>`;
   if (!ex) return intro + toolbar + bar + '<div class="empty">还没有整理稿</div>';
@@ -6441,7 +6446,40 @@ async function openReqDlg() {
   await fillReqRefs($('rqProject').value);
   $('reqDlg').showModal();
 }
-async function saveReqDlg() {
+async function showReqDupDlg() {
+  // 返回 true 表示已接管（用户在对话框里选了替换 / 取消，或仍新建会由对话框自己再调 saveReqDlg(true)）
+  const files = Array.from($('rqFiles').files).map(f => f.name);
+  const qs = files.map(n => 'filename=' + encodeURIComponent(n)).join('&');
+  let m;
+  try { m = (await api(`/api/v1/requirements/same-files?project=${encodeURIComponent($('rqProject').value)}&${qs}`)).matches || []; } catch (e) { return false; }
+  if (!m.length) return false;
+  const top = m[0];
+  $('reqDupBody').innerHTML = `<div class="hint" style="margin-bottom:8px">同一份文档再上传，多半是<b>新版本</b>或<b>重复导入</b>。替换到已有需求的附件：旧文件删掉、新文件重新解析并提取，底稿核对里人工收录 / 排除过的句子按原句自动沿用，已确认的待确认事项重新分析后也保留；新建一条则是白板（同项目里的人工决定与确认结论也会尽量沿用过来，但任务、追溯链不在一起）。</div>
+    <table><tr><th>需求</th><th style="width:80px">状态</th><th>同名文件</th><th style="width:150px">创建</th></tr>
+    ${m.map(x => `<tr><td><b>${esc(x.title)}</b>${x.task_count?` <span class="hint">${x.task_count} 个任务</span>`:''}${x.question_count?` <span class="hint">${x.question_count} 条待确认事项</span>`:''}</td><td>${esc(x.status_label||x.status)}</td><td class="hint">${x.filenames.map(esc).join('、')}</td><td class="hint">${esc(x.created_by||'')} ${fmtTime(x.created_at)}</td></tr>`).join('')}</table>`;
+  $('reqDupFoot').innerHTML = `<button class="btn ghost" onclick="$('reqDupDlg').close()">取消</button>
+    <button class="btn ghost" onclick="$('reqDupDlg').close(); saveReqDlg(true)">仍新建一条需求</button>
+    <button class="btn" onclick="replaceReqAttachments('${top.req_id}', ${jsq(JSON.stringify(top.filenames))})" title="删掉「${esc(top.title)}」里的同名旧附件，把这次选的文件追加进去并重新解析">作为新版本替换到「${esc(top.title)}」</button>`;
+  $('reqDupDlg').showModal();
+  return true;
+}
+async function replaceReqAttachments(reqId, namesJson) {
+  const names = new Set(JSON.parse(namesJson));
+  const files = Array.from($('rqFiles').files);
+  const foot = $('reqDupFoot'); foot.querySelectorAll('button').forEach(b => b.disabled = true);
+  try {
+    const r = await api('/api/v1/requirements/' + reqId);
+    for (const a of (r.attachments || [])) if (names.has(a.filename)) await api(`/api/v1/requirements/${reqId}/attachments/${a.att_id}`, {method:'DELETE'});
+    const fd = new FormData(); for (const f of files) fd.append('files', f);
+    const desc = $('rqDesc').value.trim();
+    await api(`/api/v1/requirements/${reqId}/attachments`, {method:'POST', body: fd});
+    if (desc) await jput(`/api/v1/requirements/${reqId}`, {description: ((r.description||'').trim() + '\n\n' + desc).trim()});
+    $('reqDupDlg').close(); $('reqDlg').close();
+    toast(`已替换「${r.title}」的 ${names.size} 个附件，正在后台解析；解析完会自动重提整理稿`, 'ok');
+    openRequirement(reqId);
+  } catch (e) { toast(e.message, 'err'); foot.querySelectorAll('button').forEach(b => b.disabled = false); }
+}
+async function saveReqDlg(force = false) {
   const fd = new FormData();
   fd.append('project', $('rqProject').value); fd.append('title', $('rqTitle').value.trim());
   fd.append('text', $('rqText').value); fd.append('description', $('rqDesc').value);
@@ -6450,6 +6488,7 @@ async function saveReqDlg() {
   for (const f of $('rqFiles').files) fd.append('files', f);
   if (!$('rqTitle').value.trim()) return toast('请填写需求标题', 'warn');
   if (!$('rqText').value.trim() && !$('rqFiles').files.length && !$('rqUrls').value.trim()) return toast('请粘贴需求原文、上传文件或填写链接', 'warn');
+  if (!force && $('rqFiles').files.length && await showReqDupDlg()) return;   // 同项目已有同名附件的需求：先问是新版本还是重复导入
   const btn = $('rqSaveBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 解析中';
   try {
     const r = await api('/api/v1/requirements', {method:'POST', body: fd});
@@ -6495,8 +6534,8 @@ async function _renderRequirementDetail__impl() {
   const attRows = r.attachments.map(a => `<tr>
     <td>${a.stored?`<a onclick="downloadFile(${jsq('/api/v1/requirements/'+r.req_id+'/attachments/'+a.att_id)}, ${jsq(a.filename)})">${esc(a.filename)}</a>`:esc(a.filename)}${a.source_url?`<div class="hint" style="word-break:break-all"><span class="tag">链接</span> <a href="${esc(a.source_url)}" target="_blank" rel="noopener">${esc(a.source_url.length>70?a.source_url.slice(0,70)+'…':a.source_url)}</a></div>`:''}</td>
     <td class="hint">${a.size?(a.size/1024).toFixed(1)+' KB':'—'}</td>
-    <td>${a.parsing?`<span class="st candidate">${a.source_url&&!a.stored?'抓取中':'解析中'}</span> <span class="spin"></span><div class="hint">${a.source_url?'链接下载与解析在后台进行':'PDF 提取 / 图片理解在后台进行'}，可离开页面</div>`:a.parsed?`<span class="st approved">已解析</span> <span class="hint">${a.chars} 字</span>${a.check?(a.check.ok?`<div class="hint" title="每页去掉脚本 / 样式 / 注释后的整页文字字符多重集，减去按控件提取的行，差集为空即没有漏字（与控件解析相互独立）">自校验 ✓ 0 缺字（${(a.check.pages||[]).length} 页）</div>`:`<div class="hint" style="color:var(--danger)" title="${esc((a.check.pages||[]).filter(p=>p.missing||p.error).map(p=>`${p.page}：${p.error||('缺 '+p.missing+' 字 '+(p.missing_chars||''))}`).join('\n'))}">自校验 ⚠ 缺 ${a.check.missing} 字，见底稿核对</div>`):''}${a.warning?`<div class="hint" style="color:var(--warn)">⚠ ${esc(a.warning)}</div>`:''}`:`<span class="st rejected">${a.source_url&&!a.stored?'抓取失败':'解析失败'}</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
-    <td style="white-space:nowrap">${a.parsed?`<button class="btn ghost sm" onclick="openAttText('${a.att_id}')" title="按文档格式查看解析全文（表格、流程图树、独立区域）">查看解析</button> `:''}${canEdit&&(a.stored||a.source_url)&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">${a.source_url&&!a.stored?'重新抓取':'重新解析'}</button>`:''}</td>
+    <td>${a.parsing?`<span class="st candidate">${a.source_url&&!a.stored?'抓取中':'解析中'}</span> <span class="spin"></span><div class="hint">${a.source_url?'链接下载与解析在后台进行':'PDF 提取 / 图片理解在后台进行'}，可离开页面</div>`:a.parsed?`${a.vision&&a.vision.failed?`<span class="st candidate" title="内嵌图片 ${a.vision.total} 张：识图成功 ${a.vision.done}、失败 ${a.vision.failed}、小图跳过 ${a.vision.skipped||0}">部分解析</span>`:'<span class="st approved">已解析</span>'} <span class="hint">${a.chars} 字</span>${a.check?(a.check.ok?`<div class="hint" title="每页去掉脚本 / 样式 / 注释后的整页文字字符多重集，减去按控件提取的行，差集为空即没有漏字（与控件解析相互独立）">自校验 ✓ 0 缺字（${(a.check.pages||[]).length} 页）</div>`:`<div class="hint" style="color:var(--danger)" title="${esc((a.check.pages||[]).filter(p=>p.missing||p.error).map(p=>`${p.page}：${p.error||('缺 '+p.missing+' 字 '+(p.missing_chars||''))}`).join('\n'))}">自校验 ⚠ 缺 ${a.check.missing} 字，见底稿核对</div>`):''}${a.warning?`<div class="hint" style="color:var(--warn)">⚠ ${esc(a.warning)}</div>`:''}`:`<span class="st rejected">${a.source_url&&!a.stored?'抓取失败':'解析失败'}</span><div class="hint" style="color:var(--danger)">${esc(a.error||'')}</div>`}</td>
+    <td style="white-space:nowrap">${a.parsed?`<button class="btn ghost sm" onclick="openAttText('${a.att_id}')" title="按文档格式查看解析全文（表格、流程图树、独立区域）">查看解析</button> `:''}${canEdit&&(a.stored||a.source_url)&&!a.parsing?`<button class="btn ghost sm" onclick="reparseAtt('${a.att_id}')">${a.source_url&&!a.stored?'重新抓取':'重新解析'}</button>`:''}${canEdit&&!a.parsing?` <button class="btn ghost sm danger" onclick="deleteReqAtt('${a.att_id}', ${jsq(a.filename||'')})" title="删掉这个附件（换新版本文档时先删旧的再追加）">删除</button>`:''}</td>
     <td class="hint" style="white-space:pre-wrap;max-width:420px">${a.parsed?esc((a.preview||'').slice(0,300))+((a.preview||'').length>300?'…':''):''}</td></tr>`).join('');
   const rawTab = `<div class="section-t">需求原文<span class="hint">（永久保留，AI 结果不覆盖）</span></div>
     <pre style="white-space:pre-wrap;background:var(--line-2);padding:12px;border-radius:8px;max-height:420px;overflow:auto;font:inherit">${esc(r.raw_text||'（原文来自附件）')}</pre>
@@ -6582,6 +6621,11 @@ async function doMerge() {
   const into = $('mergeInto').value; if (!into) return;
   if (!await uiConfirm('合并需求', '合并后本需求进入回收站，任务与附件归到目标需求。继续？', true)) return;
   try { const r = await jpost(`/api/v1/requirements/${curReq}/merge`, {into}); $('mergeDlg').close(); toast(`已合并到「${r.title}」`, 'ok'); openRequirement(into); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function deleteReqAtt(attId, name) {
+  if (!await uiConfirm(`删除附件「${name}」？`, '原文与其他附件不动；整理稿与分析会按输入变化标为过期，重新提取时底稿里人工收录 / 排除过的句子按原句沿用。', true)) return;
+  try { await api(`/api/v1/requirements/${curReq}/attachments/${attId}`, {method:'DELETE'}); toast('附件已删除', 'ok'); renderRequirementDetail(); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function uploadReqAtt(input) {

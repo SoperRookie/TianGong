@@ -137,6 +137,17 @@ class RequirementStore:
         self._persist(item)
         return item
 
+    def remove_attachment(self, req_id: str, att_id: str, operator: str | None = None) -> dict:
+        """删掉一个附件记录（换新版本文档前删旧的）。原文不动；整理稿 / 分析按输入指纹自然变成过期。"""
+        item = self._get_alive(req_id)
+        before = len(item["attachments"])
+        item["attachments"] = [a for a in item["attachments"] if a["att_id"] != att_id]
+        if len(item["attachments"]) == before:
+            raise RequirementError(f"附件不存在: {att_id}")
+        item["updated_by"], item["updated_at"] = operator, _now()
+        self._persist(item)
+        return item
+
     def replace_attachment(self, req_id: str, att_id: str, parsed: dict) -> dict:
         item = self._get_alive(req_id)
         for att in item["attachments"]:

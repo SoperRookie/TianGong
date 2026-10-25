@@ -33,6 +33,7 @@ _VISION_SECTIONS = ("图片类型与整体说明", "界面元素清单", "交互
 _IMG_TEXT_HEAD = re.compile(r"^#{1,6}\s*图中文字原文")
 _BULLET = re.compile(r"^[\-•·*]\s+")
 _PARSER_NOTE = re.compile(r"^共 \d+ 个页面，按站点地图顺序")   # Axure 解析器自己写的说明行，不是产品原文
+_IMG_NOTE = re.compile(r"^[（(]?\[\[图片:\d+\]\] ?(解析失败|为装饰性小图)")   # 识图失败 / 小图跳过的占位说明：程序写的，不进底稿
 FLOW_BEGIN, FLOW_END = "【流程图 ", "【流程图结束】"   # 解析器从流程框 + 连接线还原的流程块：派生内容，各框的文字已是单元，块内行不再记
 _CJK = re.compile(r"[一-鿿]")
 _HEADING_TAIL = re.compile(r"[:：]\s*$")
@@ -135,7 +136,7 @@ def build_units(materials: str) -> list[dict]:
             for k in [k for k in stack if k > lv]:
                 del stack[k]
             continue
-        if not s or s.startswith(("[[图片", "```", "|---", ">")) or _PARSER_NOTE.match(s):
+        if not s or s.startswith(("[[图片", "```", "|---", ">")) or _PARSER_NOTE.match(s) or _IMG_NOTE.match(s):
             continue
         if _MARK_LINE.match(s):
             if in_img and not img_file and s.startswith("【说明"):

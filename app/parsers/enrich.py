@@ -41,14 +41,19 @@ async def enrich_images(doc: ParsedDocument, llm: LLMClient) -> ParsedDocument:
     """就地回填：doc.sections 中的 [[图片:N]] 占位内容替换为 Vision 理解结果。"""
     if not doc.embedded_images:
         return doc
+    stat = {"total": len(doc.embedded_images), "done": 0, "failed": 0, "skipped": 0, "error": None}
 
     async def understand(img) -> tuple[str, str]:
         if not _worth_vision(img.data):
+            stat["skipped"] += 1
             return img.placeholder, f"（{img.placeholder} 为装饰性小图，已跳过）"
         try:
             content = await understand_image_bytes(img.data, img.mime, llm, prompt=embed_prompt())
+            stat["done"] += 1
             return img.placeholder, f"【文档内图片理解 {img.placeholder}】\n{content}\n【图片理解结束 {img.placeholder}】"
-        except Exception as e:  # 单图失败不阻塞整体解析
+        except Exception as e:  # 单图失败不阻塞整体解析；失败数记到 doc.vision，附件按「部分解析」显示并拦提取
+            stat["failed"] += 1
+            stat["error"] = str(e)[:200]
             return img.placeholder, f"（{img.placeholder} 解析失败：{e}）"
 
     sem = asyncio.Semaphore(4)  # 文档内图片并发上限，避免一次上传打满 Vision 配额
@@ -62,4 +67,5 @@ async def enrich_images(doc: ParsedDocument, llm: LLMClient) -> ParsedDocument:
         if section.content in replacements:
             section.content = replacements[section.content]
     doc.embedded_images = []
+    doc.vision = stat
     return doc

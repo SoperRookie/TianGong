@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from loguru import logger
 
@@ -4516,6 +4516,20 @@ def _req(request: Request, req_id: str, action: str) -> dict:
     return item
 
 
+def vision_warning(vision: dict | None) -> str | None:
+    """内嵌图片有识图失败的附件告警：图里的文字没进原文（线上一次 401 让 45 张图全失败，原文少了 4.5 万字，整理稿照样提了出来，
+    底稿里只多了 45 句「解析失败」说明）。有失败就提示重新解析，并与「疑似非需求文本」一样拦自动提取 / 分析 / 设计（可勾忽略）。"""
+    if not vision or not vision.get("failed"):
+        return None
+    err = f"（{vision['error']}）" if vision.get("error") else ""
+    return f"{vision['failed']}/{vision.get('total', 0)} 张图片识图失败{err}：图里的文字没进原文，请「重新解析」"
+
+
+def _attachment_warning(doc) -> str | None:
+    warns = [w for w in (content_warning(doc.full_text), vision_warning(doc.vision)) if w]
+    return "；".join(warns) or None
+
+
 def _attachment_record(saved: Path, doc=None, error: str | None = None) -> dict:
     display = saved.name.split("_", 1)[1] if re.match(r"^[0-9a-f]{8}_", saved.name) else saved.name
     return {
@@ -4524,7 +4538,8 @@ def _attachment_record(saved: Path, doc=None, error: str | None = None) -> dict:
         "parsed": doc is not None, "error": error,
         "text": doc.full_text if doc is not None else "",
         "chars": len(doc.full_text) if doc is not None else 0,
-        "warning": content_warning(doc.full_text) if doc is not None else None,
+        "warning": _attachment_warning(doc) if doc is not None else None,
+        "vision": doc.vision if doc is not None else None,                   # 内嵌图片理解统计：failed>0 标部分解析
         "controls": (doc.controls or None) if doc is not None else None,   # Axure：控件索引（类型 / 坐标 / 隐藏态），底稿核对按编号查
         "check": doc.check if doc is not None else None,                   # Axure：整页字符多重集自校验（缺字即报）
         "parsed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -4756,7 +4771,7 @@ async def _auto_extract(app, req_id: str) -> None:
     if not extraction_wanted(item) or extraction_current(item):
         return
     if _content_warnings(item):
-        logger.info("需求 {} 附件疑似非需求文本，跳过自动提取（可在需求页确认后手动提取）", req_id)
+        logger.info("需求 {} 附件有告警（疑似非需求文本 / 图片识图失败），跳过自动提取（重新解析或在需求页确认后手动提取）", req_id)
         return
     from app.llm.calllog import ai_scope
 
@@ -4797,8 +4812,8 @@ def _analysis_outdated(item: dict) -> bool:
 def _require_content_ok(item: dict, ignore: bool) -> None:
     warns = _content_warnings(item)
     if warns and not ignore:
-        raise HTTPException(status_code=409, detail="附件解析结果疑似非需求文本：" + "；".join(
-            f"「{w['filename']}」{w['warning']}" for w in warns) + "。确认要按这些内容继续请重试并勾选忽略告警")
+        raise HTTPException(status_code=409, detail="附件解析有告警（疑似非需求文本 / 图片识图失败）：" + "；".join(
+            f"「{w['filename']}」{w['warning']}" for w in warns) + "。识图失败的先「重新解析」；确认要按这些内容继续请重试并勾选忽略告警")
 
 
 def _review_pending(analysis: dict | None) -> int:
@@ -5070,6 +5085,27 @@ async def requirement_writing_guide() -> dict:
     return {"markdown": path.read_text(encoding="utf-8") if path.exists() else "（规范文件缺失）", "filename": "需求文档编写规范.md"}
 
 
+@router.get("/api/v1/requirements/same-files")
+async def requirements_with_same_files(request: Request, project: str, filename: list[str] = Query(default=[])) -> dict:
+    """新建需求前查重：同项目里已有哪些需求带同名附件（同一份文档再上传多半是新版本或重复导入）。
+    返回按创建时间倒序的匹配需求与对上的文件名，前端据此问「替换到已有需求的附件」还是「仍新建」。"""
+    from app.requirements import REQ_STATUSES
+
+    _require_project(request, project, "requirement.view")
+    wanted = {f.strip() for f in filename if f and f.strip()}
+    if not wanted:
+        return {"matches": []}
+    out = []
+    for r in request.app.state.requirements.list(project):
+        hit = sorted({a.get("filename") for a in r.get("attachments") or [] if a.get("filename") in wanted})
+        if hit:
+            out.append({"req_id": r["req_id"], "title": r["title"], "status": r["status"],
+                        "status_label": REQ_STATUSES.get(r["status"], r["status"]), "created_at": r["created_at"],
+                        "created_by": r.get("created_by"), "task_count": len(r.get("tasks") or []), "filenames": hit,
+                        "question_count": len(r.get("questions") or []), "has_extraction": bool(r.get("extraction"))})
+    return {"matches": out}
+
+
 @router.get("/api/v1/requirements/{req_id}")
 async def get_requirement(request: Request, req_id: str) -> dict:
     item = _req(request, req_id, "requirement.view")
@@ -5233,6 +5269,32 @@ async def reparse_requirement_attachment(request: Request, req_id: str, att_id: 
     except RequirementError as e:
         raise HTTPException(status_code=400, detail=str(e))
     _schedule_attachment_parse(request, req_id, [{"att_id": att_id, "stored": att["stored"], "parsing": True}])
+    return _req_view(request, item)
+
+
+@router.delete("/api/v1/requirements/{req_id}/attachments/{att_id}")
+async def delete_requirement_attachment(request: Request, req_id: str, att_id: str) -> dict:
+    """删除附件（换新版本文档时先删同名旧附件再追加）：解析中 / 提取中不允许；文件一并删掉。
+    删了之后整理稿与分析的输入指纹变化，页面按「已过期」提示重新提取 / 分析；底稿人工决定在重提时按原句沿用。"""
+    from app.requirements import RequirementError
+
+    item = _req(request, req_id, "requirement.edit")
+    att = next((a for a in item["attachments"] if a["att_id"] == att_id), None)
+    if att is None:
+        raise HTTPException(status_code=404, detail=f"附件不存在: {att_id}")
+    if att.get("parsing"):
+        raise HTTPException(status_code=409, detail="该附件正在解析中，解析完成后再删")
+    if item.get("extracting"):
+        raise HTTPException(status_code=409, detail="需求提取进行中，完成后再删附件")
+    try:
+        item = request.app.state.requirements.remove_attachment(req_id, att_id, operator=_operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if att.get("stored"):
+        try:
+            Path(att["stored"]).unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("附件文件删除失败 {}：{}", att["stored"], e)
     return _req_view(request, item)
 
 
