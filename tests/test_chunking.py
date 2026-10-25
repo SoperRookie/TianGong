@@ -316,3 +316,26 @@ async def test_拆解入口先清人工收录_模型看到的是并入页面的�
     user = llm.calls[0]["messages"][-1]["content"]
     assert "人工收录" not in user and "- 请输入" not in user
     assert MANUAL_NOTE in user and "只有未结算时展示撤销按钮" in user
+
+
+def test_分片从页面中间开始补所属章节行_人工补充说明每片都带_长的只放第一片():
+    from app.agents.outline import CONTEXT_PREFIX, requirement_chunks
+
+    a = _整理稿("后台", 600)
+    brief = f"【需求整理稿】（AI 摘录）\n{a}\n\n【人工补充说明】\n只测 PC 端，移动端下期。\n\n【待确认事项的确认结论（以此为准）】\n- 问：整体？\n  确认：是\n"
+    chunks, _ = requirement_chunks(brief, 1500)
+    assert len(chunks) >= 3 and not chunks[0].startswith(CONTEXT_PREFIX)
+    starts = [c.splitlines()[0] for c in chunks[1:]]
+    # 从「#### 2.1.2 基本配置」开始的片：上级链是「2 活动运营后台 › 2.1 活动列表」，同级的前一节 2.1.1 不在链上
+    assert any(s == f"{CONTEXT_PREFIX}2 活动运营后台 › 2.1 活动列表" for s in starts), starts
+    assert all(s.startswith(CONTEXT_PREFIX) or s.startswith("##") for s in starts)
+    assert all("【人工补充说明】\n只测 PC 端，移动端下期。" in c for c in chunks)   # 用户自己写的说明每片都带
+    assert "\n".join(chunks).count("【人工补充说明】") == len(chunks)
+    # 从段落中间切开：连本节标题一起给，标「续」
+    txt = "## 1. 页面A\n### 1.1 区块甲\n" + "- 规则一条。\n" * 300 + "### 1.2 区块乙\n- 一句\n"
+    heads = [c.splitlines()[0] for c in requirement_chunks(txt, 1500)[0]]
+    assert heads[0] == "## 1. 页面A" and heads[1] == f"{CONTEXT_PREFIX}1 页面A › 1.1 区块甲（续）"
+    # 太长的补充说明只放第一片
+    long_brief = f"【需求整理稿】（AI 摘录）\n{a}\n\n【人工补充说明】\n" + "补充一句。" * 500
+    chunks, _ = requirement_chunks(long_brief, 1500)
+    assert "【人工补充说明】" in chunks[0] and all("【人工补充说明】" not in c for c in chunks[1:])

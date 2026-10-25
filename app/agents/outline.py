@@ -210,6 +210,69 @@ def _attach_qa(parts: list[str], full_text: str, blocks: list[QABlock]) -> list[
     return out
 
 
+# ---- 人工补充说明：用户自己写的几句话，每一片都带（原来只在整理稿末尾所在的那一片）----
+
+_NOTE_HEAD = "【人工补充说明】"
+NOTE_EVERY_CHUNK_MAX = 2000   # 补充说明不超过这么多字时每片都带；更长的只放第一片
+
+
+def split_manual_note(text: str) -> tuple[str, str]:
+    """摘出「【人工补充说明】」块（到下一个【…】行为止）：返回 (去掉该块的文本, 块全文)。没有时块为空串。"""
+    lines = text.splitlines()
+    rest: list[str] = []
+    note: list[str] = []
+    on = False
+    for line in lines:
+        if line.startswith(_NOTE_HEAD):
+            on = True
+        elif on and _BRIEF_PART_RE.match(line):
+            on = False
+        (note if on else rest).append(line)
+    if not note:
+        return text, ""
+    return "\n".join(rest).strip(), "\n".join(note).strip()
+
+
+# ---- 分片从页面中间开始时补一行所属章节：第 2 片开头是「#### 3.2.26 对应备注内容格式说明」，模型不知道它在哪个页面下 ----
+
+CONTEXT_PREFIX = "〔接上文〕所属章节："
+
+
+def _context_lines(main: str, parts: list[str]) -> list[str]:
+    """每片开头所在的标题链（不含本片第一个标题自身）：「3. PC › 3.2 活动详情页界面说明」；第一片或开头就是顶层章节的为空串。"""
+    lines = main.splitlines()
+    stack_at: list[list[tuple[int, str]]] = []   # 每行开始时的标题栈
+    stack: list[tuple[int, str]] = []
+    for line in lines:
+        stack_at.append(list(stack))
+        m = _HEAD_RE.match(line)
+        if m:
+            level = len(m.group(1))
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, f"{m.group(2)} {_ANNOT_RE.sub('', m.group(3)).strip()}"))
+        elif line.startswith("# "):
+            stack = []
+    out: list[str] = []
+    pos = 0
+    for k, part in enumerate(parts):
+        first = part.splitlines()[0] if part else ""
+        idx = next((i for i in range(pos, len(lines)) if lines[i].strip() == first.strip()), None) if first.strip() else None
+        if idx is None or k == 0:
+            out.append("")
+            continue
+        pos = idx
+        m = _HEAD_RE.match(lines[idx])
+        if m:   # 片从标题开始：只给它的上级链（同级的前一节已经不在链上）
+            chain = [t for lvl, t in stack_at[idx] if lvl < len(m.group(1))]
+        else:   # 从段落中间切开：连本节标题一起给，标「续」
+            chain = [t for _, t in stack_at[idx]]
+            if chain:
+                chain[-1] += "（续）"
+        out.append(f"{CONTEXT_PREFIX}{' › '.join(chain)}" if chain else "")
+    return out
+
+
 # ---- 「人工收录」小节：底稿核对时人工收进来的原句，拆解前清掉样例与控件文案、并入所在页面 ----
 
 _MANUAL_TITLE = "人工收录"
@@ -276,10 +339,20 @@ def requirement_chunks(brief: str, max_chars: int) -> tuple[list[str], list[str 
     for seg in requirement_segments(brief):
         main, appendix = split_appendix(seg.text)
         main, qa_blocks = split_qa_blocks(main)
+        main, note = split_manual_note(main)
         parts = split_text(main, max_chars) if main else []
         if len(parts) > 1 and len(parts[-1]) < max_chars // 8:   # 章节装包剩下的小尾巴并入前片（略超阈值无妨）
             tail = parts.pop()   # 先 pop 再赋值：写成 parts[-2] = ... parts.pop() 时右边先执行，三片会把第一片覆盖掉
             parts[-1] = f"{parts[-1]}\n\n{tail}"
+        if len(parts) > 1:   # 从页面中间开始的片补一行所属章节
+            parts = [f"{ctx}\n{p}" if ctx else p for ctx, p in zip(_context_lines(main, parts), parts)]
+        if note:
+            if not parts:
+                parts = [note]
+            elif len(note) <= NOTE_EVERY_CHUNK_MAX:   # 用户自己写的说明每片都带（全文适用）
+                parts = [f"{p}\n\n{note}" for p in parts]
+            else:
+                parts[0] = f"{parts[0]}\n\n{note}"
         if qa_blocks:
             parts = _attach_qa(parts, main, qa_blocks) if parts else ["\n\n".join(f"{b.head}\n" + "\n".join(t for _, t in b.items) for b in qa_blocks)]
         if appendix:
