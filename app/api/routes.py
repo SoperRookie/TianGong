@@ -1106,6 +1106,7 @@ async def _run_point_quality_checks(app, task_id: str, requirement: str, model: 
     try:
         gap = await run_gap_check(app.state.llm, requirement, modules, model)
         record.coverage = gap["coverage"]
+        record.coverage_notes = gap.get("coverage_notes") or {}
         added = add_points(
             modules,
             [{"module": a.get("module", ""), "point": a.get("point", ""),
@@ -2970,6 +2971,7 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
     except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     record.coverage = gap["coverage"]
+    record.coverage_notes = gap.get("coverage_notes") or {}
     added = add_points(
         modules,
         [{"module": a.get("module", ""), "point": a.get("point", ""),
@@ -2978,7 +2980,7 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
     )
     bump_tp_seq(record.analysis)
     store.save(record)
-    return {"task_id": task_id, "coverage": gap["coverage"], "added": added, "test_points": modules}
+    return {"task_id": task_id, "coverage": gap["coverage"], "coverage_notes": record.coverage_notes, "added": added, "test_points": modules}
 
 
 @router.post("/api/v1/tasks/{task_id}/points/extend")

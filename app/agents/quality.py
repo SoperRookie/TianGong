@@ -89,6 +89,33 @@ def merge_coverage(parts: list[dict]) -> dict:
     return out
 
 
+def apply_additions_to_coverage(coverage: dict, additions: list[dict], parts: list[dict] | None = None) -> tuple[dict, dict]:
+    """查漏补完再定矩阵：某维度有批次判「未覆盖」但 additions 里补了该维度的点，这一轮结束时它就是已覆盖（查漏补上的），
+    矩阵改成「已覆盖」并在 notes 记「查漏补充 N 条」；补了 0 条才留「未覆盖」。线上 9 批合并后 7 个维度全「未覆盖」，
+    而 303 条查漏新增恰恰就是补这些维度的——矩阵说的是补之前的状态，用户看到的却是补之后的列表。
+    parts 给了时 notes 还记有几批判未覆盖（「3/9 批未覆盖」）。"""
+    by_dim: dict[str, int] = {}
+    for a in additions:
+        dim = str(a.get("dimension") or "").strip()
+        if dim:
+            by_dim[dim] = by_dim.get(dim, 0) + 1
+    out = dict(coverage)
+    notes: dict[str, str] = {}
+    for dim, status in coverage.items():
+        n = by_dim.get(dim, 0)
+        miss = sum(1 for p in (parts or []) if p.get(dim) == "未覆盖")
+        bits = []
+        if parts and miss:
+            bits.append(f"{miss}/{len(parts)} 批判未覆盖")
+        if n:
+            bits.append(f"查漏补充 {n} 条")
+            if status == "未覆盖":
+                out[dim] = "已覆盖"
+        if bits:
+            notes[dim] = "，".join(bits)
+    return out, notes
+
+
 _REF_NUM_RE = re.compile(r"(\d+(?:\.\d+)+)")
 
 
@@ -163,6 +190,7 @@ async def run_gap_check(
         )
         return _coverage(data), _additions(data), result.model_name
 
+    parts: list[dict] = []
     if len(batches) == 1:
         coverage, additions, model_name = await _one(1, *batches[0])
     else:
@@ -175,15 +203,17 @@ async def run_gap_check(
                 logger.warning("查漏第 {} 批失败（只丢该批）：{}", i, o)
         if not done:
             raise next(o for o in outcomes if isinstance(o, BaseException))
-        coverage = merge_coverage([c for c, _, _ in done])
+        parts = [c for c, _, _ in done]
+        coverage = merge_coverage(parts)
         additions = [a for _, adds, _ in done for a in adds]
         model_name = done[0][2]
         logger.info("查漏按章节分 {} 批（每批 ≤ {} 字），{} 批完成", len(batches), GAP_BATCH_CHARS, len(done))
+    coverage, notes = apply_additions_to_coverage(coverage, additions, parts or None)
     logger.info(
         "独立查漏完成：未覆盖 {} 项 / 新增建议 {} 条",
         sum(1 for v in coverage.values() if v == "未覆盖"), len(additions),
     )
-    return {"coverage": coverage, "additions": additions, "model_name": model_name, "batches": len(batches)}
+    return {"coverage": coverage, "coverage_notes": notes, "additions": additions, "model_name": model_name, "batches": len(batches)}
 
 
 # ---- 分片盲区复核：前面分片的盲区若被后面分片的需求章节说明，就不是盲区 ----

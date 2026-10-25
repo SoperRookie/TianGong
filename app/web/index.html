@@ -3204,9 +3204,10 @@ async function bsIgnore(bsId) {
 function renderCoverage(t) {
   if (!t.coverage) return '';
   const cls = {'已覆盖':'c-ok','未覆盖':'c-miss','不适用':'c-na','待确认':'c-tbd'};
-  return `<div class="section-t">测试覆盖视图<span class="hint">（独立查漏 Agent）</span></div>
+  const notes = t.coverage_notes || {};
+  return `<div class="section-t">测试覆盖视图<span class="hint">（独立查漏 Agent · 「已覆盖」含查漏补上的；长需求分批核对，格内注明几批判未覆盖、补了几条）</span></div>
     <div class="cov">${Object.entries(t.coverage).map(([d,s]) =>
-      `<div class="cell ${cls[s]||''}"><i></i>${esc(d)}<b>${esc(s)}</b></div>`).join('')}</div>`;
+      `<div class="cell ${cls[s]||''}" ${notes[d]?`title="${esc(notes[d])}"`:''}><i></i>${esc(d)}<b>${esc(s)}</b>${notes[d]?`<div class="hint" style="font-size:11px">${esc(notes[d])}</div>`:''}</div>`).join('')}</div>`;
 }
 function renderReuseHints(t) {
   if (!t.reuse_hints || !t.reuse_hints.length) return '';
