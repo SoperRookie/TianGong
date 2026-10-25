@@ -336,6 +336,139 @@ async def analyze_requirement(
     }
 
 
+EXTEND_MAX_RATIO = 1 / 3   # 经验延伸条数上限：明文测试点数的三分之一（Prompt 同口径，程序兜底按模型给出的顺序截断——模型按风险排序）
+EXTEND_MIN_TOTAL = 3       # 明文点很少的小需求也允许补几条
+EXTEND_MODULE_MATCH = 0.5  # 模型写的模块名对不上已有模块时，名字 bigram 相似度到这么多才挂到最像的那个，否则跳过
+EXTEND_SIMILAR = 0.75      # 与已有测试点（含本轮前面的延伸点）相似度到这么多算复述，跳过
+_EXT_LIST_KEYS = ("extensions", "additions", "points", "延伸", "测试点")
+_EXT_BASIS_KEYS = ("basis", "reason", "why", "依据", "原因")
+
+
+def _ext_module_of(name: str, names: list[str]) -> str | None:
+    """延伸点的模块归位：同名 › 去掉前后缀后互相包含 › 名字相似度最高且 ≥ EXTEND_MODULE_MATCH；都不是返回 None。"""
+    from app.tasks.points import similarity
+
+    name = (name or "").strip()
+    if not name or not names:
+        return None
+    if name in names:
+        return name
+    hit = [n for n in names if name in n or n in name]
+    if hit:
+        return min(hit, key=len)
+    best = max(names, key=lambda n: similarity(name, n))
+    return best if similarity(name, best) >= EXTEND_MODULE_MATCH else None
+
+
+async def extend_points(
+    llm: LLMClient, requirement: str, modules: list[dict], model: str | None,
+    knowledge_cases: str | None = None, req_title: str | None = None,
+) -> dict:
+    """经验延伸 Agent（拆解之后的独立一步）：明文测试点拆完，再按资深测试经验补需求没写到的场景——并发、中断、跨天、越权、脏数据。
+
+    输入需求原文 + 已有测试点（模块 / 描述 / 维度 / 来源需求点），输出 additions：[{module, point, dimension, ref, basis}]，
+    由调用方以 source=derived 追加（待审核）。程序兜底：
+    - 模块必须是已有模块（对不上的按名字挂到最像的，再对不上跳过）——延伸是依附在需求已有页面 / 功能上的场景，不另起分类；
+    - 与已有点或本轮前面的延伸点 bigram Jaccard ≥ EXTEND_SIMILAR 的算复述，跳过；
+    - 没有 basis 的跳过（没有「为什么要测」的延伸审核时没法判断）；
+    - 总数截到明文点数的 EXTEND_MAX_RATIO（至少 EXTEND_MIN_TOTAL）。
+    返回 {"additions", "skipped": [{module, point, reason}], "model_name"}。
+    """
+    from app.tasks.points import similarity
+
+    view = [{"module": e.get("module", ""),
+             "points": [{"point": p.get("point", ""), "dimension": p.get("dimension", ""),
+                         **({"ref": p["ref"]} if isinstance(p, dict) and p.get("ref") else {})}
+                        for p in e.get("points", []) if isinstance(p, dict) and p.get("point")]}
+            for e in modules if e.get("points")]
+    total = sum(len(e["points"]) for e in view)
+    user = ""
+    if req_title:
+        user += f"本需求「{req_title}」是多条需求合并设计中的一条：模块名与 ref 都带「{req_title}-」/「{req_title} › 」前缀，与下面的测试点一致。\n"
+    user += (f"需求原文：\n{wrap_data('需求原文', requirement)}\n\n"
+             f"前一步拆出的需求明文测试点（共 {total} 条，延伸不得与它们重复，module 只能用这里出现过的模块名）：\n"
+             f"{wrap_data('测试点', _dump(view))}\n\n"
+             "请按清单逐个页面 / 功能点过一遍，补出需求没写、但有经验的测试人员一定会测的场景。")
+    user += profile_block()
+    if knowledge_cases:
+        user += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))
+    data, result = await _chat_json(llm, [
+        {"role": "system", "content": prompt_text("point_extend")},
+        {"role": "user", "content": user},
+    ], model, reasoning_effort="high")
+    raw = None
+    if isinstance(data, dict):
+        for key in _EXT_LIST_KEYS:
+            if isinstance(data.get(key), list):
+                raw = data[key]
+                break
+        if raw is None:
+            for wrapper in ("result", "data", "output"):
+                inner = data.get(wrapper)
+                if isinstance(inner, dict):
+                    for key in _EXT_LIST_KEYS:
+                        if isinstance(inner.get(key), list):
+                            raw = inner[key]
+                            break
+                if raw is not None:
+                    break
+    elif isinstance(data, list):
+        raw = data
+    names = [e["module"] for e in view]
+    existing = [p["point"] for e in view for p in e["points"]]
+    limit = max(EXTEND_MIN_TOTAL, int(total * EXTEND_MAX_RATIO))
+    additions: list[dict] = []
+    skipped: list[dict] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("point") or item.get("text") or item.get("description") or "").strip()
+        if not text:
+            continue
+        module = _ext_module_of(str(item.get("module") or ""), names)
+        basis = ""
+        for key in _EXT_BASIS_KEYS:
+            if isinstance(item.get(key), str) and item[key].strip():
+                basis = item[key].strip()
+                break
+        if module is None:
+            skipped.append({"module": str(item.get("module") or ""), "point": text, "reason": "模块不在已有测试点里，延伸点必须依附已有页面 / 功能"})
+            continue
+        if not basis:
+            skipped.append({"module": module, "point": text, "reason": "没有写为什么要测（basis）"})
+            continue
+        if any(similarity(text, old) >= EXTEND_SIMILAR for old in existing):
+            skipped.append({"module": module, "point": text, "reason": "与已有测试点高度相似，已跳过"})
+            continue
+        if len(additions) >= limit:
+            skipped.append({"module": module, "point": text, "reason": f"超出延伸上限（明文测试点的三分之一，{limit} 条）"})
+            continue
+        dim = item.get("dimension")
+        additions.append({"module": module, "point": text,
+                          "dimension": str(dim).strip() if isinstance(dim, (str, int, float)) else "",
+                          "ref": str(item.get("ref") or "").strip(), "basis": basis})
+        existing.append(text)
+    logger.info("经验延伸：{} 条明文测试点 → 延伸 {} 条，跳过 {} 条（上限 {}）", total, len(additions), len(skipped), limit)
+    return {"additions": additions, "skipped": skipped, "model_name": result.model_name}
+
+
+def apply_extensions(modules: list[dict], additions: list[dict]) -> int:
+    """把延伸点以 source=derived 追加进对应模块（实体化之前的归一化结构）；返回追加条数。"""
+    by_name = {str(e.get("module", "")): e for e in modules}
+    n = 0
+    for a in additions:
+        entry = by_name.get(a["module"])
+        if entry is None:
+            continue
+        entry.setdefault("points", []).append({
+            "point": a["point"], "dimension": a.get("dimension", ""),
+            **({"ref": a["ref"]} if a.get("ref") else {}),
+            "basis": a["basis"], "source": "derived",
+        })
+        n += 1
+    return n
+
+
 def build_graph(
     llm: LLMClient,
     template: CustomTemplate | None = None,

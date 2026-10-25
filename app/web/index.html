@@ -2820,9 +2820,11 @@ function allPoints(t) {
   const modules = (t.analysis||{}).test_points || [];
   return modules.flatMap(m => (m.points||[]).map(p => ({...normPoint(p), module:m.module})));
 }
-const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增', blind_spot:'盲区转入'};
+const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增', blind_spot:'盲区转入', derived:'经验延伸'};
 const BS_STATUS = {open:'待处置', question:'已转待确认事项', point:'已转测试点', explained:'需求已说明', ignored:'已忽略'};
-const srcChip = src => src === 'manual' || src === 'blind_spot'
+const srcChip = src => src === 'derived'
+  ? `<span class="tag" style="color:var(--purple)" title="需求没写、按资深测试经验补的场景；依据见测试点下方">延伸</span><div class="hint">经验延伸</div>`
+  : src === 'manual' || src === 'blind_spot'
   ? `<span class="tag" style="background:var(--warn-bg,#fff4e0);color:var(--warn,#b36b00)">人工</span>${src==='blind_spot'?'<div class="hint">盲区转入</div>':''}`
   : `<span class="tag">AI</span><div class="hint">${esc(srcText[src]||src||'AI 拆解')}</div>`;
 const pStatusText = {pending:'待审核', approved:'已通过', rejected:'已驳回'};
@@ -2885,6 +2887,7 @@ function renderPointWorkbench(t) {
   const approved = pts.filter(p=>p.status==='approved').length;
   const rejected = pts.filter(p=>p.status==='rejected').length;
   const pending = pts.length - approved - rejected;
+  const derivedCnt = pts.filter(p=>p.source==='derived').length;
   const confirmable = t.status === 'awaiting_confirmation';
   const pendingGen = t.points_pending_generation || [];
   const generatedIds = new Set((t.context||{}).generated_tp_ids || []);
@@ -2912,6 +2915,7 @@ function renderPointWorkbench(t) {
         <td style="width:70px"><span class="cid">${esc(p.tp_id)}</span></td>
         <td style="width:150px">${modTag(p.module)}</td>
         <td>${esc(p.point)}
+          ${p.basis?`<div class="hint" style="color:var(--purple)" title="经验延伸：为什么要测">依据：${esc(p.basis)}</div>`:''}
           ${(p.warnings||[]).map(w=>`<div class="hint" style="color:var(--warn)">⚠ ${esc(w)}</div>`).join('')}
           ${editingHint('point', p.tp_id)}
           ${rejectInfoLine(p)}</td>
@@ -2952,18 +2956,19 @@ function renderPointWorkbench(t) {
     </div>` : '';
 
   return sub + `<div class="toolbar" style="margin-top:0">
-      <span class="hint">共 ${pts.length} 条 · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b></span>
+      <span class="hint">共 ${pts.length} 条 · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b>${derivedCnt?` · 经验延伸 <b style="color:var(--purple)" title="需求没写、按资深测试经验补的场景">${derivedCnt}</b>`:''}</span>
       <div class="seg">
         <button class="${pointView==='table'?'on':''}" onclick="pointView='table';renderDetail()">表格</button>
         <button class="${pointView==='mind'?'on':''}" onclick="pointView='mind';renderDetail()">脑图</button>
       </div>
       <div style="margin-left:auto;display:flex;gap:8px">
         ${confirmable?`<button class="btn ghost sm" onclick="gapCheck()">查漏补缺</button>
+        <button class="btn ghost sm" onclick="extendPoints()" title="按资深测试经验补需求没写到的场景（并发 / 中断 / 跨天 / 越权 / 脏数据），只新增、待审核、每条带依据；拆解时已自动跑过一遍，这里是再补一轮">经验延伸</button>
         <button class="btn ghost sm" onclick="dupCheck()">重复检查</button>
         <button class="btn ghost sm" onclick="supplementPoints()">AI 补充</button>
         <button class="btn ghost sm" onclick="manualAddPoint()">手工新增</button>`:''}
         ${canEditPt&&!pts.every(p=>p.legacy)?`<button class="btn ghost sm" onclick="openCompareDlg()" title="录入人工编写的测试点，与 AI 生成的逐条对比">人工对比</button>`:''}
-        ${pts.length?`<button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export')}+(exportApprovedOnly?'?scope=approved':''), '测试点.xlsx')" title="导出测试点 Excel：编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例">导出 xlsx</button>
+        ${pts.length?`<button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export')}+(exportApprovedOnly?'?scope=approved':''), '测试点.xlsx')" title="导出测试点 Excel：编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例、延伸依据">导出 xlsx</button>
         <label class="check" title="勾选后只导出已通过的测试点"><input type="checkbox" ${exportApprovedOnly?'checked':''} onchange="exportApprovedOnly=this.checked"> 只导已通过</label>`:''}
       </div></div>
     ${renderCoverage(t)}
@@ -2995,9 +3000,10 @@ function buildPointMinderJson(t, modules) {
     children: modules.map(m => ({
       data: {text: `${m.module}（${(m.points||[]).length}）`, kind: 'module'},
       children: (m.points||[]).map(normPoint).map(p => ({
-        data: {text: p.point, kind: 'point', tpId: p.tp_id, resource: [p.tp_id, ...(p.dimension ? [p.dimension] : []), label[p.status] || p.status]},
+        data: {text: p.point, kind: 'point', tpId: p.tp_id, resource: [p.tp_id, ...(p.dimension ? [p.dimension] : []), ...(p.source === 'derived' ? ['延伸'] : []), label[p.status] || p.status]},
         children: [
           ...(p.ref ? [{data: {text: `来源：${p.ref}`, kind: 'note', resource: ['需求来源']}}] : []),
+          ...(p.basis ? [{data: {text: `依据：${p.basis}`, kind: 'note', resource: ['经验延伸']}}] : []),
           ...(p.status === 'rejected' && (p.comment || p.fix_request) ? [{data: {text: `驳回：${p.comment || ''}${p.fix_request ? '｜要求：' + p.fix_request : ''}`, kind: 'note', resource: ['驳回意见']}}] : []),
           ...((p.warnings||[]).map(w => ({data: {text: w, kind: 'note', resource: ['提示']}}))),
         ],
@@ -3405,6 +3411,15 @@ async function gapCheck() {
     toast(`查漏完成：新增 ${data.added.length} 条待审核测试点（存量不变）`, 'ok');
   } catch (e) { toast('查漏失败：' + e.message, 'err'); }
 }
+async function extendPoints() {
+  toast('经验延伸执行中：按资深测试经验补需求没写到的场景…');
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/points/extend`, {method:'POST'});
+    await openTask(currentTask.task_id, true);
+    const skipped = (data.skipped || []).length;
+    toast(`经验延伸完成：新增 ${data.added.length} 条待审核测试点（标「延伸」并带依据）${skipped ? `，${skipped} 条与已有测试点重复或没依据已跳过` : ''}`, data.added.length ? 'ok' : 'warn');
+  } catch (e) { toast('经验延伸失败：' + e.message, 'err'); }
+}
 async function dupCheck() {
   toast('重复检查执行中…');
   try {
@@ -3489,7 +3504,7 @@ function renderCases(t) {
       <td style="width:30px"><input type="checkbox" class="cck" data-cid="${esc(c.case_id)}"></td>
       <td style="width:104px"><span class="cid">${esc(c.case_id)}</span><div class="hint">v${c.version||1}</div></td>
       <td style="width:80px">${esc(c.module)}</td>
-      <td style="min-width:180px">${esc(c.title)}
+      <td style="min-width:180px">${esc(c.title)}${/^经验延伸[:：]/.test(c.remark||'')?` <span class="tag" style="color:var(--purple)" title="${esc(c.remark)}">延伸</span>`:''}
         ${c.keywords?`<div class="kw">${esc(c.keywords)}</div>`:''}
         ${(c.point_ids||[]).length?`<div class="hint" title="来源测试点">${c.point_ids.map(x=>`<code title="${esc((ptMap.get(x)||{}).point||'')}">${esc(x)}</code>`).join(' ')}</div>
         ${refsOf(c).length?`<div class="hint">需求来源：${refsOf(c).map(x=>refHtml(x)).join('<span class="hint">；</span>')}</div>`:''}`:''}

@@ -488,3 +488,79 @@ async def test_推理耗尽输出预算没有正文时重试一次_有正文被�
     with pytest.raises(LLMOutputError):
         await _chat_json(llm, [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}], None)
     assert len(llm.calls) == 1
+
+
+# ---- 经验延伸：拆完需求明文再按资深测试经验补需求没写到的场景 ----
+
+
+EXTEND_REPLY = __import__("json").dumps({"extensions": [
+    {"module": "登录", "point": "登录请求发出后断网再恢复，不重复登录也不卡在加载中", "dimension": "网络",
+     "ref": "登录 › 登录按钮", "basis": "弱网下请求重发导致重复登录是常见缺陷"},
+    {"module": "登录", "point": "密码错误", "dimension": "异常流程", "ref": "登录 › 密码", "basis": "复述明文"},
+    {"module": "登录", "point": "两台设备同时登录同一账号，后登录的把先登录的踢下线", "dimension": "重复操作", "ref": "登录 › 登录", "basis": ""},
+    {"module": "支付", "point": "支付中途切后台再回来订单状态正确", "dimension": "中断", "ref": "支付 › 支付", "basis": "需求没有支付模块"},
+    {"module": "登录页", "point": "登录中切后台再回到前台，登录结果仍正确展示", "dimension": "中断",
+     "ref": "登录 › 登录按钮", "basis": "切后台丢回调是移动端常见缺陷"},
+    {"module": "登录", "point": "账号前后带空格登录，按去空格后的账号处理", "dimension": "输入校验",
+     "ref": "登录 › 账号输入框", "basis": "复制粘贴带空格是高频投诉"},
+    {"module": "登录", "point": "连续快速点击登录按钮 5 次只发出一次登录请求", "dimension": "重复操作",
+     "ref": "登录 › 登录按钮", "basis": "重复提交"},
+]}, ensure_ascii=False)
+
+
+async def test_经验延伸_拆完明文再补需求之外的场景_标来源与依据_复述没依据模块不对超上限的跳过_关掉不调用():
+    from app.agents import run_analysis
+
+    llm = StubLLM([ANALYST_REPLY, EXTEND_REPLY])
+    analysis = await run_analysis("登录需求", llm=llm, extend=True)
+    assert len(llm.calls) == 2
+    ext_user = llm.calls[1]["messages"][-1]["content"]
+    assert "需求原文" in ext_user and "正常登录" in ext_user and "密码错误" in ext_user   # 明文点一并给到，延伸不许复述
+    assert "需求没写、但有经验的测试人员一定会去测" in llm.calls[1]["messages"][0]["content"]
+    points = analysis.test_points[0]["points"]
+    spec = [p for p in points if p.get("source") != "derived"]
+    derived = [p for p in points if p.get("source") == "derived"]
+    assert [p["point"] for p in spec] == ["正常登录", "密码错误"]            # 明文点原样在前
+    # 7 条里：复述「密码错误」跳过、没依据跳过、模块「支付」对不上跳过、「登录页」挂到「登录」、上限 max(3, 2/3)=3 → 第 4 条合格的跳过
+    assert [p["point"][:6] for p in derived] == ["登录请求发出", "登录中切后台", "账号前后带空"]
+    assert all(p["basis"] and p["ref"] for p in derived)
+    assert derived[0]["dimension"] == "网络" and derived[0]["basis"].startswith("弱网")
+    ext_trace = [t for t in analysis.trace if t["agent"] == "经验延伸"]
+    assert ext_trace == [{"agent": "经验延伸", "model": "stub", "added": 3, "skipped": 4}]
+
+    llm = StubLLM([ANALYST_REPLY])
+    analysis = await run_analysis("登录需求", llm=llm, extend=False)
+    assert len(llm.calls) == 1 and all("basis" not in p for p in analysis.test_points[0]["points"])
+    analysis = await run_analysis("登录需求", llm=StubLLM([ANALYST_REPLY]))   # 测试环境配置关着：默认不延伸
+    assert all("basis" not in p for p in analysis.test_points[0]["points"])
+
+
+async def test_经验延伸故障只丢延伸_明文测试点照常返回():
+    from app.agents import run_analysis
+
+    llm = StubLLM([ANALYST_REPLY, "不是 JSON 的输出"])   # 解析失败重试一次时桩已空 → 延伸异常
+    analysis = await run_analysis("登录需求", llm=llm, extend=True)
+    assert [p["point"] for p in analysis.test_points[0]["points"]] == ["正常登录", "密码错误"]
+    assert any(t["agent"] == "经验延伸" and t.get("error") for t in analysis.trace)
+
+
+async def test_经验延伸点进生成_带依据让生成按依据写用例():
+    llm = StubLLM([generator_reply(_case()), review_reply(True)])
+    points = [{"module": "登录", "points": [
+        {"point": "正常登录", "dimension": "正常流程", "tp_id": "TP001"},
+        {"point": "登录请求发出后断网再恢复，不重复登录", "dimension": "网络", "tp_id": "TP002",
+         "basis": "弱网下请求重发导致重复登录是常见缺陷", "source": "derived"},
+    ]}]
+    await run_generation("登录需求", llm=llm, test_points=points)
+    gen_user = llm.calls[0]["messages"][1]["content"]
+    assert "弱网下请求重发导致重复登录是常见缺陷" in gen_user
+    assert "经验延伸测试点" in llm.calls[0]["messages"][0]["content"]
+
+
+async def test_直接生成模式也走经验延伸_延伸点进同一模块一起生成():
+    llm = StubLLM([ANALYST_REPLY, EXTEND_REPLY, generator_reply(_case()), review_reply(True)])
+    result = await run_generation("登录需求", llm=llm, extend=True)
+    assert result.passed is True
+    assert [t["agent"] for t in result.trace][:2] == ["需求分析", "经验延伸"]
+    gen_user = llm.calls[2]["messages"][1]["content"]
+    assert "登录请求发出后断网再恢复" in gen_user and "弱网下请求重发" in gen_user

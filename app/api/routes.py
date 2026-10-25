@@ -1900,7 +1900,8 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
             {"module": e["module"],
              "points": [{"point": p["point"], "dimension": p.get("dimension", ""),
                          **({"tp_id": p["tp_id"]} if p.get("tp_id") else {}),
-                         **({"ref": p["ref"]} if p.get("ref") else {})} for p in e["points"]]}
+                         **({"ref": p["ref"]} if p.get("ref") else {}),
+                         **({"basis": p["basis"]} if p.get("basis") else {})} for p in e["points"]]}
             for e in test_points if e.get("points")
         ]
     else:
@@ -1954,7 +1955,8 @@ def _points_pending_generation(record: TaskRecord) -> list[dict]:
     for entry, p in iter_points((record.analysis or {}).get("test_points") or []):
         if p.get("status") == "approved" and p.get("tp_id") and p["tp_id"] not in generated:
             out.setdefault(entry["module"], []).append({"point": p["point"], "dimension": p.get("dimension", ""), "tp_id": p["tp_id"],
-                                                       **({"ref": p["ref"]} if p.get("ref") else {})})
+                                                       **({"ref": p["ref"]} if p.get("ref") else {}),
+                                                       **({"basis": p["basis"]} if p.get("basis") else {})})
     return [{"module": m, "points": pts} for m, pts in out.items()]
 
 
@@ -2977,6 +2979,29 @@ async def gap_check_points(request: Request, task_id: str) -> dict:
     bump_tp_seq(record.analysis)
     store.save(record)
     return {"task_id": task_id, "coverage": gap["coverage"], "added": added, "test_points": modules}
+
+
+@router.post("/api/v1/tasks/{task_id}/points/extend")
+async def extend_task_points(request: Request, task_id: str) -> dict:
+    """经验延伸：按资深测试经验补需求没写到的场景（并发 / 中断 / 跨天 / 越权 / 脏数据），只新增、待审核，
+    每条标来源「经验延伸」并带依据（basis）。拆解时默认已跑一遍（配置 point_extension），这里是手动再跑 / 给关掉了自动延伸的任务补。"""
+    from app.agents.graph import extend_points
+    from app.agents.outline import clean_manual_sections
+    from app.tasks.points import add_points
+
+    store = request.app.state.tasks
+    record, modules = _points_record(request, task_id, "point.ai")
+    _ai_ctx(request, record)
+    ctx = record.context or {}
+    try:
+        ext = await extend_points(request.app.state.llm, clean_manual_sections(ctx.get("requirement", "")), modules, ctx.get("model"))
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    skipped = list(ext["skipped"])
+    added = add_points(modules, ext["additions"], source="derived", seq_floor=tp_seq_of(record.analysis), skipped=skipped)
+    bump_tp_seq(record.analysis)
+    store.save(record)
+    return {"task_id": task_id, "added": added, "skipped": skipped, "test_points": modules}
 
 
 class BlindSpotActionBody(BaseModel):

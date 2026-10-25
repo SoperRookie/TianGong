@@ -18,6 +18,8 @@ from app.agents import prompts as P
 PROMPT_DEFS: list[dict] = [
     {"key": "analyst", "name": "需求拆解（测试点）", "kind": "system", "default": P.ANALYST_SYSTEM,
      "where": "任务创建 → 拆解测试点"},
+    {"key": "point_extend", "name": "经验延伸（需求之外的场景）", "kind": "system", "default": P.POINT_EXTEND_SYSTEM,
+     "where": "拆解测试点之后的独立一步 / 测试点页「经验延伸」：按资深测试经验补需求没写到的并发 / 中断 / 跨天 / 越权 / 脏数据场景，每条带依据"},
     {"key": "requirement_outline", "name": "长需求模块大纲", "kind": "system", "default": P.REQUIREMENT_OUTLINE_SYSTEM,
      "where": "长需求分片拆解前 → 全文模块大纲"},
     {"key": "blind_spot_verify", "name": "分片盲区复核", "kind": "system", "default": P.BLIND_SPOT_VERIFY_SYSTEM,
