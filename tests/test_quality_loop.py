@@ -1106,3 +1106,57 @@ def test_盲区出处_模型给的优先_没有的按章节号反查_多需求�
     assert ents["排重键未说明"]["module"] == "后台-日榜排名-查询功能说明" and ents["排重键未说明"]["ref"].endswith("按天排重")
     assert ents["3.4.5 会员昵称取值时点未说明"]["ref"] == "后台 › 3 商户管理后台 › 3.4 日榜排名 › 3.4.5 字段说明"
     assert "ref" not in ents["没有章节号的盲区"] and "module" not in ents["没有章节号的盲区"]
+
+
+def _整理稿_for_gap(区块字数=900):
+    big = "- 规则一条，带数值 100 与条件。\n" * (区块字数 // 18 + 1)
+    return "\n".join([
+        "# 「后台」需求整理稿", "", "## 1. 需求说明", "", "### 1.1 创建活动", big,
+        "## 2. 活动运营后台", "", "### 2.1 活动列表", "", "#### 2.1.1 基本配置", big, "#### 2.1.2 数据配置", big,
+        "### 2.2 派奖查询", "", "#### 2.2.1 派奖查询", big,
+    ])
+
+
+async def test_查漏按章节分批_各批只带本批章节的测试点_矩阵合并_一批故障只丢该批(monkeypatch):
+    """线上 7.6 万字需求 + 1255 条测试点一次送查漏（10.6 万 token），模型 9 秒回「全已覆盖、新增 0 条」，整轮等于没跑。"""
+    import app.agents.quality as Q
+    from app.agents.outline import requirement_chunks
+
+    monkeypatch.setattr(Q, "GAP_BATCH_CHARS", 1500)
+    req = _整理稿_for_gap()
+    n = len(requirement_chunks(req, 1500)[0])
+    assert n >= 3
+    modules = [
+        {"module": "需求说明-创建活动", "points": [{"tp_id": "TP001", "point": "活动名称必填", "dimension": "输入校验", "ref": "1.1 创建活动 › 名称"}]},
+        {"module": "活动列表-基本配置", "points": [{"tp_id": "TP002", "point": "奖池比例 75%", "dimension": "数据", "ref": "2.1.1 基本配置 › 比例"}]},
+        {"module": "活动运营后台-派奖查询", "points": [{"tp_id": "TP003", "point": "待派可查", "dimension": "正常流程", "ref": "2.2.1 派奖查询 › 状态"}]},
+        {"module": "模型自拟的名字", "points": [{"tp_id": "TP004", "point": "按 ref 的章节号归批", "dimension": "数据", "ref": "2.1.2 数据配置 › 一条"}]},
+        {"module": "哪都对不上", "points": [{"tp_id": "TP005", "point": "每批都带", "dimension": "数据", "ref": "无"}]},
+    ]
+    batches = Q.gap_batches(req, modules)
+    assert len(batches) == n
+    where = {p["tp_id"]: [i for i, (_, ms) in enumerate(batches) if any(pp["tp_id"] == p["tp_id"] for m in ms for pp in m["points"])]
+             for m in modules for p in m["points"]}
+    chunk_of = lambda s: [i for i, (t, _) in enumerate(batches) if s in t]  # noqa: E731
+    assert where["TP001"] == chunk_of("### 1.1 创建活动") and where["TP002"] == chunk_of("#### 2.1.1 基本配置")
+    assert where["TP003"] == chunk_of("#### 2.2.1 派奖查询") and where["TP004"] == chunk_of("#### 2.1.2 数据配置")
+    assert where["TP005"] == list(range(n))   # 模块名与 ref 都对不上：每批都带
+
+    ok = lambda cov, adds: json.dumps({"coverage": cov, "additions": adds}, ensure_ascii=False)  # noqa: E731
+    full = {d: "已覆盖" for d in Q.DIMENSIONS}
+    replies = [ok({**full, "输入校验": "未覆盖", "网络": "不适用"}, [{"module": "需求说明-创建活动", "point": "名称超长不可提交", "dimension": "输入校验", "ref": "1.1 创建活动 › 名称"}]),
+               "坏掉的 JSON", "还是坏的",   # 第二批两次都解析失败 → 该批丢弃
+               ok({**full, "网络": "不适用"}, [{"module": "活动运营后台-派奖查询", "point": "驳回状态可查", "dimension": "正常流程", "ref": "2.2.1 派奖查询 › 状态"}])]
+    replies += [ok({**full, "网络": "不适用"}, [])] * (n - 3)
+    llm = StubLLM(replies)
+    gap = await Q.run_gap_check(llm, req, modules, None)
+    assert gap["batches"] == n and len(llm.calls) == n + 1
+    assert gap["coverage"]["输入校验"] == "未覆盖" and gap["coverage"]["正常流程"] == "已覆盖" and gap["coverage"]["网络"] == "不适用"
+    assert [a["point"] for a in gap["additions"]] == ["名称超长不可提交", "驳回状态可查"]
+    first = llm.calls[0]["messages"][-1]["content"]
+    assert "第 1/" in first and "活动名称必填" in first and "奖池比例 75%" not in first and "每批都带" in first
+    # 全部对不上（需求不是整理稿、模块名模型自拟）→ 不分批，整篇一次
+    plain = "登录需求：\n" + "账号密码登录，连续错误 5 次锁定。\n" * 300
+    assert Q.gap_batches(plain, [{"module": "登录", "points": [{"tp_id": "TP001", "point": "正常登录"}]}]) == [(plain, [{"module": "登录", "points": [{"tp_id": "TP001", "point": "正常登录"}]}])]
+    assert Q.merge_coverage([{"网络": "不适用"}, {"网络": "不适用"}])["网络"] == "不适用"
+    assert Q.merge_coverage([{"网络": "不适用"}, {"网络": "待确认"}])["网络"] == "待确认"

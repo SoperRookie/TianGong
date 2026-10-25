@@ -52,37 +52,137 @@ def _points_view(modules: list[dict]) -> list[dict]:
 
 # ---- 独立查漏（需求七/八/十）----
 
+# 查漏按章节分批：每批送这些字的需求原文与这些章节的测试点，让模型逐句核对。线上 7.6 万字需求加 1255 条测试点
+# 一次送进去（10.6 万 token），模型 9 秒就回「十个维度全已覆盖、新增 0 条」，整轮等于没跑。
+GAP_BATCH_CHARS = 8000
+# 对不到任何批的测试点占比超过这个数（模型自拟模块名、需求不是整理稿格式）就不分批，整篇一次查
+GAP_UNMATCHED_LIMIT = 0.5
 
-async def run_gap_check(
-    llm: LLMClient, requirement: str, modules: list[dict], model: str | None
-) -> dict:
-    """独立查漏 Agent：输出覆盖矩阵 + 新增建议；确定性保证存量测试点不被改动。"""
-    data, result = await _chat_json(
-        llm,
-        [
-            {"role": "system", "content": prompt_text("gap_check")},
-            {
-                "role": "user",
-                "content": f"需求内容：\n{wrap_data('需求原文', requirement)}\n\n已有测试点：\n{wrap_data('测试点', _dump(_points_view(modules)))}"
-                           + profile_block(),
-            },
-        ],
-        model,
-    )
+
+def _coverage(data: dict) -> dict:
     coverage = {}
     raw = data.get("coverage", {}) if isinstance(data.get("coverage"), dict) else {}
     for dim in DIMENSIONS:
         value = str(raw.get(dim, "待确认")).strip()
         coverage[dim] = value if value in COVERAGE_STATES else "待确认"
-    additions = [
-        a for a in data.get("additions", [])
-        if isinstance(a, dict) and str(a.get("point", "")).strip()
-    ]
+    return coverage
+
+
+def _additions(data: dict) -> list[dict]:
+    return [a for a in data.get("additions", []) if isinstance(a, dict) and str(a.get("point", "")).strip()]
+
+
+def merge_coverage(parts: list[dict]) -> dict:
+    """几批的覆盖矩阵合成一份：任一批未覆盖即未覆盖；否则有已覆盖即已覆盖；全不适用才不适用；其余待确认。"""
+    out = {}
+    for dim in DIMENSIONS:
+        values = [p.get(dim, "待确认") for p in parts]
+        if "未覆盖" in values:
+            out[dim] = "未覆盖"
+        elif "已覆盖" in values:
+            out[dim] = "已覆盖"
+        elif values and all(v == "不适用" for v in values):
+            out[dim] = "不适用"
+        else:
+            out[dim] = "待确认"
+    return out
+
+
+_REF_NUM_RE = re.compile(r"(\d+(?:\.\d+)+)")
+
+
+def gap_batches(requirement: str, modules: list[dict], max_chars: int | None = None) -> list[tuple[str, list[dict]]]:
+    """查漏分批：需求按章节切成若干批（与拆解同一套分片，确认结论也按模块跟到对应批），每批带与它章节相关的测试点——
+    模块名对得上批里章节的（`match_module`）跟那一批；对不上的看测试点 ref 里的章节号落在哪一批；
+    都对不上的每批都带（多花 token，不会让模型把别处已有的点当漏）。整篇不超一批、或对不上的点超过一半时只有一批、带全部测试点。"""
+    from app.agents.outline import _HEAD_RE, clean_manual_sections, heading_modules, match_module, requirement_chunks
+
+    requirement = clean_manual_sections(requirement)   # 与拆解看同一份文本：「人工收录」小节并入所在页面
+    chunks, _ = requirement_chunks(requirement, max_chars or GAP_BATCH_CHARS)
+    if len(chunks) <= 1:
+        return [(requirement, modules)]
+    heads = heading_modules(requirement)
+    names: list[list[str]] = []
+    nums: list[set[str]] = []
+    for c in chunks:
+        lines = c.splitlines()
+        names.append([heads[l.strip()] for l in lines if l.strip() in heads])
+        nums.append({m.group(2) for l in lines if (m := _HEAD_RE.match(l))})
+    all_names = [n for ns in names for n in ns]
+    per: list[list[dict]] = [[] for _ in chunks]
+    unmatched = 0
+    total = 0
+    for entry in modules:
+        points = entry.get("points", [])
+        total += len(points)
+        hit = match_module(str(entry.get("module", "")), all_names)
+        where = {i for i, ns in enumerate(names) if any(n in ns for n in hit)}
+        if len(where) != 1:   # 模块名对不上 / 跨批：按 ref 里的章节号投票
+            votes = [0] * len(chunks)
+            for p in points:
+                m = _REF_NUM_RE.search(str(p.get("ref", "")))
+                if m:
+                    for i, ns in enumerate(nums):
+                        if m.group(1) in ns:
+                            votes[i] += 1
+            where = {votes.index(max(votes))} if any(votes) else set()
+        if len(where) == 1:
+            per[where.pop()].append(entry)
+        else:
+            unmatched += len(points)
+            for bucket in per:
+                bucket.append(entry)
+    if total and unmatched / total > GAP_UNMATCHED_LIMIT:
+        return [(requirement, modules)]
+    return list(zip(chunks, per))
+
+
+async def run_gap_check(
+    llm: LLMClient, requirement: str, modules: list[dict], model: str | None
+) -> dict:
+    """独立查漏 Agent：输出覆盖矩阵 + 新增建议；确定性保证存量测试点不被改动。
+    长需求按章节分批并行查（见 gap_batches），各批覆盖矩阵合并、新增建议拼接；某批故障只丢该批。"""
+    batches = gap_batches(requirement, modules)
+
+    async def _one(no: int, text: str, mods: list[dict]) -> tuple[dict, list[dict], str]:
+        scope = (f"本批是需求的第 {no}/{len(batches)} 批章节，只核对本批原文：逐句对照，凡是本批原文里的功能描述、业务规则、"
+                 f"字段规则、数值约束没有任何测试点覆盖的，都在 additions 里补上（归入已有模块名、ref 指向本批原文）；"
+                 f"coverage 只按本批章节判断。\n\n") if len(batches) > 1 else ""
+        data, result = await _chat_json(
+            llm,
+            [
+                {"role": "system", "content": prompt_text("gap_check")},
+                {
+                    "role": "user",
+                    "content": f"{scope}需求内容：\n{wrap_data('需求原文', text)}\n\n已有测试点：\n{wrap_data('测试点', _dump(_points_view(mods)))}"
+                               + profile_block(),
+                },
+            ],
+            model,
+        )
+        return _coverage(data), _additions(data), result.model_name
+
+    if len(batches) == 1:
+        coverage, additions, model_name = await _one(1, *batches[0])
+    else:
+        import asyncio
+
+        outcomes = await asyncio.gather(*[_one(i, t, m) for i, (t, m) in enumerate(batches, 1)], return_exceptions=True)
+        done = [o for o in outcomes if not isinstance(o, BaseException)]
+        for i, o in enumerate(outcomes, 1):
+            if isinstance(o, BaseException):
+                logger.warning("查漏第 {} 批失败（只丢该批）：{}", i, o)
+        if not done:
+            raise next(o for o in outcomes if isinstance(o, BaseException))
+        coverage = merge_coverage([c for c, _, _ in done])
+        additions = [a for _, adds, _ in done for a in adds]
+        model_name = done[0][2]
+        logger.info("查漏按章节分 {} 批（每批 ≤ {} 字），{} 批完成", len(batches), GAP_BATCH_CHARS, len(done))
     logger.info(
         "独立查漏完成：未覆盖 {} 项 / 新增建议 {} 条",
         sum(1 for v in coverage.values() if v == "未覆盖"), len(additions),
     )
-    return {"coverage": coverage, "additions": additions, "model_name": result.model_name}
+    return {"coverage": coverage, "additions": additions, "model_name": model_name, "batches": len(batches)}
 
 
 # ---- 分片盲区复核：前面分片的盲区若被后面分片的需求章节说明，就不是盲区 ----
