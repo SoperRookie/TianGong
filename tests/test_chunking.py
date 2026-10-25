@@ -224,3 +224,118 @@ def test_三片以上小尾巴并入前片_第一片不被覆盖_内容不丢():
     for n in range(1, 6):
         assert joined.count(f"## {n}. 章节{n}") == 1, n   # 每章恰好出现一次：不丢、不重
     assert joined.count("## 6. 小尾巴") == 1 and "小尾巴" in chunks[-1]
+
+
+def test_确认结论与建议级假设按模块回到对应片_定不到的放第一片_多需求各自分():
+    """线上「连赢10/23」拆解：78 条确认结论（1.3 万字）整块落在只含增量奖池流水的最后一片，那片的模型按
+    「只拆本片内容」全跳过，ref 引用确认结论的测试点 0 条。"""
+    from app.agents.outline import QA_CHUNK_NOTE, requirement_chunks, split_qa_blocks
+
+    a = _整理稿("后台", 600)
+    qa = ("【待确认事项的确认结论（以此为准）】\n"
+          "- 问（活动运营后台-活动列表-基本配置）：奖池比例固定吗？\n  确认：固定为 75%／25%\n"
+          "- 问（需求说明-创建活动）：活动名称上限？\n  确认：30 个字符\n"
+          "- 问：整体是否支持多语言？\n  确认：只有中文\n"
+          "- 问（活动列表-数据配置）：模型给的模块不带文件夹名也要对上\n  确认：对得上\n"
+          "- 问（活动运营后台-活动列表-基本配置-奖池）：比章节更细的模块归上一级\n  确认：归基本配置\n")
+    assume = "【未确认的建议级事项（按下列假设处理，并在用例 remark 中注明假设）】\n- 问（需求说明-创建活动）：时区？\n  假设：UTC+8\n"
+    brief = f"【需求整理稿】（AI 摘录）\n{a}\n\n{qa}\n{assume}\n【AI 需求分析要点（已经人工过目）】\n业务规则：一条"
+    rest, blocks = split_qa_blocks(brief)
+    assert [len(b.items) for b in blocks] == [5, 1] and blocks[0].items[0][0] == "活动运营后台-活动列表-基本配置"
+    assert blocks[0].items[2][0] == "" and "确认：固定为 75%／25%" in blocks[0].items[0][1]
+    assert "- 问" not in rest and "【AI 需求分析要点" in rest and "## 1. 需求说明" in rest   # 两块摘掉，其余原样
+
+    chunks, _ = requirement_chunks(brief, 1500)
+    assert len(chunks) >= 3
+    by = lambda s: next(i for i, c in enumerate(chunks) if s in c)  # noqa: E731
+    assert by("固定为 75%／25%") == by("#### 2.1.2 基本配置") != by("### 1.2 创建活动")
+    assert by("30 个字符") == by("### 1.2 创建活动") == by("假设：UTC+8")
+    assert by("只有中文") == 0                                        # 没标模块的整体性问题放第一片
+    assert by("对得上") == by("#### 2.1.3 数据配置")                   # 「活动列表-数据配置」对上「活动运营后台-活动列表-数据配置」
+    assert by("归基本配置") == by("#### 2.1.2 基本配置")               # 更细的模块名归上一级章节
+    # 每片带着块头与说明；条目不在别的片重复出现
+    for c in chunks:
+        if "确认：" in c:
+            assert "【待确认事项的确认结论（以此为准）】" + QA_CHUNK_NOTE in c
+    assert sum(c.count("固定为 75%／25%") for c in chunks) == 1
+    assert "\n".join(chunks).count("- 问") == 6
+    # 分析要点仍在最后一片末尾（没有分到各片）
+    assert "【AI 需求分析要点" in chunks[-1]
+    # 多需求合并：各自的确认结论只在本需求的片里
+    b = _整理稿("前端", 600)
+    qb = "【待确认事项的确认结论（以此为准）】\n- 问（活动运营后台-活动列表-基本配置）：前端的比例？\n  确认：前端 50%\n"
+    brief2 = f"【需求 1/2：后台】\n{a}\n\n{qa}\n【需求 2/2：前端】\n{b}\n\n{qb}"
+    chunks2, titles2 = requirement_chunks(brief2, 1500)
+    assert all(t == "后台" for c, t in zip(chunks2, titles2) if "75%／25%" in c)
+    assert all(t == "前端" for c, t in zip(chunks2, titles2) if "前端 50%" in c)
+    # 整篇不超限：原样一片
+    assert requirement_chunks(brief, 10**6) == ([brief], [None])
+
+
+def test_人工收录小节_去样例与控件文案_规则并入所在页面_空节删掉():
+    """线上整理稿 10 个「页面-人工收录」小节模型一条测试点都没拆，里面夹着撤销按钮展示条件、导出文件名这类真规则。"""
+    from app.agents.outline import MANUAL_NOTE, clean_manual_sections, outline_from_headings
+
+    text = "\n".join([
+        "## 6. 商户管理后台", "", "### 6.7 报名记录", "", "#### 6.7.1 字段说明", "- 会员账号：按权限打码", "",
+        "#### 6.7.2 人工收录",
+        "| 1 | 2026-08-04 | 测试总账号 | zw9z3vvv1 | 20260227113553 | 2026连赢活动A | 现金报名 | 否 | 已报名 | 68.00 LGC |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+        "- 活动名称：2026连赢活动 榜单日期：2026-02-09 会员账号：zw9z3vvv1 排名:1 连赢次数：15 积分：133",
+        "- 请输入", "- 下一步", "- 搜索　重置", "- 请选择参与终端", "---", "**按从上到下、从左到右的顺序转录：**",
+        "- i.只有在榜单日期为未结算时，且报名状态为“已报名、报名中、待生效”时展示“撤销”按钮，其他情况不展示",
+        "| 积分变更 | 字符串 | 系统 | 展示本次积分的变动，增加展示+X（X为具体积分），无变动展示- |",
+        "- 下拉选项：全部 / 真实 / 机器人",
+        "| 运营管理-连赢活动记录 | 会员账号 XXXX | 撤销报名 | 活动ID：XXXX 榜单日期：XXXX 撤销原因：XXXX |",
+        "", "### 6.8 月榜排名", "", "#### 6.8.1 功能说明", "- 默认当月", "#### 6.8.2 人工收录",
+        "| 2 | 2026-08 | 测试总账号 | zw9z3vvv2 | 20260227113553 | 2026连赢活动A | 17 | 319 | 18,888.00 LGC | 待发 |",
+        "- 请输入活动备注（最多支持", "- 20个文字）", "",
+        "## 7. 疑点 / 不一致清单", "- 一条疑点",
+    ])
+    out = clean_manual_sections(text)
+    assert "人工收录" not in out and out.count(MANUAL_NOTE) == 1          # 6.7.2 留规则换成说明行；6.8.2 清空整节删掉
+    assert "展示“撤销”按钮" in out and "积分变更 | 字符串" in out and "下拉选项：全部 / 真实 / 机器人" in out
+    assert "撤销原因：XXXX" in out                                        # XXXX 是占位不是样例数据
+    for gone in ("zw9z3vvv1", "18,888.00", "排名:1 连赢次数：15", "请输入", "下一步", "搜索　重置", "请选择参与终端", "转录", "20个文字"):
+        assert gone not in out, gone
+    assert out.index("- 会员账号：按权限打码") < out.index(MANUAL_NOTE) < out.index("### 6.8 月榜排名")   # 留在本页面末尾
+    assert "## 7. 疑点 / 不一致清单\n- 一条疑点" in out and "#### 6.8.1 功能说明\n- 默认当月" in out
+    assert not any("人工收录" in m for m in outline_from_headings(out))
+    plain = "## 1. 登录\n- 规则\n### 1.1 密码\n- 6 位"
+    assert clean_manual_sections(plain) == plain                          # 没有这种小节：原样
+
+
+async def test_拆解入口先清人工收录_模型看到的是并入页面的规则():
+    from app.agents.outline import MANUAL_NOTE
+    from app.agents.service import run_analysis
+    from tests.stubs import StubLLM
+
+    text = "## 1. 报名记录\n- 会员账号按权限打码\n### 1.1 人工收录\n- 请输入\n- 只有未结算时展示撤销按钮\n"
+    llm = StubLLM([json.dumps({"modules": [{"module": "报名记录", "points": ["打码"]}], "blind_spots": []}, ensure_ascii=False)])
+    await run_analysis(text, llm, chunk_max_chars=10**6)
+    user = llm.calls[0]["messages"][-1]["content"]
+    assert "人工收录" not in user and "- 请输入" not in user
+    assert MANUAL_NOTE in user and "只有未结算时展示撤销按钮" in user
+
+
+def test_分片从页面中间开始补所属章节行_人工补充说明每片都带_长的只放第一片():
+    from app.agents.outline import CONTEXT_PREFIX, requirement_chunks
+
+    a = _整理稿("后台", 600)
+    brief = f"【需求整理稿】（AI 摘录）\n{a}\n\n【人工补充说明】\n只测 PC 端，移动端下期。\n\n【待确认事项的确认结论（以此为准）】\n- 问：整体？\n  确认：是\n"
+    chunks, _ = requirement_chunks(brief, 1500)
+    assert len(chunks) >= 3 and not chunks[0].startswith(CONTEXT_PREFIX)
+    starts = [c.splitlines()[0] for c in chunks[1:]]
+    # 从「#### 2.1.2 基本配置」开始的片：上级链是「2 活动运营后台 › 2.1 活动列表」，同级的前一节 2.1.1 不在链上
+    assert any(s == f"{CONTEXT_PREFIX}2 活动运营后台 › 2.1 活动列表" for s in starts), starts
+    assert all(s.startswith(CONTEXT_PREFIX) or s.startswith("##") for s in starts)
+    assert all("【人工补充说明】\n只测 PC 端，移动端下期。" in c for c in chunks)   # 用户自己写的说明每片都带
+    assert "\n".join(chunks).count("【人工补充说明】") == len(chunks)
+    # 从段落中间切开：连本节标题一起给，标「续」
+    txt = "## 1. 页面A\n### 1.1 区块甲\n" + "- 规则一条。\n" * 300 + "### 1.2 区块乙\n- 一句\n"
+    heads = [c.splitlines()[0] for c in requirement_chunks(txt, 1500)[0]]
+    assert heads[0] == "## 1. 页面A" and heads[1] == f"{CONTEXT_PREFIX}1 页面A › 1.1 区块甲（续）"
+    # 太长的补充说明只放第一片
+    long_brief = f"【需求整理稿】（AI 摘录）\n{a}\n\n【人工补充说明】\n" + "补充一句。" * 500
+    chunks, _ = requirement_chunks(long_brief, 1500)
+    assert "【人工补充说明】" in chunks[0] and all("【人工补充说明】" not in c for c in chunks[1:])
