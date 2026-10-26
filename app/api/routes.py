@@ -19,7 +19,7 @@ from app.api import path_params  # noqa: F401  必须先于路由定义：注册
 from app.agents import run_analysis, run_generation
 from app.agents.json_utils import LLMOutputError
 from app.config import get_settings
-from app.exporters import export_csv, export_excel, export_points_excel, export_xmind
+from app.exporters import export_csv, export_excel, export_points_excel, export_points_xmind, export_xmind
 from app.llm.client import AllModelsFailedError
 from app.llm.registry import NoVisionModelError, UnknownModelError
 from app.llm.schemas import MissingAPIKeyError
@@ -1118,6 +1118,19 @@ async def _run_point_quality_checks(app, task_id: str, requirement: str, model: 
             logger.info("独立查漏新增 {} 条待审核测试点", len(added))
     except Exception as e:
         logger.warning("独立查漏故障，跳过（不阻塞主链路）：{}", e)
+    if get_settings().point_combine:   # 模块级组合延伸：单条规则叠在一起的交叉场景，每模块一次调用
+        from app.agents.quality import run_point_combine
+
+        try:
+            cb = await run_point_combine(app.state.llm, requirement, modules, model)
+            added = add_points(modules, cb["additions"], source="combined", seq_floor=tp_seq_of(record.analysis))
+            bump_tp_seq(record.analysis)
+            record.point_combine = {"modules": cb["modules"], "added": len(added), "skipped": len(cb["skipped"]), "failed": cb["failed"],
+                                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            if added:
+                logger.info("模块级组合延伸新增 {} 条待审核测试点", len(added))
+        except Exception as e:
+            logger.warning("模块级组合延伸故障，跳过（不阻塞主链路）：{}", e)
     try:
         pairs = duplicate_candidates(modules)
         judged = await run_dup_judge(app.state.llm, requirement, pairs, model) if pairs else []
@@ -3022,6 +3035,37 @@ async def extend_task_points(request: Request, task_id: str) -> dict:
     bump_tp_seq(record.analysis)
     store.save(record)
     return {"task_id": task_id, "added": added, "skipped": skipped, "test_points": modules}
+
+
+class CombineBody(BaseModel):
+    modules: list[str] | None = None   # 只跑这些模块；空 / 不传 = 全部（≥ 3 条未驳回测试点的）模块
+
+
+@router.post("/api/v1/tasks/{task_id}/points/combine")
+async def combine_task_points(request: Request, task_id: str, body: CombineBody | None = None) -> dict:
+    """模块级组合延伸：每个模块一次调用，在模块内部找单条规则叠加后的组合场景（条件组合 / 流程串联 / 状态×角色×端 / 规则优先级 /
+    数据流转），只新增、待审核，每条标来源「组合延伸」、带依据（basis）与来源编号（combo_from）。拆解时默认已跑一遍（配置 point_combine），
+    这里是手动再跑 / 只跑某个模块（页面按模块筛选后点）。"""
+    from app.agents.quality import run_point_combine
+    from app.tasks.points import add_points
+
+    store = request.app.state.tasks
+    record, modules = _points_record(request, task_id, "point.ai")
+    _ai_ctx(request, record)
+    ctx = record.context or {}
+    only = [m for m in (body.modules if body else None) or [] if m] or None
+    try:
+        cb = await run_point_combine(request.app.state.llm, ctx.get("requirement", ""), modules, ctx.get("model"), only=only)
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    skipped = list(cb["skipped"])
+    added = add_points(modules, cb["additions"], source="combined", seq_floor=tp_seq_of(record.analysis), skipped=skipped)
+    bump_tp_seq(record.analysis)
+    if cb["modules"]:   # 一个模块都没送（筛选对不上 / 点太少）不覆盖上次的摘要
+        record.point_combine = {"modules": cb["modules"], "added": len(added), "skipped": len(skipped), "failed": cb["failed"],
+                                "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    store.save(record)
+    return {"task_id": task_id, "added": added, "skipped": skipped, "modules": cb["modules"], "failed": cb["failed"], "test_points": modules}
 
 
 class BlindSpotActionBody(BaseModel):
@@ -5666,7 +5710,49 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
     logger.info("需求 {} AI 分析完成：待确认 {} 项，核验降级 {}，复核质疑 {}，复核补充 {}（{}）", req_id,
                 len(analysis.get("open_questions") or []), v.get("demoted", 0), (r.get("wrong", 0) + r.get("unsupported", 0)),
                 r.get("added", 0), meta["model"])
+    if get_settings().question_suggest and request.app.state.requirements.open_questions(item):
+        try:   # 推荐答案：故障只记日志，不影响分析结果
+            item, _ = await _suggest_question_answers(request, item, body.model)
+        except Exception as e:
+            logger.warning("需求 {} 待确认事项推荐答案故障，跳过：{}", req_id, e)
     return _req_view(request, item)
+
+
+async def _suggest_question_answers(request: Request, item: dict, model: str | None) -> tuple[dict, int]:
+    """给未确认的待确认事项拟推荐答案（Prompt question_suggest）：原文 = 整理稿 + 人工补充 + 已确认结论（不含 AI 分析要点），
+    历史结论 = 同项目其他需求已确认的问题；写到 `suggested_answer`，页面预填、人确认才算。返回 (需求, 写上几条)。"""
+    from app.agents.quality import run_question_suggest
+    from app.requirements import design_brief
+
+    rstore = request.app.state.requirements
+    questions = rstore.open_questions(item)
+    if not questions:
+        return item, 0
+    text = design_brief({**item, "analysis": None})
+    out = await run_question_suggest(request.app.state.llm, text, questions, rstore.confirmed_question_pool(item), model)
+    return rstore.set_question_suggestions(item["req_id"], out["suggestions"], model=model, by=_operator(request))
+
+
+class SuggestBody(BaseModel):
+    model: str | None = None
+
+
+@router.post("/api/v1/requirements/{req_id}/questions/suggest")
+async def suggest_requirement_questions(request: Request, req_id: str, body: SuggestBody | None = None) -> dict:
+    """待确认事项推荐答案：对全部未确认事项按原文 › 历史结论 › 行业惯例各拟一个确定答案 + 依据 + 风险 + 置信度，
+    写到事项的 `suggested_answer`（页面预填、人点确认才算）。AI 分析完成后默认已自动跑过（配置 question_suggest）。"""
+    item = _req(request, req_id, "requirement.ai")
+    _ai_ctx(request, project=item["project"], requirement_id=req_id)
+    if not request.app.state.requirements.open_questions(item):
+        raise HTTPException(status_code=409, detail="没有未确认的待确认事项")
+    try:
+        item, n = await _suggest_question_answers(request, item, (body or SuggestBody()).model)
+    except UnknownModelError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    request.state.audit_detail = f"推荐答案 {n} 条"
+    return {"suggested": n, "requirement": _req_view(request, item)}
 
 
 class AnalysisBatchConfirmBody(BaseModel):
@@ -8020,8 +8106,8 @@ async def list_prompts(request: Request, kind: str = "", state: str = "", keywor
                        page: int = 1, page_size: int = 0) -> dict:
     """Prompt 列表：kind=system/user/block，state=builtin/customized/draft；page_size=0 不分页。"""
     store = request.app.state.prompts
-    if kind and kind not in ("system", "user", "block"):
-        raise HTTPException(status_code=400, detail="kind 仅支持 system / user / block")
+    if kind and kind not in ("system", "user", "block", "shared"):
+        raise HTTPException(status_code=400, detail="kind 仅支持 system / user / block / shared")
     if state and state not in store.STATES:
         raise HTTPException(status_code=400, detail=f"state 仅支持 {' / '.join(store.STATES)}")
     return store.query(kind=kind, state=state, keyword=keyword, page=max(1, page), page_size=min(200, max(0, page_size)))
@@ -8032,9 +8118,11 @@ async def get_prompt(request: Request, key: str) -> dict:
     from app.prompts import PromptError
 
     try:
-        return request.app.state.prompts.get(key)
+        item = request.app.state.prompts.get(key)
     except PromptError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    # expanded：正文里的「【共享:名称】」标记展开后的全文——模型实际收到的就是它；共享片段本身与没有标记的 Prompt 二者相同
+    return {**item, "expanded": request.app.state.prompts.expanded(key)}
 
 
 class PromptVersionBody(BaseModel):
@@ -8170,9 +8258,13 @@ _MEDIA_TYPES = {
 
 
 @router.get("/api/v1/tasks/{task_id}/points/export")
-async def export_points(request: Request, task_id: str, scope: str = "all") -> FileResponse:
-    """测试点导出（xlsx）：编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例与覆盖用例编号；scope=approved 只导已通过的。"""
+async def export_points(request: Request, task_id: str, scope: str = "all", fmt: str = "xlsx") -> FileResponse:
+    """测试点导出：fmt=xlsx（编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例与覆盖用例编号、延伸依据）
+    或 fmt=xmind（思维导图，与页面脑图同结构：需求 → 模块 → 测试点 → 来源 / 依据 / 意见）；scope=approved 只导已通过的。"""
     import asyncio
+
+    if fmt not in ("xlsx", "xmind"):
+        raise HTTPException(status_code=400, detail="fmt 仅支持 xlsx / xmind")
 
     record = _task(request, task_id, "case.export")
     modules = (record.analysis or {}).get("test_points") or []
@@ -8184,9 +8276,14 @@ async def export_points(request: Request, task_id: str, scope: str = "all") -> F
             links.setdefault(str(tp), []).append(str(c.get("case_id") or ""))
     generated = set((record.context or {}).get("generated_tp_ids") or [])
     task_dir = request.app.state.tasks.output_dir / task_id
-    name = "正式测试点.xlsx" if scope == "approved" else "测试点.xlsx"
-    path = await asyncio.to_thread(export_points_excel, modules, task_dir / name, links, generated, scope == "approved")
-    return FileResponse(path, media_type=_MEDIA_TYPES.get("xlsx"), filename=name)
+    name = ("正式测试点" if scope == "approved" else "测试点") + f".{fmt}"
+    if fmt == "xmind":
+        sources = record.sources or []
+        root_title = (record.context or {}).get("requirement_title") or (Path(sources[0]).stem if sources and sources[0] != "text" else "测试点")
+        path = await asyncio.to_thread(export_points_xmind, modules, task_dir / name, root_title, scope == "approved", links)
+    else:
+        path = await asyncio.to_thread(export_points_excel, modules, task_dir / name, links, generated, scope == "approved")
+    return FileResponse(path, media_type=_MEDIA_TYPES.get(fmt), filename=name)
 
 
 def _cases_fingerprint(record: TaskRecord) -> str:
