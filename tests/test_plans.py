@@ -493,3 +493,72 @@ async def test_结束轮次_全部执行完计划完成_再开一轮退回进行
     assert (await client.get(f"/api/v1/plans/{pid}")).json()["status"] == "in_progress"
     r = (await client.post(f"/api/v1/plans/{pid}/runs/{run2['run_id']}/finish")).json()   # 这轮一条没执行 → 仍进行中
     assert r["plan_status"] == "in_progress"
+
+
+# ---- 执行失败 AI 归因与缺陷单 ----
+
+import json as _json
+
+_PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
+TRIAGE_BUG_REPLY = _json.dumps({"triage": {"category": "系统缺陷", "sub": "步骤有误", "failed_step": 9, "confidence": "很高",
+                                           "reason": "预期「跳转首页并展示用户昵称」与需求一致，截图提示系统繁忙"},
+                                "bug": {"title": "登录提交后提示系统繁忙无法进入首页", "severity": "离谱", "precondition": "已注册账号",
+                                        "steps": ["输入正确账号密码并提交", 2], "expected": "跳转首页并展示用户昵称", "actual": "提示「系统繁忙，请稍后再试」", "scope": "登录主流程不通"}},
+                               ensure_ascii=False)
+TRIAGE_CASE_REPLY = _json.dumps({"triage": {"category": "用例问题", "sub": "预期有误", "failed_step": 1, "confidence": "高", "reason": "原文没有昵称"},
+                                 "bug": {"title": "不该有的缺陷单", "severity": "一般", "steps": []}}, ensure_ascii=False)
+
+
+async def test_执行失败AI归因_截图理解与需求原文入参_分类人采纳才改_缺陷单只在系统缺陷_用例问题采纳后进学习语料(client):
+    from app.learning.service import collect_samples
+
+    task_id = await _task_with_approved(client, make_case(point_ids=["TP001"]))
+    plan = await _plan(client)
+    pid = plan["plan_id"]
+    await client.post(f"/api/v1/plans/{pid}/cases", json={"task_id": task_id})
+    rid = (await client.post(f"/api/v1/plans/{pid}/runs", json={"name": "冒烟"})).json()["run_id"]
+    item_id = (await client.get(f"/api/v1/plans/{pid}")).json()["items"][0]["item_id"]
+    assert (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/triage", json={})).status_code == 409   # 没有失败记录
+    await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results",
+                      json={"items": [{"item_id": item_id, "status": "fail", "note": "点击登录后提示系统繁忙", "reason": "其他"}]})
+    r = await client.post(f"/api/v1/plans/{pid}/runs/{rid}/attachments", data={"item_id": item_id},
+                          files=[("files", ("失败.png", _PNG, "image/png"))])
+    assert r.status_code == 200 and r.json()["kind"] == "image"
+    # 截图先走图片理解，再归因；程序兜底：confidence / severity 枚举外、failed_step 超步数、非系统缺陷的 sub、steps 非字符串
+    app.state.llm = StubLLM(["页面：登录页；提示文案「系统繁忙，请稍后再试」", TRIAGE_BUG_REPLY])
+    r = await client.post(f"/api/v1/plans/{pid}/runs/{rid}/triage", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["triaged"] == [item_id] and r.json()["failed"] == []
+    t = r.json()["results"][item_id]["triage"]
+    assert t["category"] == "系统缺陷" and t["sub"] == "" and t["failed_step"] == 1 and t["confidence"] == "中"
+    assert t["suggested_reason"] == "系统缺陷" and t["screenshots"] == 1 and t["model"] == "stub"
+    assert t["bug"]["title"] == "登录提交后提示系统繁忙无法进入首页" and t["bug"]["severity"] == "一般" and t["bug"]["steps"] == ["输入正确账号密码并提交", "2"]
+    assert app.state.llm.calls[0]["require_vision"] is True
+    user = app.state.llm.calls[1]["messages"][-1]["content"]
+    assert "系统繁忙，请稍后再试" in user and "验证正确账号密码登录成功" in user and "点击登录后提示系统繁忙" in user
+    assert "# login" in user   # 需求原文（直接生成模式的任务测试点没有编号，来源测试点为空）
+    # 分类没改，人采纳才改
+    rec = (await client.get(f"/api/v1/plans/{pid}")).json()["runs"][0]["results"][item_id]
+    assert rec["reason"] == "其他"
+    r = await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results/{item_id}/triage/adopt", json={})
+    assert r.status_code == 200 and r.json()["result"]["reason"] == "系统缺陷" and r.json()["result"]["triage"]["adopted"]["reason"] == "系统缺陷"
+    assert (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results/{item_id}/triage/adopt", json={"reason": "乱填"})).status_code == 400
+    # 用例问题归因：缺陷单丢掉；采纳后进学习语料；指定 item_ids
+    app.state.llm = StubLLM(["截图文字", TRIAGE_CASE_REPLY])
+    r = (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/triage", json={"item_ids": [item_id]})).json()
+    t = r["results"][item_id]["triage"]
+    assert t["category"] == "用例问题" and t["sub"] == "预期有误" and t["suggested_reason"] == "用例预期有误" and t["bug"] is None
+    assert not [s for s in collect_samples(app.state.tasks, plans=app.state.plans) if s["来源"] == "执行失败（用例问题）"]
+    await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results/{item_id}/triage/adopt", json={})
+    samples = [s for s in collect_samples(app.state.tasks, plans=app.state.plans) if s["来源"] == "执行失败（用例问题）"]
+    assert len(samples) == 1 and samples[0]["失败分类"] == "用例预期有误"
+    # 归因故障：截图理解失败只跳过、归因本身失败整条 502（单条）
+    app.state.llm = StubLLM(["不是 JSON", "还不是 JSON", "依旧不是"])
+    assert (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/triage", json={})).status_code == 502
+    # 归因结果不在枚举内：按系统缺陷、置信度低，不丢
+    app.state.llm = StubLLM(["截图文字", _json.dumps({"triage": {"category": "不知道", "confidence": "高"}, "bug": None})])
+    t = (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/triage", json={})).json()["results"][item_id]["triage"]
+    assert t["category"] == "系统缺陷" and t["confidence"] == "低" and t["bug"] is None
+    # 轮次结束后不能再采纳
+    await client.post(f"/api/v1/plans/{pid}/runs/{rid}/finish")
+    assert (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results/{item_id}/triage/adopt", json={})).status_code == 409

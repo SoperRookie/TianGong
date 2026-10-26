@@ -4584,6 +4584,126 @@ async def finish_plan_run(request: Request, plan_id: str, run_id: str) -> dict:
     return {"run_id": run_id, "finished_at": run["finished_at"], "summary": summary, "plan_status": plan["status"]}
 
 
+class TriageBody(BaseModel):
+    item_ids: list[str] | None = None   # 只归因这些用例；空 = 本轮全部失败的用例
+    model: str | None = None
+
+
+def _triage_context(app, item: dict) -> tuple[str, list[dict]]:
+    """归因要对照的需求原文（用例所在模块的章节，定位不到用整篇前 8000 字）与用例来源测试点（tp_id / point / ref）。"""
+    record = app.state.tasks.get(item.get("task_id") or "")
+    if record is None:
+        return "", []
+    from app.agents.quality import _module_texts
+
+    requirement = (record.context or {}).get("requirement", "") or ""
+    modules = (record.analysis or {}).get("test_points") or []
+    snap = item.get("snapshot") or {}
+    wanted = set(snap.get("point_ids") or [])
+    points = [{"tp_id": p["tp_id"], "point": p.get("point", ""), **({"ref": p["ref"]} if p.get("ref") else {})}
+              for m in modules for p in m.get("points", []) if isinstance(p, dict) and p.get("tp_id") in wanted]
+    text = ""
+    try:
+        text = _module_texts(requirement, modules).get(str(snap.get("module") or item.get("module") or ""), "") if modules else ""
+    except Exception as e:   # 定位失败不影响归因
+        logger.warning("归因定位需求章节失败，用整篇：{}", e)
+    return (text or requirement[:8000]), points
+
+
+async def _triage_screenshots(app, run: dict, item_id: str, limit: int = 3) -> list[str]:
+    """该用例关联的失败截图（最多 limit 张）走图片理解，单张失败跳过。"""
+    import mimetypes
+
+    from app.agents.prompts import EXEC_SHOT_PROMPT
+    from app.parsers.image import understand_image_bytes
+
+    out: list[str] = []
+    for att in [a for a in run.get("attachments", []) if a.get("item_id") == item_id and a.get("kind") == "image"][:limit]:
+        path = Path(att.get("stored") or "")
+        if not path.exists():
+            continue
+        mime = att.get("content_type") or mimetypes.guess_type(path.name)[0] or "image/png"
+        try:
+            text = await understand_image_bytes(path.read_bytes(), mime, app.state.llm, prompt=EXEC_SHOT_PROMPT)
+            if text and text.strip():
+                out.append(f"文件 {att.get('filename', '')}：\n{text.strip()}")
+        except Exception as e:
+            logger.warning("失败截图 {} 理解失败，跳过：{}", att.get("filename"), e)
+    return out
+
+
+@router.post("/api/v1/plans/{plan_id}/runs/{run_id}/triage")
+async def triage_plan_failures(request: Request, plan_id: str, run_id: str, body: TriageBody | None = None) -> dict:
+    """执行失败 AI 归因与缺陷单（Prompt exec_triage）：本轮失败的用例（或指定的几条）逐条送模型——用例 + 执行说明 + 关联截图的理解结果 +
+    用例所在模块的需求原文 → 五类归因（用例问题 / 系统缺陷 / 环境问题 / 数据问题 / 需求变更）+ 置信度 + 依据，系统缺陷时起草缺陷单。
+    结果写在执行记录 `triage` 上，失败分类 `reason` 不动，人「采纳」才改；单条故障只丢该条。"""
+    from app.agents.quality import run_exec_triage
+
+    plan = _plan(request, plan_id, "exec.run")
+    run = _plan_run(plan, run_id)
+    body = body or TriageBody()
+    _ai_ctx(request, project=plan.get("project"), purpose="执行失败归因")
+    by_item = {i["item_id"]: i for i in plan["items"]}
+    targets = [iid for iid, r in run["results"].items() if r.get("status") == "fail" and iid in by_item
+               and (not body.item_ids or iid in body.item_ids)]
+    if not targets:
+        raise HTTPException(status_code=409, detail="没有失败的执行记录可归因")
+
+    async def _one(iid: str) -> dict:
+        item = by_item[iid]
+        requirement, points = _triage_context(request.app, item)
+        shots = await _triage_screenshots(request.app, run, iid)
+        out = await run_exec_triage(request.app.state.llm, item.get("snapshot") or {}, run["results"][iid].get("note", ""),
+                                    requirement, shots, body.model, points)
+        return {**out["triage"], "bug": out["bug"], "screenshots": len(shots), "model": out["model_name"],
+                "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+
+    import asyncio
+    outcomes = await asyncio.gather(*[_one(i) for i in targets], return_exceptions=True)
+    triaged: list[str] = []
+    failed: list[dict] = []
+    for iid, o in zip(targets, outcomes):
+        if isinstance(o, BaseException):
+            failed.append({"item_id": iid, "case_id": by_item[iid].get("case_id"), "error": str(o)})
+            logger.warning("用例 {} 归因失败：{}", by_item[iid].get("case_id"), o)
+        else:
+            run["results"][iid]["triage"] = o
+            triaged.append(iid)
+    if not triaged:
+        raise HTTPException(status_code=502, detail=f"归因失败：{failed[0]['error']}")
+    request.app.state.plans.save(plan)
+    request.state.audit_detail = f"归因 {len(triaged)} 条" + (f"，失败 {len(failed)} 条" if failed else "")
+    return {"run_id": run_id, "triaged": triaged, "failed": failed, "results": run["results"]}
+
+
+class TriageAdoptBody(BaseModel):
+    reason: str | None = None   # 不传 = 采纳 AI 建议的分类
+
+
+@router.post("/api/v1/plans/{plan_id}/runs/{run_id}/results/{item_id}/triage/adopt")
+async def adopt_plan_triage(request: Request, plan_id: str, run_id: str, item_id: str, body: TriageAdoptBody | None = None) -> dict:
+    """采纳 AI 归因：把执行记录的失败分类改成建议值（或人指定的分类），记采纳人与时间；用例问题类随之进入学习语料。"""
+    from app.plans import FAIL_REASONS
+
+    plan = _plan(request, plan_id, "exec.run")
+    run = _plan_run(plan, run_id)
+    r = run["results"].get(item_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="没有该用例的执行记录")
+    if run.get("finished_at"):
+        raise HTTPException(status_code=409, detail="该执行轮次已结束，分类不可再改")
+    if r.get("status") != "fail" or not r.get("triage"):
+        raise HTTPException(status_code=409, detail="该记录不是失败记录或还没有 AI 归因")
+    reason = ((body.reason if body else None) or r["triage"].get("suggested_reason") or "").strip()
+    if reason not in FAIL_REASONS:
+        raise HTTPException(status_code=400, detail=f"失败分类须为 {'/'.join(FAIL_REASONS)}")
+    r["reason"] = reason
+    r["triage"]["adopted"] = {"reason": reason, "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    request.app.state.plans.save(plan)
+    request.state.audit_detail = f"{r.get('case_id')} 采纳归因 {reason}"
+    return {"item_id": item_id, "result": r}
+
+
 @router.post("/api/v1/plans/{plan_id}/runs/{run_id}/attachments")
 async def upload_plan_attachment(
     request: Request, plan_id: str, run_id: str,

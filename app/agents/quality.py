@@ -561,6 +561,69 @@ async def run_question_suggest(llm: LLMClient, requirement: str, questions: list
     return {"suggestions": suggestions, "asked": len(qs), "batches": len(batches), "failed": failed}
 
 
+# ---- 执行失败归因与缺陷单（Prompt exec_triage）：人只填一句说明，分类与缺陷单由模型起草 ----
+
+
+TRIAGE_CATEGORIES = ("用例问题", "系统缺陷", "环境问题", "数据问题", "需求变更")
+TRIAGE_SUBS = ("步骤有误", "预期有误", "前置缺失")
+TRIAGE_SEVERITIES = ("致命", "严重", "一般", "轻微")
+# 五类归因 → 执行记录的失败分类（FAIL_REASONS）：前两类进学习语料，所以「用例问题」按 sub 细分；需求变更没有对应项记「其他」
+_TRIAGE_REASON = {("用例问题", "步骤有误"): "用例步骤有误", ("用例问题", "预期有误"): "用例预期有误", ("用例问题", "前置缺失"): "用例步骤有误",
+                  ("用例问题", ""): "用例步骤有误", "系统缺陷": "系统缺陷", "环境问题": "环境问题", "数据问题": "测试数据问题", "需求变更": "其他"}
+
+
+def triage_reason(category: str, sub: str = "") -> str:
+    return _TRIAGE_REASON.get((category, sub)) or _TRIAGE_REASON.get(category) or "其他"
+
+
+async def run_exec_triage(llm: LLMClient, case: dict, note: str, requirement: str, screenshots: list[str], model: str | None,
+                          points: list[dict] | None = None) -> dict:
+    """执行失败归因：用例（标题 / 前置 / 步骤与预期 / 来源测试点）+ 执行说明 + 失败截图的理解结果 + 该用例对应的需求原文 → 一次调用。
+    程序兜底：category 不在五类内按「系统缺陷」且 confidence「低」（不丢，交人看）；sub 只在用例问题下认三类；failed_step 收到 0～步数；
+    confidence 枚举外按「中」；bug 只在系统缺陷时保留，severity 枚举外按「一般」，steps 只认字符串；`suggested_reason` 为映射到
+    FAIL_REASONS 的建议分类，人采纳才写进执行记录。返回 {"triage": {...}, "bug": {...} | None, "model_name"}。"""
+    steps = [s for s in (case.get("steps") or []) if isinstance(s, dict)]
+    view = {"title": case.get("title", ""), "module": case.get("module", ""), "priority": case.get("priority", ""),
+            "precondition": case.get("precondition", ""),
+            "steps": [{"no": i, "action": s.get("action", ""), "expected": s.get("expected", "")} for i, s in enumerate(steps, 1)],
+            **({"remark": case["remark"]} if case.get("remark") else {})}
+    user = f"用例：\n{wrap_data('用例', _dump(view))}\n\n执行人的失败说明：\n{wrap_data('失败说明', note or '（没填）')}\n\n"
+    if points:
+        user += f"用例的来源测试点：\n{wrap_data('测试点', _dump(points))}\n\n"
+    for i, shot in enumerate(screenshots or [], 1):
+        user += f"失败截图 {i} 的理解结果：\n{wrap_data(f'截图{i}', shot)}\n\n"
+    user += (f"该用例对应的需求原文：\n{wrap_data('需求原文', requirement or '（没有找到对应原文）')}\n\n"
+             "请归因并（仅系统缺陷时）起草缺陷单。") + profile_block()
+    data, result = await _chat_json(llm, [{"role": "system", "content": prompt_text("exec_triage")},
+                                          {"role": "user", "content": user}], model)
+    raw = data.get("triage") if isinstance(data, dict) else None
+    raw = raw if isinstance(raw, dict) else (data if isinstance(data, dict) and data.get("category") else {})
+    category = str(raw.get("category") or "").strip()
+    confidence = str(raw.get("confidence") or "").strip()
+    if category not in TRIAGE_CATEGORIES:
+        category, confidence = "系统缺陷", "低"
+    sub = str(raw.get("sub") or "").strip()
+    sub = sub if category == "用例问题" and sub in TRIAGE_SUBS else ""
+    try:
+        step = int(raw.get("failed_step") or 0)
+    except (TypeError, ValueError):
+        step = 0
+    triage = {"category": category, "sub": sub, "failed_step": max(0, min(step, len(steps))),
+              "confidence": confidence if confidence in ("高", "中", "低") else "中",
+              "reason": str(raw.get("reason") or "").strip(), "suggested_reason": triage_reason(category, sub)}
+    bug = None
+    rb = data.get("bug") if isinstance(data, dict) else None
+    if category == "系统缺陷" and isinstance(rb, dict) and str(rb.get("title") or "").strip():
+        sev = str(rb.get("severity") or "").strip()
+        bug = {"title": str(rb.get("title") or "").strip()[:60], "severity": sev if sev in TRIAGE_SEVERITIES else "一般",
+               "precondition": str(rb.get("precondition") or "").strip(),
+               "steps": [str(s).strip() for s in (rb.get("steps") or []) if isinstance(s, (str, int, float)) and str(s).strip()],
+               "expected": str(rb.get("expected") or "").strip(), "actual": str(rb.get("actual") or "").strip(),
+               "scope": str(rb.get("scope") or "").strip()}
+    logger.info("执行失败归因：{}（{}，置信度{}）{}", category, sub or "-", triage["confidence"], "，起草缺陷单" if bug else "")
+    return {"triage": triage, "bug": bug, "model_name": result.model_name}
+
+
 # ---- 重复复核（需求十一~十三）----
 
 

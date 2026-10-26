@@ -4451,6 +4451,7 @@ async function _renderPlanDetail__impl() {
         ${(it.assign_log || []).length > 1 ? `<div class="hint" title="${esc(it.assign_log.map(x => `${x.prev || '—'} → ${x.assignee}（${x.by}）`).join('\n'))}">已改派 ${it.assign_log.length - 1} 次</div>` : ''}</td>
       <td style="width:118px">${r ? `<span class="st ${EXEC_CLS[r.status]}">${EXEC_LABEL[r.status]}</span>
           ${r.note || r.reason ? `<div class="hint" style="color:var(--danger)">${r.reason?`【${esc(r.reason)}】`:''}${esc(r.note)}</div>` : ''}
+          ${r.triage ? `<div class="hint" style="color:var(--purple)" title="${esc(r.triage.reason||'')}">AI 归因：<b>${esc(r.triage.category)}${r.triage.sub?`·${esc(r.triage.sub)}`:''}</b>（置信度${esc(r.triage.confidence||'中')}${r.triage.failed_step?`，第 ${r.triage.failed_step} 步`:''}${r.triage.screenshots?`，看了 ${r.triage.screenshots} 张截图`:''}）${r.triage.suggested_reason && r.triage.suggested_reason !== r.reason && active ? ` <a onclick="planAdoptTriage('${it.item_id}')" title="把失败分类从「${esc(r.reason)}」改成 AI 建议的「${esc(r.triage.suggested_reason)}」；用例问题类会进入学习语料">采纳为「${esc(r.triage.suggested_reason)}」</a>` : r.triage.adopted ? ' <span class="tag">已采纳</span>' : ''}${r.triage.bug ? ` <a onclick="planCopyBug('${it.item_id}')" title="【${esc(r.triage.bug.severity)}】${esc(r.triage.bug.title)}：复制缺陷单文本，贴到外部缺陷系统">复制缺陷单</a>` : ''}${r.triage.reason?`<div>${esc(r.triage.reason)}</div>`:''}</div>` : ''}
           <div class="hint">${(r.history||[]).length ? `第 ${r.history.length+1} 次 · ` : ''}${esc(r.by)}${r.on_behalf_of ? ` <span title="代 ${esc(r.on_behalf_of)} 执行">代执行</span>` : ''}</div>`
         : '<span class="hint">未执行</span>'}</td>
       <td style="width:170px"><div class="rowops">
@@ -4459,6 +4460,7 @@ async function _renderPlanDetail__impl() {
         <button class="ibtn bad" title="失败（填写原因/缺陷号）" onclick="planExecAct('${it.item_id}','fail')">${IC.x}</button>
         <button class="ibtn" title="阻塞" onclick="planExecAct('${it.item_id}','blocked')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg></button>
         <button class="ibtn" title="跳过" onclick="planExecAct('${it.item_id}','skipped')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:15px;height:15px"><path d="M5 4l10 8-10 8M19 4v16"/></svg></button>` : ''}
+        ${r && r.status === 'fail' && can(p.project,'exec.run') ? `<button class="ibtn" title="AI 归因：用例 + 失败说明 + 关联截图 + 需求原文 → 用例问题 / 系统缺陷 / 环境 / 数据 / 需求变更，系统缺陷起草缺陷单；分类要人采纳才算" onclick="planTriage(['${it.item_id}'])"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:15px;height:15px"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6M11 8v6"/></svg></button>` : ''}
         ${run ? `<button class="ibtn" title="上传附件并关联此用例（失败截图/日志等）" onclick="planPickAtt('${it.item_id}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:15px;height:15px"><path d="M21 12.5l-8.5 8.5a6 6 0 01-8.5-8.5L12.5 4a4 4 0 015.7 5.7L9.7 18.2a2 2 0 01-2.9-2.9l8-8"/></svg></button>` : ''}
         ${editable && canDelete() ? `<button class="ibtn" title="从计划移除（有执行记录的不可移除）" onclick="planRemoveItem('${it.item_id}')">${IC.trash || '✕'}</button>` : ''}
       </div></td>
@@ -4518,6 +4520,7 @@ async function _renderPlanDetail__impl() {
         ${p.runs.map(r => `<option value="${r.run_id}" ${run && r.run_id===run.run_id?'selected':''}>${esc(r.name)}${r.executor?` · 执行人 ${esc(r.executor)}`:''} · ${r.finished_at?'已结束':'进行中'}</option>`).join('')}
       </select>` : ''}
       ${run ? `<button class="btn ghost sm" title="不关联具体用例的整轮附件；关联用例请用表格行内的回形针按钮" onclick="planPickAtt(null)">＋ 整轮附件</button>` : ''}
+      ${run && can(p.project,'exec.run') && Object.values(results).some(r => r.status === 'fail') ? `<button class="btn ghost sm" onclick="planTriage(null)" title="本轮全部失败用例逐条 AI 归因（每条一次调用，关联截图先走图片理解）">AI 归因（失败 ${Object.values(results).filter(r => r.status === 'fail').length}）</button>` : ''}
       ${active ? `<button class="btn ghost sm" onclick="planFinishRun()">结束本轮</button>` : ''}
       ${editable ? `<button class="btn sm" onclick="planNewRun()">＋ 新建执行轮次</button>` : ''}
     </div></div>
@@ -4778,6 +4781,38 @@ async function planExecAct(itemId, status) {
       {items: [{item_id: itemId, status, note, reason}]});
     renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
+}
+/* 执行失败 AI 归因：结果写在记录上，分类要人「采纳」才改；系统缺陷的缺陷单复制到外部系统 */
+async function planTriage(itemIds) {
+  const run = curPlanRun(_planDetail); if (!run) return;
+  toast(itemIds ? 'AI 归因中：用例 + 失败说明 + 截图 + 需求原文…' : 'AI 归因中：逐条分析本轮失败用例（关联截图先做图片理解）…');
+  try {
+    const r = await jpost(`/api/v1/plans/${curPlan}/runs/${run.run_id}/triage`, {item_ids: itemIds});
+    toast(`已归因 ${r.triaged.length} 条${r.failed.length ? `，${r.failed.length} 条失败：${r.failed.map(f => f.case_id).join('、')}` : ''}`, r.failed.length ? 'warn' : 'ok');
+    renderPlanDetail();
+  } catch (e) { toast('AI 归因失败：' + e.message, 'err'); }
+}
+async function planAdoptTriage(itemId) {
+  const run = curPlanRun(_planDetail); if (!run) return;
+  try {
+    const r = await jpost(`/api/v1/plans/${curPlan}/runs/${run.run_id}/results/${itemId}/triage/adopt`, {});
+    toast(`失败分类已改为「${r.result.reason}」`, 'ok');
+    renderPlanDetail();
+  } catch (e) { toast(e.message, 'err'); }
+}
+function bugText(it, r) {
+  const b = r.triage.bug;
+  return [`【${b.severity}】${b.title}`, `用例：${it.case_id} ${it.title}（${it.module}）`, `前置：${b.precondition || '—'}`, '复现步骤：',
+    ...(b.steps || []).map((s, i) => `${i + 1}. ${s}`), `预期：${b.expected || '—'}`, `实际：${b.actual || '—'}`, `影响范围：${b.scope || '—'}`,
+    `执行说明：${r.note || ''}`, `归因依据：${r.triage.reason || ''}`].join('\n');
+}
+async function planCopyBug(itemId) {
+  const it = _planDetail.items.find(i => i.item_id === itemId);
+  const r = (curPlanRun(_planDetail) || {results: {}}).results[itemId];
+  if (!it || !r || !r.triage || !r.triage.bug) return;
+  const text = bugText(it, r);
+  try { await navigator.clipboard.writeText(text); toast('缺陷单已复制到剪贴板', 'ok'); }
+  catch (e) { await uiConfirm('缺陷单（复制失败，请手动选取）', text); }
 }
 async function planFinishRun() {
   const run = curPlanRun(_planDetail);
