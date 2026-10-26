@@ -154,7 +154,7 @@ def normalize_points(modules: list[dict]) -> list[dict]:
                     item["ref"] = ref
                 # 保留实体字段（已实体化的测试点二次归一化时不丢状态）
                 for key in ("tp_id", "status", "locked", "comment", "reject_count", "source", "warnings",
-                            "version", "basis", "ai_review", *REJECT_FIELDS):
+                            "version", "basis", "combo_from", "ai_review", *REJECT_FIELDS):
                     if key in p:
                         item[key] = p[key]
                 points.append(item)
@@ -370,7 +370,7 @@ def confirmable_points(modules: list[dict]) -> list[dict]:
     return result
 
 
-AI_SOURCES = ("ai", "gap", "supplement", "ai_fix", "derived")   # derived：经验延伸（需求之外、带依据）
+AI_SOURCES = ("ai", "gap", "supplement", "ai_fix", "derived", "combined")   # derived：经验延伸（需求之外、带依据）；combined：模块级组合延伸（带依据与来源编号）
 
 
 RESOLVE_MODULE_SIM = 0.6   # AI 补的点模块名对不上已有模块时，名字相似度到这么多才归到最像的那个
@@ -417,6 +417,7 @@ def add_points(modules: list[dict], additions: list[dict], source: str, seq_floo
             "dimension": str(item.get("dimension", "")).strip(),
             **({"ref": ref} if (ref := point_ref(item)) else {}),
             **({"basis": basis} if (basis := str(item.get("basis") or "").strip()) else {}),
+            **({"combo_from": list(item["combo_from"])} if isinstance(item.get("combo_from"), list) and item["combo_from"] else {}),
             "status": "pending", "locked": False, "comment": "",
             "reject_count": 0, "source": source, "version": 1,
             "warnings": coarse_warnings(text),

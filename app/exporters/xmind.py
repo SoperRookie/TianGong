@@ -72,3 +72,62 @@ def export_xmind(cases: list[TestCase], path: str | Path, root_title: str = "测
         zf.writestr("metadata.json", "{}")
         zf.writestr("manifest.json", json.dumps(_MANIFEST))
     return path
+
+
+_POINT_SOURCE = {"ai": "AI 拆解", "gap": "查漏新增", "supplement": "AI 补充", "manual": "人工", "ai_fix": "修改新增",
+                 "blind_spot": "盲区转入", "derived": "经验延伸", "combined": "组合延伸"}
+_POINT_STATUS = {"pending": "待审核", "approved": "已通过", "rejected": "已驳回"}
+
+
+def export_points_xmind(modules: list[dict], path: str | Path, root_title: str = "测试点", approved_only: bool = False,
+                        case_links: dict[str, list[str]] | None = None) -> Path:
+    """测试点 → .xmind（与页面「脑图」同一结构）：需求 → 模块（条数）→ 测试点「编号 描述」（labels=维度 / 来源 / 状态）→
+    子节点：需求来源、依据（经验延伸 / 组合延伸的 basis，组合点带来源编号）、驳回意见、AI 评审意见、覆盖用例编号；
+    备注里再写一遍 ref / 依据 / 审核意见，方便只看一层的人。approved_only 只导已通过的；空模块不出现。"""
+    path = Path(path)
+    case_links = case_links or {}
+    root = _topic(root_title)
+    root["structureClass"] = "org.xmind.ui.map.unbalanced"
+    for entry in modules:
+        pts = []
+        for p in entry.get("points") or []:
+            if isinstance(p, str):
+                p = {"point": p}
+            if approved_only and p.get("status") != "approved":
+                continue
+            pts.append(p)
+        if not pts:
+            continue
+        mod = _attach(root, _topic(f"{entry.get('module', '')}（{len(pts)}）"))
+        for p in pts:
+            tp = str(p.get("tp_id") or "")
+            src = str(p.get("source") or "ai")
+            labels = [x for x in (str(p.get("dimension") or ""),
+                                  _POINT_SOURCE.get(src, src) if src not in ("ai",) else "",
+                                  _POINT_STATUS.get(str(p.get("status") or "pending"), "")) if x]
+            notes = []
+            if p.get("ref"):
+                notes.append(f"需求来源：{p['ref']}")
+            if p.get("basis"):
+                notes.append(("组合依据" if src == "combined" else "依据") + f"：{p['basis']}"
+                             + (f"（由 {'、'.join(p['combo_from'])} 组合）" if p.get("combo_from") else ""))
+            if p.get("status") == "rejected" and (p.get("comment") or p.get("fix_request")):
+                notes.append(f"驳回：{p.get('comment') or ''}" + (f"｜要求：{p['fix_request']}" if p.get("fix_request") else ""))
+            elif p.get("comment"):
+                notes.append(f"审核意见：{p['comment']}")
+            rv = p.get("ai_review") or {}
+            if rv.get("verdict"):
+                notes.append(f"AI 评审·{rv['verdict']}：{rv.get('fix') or rv.get('note') or ''}")
+            linked = case_links.get(tp) or []
+            if linked:
+                notes.append(f"覆盖用例：{'、'.join(linked)}")
+            node = _attach(mod, _topic(f"{tp} {p.get('point', '')}".strip(), labels=labels, notes="\n".join(notes)))
+            for line in notes:
+                _attach(node, _topic(line))
+    sheet = {"id": uuid.uuid4().hex, "class": "sheet", "title": "测试点", "rootTopic": root, "topicPositioning": "fixed"}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("content.json", json.dumps([sheet], ensure_ascii=False))
+        zf.writestr("metadata.json", "{}")
+        zf.writestr("manifest.json", json.dumps(_MANIFEST))
+    return path

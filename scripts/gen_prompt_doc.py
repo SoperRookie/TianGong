@@ -27,6 +27,9 @@ META = {
     "requirement_analysis_review": ("需求中心 · 分析复核", "`analysis.py` `review_analysis`，开关 `TIANGONG_ANALYSIS_REVIEW`", "high；`reviewer_model or model`",
         "原文 + 核验后的条目清单 + 画像", "`{issues:[{key, n, verdict: wrong|unsupported, fix, note}], missing:[{key, text, quote}]}`；意见标在条目上由人拍板，不改条目",
         "独立第二人只找理解错 / 无依据 / 遗漏三类，只报有把握的。"),
+    "question_suggest": ("需求中心 · 推荐答案", "`quality.run_question_suggest` ← AI 分析完成后自动（配置 `TIANGONG_QUESTION_SUGGEST`）/ 待确认事项页「推荐答案」`POST /requirements/{id}/questions/suggest`；≤ 40 条一批并行", "默认；分析模型",
+        "原文（整理稿 + 人工补充 + 已确认结论，不含 AI 分析要点）+ 本批未确认事项（question / reason / module / level / assumption）+ 同项目其他需求已确认的相似问题结论（问法相似 ≥ 0.3，每条 ≤ 3 条）+ 画像", "`{suggestions:[{index, answer, basis: 原文|历史结论|行业惯例, evidence, risk, confidence: 高|中|低}]}`；index 只认批内编号、一条一个答案、空答案丢；basis=原文 的 evidence 用 `quote_found` 核验，对不上降为「行业惯例」并标 `unverified`；写到事项 `suggested_answer`，页面预填、人确认才算，确认 / 采纳后撤掉；某批故障只丢该批",
+        "答案必须是能直接写进预期结果的确定值；按原文 › 历史结论 › 行业惯例依次找，每条带选它的风险；不替需求方拍板「无需确认」。"),
     "analysis_judge": ("需求分析评测", "`app/analysis_eval.py` `judge_sample`", "high",
         "标准答案（人工确认）与 AI 输出", "`{项: {matched, wrong, extra, missing}}`；程序先把规范化相同的条目预配对，裁判漏报的补回；`score_alignment` 算准确率 / 捏造率 / 理解错率 / 遗漏率",
         "语义对齐而非文字对齐，归类不同的同一事实算匹配。"),
@@ -39,6 +42,9 @@ META = {
     "point_extend": ("测试设计 · 经验延伸", "`graph.py` `extend_points` ← `service._analyze_and_extend`（每片拆完紧接着）；测试点页「经验延伸」`POST /tasks/{id}/points/extend`；开关 `TIANGONG_POINT_EXTENSION`", "high",
         "本片原文 + 刚拆出的全部明文测试点 + 画像 + 历史用例 / 缺陷知识", "`{extensions:[{module, point, dimension, ref, basis}]}`；模块归位到已有模块、与已有点相似 ≥ 0.75 跳过、没 basis 跳过、总数 ≤ 明文点 1/3（≥ 3）；`source=derived` 待审核",
         "只延伸不复述、不给需求没有的功能加需求；每条带「为什么要测」；拆解与延伸分两次调用，职责分开。"),
+    "point_combine": ("测试设计 · 组合延伸", "`quality.run_point_combine` ← 拆解后自动 `_run_point_quality_checks`（查漏之后、查重之前，配置 `TIANGONG_POINT_COMBINE`）/ 测试点页「组合延伸」`POST /tasks/{id}/points/combine`（body.modules 只跑指定模块）；每个模块（未驳回点 ≥ 3）一次调用，并发 6", "high",
+        "该模块所在章节的原文（按 `gap_batches` 定位，对不上用整篇）+ 该模块全部测试点（tp_id / point / dimension / ref / basis）+ 画像", "`{combinations:[{point, dimension, ref, basis, from:[tp_id…]}]}`；模块固定为被处理的那个；`from` 只认本模块编号且 ≥ 2（不足的是单点不是组合）；没 basis 跳过；与本模块已有点相似 ≥ 0.75 跳过；每模块 ≤ 8 条；`source=combined` 带 `combo_from` 待审核；某模块故障只丢该模块",
+        "单条规则各自成立不等于叠在一起也成立：条件组合 / 流程串联 / 状态×角色×端 / 规则优先级 / 数据流转五种方法只在模块内找交叉场景；宁少勿错、条条有依据。"),
     "blind_spot_verify": ("测试设计 · 盲区复核", "`quality.run_blind_spot_verify`，多片时每片对照全部盲区各一次", "默认",
         "一片原文 + 全部盲区清单", "`{explained:[{index, evidence}]}`；任一片判已说明即剔除并记 `resolved_blind_spots`",
         "前片标的盲区后片可能已说明；只有原文明确写出才算。"),
@@ -94,15 +100,19 @@ META = {
     "knowledge_refs_block": ("注入块", "生成 / 需求分析阶段", "—", "相关历史需求与业务规则", "—", "与当前需求冲突以当前需求为准并视为重点测试对象。"),
     "rules_block": ("注入块", "生成阶段", "—", "已确认生效的团队 / 项目规则（预算 800 字）", "—", "与需求明文冲突以需求为准。"),
     "memory_block": ("注入块", "生成阶段", "—", "用户偏好 + 项目记忆（预算 600 字）", "—", "用户反复提过的要求直接满足。"),
-    "profile_block": ("注入块", "拆解 / 延伸 / 生成 / 评审 / 查漏 / 补充 / 需求提取 / 需求分析", "—", "管理员确认生效的项目画像（≤ 2500 字）", "—", "统一术语与模块命名；画像与需求冲突以需求为准。"),
+    "profile_block": ("注入块", "拆解 / 延伸 / 组合 / 生成 / 评审 / 查漏 / 补充 / 需求提取 / 需求分析 / 推荐答案", "—", "管理员确认生效的项目画像（≤ 2500 字）", "—", "统一术语与模块命名；画像与需求冲突以需求为准。"),
+    "shared_dimensions": ("共享片段", "正文「【共享:维度枚举】」处展开：analyst / point_extend / point_combine / gap_check / point_supplement", "—", "—", "`prompt_text` 取用时 `expand_shared` 替换标记；管理页 `expanded` 字段显示展开全文", "十个维度只写一份，改一处全部生效。"),
+    "shared_ui_exclusion": ("共享片段", "正文「【共享:UI外观清单】」处展开：analyst / gap_check / point_supplement / point_review / generator / reviewer", "—", "—", "同上", "UI 外观排除清单只写一份。"),
+    "shared_ref_format": ("共享片段", "正文「【共享:ref格式】」处展开：analyst / point_extend / point_combine / gap_check / point_supplement", "—", "—", "同上", "ref 格式「页面或章节 › 需求点」只写一份。"),
 }
 
 ORDER = [
-    ("一、需求中心", ["requirement_extract", "requirement_extract_gap", "requirement_extract_crosscheck", "requirement_analysis", "requirement_analysis_review", "analysis_judge"]),
-    ("二、测试设计：拆解与质量闭环", ["requirement_outline", "analyst", "point_extend", "blind_spot_verify", "gap_check", "dup_judge", "point_review", "point_compare", "point_supplement", "point_fix"]),
+    ("一、需求中心", ["requirement_extract", "requirement_extract_gap", "requirement_extract_crosscheck", "requirement_analysis", "requirement_analysis_review", "question_suggest", "analysis_judge"]),
+    ("二、测试设计：拆解与质量闭环", ["requirement_outline", "analyst", "point_extend", "point_combine", "blind_spot_verify", "gap_check", "dup_judge", "point_review", "point_compare", "point_supplement", "point_fix"]),
     ("三、测试设计：生成与评审", ["generator", "reviewer", "fix_instruction", "case_dup_judge", "case_fix", "requirement_diff"]),
     ("四、沉淀与知识", ["learning", "profile_extract", "dependency_infer", "vision_image"]),
     ("五、注入块", ["knowledge_cases_block", "knowledge_refs_block", "rules_block", "memory_block", "profile_block"]),
+    ("六、共享片段", ["shared_dimensions", "shared_ui_exclusion", "shared_ref_format"]),
 ]
 
 defs = {d["key"]: d for d in PROMPT_DEFS}
@@ -118,7 +128,8 @@ w("> 本文第 1～3 部分由脚本从 `app/prompts.py` 登记表与 `app/agent
 w("## 0. Prompt 机制\n")
 w("""- **登记与版本**：全部 Prompt 在 `app/prompts.py` 的 `PROMPT_DEFS` 登记（key / 名称 / kind / 调用位置 / 默认文本 / 占位符），`PromptStore` 为每条维护版本链（内置默认 v1 → 新建草稿 → 激活生效，可回滚到任一历史版本）。新版本必须包含默认版本的全部 `{占位符}`，否则 `.format` 会失败。
 - **取用登记**：`prompt_text(key)` 返回生效内容并把 (key, version) 登记到调用上下文，任务 `prompt_versions` 与调用日志据此记录，复盘时能知道这条任务是哪个版本的 Prompt 跑出来的。
-- **kind**：`system` 系统消息；`user` 用户消息模板（`fix_instruction`、`vision_image`）；`block` 注入块（追加在 user 消息末尾）。
+- **kind**：`system` 系统消息；`user` 用户消息模板（`fix_instruction`、`vision_image`）；`block` 注入块（追加在 user 消息末尾）；`shared` 共享片段——多条 Prompt 共用的枚举 / 清单 / 格式只写一份，正文里写「【共享:名称】」标记，`prompt_text` 取用时 `expand_shared` 展开成共享片段的生效正文（共享片段的版本一并登记），管理页 `expanded` 显示展开全文；下文第 3 部分贴的是带标记的原文。
+- **策略句**：每条 Prompt 第一段固定一句「本步策略：宁多勿漏 / 宁少勿错」——提取、补漏、拆解、分析、查漏是宁多勿漏；延伸、组合、盲区复核、分析复核、查重、对比、评审、学习是宁少勿错。
 - **数据边界**：每个 system 消息末尾自动追加 `DATA_GUARD`；外部内容（需求原文、知识、历史用例、审核意见、记忆、规则）一律用 `wrap_data(名称, 内容)` 包成 `<<<数据:名称>>> … <<<数据结束>>>`，Prompt 注入文字只当数据。
 - **输出协议**：全部要求只输出 JSON；`_chat_json` 解析失败重试一次（推理耗尽预算、`finish_reason=length` 且无正文时也重试一次），`extract_json` 依次尝试代码块 / 第一个完整对象 / 数组包装 / 逐对象抢救。
 - **推理强度**：拆解、延伸、需求分析、分析复核、评测裁判用 `high`；提取三步 `medium`；大纲 `low`；其余默认。GPT-6 / 5.6 / 5.5 温度只能 1，仅 5.4 系可设 0.3（见 `docs/GPT模型组合与预算.md`）。
@@ -140,12 +151,14 @@ flowchart LR
   R2 -. 评测 .-> J[analysis_judge]
   E3 --> O[requirement_outline<br>非整理稿才调]
   O --> P1[analyst<br>明文测试点]
+  R2 --> QS[question_suggest<br>推荐答案]
   P1 --> P2[point_extend<br>经验延伸]
   P2 --> B[blind_spot_verify]
   P2 --> G[gap_check<br>分批查漏]
-  P2 --> D[dup_judge<br>查重]
-  G --> H{人工审核}
-  D --> H
+  G --> CB[point_combine<br>模块级组合]
+  CB --> D[dup_judge<br>查重]
+  D --> PR[point_review<br>独立评审]
+  PR --> H{人工审核}
   H -. 驳回 .-> PF[point_fix]
   H -. 人工对比 / 补充 .-> PC[point_compare / point_supplement]
   H --> GEN[generator<br>按模块生成]

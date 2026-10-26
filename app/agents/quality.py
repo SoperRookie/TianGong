@@ -347,6 +347,220 @@ async def run_point_review(llm: LLMClient, requirement: str, modules: list[dict]
     return {"issues": issues, "reviewed": reviewed, "batches": len(batches), "failed": failed}
 
 
+# ---- 模块级组合延伸：单条规则各自成立不等于叠在一起也成立，在一个模块内找交叉场景 ----
+
+
+COMBINE_MIN_POINTS = 3       # 少于这么多条（未驳回）测试点的模块没有组合的材料，不送
+COMBINE_MAX_PER_MODULE = 8   # 每个模块最多收这么多条组合点（Prompt 同口径：模型按风险排序，截掉的是靠后的）
+COMBINE_SIMILAR = 0.75       # 与本模块已有点或本轮前面的组合点相似度到这么多算复述，跳过
+COMBINE_CONCURRENCY = 6      # 同时在跑的模块数（每个模块一次调用）
+_COMBINE_LIST_KEYS = ("combinations", "extensions", "additions", "points", "组合", "测试点")
+_COMBINE_FROM_KEYS = ("from", "combo_from", "sources", "tp_ids", "来源")
+
+
+def _module_texts(requirement: str, modules: list[dict]) -> dict[str, str]:
+    """每个模块所在章节的需求原文：复用查漏分批（模块名对章节、ref 章节号投票）；整篇一批、或模块落到多批（对不上）的用整篇。"""
+    batches = gap_batches(requirement, modules)
+    if len(batches) <= 1:
+        text = batches[0][0] if batches else requirement
+        return {str(e.get("module", "")): text for e in modules}
+    hits: dict[str, list[str]] = {}
+    for text, mods in batches:
+        for e in mods:
+            hits.setdefault(str(e.get("module", "")), []).append(text)
+    full = "\n\n".join(t for t, _ in batches)
+    return {name: (texts[0] if len(texts) == 1 else full) for name, texts in hits.items()}
+
+
+async def run_point_combine(llm: LLMClient, requirement: str, modules: list[dict], model: str | None,
+                            only: list[str] | None = None) -> dict:
+    """模块级组合延伸（Prompt `point_combine`）：每个模块（未驳回测试点 ≥ COMBINE_MIN_POINTS，`only` 给了就只跑这些模块）各调一次，
+    送该模块全部测试点（tp_id / point / dimension / ref / basis）+ 它所在章节的原文，按判定表 / 场景串联 / 状态×角色×端 /
+    规则优先级 / 数据流转找单条规则叠加后的组合场景。程序兜底：模块固定为被处理的那个；`from` 只认本模块编号且 ≥ 2 条（不足的是单点
+    场景不是组合）；没 basis 跳过；与本模块已有点相似 ≥ COMBINE_SIMILAR 跳过；每模块截到 COMBINE_MAX_PER_MODULE；某模块故障只丢该模块。
+    返回 {"additions": [{module, point, dimension, ref, basis, combo_from}], "skipped": [{module, point, reason}], "modules": 送了几个模块,
+    "failed": 故障模块数, "model_name"}。"""
+    import asyncio
+
+    from app.tasks.points import similarity
+
+    texts = _module_texts(requirement, modules)
+    todo: list[tuple[str, list[dict]]] = []
+    for e in modules:
+        name = str(e.get("module", ""))
+        if only is not None and name not in only:
+            continue
+        pts = [p for p in e.get("points", []) if isinstance(p, dict) and p.get("tp_id") and p.get("status") != "rejected"]
+        if len(pts) >= COMBINE_MIN_POINTS:
+            todo.append((name, pts))
+    if not todo:
+        return {"additions": [], "skipped": [], "modules": 0, "failed": 0, "model_name": None}
+    sem = asyncio.Semaphore(COMBINE_CONCURRENCY)
+
+    async def _one(name: str, pts: list[dict]) -> tuple[list[dict], list[dict], str | None]:
+        view = [{"tp_id": p["tp_id"], "point": p.get("point", ""), "dimension": p.get("dimension", ""),
+                 **({"ref": p["ref"]} if p.get("ref") else {}), **({"basis": p["basis"]} if p.get("basis") else {})} for p in pts]
+        user = (f"模块「{name}」所在章节的需求原文：\n{wrap_data('需求原文', texts.get(name) or requirement)}\n\n"
+                f"模块「{name}」的全部测试点（共 {len(view)} 条；组合只能在这些测试点之间做，from 只能写这里出现的编号）：\n"
+                f"{wrap_data('测试点', _dump(view))}\n\n请按五种方法找这个模块内单条规则叠加后的组合场景。") + profile_block()
+        async with sem:
+            data, result = await _chat_json(llm, [{"role": "system", "content": prompt_text("point_combine")},
+                                                  {"role": "user", "content": user}], model, reasoning_effort="high")
+        raw = None
+        if isinstance(data, dict):
+            for key in _COMBINE_LIST_KEYS:
+                if isinstance(data.get(key), list):
+                    raw = data[key]
+                    break
+        elif isinstance(data, list):
+            raw = data
+        ids = {p["tp_id"] for p in pts}
+        existing = [str(p.get("point", "")) for p in pts]
+        out: list[dict] = []
+        skipped: list[dict] = []
+        for item in raw or []:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("point") or item.get("text") or item.get("description") or "").strip()
+            if not text:
+                continue
+            frm = next((item[k] for k in _COMBINE_FROM_KEYS if item.get(k)), [])
+            if isinstance(frm, str):
+                frm = re.split(r"[,，、;；\s]+", frm)
+            frm = list(dict.fromkeys(str(x).strip() for x in frm if str(x).strip() in ids)) if isinstance(frm, list) else []
+            basis = str(item.get("basis") or item.get("reason") or item.get("依据") or "").strip()
+            if len(frm) < 2:
+                skipped.append({"module": name, "point": text, "reason": "来源编号不足两条或不在本模块（单点场景不是组合）"})
+                continue
+            if not basis:
+                skipped.append({"module": name, "point": text, "reason": "没有写为什么要测（basis）"})
+                continue
+            if any(similarity(text, old) >= COMBINE_SIMILAR for old in existing):
+                skipped.append({"module": name, "point": text, "reason": "与已有测试点高度相似，已跳过"})
+                continue
+            if len(out) >= COMBINE_MAX_PER_MODULE:
+                skipped.append({"module": name, "point": text, "reason": f"超出每模块组合上限（{COMBINE_MAX_PER_MODULE} 条）"})
+                continue
+            dim = item.get("dimension")
+            out.append({"module": name, "point": text,
+                        "dimension": str(dim).strip() if isinstance(dim, (str, int, float)) else "",
+                        "ref": str(item.get("ref") or "").strip(), "basis": basis, "combo_from": frm})
+            existing.append(text)
+        return out, skipped, result.model_name
+
+    outcomes = await asyncio.gather(*[_one(n, p) for n, p in todo], return_exceptions=True)
+    additions: list[dict] = []
+    skipped: list[dict] = []
+    failed = 0
+    model_name = None
+    for (name, _), o in zip(todo, outcomes):
+        if isinstance(o, BaseException):
+            failed += 1
+            logger.warning("组合延伸模块「{}」失败（只丢该模块）：{}", name, o)
+        else:
+            additions.extend(o[0])
+            skipped.extend(o[1])
+            model_name = model_name or o[2]
+    if failed == len(todo):
+        raise next(o for o in outcomes if isinstance(o, BaseException))
+    logger.info("模块级组合延伸：{} 个模块 → 组合 {} 条，跳过 {} 条，故障 {} 个模块", len(todo), len(additions), len(skipped), failed)
+    return {"additions": additions, "skipped": skipped, "modules": len(todo), "failed": failed, "model_name": model_name}
+
+
+# ---- 待确认事项推荐答案（Prompt question_suggest）：原文 › 历史结论 › 行业惯例，人确认才算 ----
+
+
+QUESTION_SUGGEST_BATCH = 40
+QUESTION_BASES = ("原文", "历史结论", "行业惯例")
+QUESTION_CONFIDENCE = ("高", "中", "低")
+QUESTION_HISTORY_SIM = 0.3   # 历史结论池里问法相似度到这么多的才送给模型参考
+QUESTION_HISTORY_PER = 3     # 每条事项最多带这么多条历史结论
+
+
+async def run_question_suggest(llm: LLMClient, requirement: str, questions: list[dict], history: list[dict],
+                               model: str | None) -> dict:
+    """给未确认的待确认事项拟推荐答案：按 QUESTION_SUGGEST_BATCH 条一批并行，每批带需求原文、本批事项（question / reason / module /
+    level / assumption）与同项目其他需求已确认的相似问题结论（问法相似 ≥ QUESTION_HISTORY_SIM，每条最多 QUESTION_HISTORY_PER 条）。
+    程序兜底：index 只认批内编号、一条事项一个答案、answer 为空的丢；basis 不在枚举内按「行业惯例」；basis=原文 的 evidence 用
+    `quote_found` 核验，对不上的降为「行业惯例」并标 `unverified`；confidence 不在枚举内按「中」；某批故障只丢该批。
+    返回 {"suggestions": {q_id: {answer, basis, evidence, risk, confidence, unverified?}}, "asked", "batches", "failed"}。"""
+    import asyncio
+
+    from app.agents.analysis import normalize, quote_found
+    from app.requirements import question_similarity
+
+    qs = [q for q in questions if str(q.get("question") or "").strip() and q.get("q_id")]
+    if not qs:
+        return {"suggestions": {}, "asked": 0, "batches": 0, "failed": 0}
+    src = normalize(requirement)
+    batches = [qs[i:i + QUESTION_SUGGEST_BATCH] for i in range(0, len(qs), QUESTION_SUGGEST_BATCH)]
+
+    async def _one(batch: list[dict]) -> dict[str, dict]:
+        view = []
+        for i, q in enumerate(batch, 1):
+            row = {"index": i, "question": q["question"], "level": "必须确认" if (q.get("level") or "must") == "must" else "建议确认"}
+            for key, label in (("reason", "reason"), ("module", "module"), ("assumption", "assumption")):
+                if str(q.get(key) or "").strip():
+                    row[label] = str(q[key]).strip()
+            view.append(row)
+        hist: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for q in batch:
+            scored = sorted(((question_similarity(q["question"], str(h.get("question") or "")), h) for h in history),
+                            key=lambda x: -x[0])
+            for score, h in scored[:QUESTION_HISTORY_PER]:
+                key = (str(h.get("question") or ""), str(h.get("answer") or ""))
+                if score >= QUESTION_HISTORY_SIM and key not in seen:
+                    seen.add(key)
+                    hist.append({"question": key[0], "answer": key[1], "requirement": str(h.get("_title") or "")})
+        user = (f"需求原文：\n{wrap_data('需求原文', requirement)}\n\n"
+                f"待确认事项（共 {len(view)} 条，每条都要给答案，index 用这里的编号）：\n{wrap_data('待确认事项', _dump(view))}\n\n")
+        if hist:
+            user += (f"同项目其他需求已确认的相似问题结论（只作「历史结论」来源；与本需求原文冲突时以原文为准）：\n"
+                     f"{wrap_data('历史结论', _dump(hist))}\n\n")
+        user += profile_block()
+        data, _ = await _chat_json(llm, [{"role": "system", "content": prompt_text("question_suggest")},
+                                         {"role": "user", "content": user}], model)
+        out: dict[str, dict] = {}
+        for item in (data.get("suggestions") or []) if isinstance(data, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                idx = int(item.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if not 1 <= idx <= len(batch):
+                continue
+            qid = batch[idx - 1]["q_id"]
+            answer = str(item.get("answer") or "").strip()
+            if qid in out or not answer:
+                continue
+            basis = str(item.get("basis") or "").strip()
+            evidence = str(item.get("evidence") or "").strip()
+            conf = str(item.get("confidence") or "").strip()
+            s = {"answer": answer, "basis": basis if basis in QUESTION_BASES else "行业惯例", "evidence": evidence,
+                 "risk": str(item.get("risk") or "").strip(), "confidence": conf if conf in QUESTION_CONFIDENCE else "中"}
+            if s["basis"] == "原文" and not (evidence and quote_found(evidence, src)):
+                s["basis"], s["unverified"] = "行业惯例", True   # 说是原文却引不出来：按惯例看待、标出来
+            out[qid] = s
+        return out
+
+    outcomes = await asyncio.gather(*[_one(b) for b in batches], return_exceptions=True)
+    suggestions: dict[str, dict] = {}
+    failed = 0
+    for i, o in enumerate(outcomes, 1):
+        if isinstance(o, BaseException):
+            failed += 1
+            logger.warning("待确认事项推荐答案第 {} 批失败（只丢该批）：{}", i, o)
+        else:
+            suggestions.update(o)
+    if failed == len(batches):
+        raise next(o for o in outcomes if isinstance(o, BaseException))
+    logger.info("待确认事项推荐答案：{} 条 / {} 批 → {} 条有推荐（引文未核验 {}）", len(qs), len(batches), len(suggestions),
+                sum(1 for x in suggestions.values() if x.get("unverified")))
+    return {"suggestions": suggestions, "asked": len(qs), "batches": len(batches), "failed": failed}
+
+
 # ---- 重复复核（需求十一~十三）----
 
 

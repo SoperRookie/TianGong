@@ -38,6 +38,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _q_log(q: dict, action: str, by: str | None, detail: str = "") -> None:
+    """待确认事项的澄清记录：谁在什么时候做了什么（提出 / 沿用历史结论 / AI 推荐答案 / 调整等级 / 确认 / 重新打开 / 采纳回分析 / 并入）。
+    只追加不改写，页面「澄清记录」按时间看全程。"""
+    q.setdefault("history", []).append({"at": _now(), "by": by, "action": action, "detail": (detail or "")[:400]})
+
+
 def _hex8() -> str:
     return uuid.uuid4().hex[:8]
 
@@ -541,6 +547,7 @@ class RequirementStore:
         item["analysis"] = {k: v for k, v in analysis.items() if k not in ("model_name", "chunks")}
         item["analysis_meta"] = meta
         item["analysis_edits"] = []  # 新一版分析：上一版的人工修改留痕随历史走
+        analysis_by = (meta or {}).get("by") if isinstance(meta, dict) else None
         existing = {q["question"]: q for q in item["questions"]}
         history = self._confirmed_question_pool(item)
         questions = []
@@ -570,6 +577,8 @@ class RequirementStore:
                        # 核验降级 / 复核补充的条目：记下来源项与原文本，确认成立后可一键采纳回分析结果
                        "kind": meta.get("kind") or "question", "key": meta.get("key"),
                        "text": str(meta.get("text") or ""), "quote": str(meta.get("quote") or "")}
+                _q_log(new, "提出", analysis_by, {"unverified": "AI 分析：原文核验降级", "review": "AI 分析：复核补充"}.get(new["kind"], "AI 分析")
+                       + (f"；原因：{new['reason']}" if new["reason"] else ""))
                 # 同项目其他需求（同一份文档重新上传、新版本）已经确认过的同一问题：结论直接带进来，标来源、可重新打开；
                 # 像但没到自动沿用门槛的只作参考，页面预填、人点确认才算
                 hit, score = find_similar_question(text, history, QUESTION_SIM_HINT)
@@ -578,6 +587,7 @@ class RequirementStore:
                     if score >= QUESTION_SIM_AUTO and _same_numbers(text, hit["question"]):
                         new.update(status="confirmed", answer=hit["answer"], by=hit.get("by"), at=hit.get("at") or _now(),
                                    inherited=src, module=new["module"] or str(hit.get("module") or ""))
+                        _q_log(new, "沿用历史结论", hit.get("by"), f"需求「{hit['_title']}」已确认：{hit['answer']}")
                     else:
                         new["suggested"] = {**src, "answer": hit["answer"], "by": hit.get("by")}
                 questions.append(new)
@@ -697,6 +707,8 @@ class RequirementStore:
             raise RequirementError("还没有分析结果")
         self.edit_analysis_item(req_id, q["key"], "add", text=q["text"], operator=operator, quote=q.get("quote"))
         q.update({"status": "confirmed", "answer": "确认成立，已采纳回分析结果", "by": operator, "at": _now()})
+        q.pop("suggested_answer", None)
+        _q_log(q, "采纳回分析", operator, f"采纳为「{q['key']}」条目：{q['text']}")
         self._refresh_status(item)
         self._persist(item)
         return item
@@ -714,6 +726,8 @@ class RequirementStore:
              "answer": "", "by": operator, "at": _now(), "source": "manual"}
         if (ref or "").strip():
             q["ref"] = ref.strip()
+        _q_log(q, "提出", operator, (f"盲区转入（出处：{q['ref']}）" if q.get("ref") else "人工补充")
+               + (f"；等级：{'必须确认' if q['level'] == 'must' else '建议确认'}") + (f"；假设：{q['assumption']}" if q["assumption"] else ""))
         item["questions"].append(q)
         self._refresh_status(item)
         self._persist(item)
@@ -728,10 +742,13 @@ class RequirementStore:
         q = next((x for x in item["questions"] if x["q_id"] == q_id), None)
         if q is None:
             raise RequirementError(f"待确认事项不存在: {q_id}")
+        before = q.get("level") or "must"
         q["level"] = level
         if assumption is not None:
             q["assumption"] = assumption.strip()
         q["level_by"], q["level_at"] = operator, _now()
+        label = {"must": "必须确认", "suggest": "建议确认"}
+        _q_log(q, "调整等级", operator, f"{label[before]} → {label[level]}" + (f"；假设：{q['assumption']}" if level == "suggest" and q.get("assumption") else ""))
         self._refresh_status(item)
         self._persist(item)
         return item
@@ -741,19 +758,51 @@ class RequirementStore:
         item = self._get_alive(req_id)
         for q in item["questions"]:
             if q["q_id"] == q_id:
-                q.pop("inherited", None); q.pop("suggested", None)   # 人自己定了：沿用 / 参考的历史结论标记撤掉
                 if reopen:
+                    q.pop("inherited", None); q.pop("suggested", None)   # 人自己定了：沿用 / 参考的历史结论标记撤掉
                     q.update({"status": "open"})
+                    _q_log(q, "重新打开", operator, f"原结论：{q.get('answer') or '—'}")
                 else:
                     if not (answer or "").strip():
                         raise RequirementError("请填写确认结论")
-                    q.update({"status": "confirmed", "answer": answer.strip(), "by": operator, "at": _now()})
+                    answer = answer.strip()
+                    how = ""
+                    if (q.get("suggested_answer") or {}).get("answer") == answer:
+                        how = f"（采纳 AI 推荐，依据：{q['suggested_answer'].get('basis', '')}）"
+                    elif (q.get("suggested") or {}).get("answer") == answer:
+                        how = f"（采纳需求「{q['suggested'].get('title', '')}」的历史结论）"
+                    elif q.get("suggested_answer"):
+                        how = f"（未采纳 AI 推荐「{q['suggested_answer'].get('answer', '')}」）"
+                    q.pop("inherited", None); q.pop("suggested", None); q.pop("suggested_answer", None)
+                    q.update({"status": "confirmed", "answer": answer, "by": operator, "at": _now()})
+                    _q_log(q, "确认", operator, f"{answer}{how}")
                 break
         else:
             raise RequirementError(f"待确认事项不存在: {q_id}")
         self._refresh_status(item)
         self._persist(item)
         return item
+
+    def set_question_suggestions(self, req_id: str, suggestions: dict[str, dict], model: str | None = None,
+                                 by: str | None = None) -> tuple[dict, int]:
+        """把 AI 推荐答案写到未确认事项上（`suggested_answer`：answer / basis / evidence / risk / confidence / unverified? / at / model），
+        页面预填、人点确认才算；人确认后撤掉。返回 (需求, 写上几条)。"""
+        item = self._get_alive(req_id)
+        n = 0
+        for q in item["questions"]:
+            s = suggestions.get(q["q_id"])
+            if q["status"] != "open" or not s or not str(s.get("answer") or "").strip():
+                continue
+            q["suggested_answer"] = {**s, "at": _now(), "model": model}
+            _q_log(q, "AI 推荐答案", by, f"{s['answer']}（{s.get('basis', '')}{'·引文未核验' if s.get('unverified') else ''}，置信度{s.get('confidence', '中')}）")
+            n += 1
+        if n:
+            self._persist(item)
+        return item, n
+
+    def confirmed_question_pool(self, item: dict) -> list[dict]:
+        """对外：同项目其他需求已确认、有结论的待确认事项（推荐答案的「历史结论」来源）。"""
+        return self._confirmed_question_pool(item)
 
     def open_questions(self, item: dict) -> list[dict]:
         return [q for q in item.get("questions", []) if q["status"] == "open"]
@@ -797,6 +846,7 @@ class RequirementStore:
         seen = {q["question"] for q in into.get("questions") or []}
         for q in src.get("questions") or []:
             if q["question"] not in seen:
+                _q_log(q, "并入", operator, f"自需求「{src['title']}」并入")
                 into.setdefault("questions", []).append(q)
                 seen.add(q["question"])
         if (src.get("description") or "").strip() and src["description"].strip() not in (into.get("description") or ""):
