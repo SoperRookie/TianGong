@@ -497,6 +497,7 @@ async def test_结束轮次_全部执行完计划完成_再开一轮退回进行
 
 # ---- 执行失败 AI 归因与缺陷单 ----
 
+import json
 import json as _json
 
 _PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
@@ -562,3 +563,59 @@ async def test_执行失败AI归因_截图理解与需求原文入参_分类人�
     # 轮次结束后不能再采纳
     await client.post(f"/api/v1/plans/{pid}/runs/{rid}/finish")
     assert (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results/{item_id}/triage/adopt", json={})).status_code == 409
+
+
+# ---- AI 挑选计划用例 ----
+
+
+async def test_AI挑选计划用例_只认候选id_冒烟兜底每模块P0_预算按优先级截_变更摘要自动带_草稿勾选后加入(client):
+    cases = [make_case(case_id="TC-登录-001", priority="P0", title="登录主流程"),
+             make_case(case_id="TC-登录-002", priority="P2", title="密码错误提示"),
+             make_case(case_id="TC-下单-001", module="下单", priority="P0", title="下单主流程"),
+             make_case(case_id="TC-下单-002", module="下单", priority="P1", title="余额不足下单失败"),
+             make_case(case_id="TC-下单-003", module="下单", priority="P3", title="下单页文案")]
+    task_id = await _task_with_approved(client, *cases)
+    # 另一个计划里 TC-下单-002 执行失败过 → 候选带近期失败标记
+    old = await _plan(client, name="上一轮")
+    await client.post(f"/api/v1/plans/{old['plan_id']}/cases", json={"task_id": task_id, "module": "下单", "priority": "P1"})
+    rid = (await client.post(f"/api/v1/plans/{old['plan_id']}/runs", json={})).json()["run_id"]
+    iid = (await client.get(f"/api/v1/plans/{old['plan_id']}")).json()["items"][0]["item_id"]
+    await client.post(f"/api/v1/plans/{old['plan_id']}/runs/{rid}/results", json={"items": [{"item_id": iid, "status": "fail", "note": "x", "reason": "系统缺陷"}]})
+    # 任务上有需求变更分析 → 变更影响回归时自动带摘要
+    rec = app.state.tasks.get(task_id)
+    rec.requirement_diff = {"summary": "下单余额校验改为含冻结金额", "changes": [{"type": "规则调整", "description": "余额不足判定含冻结金额", "affected_cases": ["TC-下单-002"]}]}
+    app.state.tasks.save(rec)
+
+    plan = await _plan(client)
+    pid = plan["plan_id"]
+    assert (await client.post(f"/api/v1/plans/{pid}/select", json={"goal": "乱写"})).status_code == 400
+    # 冒烟：模型选了登录 P0 + 一条清单外 id + 下单 P1，漏了下单的 P0 → 程序补；按优先级排序；预算 2 截掉 P1
+    app.state.llm = StubLLM([json.dumps({"selected": [{"id": "C1", "reason": "登录主流程冒烟"}, {"id": "C99", "reason": "不存在"}, {"id": "C4", "reason": "近期失败"}],
+                                         "excluded_summary": "异常与边界留回归", "coverage_note": "「下单」模块未选 P0"}, ensure_ascii=False)])
+    r = await client.post(f"/api/v1/plans/{pid}/select", json={"goal": "冒烟", "budget": 2})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["candidates"] == 5 and [c["case_id"] for c in d["selected"]] == ["TC-登录-001", "TC-下单-001"] and d["truncated"] == 1
+    assert d["selected"][1]["by"] == "program" and "程序兜底" in d["selected"][1]["reason"] and d["selected"][0]["by"] == "ai"
+    assert d["excluded_summary"] == "异常与边界留回归" and "下单" in d["coverage_note"]
+    user = app.state.llm.calls[0]["messages"][-1]["content"]
+    assert "本轮目标：冒烟" in user and "最多 2 条" in user and '"failed_recent": true' in user and "TC-下单-002" in user and "变更摘要" not in user
+    assert (await client.get(f"/api/v1/plans/{pid}")).json()["selection_draft"]["goal"] == "冒烟"   # 草稿留在计划上
+    # 变更影响回归：摘要自动带需求变更分析；重点模块与自写摘要透传
+    app.state.llm = StubLLM([json.dumps({"selected": [{"id": "C4", "reason": "受影响用例"}], "excluded_summary": "", "coverage_note": ""})])
+    d = (await client.post(f"/api/v1/plans/{pid}/select", json={"goal": "变更影响回归", "focus_modules": ["下单"]})).json()
+    user = app.state.llm.calls[0]["messages"][-1]["content"]
+    assert "下单余额校验改为含冻结金额" in user and "受影响用例 TC-下单-002" in user and "重点模块：下单" in user
+    assert [c["case_id"] for c in d["selected"]] == ["TC-下单-002"] and d["selected"][0]["failed_recent"] is True
+    # 草稿勾选后按任务加入；加入后不再是候选
+    r = (await client.post(f"/api/v1/plans/{pid}/cases", json={"task_id": task_id, "uids": [d["selected"][0]["uid"]]})).json()
+    assert r["added"] == 1
+    app.state.llm = StubLLM([json.dumps({"selected": []})])
+    d = (await client.post(f"/api/v1/plans/{pid}/select", json={"goal": "全量回归"})).json()
+    assert d["candidates"] == 4 and d["selected"] == []
+    # 全部失败 502；没有候选 409
+    app.state.llm = StubLLM(["不是 JSON", "还不是"])
+    assert (await client.post(f"/api/v1/plans/{pid}/select", json={"goal": "全量回归"})).status_code == 502
+    for c in cases:
+        await client.post(f"/api/v1/plans/{pid}/cases", json={"task_id": task_id})
+    assert (await client.post(f"/api/v1/plans/{pid}/select", json={"goal": "冒烟"})).status_code == 409

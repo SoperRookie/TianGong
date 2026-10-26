@@ -4334,6 +4334,73 @@ async def add_plan_cases(request: Request, plan_id: str, body: PlanCasesBody) ->
     return {"added": len(added), "skipped": len(pool) - len(added), "plan": _plan_view(plan)}
 
 
+class PlanSelectBody(BaseModel):
+    goal: str = "冒烟"                 # 冒烟 / 全量回归 / 变更影响回归 / 模块专项
+    budget: int = 0                    # 条数上限，0 不限
+    change_summary: str = ""           # 变更影响回归的依据；空则自动带本项目任务里最近一次需求变更分析的摘要与受影响用例
+    focus_modules: list[str] = []      # 模块专项的重点模块
+    task_ids: list[str] = []           # 只从这些任务挑；空 = 本项目全部有正式用例的任务
+    model: str | None = None
+
+
+@router.post("/api/v1/plans/{plan_id}/select")
+async def select_plan_cases(request: Request, plan_id: str, body: PlanSelectBody) -> dict:
+    """AI 挑选计划用例（Prompt plan_case_select）：候选 = 本项目任务里已通过、还没在计划内的正式用例（精简视图，不带步骤），
+    带最近执行失败标记；按目标 / 预算 / 变更摘要 / 重点模块挑出草稿，人勾选后用 POST .../cases 加入。草稿存 plan.selection_draft。"""
+    from app.agents.quality import PLAN_GOALS, run_plan_case_select
+    from app.reports import UNASSIGNED as _UN
+    from app.reports import plan_exec_index
+
+    plan = _plan(request, plan_id, "plan.manage")
+    if plan["status"] == "archived":
+        raise HTTPException(status_code=409, detail="计划已归档，不可再加入用例")
+    if body.goal not in PLAN_GOALS:
+        raise HTTPException(status_code=400, detail=f"目标类型只能是 {' / '.join(PLAN_GOALS)}")
+    _ai_ctx(request, project=plan.get("project"), purpose="计划用例挑选")
+    store = request.app.state.tasks
+    scoped = store.list(limit=100000, project=None if plan["project"] == _UN else plan["project"])
+    if plan["project"] == _UN:
+        scoped = [r for r in scoped if not (r.context or {}).get("project")]
+    if body.task_ids:
+        scoped = [r for r in scoped if r.task_id in body.task_ids]
+    in_plan = {(i["task_id"], i["uid"]) for i in plan["items"]}
+    exec_idx = plan_exec_index(request.app.state.plans.list(project=None if plan["project"] == _UN else plan["project"]))
+    cases: list[dict] = []
+    diffs: list[str] = []
+    for r in scoped:
+        for c in _approved_cases(r):
+            uid = str(c.get("uid") or "")
+            if (r.task_id, uid) in in_plan:
+                continue
+            latest = (exec_idx.get((r.task_id, uid)) or {}).get("latest") or {}
+            cases.append({"key": f"{r.task_id}:{uid}", "task_id": r.task_id, "uid": uid, "case_id": str(c.get("case_id") or ""),
+                          "module": c.get("module", ""), "title": c.get("title", ""), "priority": c.get("priority", ""),
+                          "keywords": c.get("keywords", ""), "point_ids": c.get("point_ids") or [],
+                          "failed_recent": latest.get("status") == "fail"})
+        d = r.requirement_diff or {}
+        if d.get("summary") or d.get("changes"):
+            lines = [f"任务 {r.task_id}（{(r.sources or [r.task_id])[0]}）：{d.get('summary', '')}"]
+            lines += [f"- {ch.get('type', '')}：{ch.get('description', '')}" + (f"（受影响用例 {'、'.join(ch['affected_cases'])}）" if ch.get("affected_cases") else "")
+                      for ch in (d.get("changes") or []) if isinstance(ch, dict)]
+            diffs.append("\n".join(lines))
+    if not cases:
+        raise HTTPException(status_code=409, detail="本项目没有可挑选的正式用例（已全部在计划内，或还没有评审通过的用例）")
+    summary = body.change_summary.strip() or ("\n\n".join(diffs) if body.goal == "变更影响回归" else "")
+    try:
+        out = await run_plan_case_select(request.app.state.llm, cases, body.goal, max(0, body.budget), summary,
+                                         body.focus_modules, body.model)
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    draft = {"goal": body.goal, "budget": body.budget, "focus_modules": body.focus_modules, "change_summary": summary,
+             "candidates": len(cases), "selected": out["selected"], "excluded_summary": out["excluded_summary"],
+             "coverage_note": out["coverage_note"], "batches": out["batches"], "failed": out["failed"], "truncated": out["truncated"],
+             "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    plan["selection_draft"] = draft
+    request.app.state.plans.save(plan)
+    request.state.audit_detail = f"{body.goal} 候选 {len(cases)} 选 {len(out['selected'])}"
+    return {"plan_id": plan_id, **draft}
+
+
 @router.delete("/api/v1/plans/{plan_id}/cases/{item_id}")
 async def remove_plan_case(request: Request, plan_id: str, item_id: str) -> dict:
     plan = _plan(request, plan_id, "plan.manage")

@@ -84,6 +84,9 @@ META = {
     "requirement_diff": ("测试设计 · 需求变更分析", "`quality.run_requirement_diff` ← 任务「需求变更」", "默认",
         "旧版需求 + 新版需求 + 现有测试点 / 用例编号", "`{changes:[{type, description, affected_points, affected_cases, action_hint}], new_requirements, summary}`",
         "变化类型八选一；删除只标记不建议自动删；受影响范围要具体不扩大。"),
+    "plan_case_select": ("测试执行 · 计划挑选", "`quality.run_plan_case_select` ← 计划页「AI 挑选」`POST /plans/{id}/select`；候选 = 本项目已通过、不在计划内的正式用例，按 300 条一批并行", "默认",
+        "候选精简视图（id / case_id / module / title / priority / keywords / point_ids / failed_recent）+ 目标（冒烟 / 全量回归 / 变更影响回归 / 模块专项）+ 预算 + 变更摘要（空则自动带任务的需求变更分析）+ 重点模块 + 画像；不带步骤", "`{selected:[{id, reason}], excluded_summary, coverage_note}`；只认批内 id、一条一次；合并后按 P0 › P1 › P2 › P3 再按模型顺序排、超预算截掉靠后的；冒烟目标每个有 P0 的模块至少保 1 条 P0（程序补、标 by=program）；某批故障只丢该批；草稿存 `plan.selection_draft`，人勾选后走 `POST .../cases` 加入",
+        "在预算内覆盖风险最高的、不求全；四种目标各有选法；不得生成清单外的 id。"),
     "exec_triage": ("测试执行 · 失败归因", "`quality.run_exec_triage` ← 计划执行页「AI 归因」（行内单条 / 本轮全部失败）`POST /plans/{id}/runs/{rid}/triage`，每条一次调用并行；关联截图先走 `understand_image_bytes`（`EXEC_SHOT_PROMPT`，≤ 3 张）", "默认",
         "用例快照（标题 / 前置 / 步骤与预期 / 备注）+ 执行说明 + 来源测试点（tp_id / point / ref）+ 截图理解结果 + 用例所在模块的需求章节（`_module_texts` 定位，定不到用整篇前 8000 字）+ 画像", "`{triage:{category: 用例问题|系统缺陷|环境问题|数据问题|需求变更, sub, failed_step, confidence, reason}, bug:{title, severity, precondition, steps, expected, actual, scope}|null}`；category 枚举外按系统缺陷且置信度低、sub 只在用例问题下认三类、failed_step 收到步数内、bug 只在系统缺陷时留；`suggested_reason` 映射到 FAIL_REASONS，写在执行记录 `triage` 上，人「采纳」才改 `reason`（`POST .../results/{item}/triage/adopt`）",
         "先对照原文判用例的预期对不对，预期对实际错才是缺陷；证据不足置信度写低不编；缺陷单标题「模块 + 操作 + 现象」、步骤精简到失败那一步。"),
@@ -113,7 +116,7 @@ ORDER = [
     ("一、需求中心", ["requirement_extract", "requirement_extract_gap", "requirement_extract_crosscheck", "requirement_analysis", "requirement_analysis_review", "question_suggest", "analysis_judge"]),
     ("二、测试设计：拆解与质量闭环", ["requirement_outline", "analyst", "point_extend", "point_combine", "blind_spot_verify", "gap_check", "dup_judge", "point_review", "point_compare", "point_supplement", "point_fix"]),
     ("三、测试设计：生成与评审", ["generator", "reviewer", "fix_instruction", "case_dup_judge", "case_fix", "requirement_diff"]),
-    ("四、测试执行", ["exec_triage"]),
+    ("四、测试执行", ["plan_case_select", "exec_triage"]),
     ("五、沉淀与知识", ["learning", "profile_extract", "dependency_infer", "vision_image"]),
     ("六、注入块", ["knowledge_cases_block", "knowledge_refs_block", "rules_block", "memory_block", "profile_block"]),
     ("七、共享片段", ["shared_dimensions", "shared_ui_exclusion", "shared_ref_format"]),
@@ -171,7 +174,7 @@ flowchart LR
   GEN --> CR{用例审核}
   CR -. 驳回 .-> CF[case_fix]
   CR -. 需求变更 .-> RD[requirement_diff → case_fix]
-  CR --> EX[计划执行] -. 失败 .-> TR[exec_triage<br>归因 + 缺陷单]
+  CR --> PS[plan_case_select<br>AI 挑选] --> EX[计划执行] -. 失败 .-> TR[exec_triage<br>归因 + 缺陷单]
   CR --> L[learning<br>按项目提炼规则]
   L -. rules_block .-> GEN
   PRO[profile_extract] -. profile_block .-> P1

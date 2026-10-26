@@ -67,6 +67,8 @@ PROMPT_DEFS: list[dict] = [
      "where": "用例页「重复检查」：文字初筛候选对交模型判重复 / 可合并 / 不重复，人工处置"},
     {"key": "question_suggest", "name": "待确认事项推荐答案", "kind": "system", "default": P.QUESTION_SUGGEST_SYSTEM,
      "where": "需求中心 → AI 分析完成后自动（配置 question_suggest）/ 待确认事项页「推荐答案」：按原文 › 历史结论 › 行业惯例给每条未确认事项一个确定答案 + 依据 + 风险，人确认才算"},
+    {"key": "plan_case_select", "name": "测试计划用例挑选", "kind": "system", "default": P.PLAN_CASE_SELECT_SYSTEM,
+     "where": "计划页「AI 挑选」：按目标（冒烟 / 全量回归 / 变更影响回归 / 模块专项）、预算、变更摘要、重点模块从本项目正式用例里挑集合，草稿人勾选后加入"},
     {"key": "exec_triage", "name": "执行失败归因与缺陷单", "kind": "system", "default": P.EXEC_TRIAGE_SYSTEM,
      "where": "计划执行页「AI 归因」（单条 / 本轮全部失败）：用例 + 失败说明 + 截图理解 + 对应需求原文 → 五类归因（用例问题 / 系统缺陷 / 环境 / 数据 / 需求变更）+ 系统缺陷时起草缺陷单，人采纳分类才算"},
     {"key": "dependency_infer", "name": "依赖关系识别", "kind": "system", "default": P.DEPENDENCY_INFER_SYSTEM,

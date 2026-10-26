@@ -49,7 +49,7 @@ flowchart LR
   GEN --> CR{用例审核}
   CR -. 驳回 .-> CF[case_fix]
   CR -. 需求变更 .-> RD[requirement_diff → case_fix]
-  CR --> EX[计划执行] -. 失败 .-> TR[exec_triage<br>归因 + 缺陷单]
+  CR --> PS[plan_case_select<br>AI 挑选] --> EX[计划执行] -. 失败 .-> TR[exec_triage<br>归因 + 缺陷单]
   CR --> L[learning<br>按项目提炼规则]
   L -. rules_block .-> GEN
   PRO[profile_extract] -. profile_block .-> P1
@@ -87,6 +87,7 @@ flowchart LR
 | `case_dup_judge` | 用例语义查重 | 测试设计 · 用例查重 | `quality.run_case_dup_judge` ← 用例页「重复检查」`POST .../cases/dup-check`；`case_duplicate_candidates` 候选按 40 对一批并行 | 默认 | 613 |
 | `case_fix` | 用例驳回修改 | 测试设计 · 用例驳回修改 / 需求变更更新 | `quality.run_case_fix` ← 「AI 修改驳回项」；`routes.py` 需求变更后更新受影响用例 | 默认 | 909 |
 | `requirement_diff` | 需求变更分析 | 测试设计 · 需求变更分析 | `quality.run_requirement_diff` ← 任务「需求变更」 | 默认 | 599 |
+| `plan_case_select` | 测试计划用例挑选 | 测试执行 · 计划挑选 | `quality.run_plan_case_select` ← 计划页「AI 挑选」`POST /plans/{id}/select`；候选 = 本项目已通过、不在计划内的正式用例，按 300 条一批并行 | 默认 | 663 |
 | `exec_triage` | 执行失败归因与缺陷单 | 测试执行 · 失败归因 | `quality.run_exec_triage` ← 计划执行页「AI 归因」（行内单条 / 本轮全部失败）`POST /plans/{id}/runs/{rid}/triage`，每条一次调用并行；关联截图先走 `understand_image_bytes`（`EXEC_SHOT_PROMPT`，≤ 3 张） | 默认 | 1160 |
 | `learning` | 修改习惯学习 | 学习规则 | `quality.run_learning_analysis` ← `POST /learning/analyze`，按项目分组各调一次 | 默认 | 671 |
 | `profile_extract` | 项目画像提炼 | 项目画像 | `app/agents/profile.py` `run_profile_extract`（自动 / 手动），草稿经管理员确认后生效 | 默认 | 711 |
@@ -966,6 +967,32 @@ missing 仅允许提出「需求明文描述的规则完全没有用例覆盖」
 
 ### 四、测试执行
 
+#### `plan_case_select` · 测试计划用例挑选
+
+- **kind**：system
+- **阶段**：测试执行 · 计划挑选
+- **调用位置**：`quality.run_plan_case_select` ← 计划页「AI 挑选」`POST /plans/{id}/select`；候选 = 本项目已通过、不在计划内的正式用例，按 300 条一批并行
+- **推理强度 / 模型**：默认
+- **输入**：候选精简视图（id / case_id / module / title / priority / keywords / point_ids / failed_recent）+ 目标（冒烟 / 全量回归 / 变更影响回归 / 模块专项）+ 预算 + 变更摘要（空则自动带任务的需求变更分析）+ 重点模块 + 画像；不带步骤
+- **输出与程序兜底**：`{selected:[{id, reason}], excluded_summary, coverage_note}`；只认批内 id、一条一次；合并后按 P0 › P1 › P2 › P3 再按模型顺序排、超预算截掉靠后的；冒烟目标每个有 P0 的模块至少保 1 条 P0（程序补、标 by=program）；某批故障只丢该批；草稿存 `plan.selection_draft`，人勾选后走 `POST .../cases` 加入
+- **设计意图**：在预算内覆盖风险最高的、不求全；四种目标各有选法；不得生成清单外的 id。
+
+```text
+你是测试经理，负责按本轮测试目标从正式用例库里挑出要执行的用例。本步策略：在预算内覆盖风险最高的，不求全；拿不准的不选，excluded_summary 里说明。
+
+用例清单每条带 id（挑选只能用这个 id）、case_id、模块、标题、优先级、关键词、来源测试点，最近执行失败过的带 failed_recent=true。
+目标类型：
+- 冒烟：每个页面 / 功能的主流程各 1 条 P0（没有 P0 的模块选 1 条 P1 主流程），能跑通就行，不选异常与边界；
+- 全量回归：P0 + P1 全选，P2 按模块均匀抽，P3 不选；
+- 变更影响回归：变更清单里受影响的用例必选，与它同模块、同来源测试点、同数据对象的用例按风险补选，其余不选；历史失败过的同模块用例优先；
+- 模块专项：重点模块全选，依赖它的上下游模块各选 1～2 条主流程。
+有预算（条数上限）时按风险排序、优先级高的在前，宁可少选不超预算；每条选中的写一句 reason（为什么本轮要跑它，≤ 30 字）。
+excluded_summary 一句话说明没选哪类；coverage_note 列出一条没选的模块与原因（没有写「全部模块都有覆盖」）。
+不得改写用例、不得生成清单外的 id。
+只输出 JSON：
+{"selected": [{"id": "C12", "reason": "登录主流程冒烟"}], "excluded_summary": "边界与异常留全量回归", "coverage_note": "「操作记录」模块无 P0，未选"}
+```
+
 #### `exec_triage` · 执行失败归因与缺陷单
 
 - **kind**：system
@@ -1411,6 +1438,8 @@ expected / actual 写具体值（actual 来自说明与截图，没有就写「�
 只输出 JSON：{"selected": [{"case_id": "TC-登录-001", "reason": "登录主流程冒烟"}], "excluded_summary": "边界与异常留全量回归", "coverage_note": "「操作记录」模块无 P0，未选"}
 ```
 
+> 2026-10-26 已落地：`quality.run_plan_case_select` + `POST /plans/{id}/select`，计划页「AI 挑选」弹窗（目标 / 预算 / 重点模块 / 变更摘要）→ 草稿表格勾选 → 按任务分组调 `POST .../cases` 加入。与草案的差别：跨任务 case_id 可能重复，模型用批内 id（C1…）挑、程序映回 `task_id:uid`；候选按 300 条一批；「每个模块至少 1 条 P0」只在冒烟目标下兜底；变更摘要留空时自动带本项目任务的 `requirement_diff`（摘要 + 变更条目 + 受影响用例）；历史失败按最近一次执行结果标 `failed_recent`。
+
 ### G6 `exec_triage` 执行失败归因与缺陷单（P1）
 
 - **目的**：执行记失败时人只填一句备注；归因（用例问题 / 系统缺陷 / 环境 / 数据）靠人选，缺陷单靠人写。失败归因直接决定进不进学习语料（`CASE_PROBLEM_REASONS`）。
@@ -1546,7 +1575,7 @@ blockers 每条写「哪个模块 › 哪条问题 › 不解决会怎样」。�
 
 > 2026-10-26：G1 / G2 / G3 已按下面第 2、3 步落地（`point_review` / `case_dup_judge` / `point_supplement` 完整版），实现与草案的差别：评审意见不进 `warnings` 而是单独的 `ai_review` 字段（`warnings` 在实体化时会被重算）；用例查重的忽略 / 重开复用测试点那套 `dup_report.resolved`。
 > 同日第二批：第 1 步（横向评审 1 / 4 / 5 / 11）与第 4 步 G4 落地，另加 G13 模块级组合延伸（`point_combine`）。
-> 同日第三批：第 5 步的 G6 执行归因（`exec_triage`）落地；G5 计划挑选、G9 报告待做。
+> 同日第三批：第 5 步的 G6 执行归因（`exec_triage`）落地；第四批 G5 计划挑选（`plan_case_select`）落地；G9 报告待做。
 
 1. **先做横向评审 1、11、5、4**（共享片段抽取、策略一句话、reviewer 限定本模块、P0 规则）：都是改 Prompt 文本与少量拼接代码，一次提交。
 2. **G3 补齐 `point_supplement`**：改默认文本即可。

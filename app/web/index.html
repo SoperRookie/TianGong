@@ -1487,6 +1487,25 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<dialog id="planSelectDlg" style="width:900px;max-width:96vw">
+  <div class="dlg-h"><h3>AI 挑选用例</h3><span class="meta">按本轮目标从本项目正式用例里挑集合，结果是草稿，勾选后才加入计划</span></div>
+  <div class="dlg-b">
+    <div class="filters" style="margin:0 0 8px">
+      <select id="psGoal" style="width:150px" onchange="psGoalHint()"><option>冒烟</option><option>全量回归</option><option>变更影响回归</option><option>模块专项</option></select>
+      <input type="number" id="psBudget" min="0" placeholder="预算（条数，0 不限）" style="width:170px" title="最多选多少条；超出按优先级截掉靠后的">
+      <input type="text" id="psModules" placeholder="重点模块（逗号分隔）" style="width:220px" title="模块专项时全选这些模块，其它目标作为优先考虑的模块">
+      <button class="btn sm" onclick="planSelectRun()">AI 挑选</button>
+    </div>
+    <textarea id="psChange" rows="2" style="width:100%;box-sizing:border-box;display:none" placeholder="变更摘要：改了什么、影响哪些功能（留空则自动带本项目任务里最近一次需求变更分析的结果）"></textarea>
+    <div class="hint" id="psHint" style="margin:6px 0"></div>
+    <div id="psList" style="max-height:380px;overflow:auto"></div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('planSelectDlg').close()">关闭</button>
+    <button class="btn" onclick="psAdd()">加入选中</button>
+  </div>
+</dialog>
+
 <dialog id="planCaseDlg" style="width:860px;max-width:96vw">
   <div class="dlg-h"><h3>加入用例（加入即快照定格）</h3></div>
   <div class="dlg-b">
@@ -4482,6 +4501,7 @@ async function _renderPlanDetail__impl() {
       </select>
       ${editable ? `<button class="btn ghost sm" onclick="planAssignChecked()">分配选中</button>
       <button class="btn ghost sm" onclick="planAssignModule()">按模块分配</button>
+      <button class="btn ghost sm" onclick="openPlanSelectDlg()" title="按目标（冒烟 / 全量回归 / 变更影响回归 / 模块专项）、预算、变更摘要、重点模块从本项目正式用例里 AI 挑一组，勾选后加入">AI 挑选</button>
       <button class="btn sm" onclick="openPlanCaseDlg()">＋ 加入用例</button>` : ''}
     </div></div>
     <div class="card-b">${p.items.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
@@ -4563,6 +4583,61 @@ async function deletePlan() {
   if (!await uiConfirm('删除计划', `确定删除「${_planDetail.name}」？删除仅系统管理员可执行；已有执行记录的计划不可删除（请归档）。`, true)) return;
   try { await api('/api/v1/plans/' + curPlan, {method:'DELETE'}); toast('计划已删除', 'ok'); backToPlans(); }
   catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- AI 挑选用例：草稿勾选后按任务分组调加入接口 ---- */
+const PS_GOAL_HINT = {'冒烟': '每个页面 / 功能的主流程各 1 条 P0（没有 P0 的模块选 1 条 P1），不选异常与边界；程序保证每个有 P0 的模块至少 1 条',
+  '全量回归': 'P0 + P1 全选，P2 按模块均匀抽，P3 不选', '变更影响回归': '变更清单里受影响的用例必选，同模块 / 同测试点 / 同数据对象的按风险补选；历史失败过的优先',
+  '模块专项': '重点模块全选，依赖它的上下游各选 1～2 条主流程'};
+function psGoalHint() {
+  const g = $('psGoal').value;
+  $('psChange').style.display = g === '变更影响回归' ? '' : 'none';
+  $('psHint').textContent = PS_GOAL_HINT[g] || '';
+}
+function psRender(d) {
+  const sel = d.selected || [];
+  $('psHint').innerHTML = `${esc(PS_GOAL_HINT[d.goal] || '')}<div style="margin-top:4px">候选 ${d.candidates} 条 → 选 ${sel.length} 条${d.truncated ? `（超预算截掉 ${d.truncated} 条）` : ''}${d.failed ? `，${d.failed} 批失败` : ''}${d.excluded_summary ? ` · 没选：${esc(d.excluded_summary)}` : ''}${d.coverage_note ? ` · <span style="color:var(--warn)">${esc(d.coverage_note)}</span>` : ''}</div>`;
+  $('psList').innerHTML = sel.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
+    <tr><th style="width:26px">${allCheckedHtml('psck', '', '全选')}</th><th style="width:110px">编号</th><th>标题</th><th style="width:90px">模块</th><th style="width:50px">优先级</th><th>为什么本轮要跑</th></tr>
+    ${sel.map((c, i) => `<tr>
+      <td><input type="checkbox" class="psck" data-i="${i}" checked></td>
+      <td><span class="cid">${esc(c.case_id)}</span></td>
+      <td>${esc(c.title)}${c.failed_recent ? ' <span class="tag" style="color:var(--danger)" title="最近一次执行失败">近期失败</span>' : ''}</td>
+      <td>${esc(c.module)}</td><td><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
+      <td class="hint">${esc(c.reason || '')}${c.by === 'program' ? ' <span class="tag">程序兜底</span>' : ''}</td></tr>`).join('')}</table></div>`
+    : '<div class="empty">没有选中任何用例</div>';
+}
+function openPlanSelectDlg() {
+  const d = _planDetail.selection_draft;
+  $('psGoal').value = (d && d.goal) || '冒烟'; $('psBudget').value = (d && d.budget) || '';
+  $('psModules').value = ((d && d.focus_modules) || []).join('，'); $('psChange').value = (d && d.change_summary) || '';
+  psGoalHint();
+  $('psList').innerHTML = d ? '' : '<div class="hint">选好目标点「AI 挑选」；候选为本项目已通过、还没在计划内的正式用例</div>';
+  if (d) psRender(d);
+  $('planSelectDlg').showModal();
+}
+async function planSelectRun() {
+  const body = {goal: $('psGoal').value, budget: parseInt($('psBudget').value || '0', 10) || 0,
+    focus_modules: $('psModules').value.split(/[,，、\s]+/).map(s => s.trim()).filter(Boolean), change_summary: $('psChange').value.trim()};
+  $('psList').innerHTML = '<div class="hint"><span class="spin"></span> AI 挑选中（候选每 300 条一批）…</div>';
+  try {
+    const d = await jpost(`/api/v1/plans/${curPlan}/select`, body);
+    _planDetail.selection_draft = d;
+    psRender(d);
+  } catch (e) { $('psList').innerHTML = ''; toast('AI 挑选失败：' + e.message, 'err'); }
+}
+async function psAdd() {
+  const d = _planDetail.selection_draft; if (!d) return;
+  const picked = [...document.querySelectorAll('.psck:checked')].map(x => d.selected[+x.dataset.i]).filter(Boolean);
+  if (!picked.length) return toast('请先勾选要加入的用例', 'warn');
+  const byTask = {};
+  for (const c of picked) (byTask[c.task_id] = byTask[c.task_id] || []).push(c.uid);
+  let added = 0;
+  try {
+    for (const [task_id, uids] of Object.entries(byTask)) added += (await jpost(`/api/v1/plans/${curPlan}/cases`, {task_id, uids})).added;
+    toast(`已加入 ${added} 条`, 'ok');
+    $('planSelectDlg').close(); renderPlanDetail();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 /* ---- 加入用例（快照） ---- */
