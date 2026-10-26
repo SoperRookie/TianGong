@@ -41,6 +41,7 @@ class TaskRecord(BaseModel):
     case_reviews: dict[str, dict] = Field(default_factory=dict, description="用例审核状态机：uid -> {status, comment, reject_count, locked}")
     fix_log: list[dict] = Field(default_factory=list, description="驳回定点修改 Diff 留痕（需求三十四）：修改前 vs 修改后")
     coverage: dict | None = Field(default=None, description="测试维度覆盖矩阵（需求八）：维度 -> 已覆盖/未覆盖/不适用/待确认")
+    point_review: dict | None = Field(default=None, description="测试点独立评审摘要：{issues, reviewed, batches, failed, at}；意见在各测试点的 ai_review 上")
     coverage_notes: dict = Field(default_factory=dict)   # 维度 → 说明（如「查漏补充 12 条」）：矩阵合并后每格的来龙去脉
     dup_report: dict | None = Field(default=None, description="重复检查结果（需求十一~十三）：疑似重复对与人工处置")
     point_compare: dict | None = Field(default=None, description="人工 vs AI 测试点对比报告：匹配对、人工独有、AI 独有与覆盖率")
