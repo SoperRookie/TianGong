@@ -270,6 +270,83 @@ async def run_blind_spot_verify(
     return list(explained.values())
 
 
+# ---- 测试点独立评审（拆解 / 延伸 / 查漏之后、人工审核之前）----
+
+POINT_REVIEW_VERDICTS = ("合写", "不可验证", "数值改写", "ref 对不上", "UI 外观", "超出需求", "维度不符")
+_QUOTE_VERDICTS = ("数值改写", "ref 对不上", "超出需求")   # 这三类意见要引原文，程序核验 quote 对不上就标「未核验」
+
+
+def _review_view(modules: list[dict]) -> list[dict]:
+    """送评审的测试点：只送待审核的（人已通过 / 驳回的不再评），带 ref 与 basis（评审要靳它们判 ref 对不上 / 超出需求）。"""
+    out = []
+    for e in modules:
+        pts = [{"tp_id": p.get("tp_id", ""), "point": p.get("point", ""), "dimension": p.get("dimension", ""),
+                **({"ref": p["ref"]} if p.get("ref") else {}), **({"basis": p["basis"]} if p.get("basis") else {})}
+               for p in e.get("points", []) if isinstance(p, dict) and p.get("tp_id") and p.get("status", "pending") == "pending"]
+        if pts:
+            out.append({"module": e.get("module", ""), "points": pts})
+    return out
+
+
+async def run_point_review(llm: LLMClient, requirement: str, modules: list[dict], model: str | None) -> dict:
+    """测试点独立评审：按章节分批（与查漏同一 `gap_batches`，每批带本批原文与本批章节的待审核测试点），并行调 Prompt
+    `point_review`，逐条挑七类硬伤。程序兜底：只接受本批内的 tp_id 与枚举内的 verdict；数值改写 / ref 对不上 / 超出需求
+    三类的 quote 用 `quote_found` 对本批原文核验，对不上的标 `unverified`；一条测试点只留第一条意见；某批故障只丢该批。
+    返回 {"issues": [{tp_id, verdict, fix, note, quote, unverified?}], "reviewed": 送评条数, "batches": 批数, "failed": 故障批数}。"""
+    from app.agents.analysis import normalize, quote_found
+
+    batches = [(text, _review_view(mods)) for text, mods in gap_batches(requirement, modules)]
+    batches = [(t, v) for t, v in batches if v]
+    if not batches:
+        return {"issues": [], "reviewed": 0, "batches": 0, "failed": 0}
+
+    async def _one(no: int, text: str, view: list[dict]) -> list[dict]:
+        scope = (f"本批是需求的第 {no}/{len(batches)} 批章节，测试点是从本批原文拆出来的，只对照本批原文评。\n\n"
+                 if len(batches) > 1 else "")
+        data, _ = await _chat_json(
+            llm,
+            [{"role": "system", "content": prompt_text("point_review")},
+             {"role": "user", "content": f"{scope}需求原文：\n{wrap_data('需求原文', text)}\n\n待评审的测试点：\n{wrap_data('测试点', _dump(view))}"
+                                         + profile_block()}],
+            model,
+        )
+        allowed = {p["tp_id"] for e in view for p in e["points"]}
+        src = normalize(text)
+        out: list[dict] = []
+        seen: set[str] = set()
+        for item in (data.get("issues") or []) if isinstance(data, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            tp, verdict = str(item.get("tp_id") or "").strip(), str(item.get("verdict") or "").strip()
+            if tp not in allowed or tp in seen or verdict not in POINT_REVIEW_VERDICTS:
+                continue
+            seen.add(tp)
+            quote = str(item.get("quote") or "").strip()
+            issue = {"tp_id": tp, "verdict": verdict, "fix": str(item.get("fix") or "").strip(),
+                     "note": str(item.get("note") or "").strip(), "quote": quote}
+            if verdict in _QUOTE_VERDICTS and not (quote and quote_found(quote, src)):
+                issue["unverified"] = True
+            out.append(issue)
+        return out
+
+    import asyncio
+    outcomes = await asyncio.gather(*[_one(i, t, v) for i, (t, v) in enumerate(batches, 1)], return_exceptions=True)
+    issues: list[dict] = []
+    failed = 0
+    for i, o in enumerate(outcomes, 1):
+        if isinstance(o, BaseException):
+            failed += 1
+            logger.warning("测试点评审第 {} 批失败（只丢该批）：{}", i, o)
+        else:
+            issues.extend(o)
+    if failed == len(batches):
+        raise next(o for o in outcomes if isinstance(o, BaseException))
+    reviewed = sum(len(p) for _, v in batches for e in v for p in [e["points"]])
+    logger.info("测试点独立评审：{} 条送评 / {} 批 / 意见 {} 条（未核验 {}）", reviewed, len(batches), len(issues),
+                sum(1 for x in issues if x.get("unverified")))
+    return {"issues": issues, "reviewed": reviewed, "batches": len(batches), "failed": failed}
+
+
 # ---- 重复复核（需求十一~十三）----
 
 
@@ -340,6 +417,69 @@ async def run_dup_judge(
 
 
 # ---- 人工 vs AI 测试点对比 ----
+
+
+# ---- 用例语义查重裁判 ----
+
+CASE_DUP_VERDICTS = ("重复", "可合并", "不重复")
+
+
+def _case_side(c: dict | None) -> dict:
+    if not c:
+        return {}
+    return {"module": c.get("module", ""), "title": c.get("title", ""), "precondition": c.get("precondition", ""),
+            "steps": [{"action": st.get("action", ""), "expected": st.get("expected", "")} for st in (c.get("steps") or [])],
+            "point_ids": c.get("point_ids") or []}
+
+
+async def run_case_dup_judge(llm: LLMClient, requirement: str, pairs: list[dict], cases: list[dict], model: str | None) -> list[dict]:
+    """用例对的语义复核：`case_duplicate_candidates` 的文字候选（标题 + 前置 + 步骤 + 预期 Jaccard ≥ 0.6）按 DUP_JUDGE_BATCH 对一批并行，
+    每对带两条用例的模块 / 标题 / 前置 / 步骤 / 来源测试点，裁判三选一；判「不重复」的不进列表，没判到的标「待复核」；
+    某批故障该批全标待复核。AI 不删，人工处置。"""
+    if not pairs:
+        return []
+    import asyncio
+    by_id = {str(c.get("case_id")): c for c in cases}
+
+    async def _batch(batch: list[dict]) -> dict[tuple[str, str], dict]:
+        view = [{"a": p["a"], "a_case": _case_side(by_id.get(p["a"])), "b": p["b"], "b_case": _case_side(by_id.get(p["b"]))} for p in batch]
+        data, _ = await _chat_json(
+            llm,
+            [{"role": "system", "content": prompt_text("case_dup_judge")},
+             {"role": "user", "content": f"需求内容：\n{wrap_data('需求原文', requirement[:2000])}\n\n疑似重复用例对：\n{wrap_data('用例对', _dump(view))}"}],
+            model,
+        )
+        out: dict[tuple[str, str], dict] = {}
+        for d in (data.get("duplicates") or []) if isinstance(data, dict) else []:
+            if not isinstance(d, dict):
+                continue
+            verdict = str(d.get("verdict") or "").strip()
+            if verdict not in CASE_DUP_VERDICTS:
+                continue
+            keep = str(d.get("keep") or "").strip().lower()
+            out[(str(d.get("a")), str(d.get("b")))] = {
+                "verdict": verdict, "reason": str(d.get("reason") or ""),
+                "keep": keep if keep in ("a", "b") else "", "merged_title": str(d.get("merged_title") or "")}
+        return out
+
+    batches = [pairs[i:i + DUP_JUDGE_BATCH] for i in range(0, len(pairs), DUP_JUDGE_BATCH)]
+    outcomes = await asyncio.gather(*[_batch(b) for b in batches], return_exceptions=True)
+    judged: list[dict] = []
+    for batch, res in zip(batches, outcomes):
+        if isinstance(res, BaseException):
+            logger.warning("用例查重裁判一批失败（{} 对标待复核）：{}", len(batch), res)
+            judged.extend({**p, "verdict": "待复核", "reason": "AI 复核失败，请人工判断"} for p in batch)
+            continue
+        for p in batch:
+            r = res.get((p["a"], p["b"])) or res.get((p["b"], p["a"]))
+            if r is None:
+                judged.append({**p, "verdict": "待复核", "reason": "AI 未给出结论"})
+            elif r["verdict"] != "不重复":
+                judged.append({**p, **r})
+    logger.info("用例查重：候选 {} 对 → 重复 {} / 可合并 {} / 待复核 {}", len(pairs),
+                sum(1 for j in judged if j["verdict"] == "重复"), sum(1 for j in judged if j["verdict"] == "可合并"),
+                sum(1 for j in judged if j["verdict"] == "待复核"))
+    return judged
 
 
 async def run_point_compare(llm: LLMClient, requirement: str, modules: list[dict], model: str | None) -> dict:

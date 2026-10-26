@@ -1124,6 +1124,18 @@ async def _run_point_quality_checks(app, task_id: str, requirement: str, model: 
         record.dup_report = {"points": judged, "resolved": []}
     except Exception as e:
         logger.warning("重复检查故障，跳过（不阻塞主链路）：{}", e)
+    if get_settings().point_review:   # 独立评审：挑硬伤标到条目上，人先看带标记的
+        from app.agents.quality import run_point_review
+        from app.tasks.points import apply_ai_review
+
+        try:
+            rv = await run_point_review(app.state.llm, requirement, modules, model)
+            n = apply_ai_review(modules, rv["issues"])
+            record.point_review = {"issues": len(rv["issues"]), "reviewed": rv["reviewed"], "batches": rv["batches"],
+                                   "failed": rv["failed"], "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            logger.info("测试点独立评审：{} 条标上意见", n)
+        except Exception as e:
+            logger.warning("测试点独立评审故障，跳过（不阻塞主链路）：{}", e)
     store.save(record)
 
 
@@ -2932,7 +2944,7 @@ async def add_task_points(request: Request, task_id: str, body: PointAddBody) ->
             f"已有测试点：\n{wrap_data('测试点', _json.dumps(_points_view(modules), ensure_ascii=False, indent=1))}\n\n"
             f"用户补充要求：{wrap_data('补充要求', body.instruction.strip())}\n\n"
             "只生成满足补充要求的**新增**测试点，不要复述或修改已有测试点。"
-            '只输出 JSON：{"additions": [{"module": "模块名", "point": "测试点描述", "dimension": "维度"}]}'
+            '只输出 JSON：{"additions": [{"module": "模块名", "point": "测试点描述", "dimension": "维度", "ref": "页面或章节 › 需求点（需求里没有则留空）", "reason": "ref 为空时写依据"}]}'
             + profile_block()
         )
         try:
@@ -2942,11 +2954,17 @@ async def add_task_points(request: Request, task_id: str, body: PointAddBody) ->
             ], ctx.get("model"))
         except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
             raise HTTPException(status_code=502, detail=str(e))
-        added = add_points(
-            modules,
-            [a for a in data.get("additions", []) if isinstance(a, dict)],
-            source="supplement", seq_floor=tp_seq_of(record.analysis), skipped=skipped,
-        )
+        from app.tasks.points import point_ref
+        items = []
+        for a in data.get("additions", []):
+            if not isinstance(a, dict):
+                continue
+            ref = point_ref(a)
+            reason = str(a.get("reason") or "").strip()
+            # 需求里没有依据的经验场景：reason 作「依据」显示（与经验延伸同一位置），有 ref 的不带
+            items.append({"module": a.get("module", ""), "point": a.get("point", ""), "dimension": a.get("dimension", ""),
+                          "ref": ref, **({"basis": reason} if reason and not ref else {})})
+        added = add_points(modules, items, source="supplement", seq_floor=tp_seq_of(record.analysis), skipped=skipped)
     else:
         raise HTTPException(status_code=400, detail="请提供 points（手工新增）或 instruction（AI 补充）")
     bump_tp_seq(record.analysis)
@@ -3197,6 +3215,74 @@ async def compare_points(request: Request, task_id: str) -> dict:
     return {"task_id": task_id, "point_compare": report}
 
 
+class DupPairActionBody(BaseModel):
+    action: str        # ignore（人工判定不重复 / 无需处理）/ reopen
+    note: str = ""
+
+
+@router.post("/api/v1/tasks/{task_id}/points/ai-review")
+async def ai_review_points(request: Request, task_id: str) -> dict:
+    """测试点独立评审：按章节分批逐条挑硬伤（合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符），
+    意见标到待审核的条目上，不改动测试点；人通过 / 驳回 / 修改后意见撤掉。拆解时默认已自动跑过（配置 point_review）。"""
+    from app.agents.quality import run_point_review
+    from app.tasks.points import apply_ai_review
+
+    store = request.app.state.tasks
+    record, modules = _points_record(request, task_id, "point.ai")
+    _ai_ctx(request, record)
+    ctx = record.context or {}
+    try:
+        rv = await run_point_review(request.app.state.llm, ctx.get("requirement", ""), modules, ctx.get("model"))
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    n = apply_ai_review(modules, rv["issues"])
+    record.point_review = {"issues": len(rv["issues"]), "reviewed": rv["reviewed"], "batches": rv["batches"],
+                           "failed": rv["failed"], "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    store.save(record)
+    return {"task_id": task_id, "issues": rv["issues"], "marked": n, "reviewed": rv["reviewed"], "batches": rv["batches"],
+            "failed": rv["failed"], "test_points": modules}
+
+
+@router.post("/api/v1/tasks/{task_id}/cases/dup-check")
+async def dup_check_cases(request: Request, task_id: str) -> dict:
+    """用例重复检查：文字初筛（标题 + 前置 + 步骤 + 预期）+ AI 语义裁判（重复 / 可合并 / 不重复）；AI 不删除，人工处置。"""
+    from app.agents.quality import run_case_dup_judge
+    from app.tasks.points import case_duplicate_candidates, dup_pair_entities
+
+    store = request.app.state.tasks
+    record = _task(request, task_id, "case.ai")
+    cases = (record.result or {}).get("cases") or []
+    if not cases:
+        raise HTTPException(status_code=409, detail="任务没有用例")
+    _ai_ctx(request, record)
+    ctx = record.context or {}
+    pairs = case_duplicate_candidates(cases)
+    try:
+        judged = await run_case_dup_judge(request.app.state.llm, ctx.get("requirement", ""), pairs, cases, ctx.get("model")) if pairs else []
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    record.dup_report = {**(record.dup_report or {"points": [], "resolved": []}), "cases": judged}
+    store.save(record)
+    return {"task_id": task_id, "candidates": len(pairs), "duplicates": judged, "case_dup_pairs": dup_pair_entities(record, "cases")}
+
+
+@router.post("/api/v1/tasks/{task_id}/cases/dup-pairs/{key}")
+async def act_case_dup_pair(request: Request, task_id: str, key: str, body: DupPairActionBody) -> dict:
+    """用例疑似重复对的人工处置：忽略（判定不重复 / 都保留）/ 重开。删除其中一条走用例删除，该组自动变为已处置。"""
+    from app.tasks.points import dup_pair_entities, record_dup_pair_action
+
+    store = request.app.state.tasks
+    record = _task(request, task_id, "case.review")
+    if not any(e["key"] == key for e in dup_pair_entities(record, "cases")):
+        raise HTTPException(status_code=404, detail=f"重复对不存在: {key}")
+    try:
+        updated = record_dup_pair_action(record, key, body.action, _operator(request), body.note, kind="cases")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    store.save(record)
+    return {"task_id": task_id, "dup_pair": updated, "case_dup_pairs": dup_pair_entities(record, "cases")}
+
+
 @router.post("/api/v1/tasks/{task_id}/points/dup-check")
 async def dup_check_points(request: Request, task_id: str) -> dict:
     """重复检查（需求十一~十三）：文字初筛 + 语义复核；AI 不删除，人工决定处置。"""
@@ -3216,11 +3302,6 @@ async def dup_check_points(request: Request, task_id: str) -> dict:
     store.save(record)
     from app.tasks.points import dup_pair_entities
     return {"task_id": task_id, "duplicates": judged, "dup_pairs": dup_pair_entities(record)}
-
-
-class DupPairActionBody(BaseModel):
-    action: str        # ignore（人工判定不重复 / 无需处理）/ reopen
-    note: str = ""
 
 
 class DupPairBatchBody(DupPairActionBody):
@@ -8012,6 +8093,7 @@ async def get_task(request: Request, task_id: str) -> dict:
     return {**record.model_dump(exclude={"checkpoint"}), "editing": _active_editing(request.app, task_id),
             "error_kind": _error_kind(record.error), "resume": _resume_info(record),
             "blind_spots": blind_spot_entities(record), "dup_pairs": dup_pair_entities(record),
+            "case_dup_pairs": dup_pair_entities(record, "cases"),
             "points_pending_generation": [p["tp_id"] for tp in pending for p in tp["points"]]}
 
 

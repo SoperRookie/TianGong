@@ -154,7 +154,7 @@ def normalize_points(modules: list[dict]) -> list[dict]:
                     item["ref"] = ref
                 # 保留实体字段（已实体化的测试点二次归一化时不丢状态）
                 for key in ("tp_id", "status", "locked", "comment", "reject_count", "source", "warnings",
-                            "version", "basis", *REJECT_FIELDS):
+                            "version", "basis", "ai_review", *REJECT_FIELDS):
                     if key in p:
                         item[key] = p[key]
                 points.append(item)
@@ -281,6 +281,7 @@ def apply_point_review(modules: list[dict], items: list[dict]) -> dict:
             raise PointReviewError(f"测试点不存在: {tp_id}")
         entry, point = found
         record = {"tp_id": tp_id, "action": action, "comment": str(item.get("comment", ""))}
+        point.pop("ai_review", None)   # 人看过（通过 / 驳回 / 改过）的点，AI 评审意见撤掉
         if action == "approve":
             point["status"], point["locked"] = "approved", True
             clear_reject_fields(point)
@@ -323,6 +324,24 @@ def apply_point_review(modules: list[dict], items: list[dict]) -> dict:
         counts[action] += 1
         log.append(record)
     return {"counts": counts, "hints": hints, "log": log}
+
+
+def apply_ai_review(modules: list[dict], issues: list[dict]) -> int:
+    """把独立评审的意见标到测试点上：`p["ai_review"] = {verdict, fix, note, quote, unverified?, at}`；
+    这次没意见的点清掉上次的（评审是对当前文本的）。返回标上的条数。意见不改动测试点本身，人工审核时先看带标记的，
+    人通过 / 驳回 / 修改后意见撤掉（`apply_point_review`）。"""
+    by_id = {str(i.get("tp_id")): i for i in issues if isinstance(i, dict) and i.get("tp_id")}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    n = 0
+    for _, p in iter_points(modules):
+        issue = by_id.get(str(p.get("tp_id")))
+        if issue is None or p.get("status", "pending") != "pending":
+            p.pop("ai_review", None)
+            continue
+        p["ai_review"] = {"verdict": issue["verdict"], "fix": issue.get("fix", ""), "note": issue.get("note", ""),
+                          "quote": issue.get("quote", ""), **({"unverified": True} if issue.get("unverified") else {}), "at": now}
+        n += 1
+    return n
 
 
 def rejected_points(modules: list[dict]) -> list[dict]:
@@ -443,17 +462,21 @@ def _pair_key(a: str, b: str) -> str:
     return "|".join(sorted((str(a), str(b))))
 
 
-def dup_pair_entities(record) -> list[dict]:
-    """疑似重复测试点对的条目视图：状态 open / ignored（人工判定非重复）/ resolved（其中一条已删除或改写后不再重复）。
+def dup_pair_entities(record, kind: str = "points") -> list[dict]:
+    """疑似重复对的条目视图：状态 open / ignored（人工判定非重复）/ resolved（其中一条已删除或改写后不再重复）。
 
-    dup_report.points 为最近一次重复检查的结果；resolved 记录人工处置（忽略 / 重开留痕）。
-    测试点被删除后自动视为已处置，不需要再手工点；文本已修改的用重新检查刷新。
+    kind=points：dup_report.points 为最近一次测试点重复检查的结果；kind=cases：dup_report.cases 为用例查重裁判结果，
+    存活集换成用例编号。resolved 记录人工处置（忽略 / 重开留痕），两类共用（编号不会撞）。
+    条目被删除后自动视为已处置，不需要再手工点；文本已修改的用重新检查刷新。
     """
     report = record.dup_report or {}
-    pairs = report.get("points") or []
+    pairs = report.get(kind) or []
     reviews = {r["key"]: r for r in (report.get("resolved") or []) if isinstance(r, dict) and r.get("key")}
-    modules = (record.analysis or {}).get("test_points") or []
-    alive = {p.get("tp_id") for _, p in iter_points(modules)}
+    if kind == "cases":
+        alive = {str(c.get("case_id")) for c in ((record.result or {}).get("cases") or [])}
+    else:
+        modules = (record.analysis or {}).get("test_points") or []
+        alive = {p.get("tp_id") for _, p in iter_points(modules)}
     out: list[dict] = []
     for p in pairs:
         key = _pair_key(p.get("a", ""), p.get("b", ""))
@@ -469,8 +492,8 @@ def dup_pair_entities(record) -> list[dict]:
     return out
 
 
-def record_dup_pair_action(record, key: str, action: str, by: str | None, note: str = "") -> dict:
-    """忽略 / 重开一对疑似重复（持久化，刷新与重新检查后保留）。"""
+def record_dup_pair_action(record, key: str, action: str, by: str | None, note: str = "", kind: str = "points") -> dict:
+    """忽略 / 重开一对疑似重复（持久化，刷新与重新检查后保留）；kind 同 dup_pair_entities。"""
     if action not in ("ignore", "reopen"):
         raise ValueError(f"不支持的处置动作: {action}")
     report = record.dup_report or {"points": [], "resolved": []}
@@ -479,7 +502,7 @@ def record_dup_pair_action(record, key: str, action: str, by: str | None, note: 
         resolved.append({"key": key, "status": "ignored", "note": (note or "").strip(), "by": by,
                          "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     record.dup_report = {**report, "resolved": resolved}
-    return next((e for e in dup_pair_entities(record) if e["key"] == key), {"key": key, "status": "open"})
+    return next((e for e in dup_pair_entities(record, kind) if e["key"] == key), {"key": key, "status": "open"})
 
 
 def _point_key(text: str) -> str:
