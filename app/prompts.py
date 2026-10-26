@@ -20,6 +20,8 @@ PROMPT_DEFS: list[dict] = [
      "where": "任务创建 → 拆解测试点"},
     {"key": "point_extend", "name": "经验延伸（需求之外的场景）", "kind": "system", "default": P.POINT_EXTEND_SYSTEM,
      "where": "拆解测试点之后的独立一步 / 测试点页「经验延伸」：按资深测试经验补需求没写到的并发 / 中断 / 跨天 / 越权 / 脏数据场景，每条带依据"},
+    {"key": "point_combine", "name": "模块级组合延伸", "kind": "system", "default": P.POINT_COMBINE_SYSTEM,
+     "where": "拆解 / 延伸 / 查漏之后自动（配置 point_combine）/ 测试点页「组合延伸」：每个模块一次，按判定表 / 场景串联 / 状态×角色×端 / 规则优先级 / 数据流转找单条规则叠加后的组合场景，每条带依据与来源编号"},
     {"key": "requirement_outline", "name": "长需求模块大纲", "kind": "system", "default": P.REQUIREMENT_OUTLINE_SYSTEM,
      "where": "长需求分片拆解前 → 全文模块大纲"},
     {"key": "blind_spot_verify", "name": "分片盲区复核", "kind": "system", "default": P.BLIND_SPOT_VERIFY_SYSTEM,
@@ -63,6 +65,8 @@ PROMPT_DEFS: list[dict] = [
      "where": "拆解 / 延伸 / 查漏之后自动（配置 point_review）/ 测试点页「AI 评审」：逐条挑合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符，标到条目上"},
     {"key": "case_dup_judge", "name": "用例语义查重", "kind": "system", "default": P.CASE_DUP_JUDGE_SYSTEM,
      "where": "用例页「重复检查」：文字初筛候选对交模型判重复 / 可合并 / 不重复，人工处置"},
+    {"key": "question_suggest", "name": "待确认事项推荐答案", "kind": "system", "default": P.QUESTION_SUGGEST_SYSTEM,
+     "where": "需求中心 → AI 分析完成后自动（配置 question_suggest）/ 待确认事项页「推荐答案」：按原文 › 历史结论 › 行业惯例给每条未确认事项一个确定答案 + 依据 + 风险，人确认才算"},
     {"key": "dependency_infer", "name": "依赖关系识别", "kind": "system", "default": P.DEPENDENCY_INFER_SYSTEM,
      "where": "知识库 → 依赖关系 → AI 识别（需求功能依赖 / 用例依赖链路）"},
     {"key": "vision_image", "name": "图片理解（Vision）", "kind": "user", "default": None,
@@ -79,7 +83,17 @@ PROMPT_DEFS: list[dict] = [
      "where": "拆解 / 生成 / 评审 / 查漏 / 补充测试点 / 需求分析全链路注入（项目画像确认生效后）", "placeholders": ["profile"]},
     {"key": "profile_extract", "name": "项目画像提炼", "kind": "system", "default": P.PROFILE_EXTRACT_SYSTEM,
      "where": "项目 → 项目画像 → AI 提炼（自动 / 手动），草稿经管理员确认后生效"},
+    # 共享片段：多条 Prompt 共用的枚举 / 清单 / 格式只写一份，正文里用「【共享:名称】」引用，prompt_text 取用时展开；改这里全部生效
+    {"key": "shared_dimensions", "name": "共享片段：测试维度枚举", "kind": "shared", "default": P.SHARED_DIMENSIONS,
+     "where": "正文写「【共享:维度枚举】」处展开：拆解 / 经验延伸 / 组合延伸 / 查漏 / AI 补充"},
+    {"key": "shared_ui_exclusion", "name": "共享片段：UI 外观排除清单", "kind": "shared", "default": P.SHARED_UI_EXCLUSION,
+     "where": "正文写「【共享:UI外观清单】」处展开：拆解 / 查漏 / AI 补充 / 测试点评审 / 用例生成 / 用例评审"},
+    {"key": "shared_ref_format", "name": "共享片段：ref 格式", "kind": "shared", "default": P.SHARED_REF_FORMAT,
+     "where": "正文写「【共享:ref格式】」处展开：拆解 / 经验延伸 / 组合延伸 / 查漏 / AI 补充"},
 ]
+
+# 共享片段标记名 → 登记键
+SHARED_KEYS = {"维度枚举": "shared_dimensions", "UI外观清单": "shared_ui_exclusion", "ref格式": "shared_ref_format"}
 
 
 class PromptError(ValueError):
@@ -166,7 +180,7 @@ class PromptStore:
         """列表筛选：类型 / 定制状态 / 关键词（名称、键、场景、占位符、各版本内容与说明），计数按全集统计。
         page_size=0 不分页。"""
         rows = self.list()
-        kind_counts = {k: sum(1 for r in rows if r["kind"] == k) for k in ("system", "user", "block")}
+        kind_counts = {k: sum(1 for r in rows if r["kind"] == k) for k in ("system", "user", "block", "shared")}
         state_counts = {k: sum(1 for r in rows if k in self._state_of(r)) for k in self.STATES}
         if kind:
             rows = [r for r in rows if r["kind"] == kind]
@@ -196,6 +210,14 @@ class PromptStore:
     def text(self, key: str) -> tuple[str, int]:
         v = self.active(key)
         return v["content"], v["version_no"]
+
+    def shared_blocks(self) -> dict[str, str]:
+        """共享片段当前生效的正文（标记名 → 文本），供展开。"""
+        return {mark: self.active(key)["content"] for mark, key in SHARED_KEYS.items() if key in self._items}
+
+    def expanded(self, key: str, content: str | None = None) -> str:
+        """Prompt 正文展开共享片段后的全文（管理页展示、模型实际收到的就是它）。"""
+        return P.expand_shared(self.active(key)["content"] if content is None else content, self.shared_blocks())
 
     # ---- 维护 ----
 
@@ -264,7 +286,8 @@ def set_current(store: PromptStore | None) -> None:
 
 
 def prompt_text(key: str) -> str:
-    """取生效 Prompt 并登记版本到调用上下文；未初始化（脚本/单测直接调用）时回退内置默认。"""
+    """取生效 Prompt 并登记版本到调用上下文；未初始化（脚本/单测直接调用）时回退内置默认。
+    正文里的「【共享:名称】」标记在这里展开成共享片段的生效正文（共享片段的版本也一并登记）。"""
     from app.llm.calllog import note_prompt
 
     d = next(x for x in PROMPT_DEFS if x["key"] == key)
@@ -275,4 +298,13 @@ def prompt_text(key: str) -> str:
     else:
         content, version = _current.text(key)
     note_prompt(key, version, d["name"], d["kind"])
+    if d["kind"] != "shared" and P.SHARED_MARK_RE.search(content):
+        blocks = {}
+        for mark, skey in SHARED_KEYS.items():
+            if _current is None:
+                blocks[mark] = P.SHARED_BLOCKS[mark]
+            else:
+                blocks[mark], sv = _current.text(skey)
+                note_prompt(skey, sv, "共享片段", "block")
+        content = P.expand_shared(content, blocks)
     return content

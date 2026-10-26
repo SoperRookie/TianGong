@@ -1441,3 +1441,93 @@ async def test_用例语义查重_文字候选交裁判_重复可合并进列表
     t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
     st = {p["key"]: p["status"] for p in t["case_dup_pairs"]}
     assert st["TC-登录-003|TC-登录-004"] == "resolved" and st["TC-登录-001|TC-登录-002"] == "open"
+
+
+# ---- 模块级组合延伸：单条规则叠在一起的交叉场景，每模块一次调用 ----
+
+
+COMBINE_REPLY = json.dumps({"combinations": [
+    {"point": "连续错误 4 次后输入正确密码登录成功且错误计数清零", "dimension": "状态转换", "ref": "登录 › 锁定",
+     "basis": "锁定计数与成功登录的交叉：计数不清零会误锁", "from": ["TP001", "TP002"]},
+    {"point": "密码为空连续提交 5 次不计入锁定次数", "dimension": "输入校验", "ref": "登录 › 锁定",
+     "basis": "空值拦截在前，不应触发锁定计数", "from": ["TP002", "TP003"]},
+    {"point": "只涉及一条的单点场景", "dimension": "数据", "basis": "x", "from": ["TP001"]},
+    {"point": "没依据的组合场景", "dimension": "数据", "from": ["TP001", "TP002"]},
+    {"point": "正确账号密码登录成功", "dimension": "正常流程", "basis": "复述已有点", "from": ["TP001", "TP002"]},
+    {"point": "编号不在本模块的组合", "dimension": "数据", "basis": "y", "from": ["TP001", "TP099"]},
+]}, ensure_ascii=False)
+
+
+async def test_points_combine_模块级组合延伸_只认本模块且至少两条来源_标来源依据与来源编号_按模块筛选_导出脑图(client, tmp_path):
+    import zipfile
+
+    from openpyxl import load_workbook
+
+    data = await _create_confirm_task(client)
+    task_id = data["task_id"]
+    app.state.llm = StubLLM([COMBINE_REPLY])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/points/combine", json={})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["modules"] == 1 and body["failed"] == 0
+    assert [p["source"] for p in body["added"]] == ["combined", "combined"]
+    assert body["added"][0]["combo_from"] == ["TP001", "TP002"] and body["added"][0]["basis"].startswith("锁定计数")
+    assert body["added"][1]["combo_from"] == ["TP002", "TP003"] and all(p["status"] == "pending" for p in body["added"])
+    reasons = "｜".join(s["reason"] for s in body["skipped"])
+    assert "来源编号不足两条" in reasons and "没有写为什么要测" in reasons and "高度相似" in reasons and len(body["skipped"]) == 4
+    user = app.state.llm.calls[0]["messages"][-1]["content"]
+    assert "模块「登录」" in user and "TP003" in user and "密码为空点击登录被拦截" in user   # 查漏新增的点也在组合材料里
+    # 只跑指定模块：对不上的模块名 → 不调模型、新增 0
+    app.state.llm = StubLLM([])
+    r = (await client.post(f"/api/v1/tasks/{task_id}/points/combine", json={"modules": ["不存在的模块"]})).json()
+    assert r["modules"] == 0 and r["added"] == [] and app.state.llm.calls == []
+    # 任务详情带来源编号与摘要
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    pts = {p["tp_id"]: p for m in t["analysis"]["test_points"] for p in m["points"]}
+    new_id = body["added"][0]["tp_id"]
+    assert pts[new_id]["source"] == "combined" and pts[new_id]["combo_from"] == ["TP001", "TP002"]
+    assert t["point_combine"]["added"] == 2 and t["point_combine"]["modules"] == 1
+    # 导出 xlsx 来源列「组合延伸」；导出 xmind 与页面脑图同结构：需求 → 模块 → 测试点 → 依据节点
+    r = await client.get(f"/api/v1/tasks/{task_id}/points/export")
+    f = tmp_path / "pts.xlsx"; f.write_bytes(r.content)
+    rows = {str(row[0]): row for row in load_workbook(str(f)).active.iter_rows(values_only=True)}
+    assert rows[new_id][5] == "组合延伸" and rows[new_id][-1].startswith("锁定计数")
+    r = await client.get(f"/api/v1/tasks/{task_id}/points/export", params={"fmt": "xmind"})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/vnd.xmind")
+    f = tmp_path / "pts.xmind"; f.write_bytes(r.content)
+    with zipfile.ZipFile(f) as zf:
+        sheet = json.loads(zf.read("content.json"))[0]
+    root = sheet["rootTopic"]
+    mods = root["children"]["attached"]
+    assert len(mods) == 1 and mods[0]["title"].startswith("登录（5）")
+    points = mods[0]["children"]["attached"]
+    assert [p["title"].split(" ")[0] for p in points] == ["TP001", "TP002", "TP003", new_id, body["added"][1]["tp_id"]]
+    combo = next(p for p in points if p["title"].startswith(new_id))
+    assert "状态转换" in combo["labels"] and "组合延伸" in combo["labels"] and "待审核" in combo["labels"]
+    kids = [c["title"] for c in combo["children"]["attached"]]
+    assert any(k.startswith("组合依据：锁定计数") and "TP001、TP002" in k for k in kids) and any(k.startswith("需求来源：登录 › 锁定") for k in kids)
+    assert "组合依据" in combo["notes"]["plain"]["content"]
+    # 只导已通过的：一条都没通过 → 空脑图只有根
+    r = await client.get(f"/api/v1/tasks/{task_id}/points/export", params={"fmt": "xmind", "scope": "approved"})
+    f.write_bytes(r.content)
+    with zipfile.ZipFile(f) as zf:
+        assert "children" not in json.loads(zf.read("content.json"))[0]["rootTopic"]
+    assert (await client.get(f"/api/v1/tasks/{task_id}/points/export", params={"fmt": "pdf"})).status_code == 400
+
+
+async def test_拆解时自动组合延伸_查漏之后查重之前_开关打开时跑_故障只跳过(client, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "point_combine", True)
+    app.state.llm = StubLLM([ANALYST_REPLY_V2, GAP_REPLY, COMBINE_REPLY])
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求：账号密码登录，连续错误5次锁定", "confirm_points": "true"})
+    assert resp.status_code == 200, resp.text
+    points = resp.json()["test_points"][0]["points"]
+    assert [p["source"] for p in points] == ["ai", "ai", "gap", "combined", "combined"]   # 明文 → 查漏新增 → 组合（看到了查漏点）
+    assert all(p["basis"] and len(p["combo_from"]) == 2 for p in points if p["source"] == "combined")
+    assert len({p["tp_id"] for p in points}) == 5
+    # 组合这一步故障：只丢组合，拆解与查漏结果照常
+    app.state.llm = StubLLM([ANALYST_REPLY_V2, GAP_REPLY, "不是 JSON", "还不是 JSON"])
+    resp = await client.post("/api/v1/tasks", data={"text": "登录需求：账号密码登录，连续错误5次锁定", "confirm_points": "true"})
+    assert resp.status_code == 200, resp.text
+    assert [p["source"] for p in resp.json()["test_points"][0]["points"]] == ["ai", "ai", "gap"]

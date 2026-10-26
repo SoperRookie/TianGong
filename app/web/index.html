@@ -2845,10 +2845,12 @@ function allPoints(t) {
   const modules = (t.analysis||{}).test_points || [];
   return modules.flatMap(m => (m.points||[]).map(p => ({...normPoint(p), module:m.module})));
 }
-const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增', blind_spot:'盲区转入', derived:'经验延伸'};
+const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增', blind_spot:'盲区转入', derived:'经验延伸', combined:'组合延伸'};
 const BS_STATUS = {open:'待处置', question:'已转待确认事项', point:'已转测试点', explained:'需求已说明', ignored:'已忽略'};
 const srcChip = src => src === 'derived'
   ? `<span class="tag" style="color:var(--purple)" title="需求没写、按资深测试经验补的场景；依据见测试点下方">延伸</span><div class="hint">经验延伸</div>`
+  : src === 'combined'
+  ? `<span class="tag" style="color:var(--purple)" title="模块内几条规则叠加后的组合场景（条件组合 / 流程串联 / 状态×角色×端 / 规则优先级 / 数据流转）；依据与来源编号见测试点下方">组合</span><div class="hint">组合延伸</div>`
   : src === 'manual' || src === 'blind_spot'
   ? `<span class="tag" style="background:var(--warn-bg,#fff4e0);color:var(--warn,#b36b00)">人工</span>${src==='blind_spot'?'<div class="hint">盲区转入</div>':''}`
   : `<span class="tag">AI</span><div class="hint">${esc(srcText[src]||src||'AI 拆解')}</div>`;
@@ -2913,6 +2915,7 @@ function renderPointWorkbench(t) {
   const rejected = pts.filter(p=>p.status==='rejected').length;
   const pending = pts.length - approved - rejected;
   const derivedCnt = pts.filter(p=>p.source==='derived').length;
+  const combinedCnt = pts.filter(p=>p.source==='combined').length;
   const aiReviewCnt = pts.filter(p=>p.ai_review).length;
   const confirmable = t.status === 'awaiting_confirmation';
   const pendingGen = t.points_pending_generation || [];
@@ -2941,7 +2944,7 @@ function renderPointWorkbench(t) {
         <td style="width:70px"><span class="cid">${esc(p.tp_id)}</span></td>
         <td style="width:150px">${modTag(p.module)}</td>
         <td>${esc(p.point)}
-          ${p.basis?`<div class="hint" style="color:var(--purple)" title="经验延伸：为什么要测">依据：${esc(p.basis)}</div>`:''}
+          ${p.basis?`<div class="hint" style="color:var(--purple)" title="${p.source==='combined'?'组合延伸：为什么这个组合值得测':'经验延伸：为什么要测'}">${p.source==='combined'?'组合依据':'依据'}：${esc(p.basis)}${(p.combo_from||[]).length?` <span class="hint">（由 ${p.combo_from.map(esc).join('、')} 组合）</span>`:''}</div>`:''}
           ${p.ai_review?`<div class="hint" style="color:var(--danger)" title="${esc(p.ai_review.quote?'原文：'+p.ai_review.quote:'独立评审 Agent 的意见，不改动测试点；通过 / 驳回 / 修改后撤掉')}">AI 评审·${esc(p.ai_review.verdict)}${p.ai_review.unverified?'（引文未核验）':''}：${esc(p.ai_review.fix||p.ai_review.note||'')}${p.ai_review.fix&&p.ai_review.note?`<span class="hint">（${esc(p.ai_review.note)}）</span>`:''}${canEditPt&&p.ai_review.fix&&!['UI 外观','超出需求','维度不符'].includes(p.ai_review.verdict)?` <a onclick="pointModify(${jsq(p.tp_id)}, ${jsq(p.ai_review.fix)})" title="打开修改框，预填 AI 建议的写法">按建议修改</a>`:''}</div>`:''}
           ${(p.warnings||[]).map(w=>`<div class="hint" style="color:var(--warn)">⚠ ${esc(w)}</div>`).join('')}
           ${editingHint('point', p.tp_id)}
@@ -2984,7 +2987,7 @@ function renderPointWorkbench(t) {
     </div>` : '';
 
   return sub + `<div class="toolbar" style="margin-top:0">
-      <span class="hint">共 ${pts.length} 条 · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b>${derivedCnt?` · 经验延伸 <b style="color:var(--purple)" title="需求没写、按资深测试经验补的场景">${derivedCnt}</b>`:''}${aiReviewCnt?` · <a onclick="ptSet('status','ai_review')" title="独立评审 Agent 标出的硬伤：合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符">AI 评审意见 <b style="color:var(--danger)">${aiReviewCnt}</b></a>`:''}</span>
+      <span class="hint">共 ${pts.length} 条 · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b>${derivedCnt?` · 经验延伸 <b style="color:var(--purple)" title="需求没写、按资深测试经验补的场景">${derivedCnt}</b>`:''}${combinedCnt?` · 组合延伸 <b style="color:var(--purple)" title="模块内几条规则叠加后的组合场景">${combinedCnt}</b>`:''}${aiReviewCnt?` · <a onclick="ptSet('status','ai_review')" title="独立评审 Agent 标出的硬伤：合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符">AI 评审意见 <b style="color:var(--danger)">${aiReviewCnt}</b></a>`:''}</span>
       <div class="seg">
         <button class="${pointView==='table'?'on':''}" onclick="pointView='table';renderDetail()">表格</button>
         <button class="${pointView==='mind'?'on':''}" onclick="pointView='mind';renderDetail()">脑图</button>
@@ -2993,11 +2996,13 @@ function renderPointWorkbench(t) {
         ${confirmable?`<button class="btn ghost sm" onclick="gapCheck()">查漏补缺</button>
         <button class="btn ghost sm" onclick="aiReviewPoints()" title="独立评审 Agent 逐条挑硬伤（合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符），意见标到待审核的条目上，不改动测试点；拆解时已自动跑过一遍">AI 评审</button>
         <button class="btn ghost sm" onclick="extendPoints()" title="按资深测试经验补需求没写到的场景（并发 / 中断 / 跨天 / 越权 / 脏数据），只新增、待审核、每条带依据；拆解时已自动跑过一遍，这里是再补一轮">经验延伸</button>
+        <button class="btn ghost sm" onclick="combinePoints()" title="模块级组合思考：每个模块一次，把模块内单条规则叠在一起找交叉场景（条件组合 / 流程串联 / 状态×角色×端 / 规则优先级 / 数据流转），只新增、待审核、每条带依据与来源编号；上方按模块筛选后只跑该模块">组合延伸${ptModule?'（本模块）':''}</button>
         <button class="btn ghost sm" onclick="dupCheck()">重复检查</button>
         <button class="btn ghost sm" onclick="supplementPoints()">AI 补充</button>
         <button class="btn ghost sm" onclick="manualAddPoint()">手工新增</button>`:''}
         ${canEditPt&&!pts.every(p=>p.legacy)?`<button class="btn ghost sm" onclick="openCompareDlg()" title="录入人工编写的测试点，与 AI 生成的逐条对比">人工对比</button>`:''}
         ${pts.length?`<button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export')}+(exportApprovedOnly?'?scope=approved':''), '测试点.xlsx')" title="导出测试点 Excel：编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例、延伸依据">导出 xlsx</button>
+        <button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export?fmt=xmind')}+(exportApprovedOnly?'&scope=approved':''), '测试点.xmind')" title="导出测试点思维导图（XMind）：需求 → 模块 → 测试点（维度 / 来源 / 状态标签）→ 需求来源、依据、审核与 AI 评审意见、覆盖用例；与页面脑图同结构">导出脑图</button>
         <label class="check" title="勾选后只导出已通过的测试点"><input type="checkbox" ${exportApprovedOnly?'checked':''} onchange="exportApprovedOnly=this.checked"> 只导已通过</label>`:''}
       </div></div>
     ${renderCoverage(t)}
@@ -3029,10 +3034,10 @@ function buildPointMinderJson(t, modules) {
     children: modules.map(m => ({
       data: {text: `${m.module}（${(m.points||[]).length}）`, kind: 'module'},
       children: (m.points||[]).map(normPoint).map(p => ({
-        data: {text: p.point, kind: 'point', tpId: p.tp_id, resource: [p.tp_id, ...(p.dimension ? [p.dimension] : []), ...(p.source === 'derived' ? ['延伸'] : []), label[p.status] || p.status]},
+        data: {text: p.point, kind: 'point', tpId: p.tp_id, resource: [p.tp_id, ...(p.dimension ? [p.dimension] : []), ...(p.source === 'derived' ? ['延伸'] : p.source === 'combined' ? ['组合'] : []), label[p.status] || p.status]},
         children: [
           ...(p.ref ? [{data: {text: `来源：${p.ref}`, kind: 'note', resource: ['需求来源']}}] : []),
-          ...(p.basis ? [{data: {text: `依据：${p.basis}`, kind: 'note', resource: ['经验延伸']}}] : []),
+          ...(p.basis ? [{data: {text: `${p.source === 'combined' ? '组合依据' : '依据'}：${p.basis}${(p.combo_from||[]).length ? `（由 ${p.combo_from.join('、')} 组合）` : ''}`, kind: 'note', resource: [p.source === 'combined' ? '组合延伸' : '经验延伸']}}] : []),
           ...(p.status === 'rejected' && (p.comment || p.fix_request) ? [{data: {text: `驳回：${p.comment || ''}${p.fix_request ? '｜要求：' + p.fix_request : ''}`, kind: 'note', resource: ['驳回意见']}}] : []),
           ...((p.warnings||[]).map(w => ({data: {text: w, kind: 'note', resource: ['提示']}}))),
         ],
@@ -3458,6 +3463,16 @@ async function extendPoints() {
     const skipped = (data.skipped || []).length;
     toast(`经验延伸完成：新增 ${data.added.length} 条待审核测试点（标「延伸」并带依据）${skipped ? `，${skipped} 条与已有测试点重复或没依据已跳过` : ''}`, data.added.length ? 'ok' : 'warn');
   } catch (e) { toast('经验延伸失败：' + e.message, 'err'); }
+}
+async function combinePoints() {
+  const only = ptModule ? [ptModule] : null;
+  toast(only ? `组合延伸执行中：模块「${ptModule}」内找规则叠加的组合场景…` : '组合延伸执行中：逐个模块找规则叠加的组合场景（每模块一次调用）…');
+  try {
+    const data = await api(`/api/v1/tasks/${currentTask.task_id}/points/combine`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({modules: only})});
+    await openTask(currentTask.task_id, true);
+    const skipped = (data.skipped || []).length;
+    toast(`组合延伸完成：${data.modules} 个模块，新增 ${data.added.length} 条待审核测试点（标「组合」并带依据与来源编号）${skipped ? `，${skipped} 条重复 / 没依据 / 来源不足已跳过` : ''}${data.failed ? `，${data.failed} 个模块失败` : ''}`, data.added.length ? 'ok' : 'warn');
+  } catch (e) { toast('组合延伸失败：' + e.message, 'err'); }
 }
 async function dupCheck() {
   toast('重复检查执行中…');
@@ -5744,7 +5759,7 @@ async function renderPrompts() {
   const kc = data.kind_counts || {}, sc = data.state_counts || {};
   const scopeTotal = Object.values(kc).reduce((a, b) => a + b, 0);
   const filtering = promptKind || promptState || promptKw;
-  const KIND = {system:'系统', user:'用户', block:'注入块'};
+  const KIND = {system:'系统', user:'用户', block:'注入块', shared:'共享片段'};
   $('promptArea').innerHTML = `<div class="card">
     <div class="card-h"><h3>Prompt 管理 <span class="hint" style="font-weight:normal">${scopeTotal} 个</span></h3><span class="meta">全部 Prompt 版本化：新建版本为草稿，激活后生效，可随时回滚；每次 AI 调用记录所用版本</span>
       <div class="grow">
@@ -6649,14 +6664,15 @@ async function _renderRequirementDetail__impl() {
   const openN = openAll.filter(q=>(q.level||'must')==='must').length;
   const suggestN = openAll.length - openN;
   const qTab = `<div class="hint" style="margin-bottom:8px">待确认事项分两级：<b>必须确认</b>（影响规则 / 预期 / 数值 / 分支，不确认不能开始测试设计）与 <b>建议确认</b>（可按假设继续，假设会写进用例备注）。确认结论会作为需求的一部分参与拆解与生成。「模块」列是问题所属的页面 / 区块：AI 分析时按问题所在章节给出，核验降级与复核补充的按原文依据所在章节定，盲区转入的按出处定。</div>
-    ${canEdit?`<div class="toolbar" style="margin-bottom:10px"><input type="text" id="rqNewQ" placeholder="人工补充一条待确认事项…" style="flex:1"><input type="text" id="rqNewQModule" list="rqQModules" placeholder="所属模块（可选）" style="width:170px" title="问题属于哪个页面 / 模块，如「活动列表-基本配置」"><datalist id="rqQModules">${[...new Set(qs.map(q=>q.module).filter(Boolean))].map(m=>`<option value="${esc(m)}">`).join('')}</datalist><select id="rqNewQLevel" style="width:110px"><option value="must">必须确认</option><option value="suggest">建议确认</option></select><button class="btn ghost sm" onclick="addReqQuestion()">添加</button></div>`:''}
+    ${canEdit?`<div class="toolbar" style="margin-bottom:10px"><input type="text" id="rqNewQ" placeholder="人工补充一条待确认事项…" style="flex:1"><input type="text" id="rqNewQModule" list="rqQModules" placeholder="所属模块（可选）" style="width:170px" title="问题属于哪个页面 / 模块，如「活动列表-基本配置」"><datalist id="rqQModules">${[...new Set(qs.map(q=>q.module).filter(Boolean))].map(m=>`<option value="${esc(m)}">`).join('')}</datalist><select id="rqNewQLevel" style="width:110px"><option value="must">必须确认</option><option value="suggest">建议确认</option></select><button class="btn ghost sm" onclick="addReqQuestion()">添加</button>${canAI&&openAll.length?`<button class="btn ghost sm" onclick="suggestReqQuestions()" title="给全部未确认事项按原文 › 历史结论 › 行业惯例各拟一个确定答案 + 依据 + 风险，预填到结论框；人点「确认」才算。AI 分析完成后默认已自动跑过">推荐答案</button>`:''}<button class="btn ghost sm ${reqQLog?'on':''}" onclick="reqQLog=!reqQLog;renderRequirementDetail()" title="按时间看全部事项的澄清全程：谁提的、AI 推荐了什么、谁确认 / 重开 / 改等级">澄清记录</button></div>`:''}
+    ${reqQLog?renderQuestionLog(qs):''}
     ${qs.length?`<div class="tbl-wrap"><table><tr><th style="width:36px">#</th><th>问题</th><th style="width:150px">模块</th><th style="width:96px">等级</th><th style="width:90px">状态</th><th>确认结论</th><th style="width:120px">确认人</th><th style="width:150px">操作</th></tr>
       ${qs.map((q,i)=>`<tr>
-        <td class="hint">${i+1}</td><td>${esc(q.question)}${q.source==='manual'?' <span class="tag">人工</span>':''}${q.kind==='unverified'?' <span class="tag" style="background:var(--danger-bg);color:var(--danger)">原文核验降级</span>':q.kind==='review'?' <span class="tag">复核补充</span>':''}${q.inherited?` <span class="tag" title="同项目需求「${esc(q.inherited.title||'')}」已确认过同一问题（当时问法：${esc(q.inherited.question||'')}），结论直接沿用；不对就「重新打开」再答">沿用「${esc(q.inherited.title||'')}」</span>`:''}${q.reason?`<div class="hint">${esc(q.reason)}</div>`:''}${q.status==='open'&&q.suggested?`<div class="hint" title="问法相近但没到自动沿用的门槛（或数字不同），只作参考：结论已预填，点「确认」才算">历史结论参考（「${esc(q.suggested.title||'')}」：${esc(q.suggested.question||'')}）→ ${esc(q.suggested.answer||'')}</div>`:''}${(q.level||'must')==='suggest'&&q.status==='open'?`<div class="hint">不确认时假设：${esc(q.assumption||'按行业惯例处理')}</div>`:''}</td>
+        <td class="hint">${i+1}</td><td>${esc(q.question)}${q.source==='manual'?' <span class="tag">人工</span>':''}${q.kind==='unverified'?' <span class="tag" style="background:var(--danger-bg);color:var(--danger)">原文核验降级</span>':q.kind==='review'?' <span class="tag">复核补充</span>':''}${q.inherited?` <span class="tag" title="同项目需求「${esc(q.inherited.title||'')}」已确认过同一问题（当时问法：${esc(q.inherited.question||'')}），结论直接沿用；不对就「重新打开」再答">沿用「${esc(q.inherited.title||'')}」</span>`:''}${q.reason?`<div class="hint">${esc(q.reason)}</div>`:''}${q.status==='open'&&q.suggested?`<div class="hint" title="问法相近但没到自动沿用的门槛（或数字不同），只作参考：结论已预填，点「确认」才算">历史结论参考（「${esc(q.suggested.title||'')}」：${esc(q.suggested.question||'')}）→ ${esc(q.suggested.answer||'')}</div>`:''}${q.status==='open'&&q.suggested_answer&&!q.suggested?`<div class="hint" style="color:var(--purple)" title="${esc(q.suggested_answer.evidence?'依据：'+q.suggested_answer.evidence:'AI 按原文 › 历史结论 › 行业惯例拟的答案，只作参考：结论已预填，点「确认」才算')}">AI 推荐（${esc(q.suggested_answer.basis||'')}${q.suggested_answer.unverified?'·引文未核验':''} · 置信度${esc(q.suggested_answer.confidence||'中')}）→ ${esc(q.suggested_answer.answer||'')}${q.suggested_answer.evidence?`<div>依据：${esc(q.suggested_answer.evidence)}</div>`:''}${q.suggested_answer.risk?`<div>若不是这个答案：${esc(q.suggested_answer.risk)}</div>`:''}</div>`:''}${(q.history||[]).length?`<details class="qhist"><summary class="hint" style="cursor:pointer">澄清记录 ${q.history.length} 条</summary>${q.history.map(h=>`<div class="hint">${esc(fmtTime(h.at))} · ${esc(h.by||'系统')} · <b>${esc(h.action)}</b>${h.detail?`：${esc(h.detail)}`:''}</div>`).join('')}</details>`:''}${(q.level||'must')==='suggest'&&q.status==='open'?`<div class="hint">不确认时假设：${esc(q.assumption||'按行业惯例处理')}</div>`:''}</td>
         <td>${q.module?`<span class="tag" title="${esc(q.ref?`出处：${q.ref}`:'所属页面 / 模块')}">${esc(q.module)}</span>`:'<span class="hint" title="整体性问题，或模型 / 章节号都没定到模块">—</span>'}</td>
         <td>${(q.level||'must')==='must'?'<span class="tag" style="background:var(--danger-bg);color:var(--danger)">必须确认</span>':'<span class="tag">建议确认</span>'}${canEdit&&q.status==='open'?`<div><a class="hint" onclick="setReqQuestionLevel('${q.q_id}','${(q.level||'must')==='must'?'suggest':'must'}')">${(q.level||'must')==='must'?'降为建议':'升为必须'}</a></div>`:''}</td>
         <td>${q.status==='open'?'<span class="st rejected">待确认</span>':'<span class="st approved">已确认</span>'}</td>
-        <td>${q.status==='open'?(canEdit?`<input type="text" id="qa-${q.q_id}" placeholder="填写确认结论（产品/开发口径）" style="width:100%;box-sizing:border-box" value="${esc((q.suggested||{}).answer||'')}">`:'<span class="hint">—</span>'):esc(q.answer)}</td>
+        <td>${q.status==='open'?(canEdit?`<input type="text" id="qa-${q.q_id}" placeholder="填写确认结论（产品/开发口径）" style="width:100%;box-sizing:border-box" value="${esc((q.suggested||{}).answer||(q.suggested_answer||{}).answer||'')}">`:'<span class="hint">—</span>'):esc(q.answer)}</td>
         <td class="hint">${q.status==='open'?'':`${esc(q.by||'')}<div>${esc(fmtTime(q.at))}</div>`}</td>
         <td><div class="rowops">${canEdit?(q.status==='open'?`${q.key&&q.text?`<button class="btn ghost sm" onclick="adoptReqQuestion('${q.q_id}')" title="确认该条成立：采纳回「${esc((r.analysis_labels||{})[q.key]||q.key)}」并记为已确认">采纳</button>`:''}<button class="btn sm" onclick="answerReqQuestion('${q.q_id}')">确认</button>`:`<button class="btn ghost sm" onclick="answerReqQuestion('${q.q_id}',true)">重新打开</button>`):''}</div></td></tr>`).join('')}
     </table></div>`:'<div class="empty">暂无待确认事项</div>'}
@@ -6775,6 +6791,24 @@ async function analyzeReq() {
     toast(r.open_questions ? `分析完成，${r.open_questions} 项待确认事项需要确认` : '分析完成，无待确认事项', r.open_questions ? 'warn' : 'ok');
     anHist = -1; anPage = 1; reqTab = r.open_questions ? 'questions' : 'analysis'; renderRequirementDetail();
   } catch (e) { if (e.message !== '已取消') toast(e.message, 'err'); btn.disabled = false; btn.textContent = 'AI 需求分析'; }
+}
+let reqQLog = false;
+function renderQuestionLog(qs) {
+  const rows = [];
+  qs.forEach((q, i) => (q.history||[]).forEach(h => rows.push({...h, n: i+1, question: q.question, status: q.status})));
+  if (!rows.length) return '<div class="hint" style="margin-bottom:10px">还没有澄清记录（旧数据只有当前状态；之后的提出 / 推荐 / 确认 / 重开 / 改等级都会留痕）</div>';
+  rows.sort((a, b) => (a.at||'').localeCompare(b.at||''));
+  return `<div class="tbl-wrap" style="margin-bottom:10px"><table><tr><th style="width:150px">时间</th><th style="width:110px">操作人</th><th style="width:36px">#</th><th>事项</th><th style="width:110px">动作</th><th>说明</th></tr>
+    ${rows.map(r=>`<tr><td class="hint">${esc(fmtTime(r.at))}</td><td class="hint">${esc(r.by||'系统')}</td><td class="hint">${r.n}</td><td>${esc(r.question)}</td><td><b>${esc(r.action)}</b></td><td class="hint">${esc(r.detail||'')}</td></tr>`).join('')}
+  </table></div>`;
+}
+async function suggestReqQuestions() {
+  toast('推荐答案生成中：按原文 › 历史结论 › 行业惯例逐条拟答案…');
+  try {
+    const r = await jpost(`/api/v1/requirements/${curReq}/questions/suggest`, {model: ($('rqAnalyzeModel')||{}).value || null});
+    toast(`已给 ${r.suggested} 条事项拟了推荐答案（预填在结论框，点「确认」才算）`, r.suggested ? 'ok' : 'warn');
+    renderRequirementDetail();
+  } catch (e) { toast(e.message, 'err'); }
 }
 async function addReqQuestion() {
   const q = $('rqNewQ').value.trim(); if (!q) return;

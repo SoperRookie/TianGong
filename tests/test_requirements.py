@@ -674,3 +674,81 @@ async def test_内嵌图片识图失败_附件标部分解析并告警_拦分析
     assert att["vision"] == {"total": 1, "done": 1, "failed": 0, "skipped": 0, "error": None} and att["warning"] is None
     assert r["content_warnings"] == []
     assert (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).status_code == 200
+
+
+SUGGEST_REPLY = json.dumps({"suggestions": [
+    {"index": 1, "answer": "锁定期间不允许找回密码，提示「账号锁定中」", "basis": "原文", "evidence": "密码错误 5 次锁定 30 分钟",
+     "risk": "若允许找回，锁定态下找回密码的用例预期相反", "confidence": "中"},
+    {"index": 2, "answer": "按账号统计", "basis": "原文", "evidence": "这一句在原文里并不存在", "risk": "", "confidence": "很高"},
+    {"index": 3, "answer": "越界编号", "basis": "行业惯例", "evidence": "", "risk": "", "confidence": "低"},
+    {"index": 1, "answer": "同一条的第二个答案", "basis": "行业惯例", "evidence": "", "risk": "", "confidence": "低"},
+]}, ensure_ascii=False)
+
+
+async def test_待确认事项推荐答案_原文引文核验_历史结论入参_人确认才算_澄清记录全程(client):
+    """G4：must 级事项只有问题与原因，需求负责人从零想。推荐答案按原文 › 历史结论 › 行业惯例给一个确定答案 + 依据 + 风险，
+    basis=原文 的引文程序核验、对不上降为行业惯例并标未核验；写到 suggested_answer 预填，人点确认才算。
+    同时每条事项带澄清记录：提出 / 沿用 / AI 推荐 / 调整等级 / 确认（采纳 AI 推荐与否）/ 重新打开。"""
+    # 旧需求确认过「按账号」→ 新需求的历史结论来源
+    a = await _req(client, title="登录 v1")
+    app.state.llm = StubLLM([ANALYSIS_REPLY])
+    a = (await client.post(f"/api/v1/requirements/{a['req_id']}/analyze", json={})).json()
+    q2 = next(q["q_id"] for q in a["questions"] if q["question"].startswith("锁定次数"))
+    await client.post(f"/api/v1/requirements/{a['req_id']}/questions/{q2}", json={"answer": "按账号"})
+    b = await _req(client, title="登录 v2")
+    rid = b["req_id"]
+    reply = ANALYSIS_REPLY.replace("锁定次数是否按账号还是按设备统计？", "锁定次数是否按账号还是按设备统计（上限 5 次）？")
+    app.state.llm = StubLLM([reply])
+    b = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
+    assert b["open_questions"] == 2 and all(q["history"][0]["action"] == "提出" and "AI 分析" in q["history"][0]["detail"] for q in b["questions"])
+    assert next(q for q in b["questions"] if q["question"].startswith("锁定次数"))["suggested"]["answer"] == "按账号"   # 历史结论参考照旧
+    app.state.llm = StubLLM([SUGGEST_REPLY])
+    r = await client.post(f"/api/v1/requirements/{rid}/questions/suggest", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["suggested"] == 2
+    user = app.state.llm.calls[0]["messages"][-1]["content"]
+    assert "待确认事项" in user and "历史结论" in user and "按账号" in user and "登录 v1" in user   # 相似的历史结论送进去了
+    qs = {q["question"]: q for q in r.json()["requirement"]["questions"]}
+    q1 = qs["锁定期间是否允许找回密码？"]
+    assert q1["suggested_answer"]["answer"].startswith("锁定期间不允许") and q1["suggested_answer"]["basis"] == "原文"
+    assert "unverified" not in q1["suggested_answer"] and q1["suggested_answer"]["confidence"] == "中"
+    q2b = qs["锁定次数是否按账号还是按设备统计（上限 5 次）？"]
+    assert q2b["suggested_answer"]["basis"] == "行业惯例" and q2b["suggested_answer"]["unverified"] is True   # 说是原文却引不出来
+    assert q2b["suggested_answer"]["confidence"] == "中"   # 枚举外的置信度按中
+    assert [h["action"] for h in q1["history"]] == ["提出", "AI 推荐答案"] and "引文未核验" in q2b["history"][-1]["detail"]
+    # 人按推荐确认：记「采纳 AI 推荐」，推荐标记撤掉；另一条自己写：记「未采纳」
+    r = (await client.post(f"/api/v1/requirements/{rid}/questions/{q1['q_id']}", json={"answer": q1["suggested_answer"]["answer"]})).json()
+    q1 = next(q for q in r["questions"] if q["q_id"] == q1["q_id"])
+    assert q1["status"] == "confirmed" and "suggested_answer" not in q1 and q1["history"][-1]["action"] == "确认" and "采纳 AI 推荐" in q1["history"][-1]["detail"]
+    r = (await client.put(f"/api/v1/requirements/{rid}/questions/{q2b['q_id']}/level", json={"level": "suggest", "assumption": "按账号"})).json()
+    q2b = next(q for q in r["questions"] if q["q_id"] == q2b["q_id"])
+    assert q2b["history"][-1]["action"] == "调整等级" and "必须确认 → 建议确认" in q2b["history"][-1]["detail"]
+    r = (await client.post(f"/api/v1/requirements/{rid}/questions/{q2b['q_id']}", json={"answer": "按设备"})).json()
+    q2b = next(q for q in r["questions"] if q["q_id"] == q2b["q_id"])
+    assert "未采纳 AI 推荐" in q2b["history"][-1]["detail"] and r["open_questions"] == 0
+    # 重新打开留痕带原结论；人工补充带「人工补充」
+    r = (await client.post(f"/api/v1/requirements/{rid}/questions/{q1['q_id']}", json={"answer": "", "reopen": True})).json()
+    q1 = next(q for q in r["questions"] if q["q_id"] == q1["q_id"])
+    assert q1["status"] == "open" and q1["history"][-1]["action"] == "重新打开" and "原结论：锁定期间不允许" in q1["history"][-1]["detail"]
+    r = (await client.post(f"/api/v1/requirements/{rid}/questions", json={"question": "是否支持记住登录？", "level": "suggest", "assumption": "支持 7 天"})).json()
+    manual = next(q for q in r["questions"] if q["source"] == "manual")
+    assert manual["history"][0]["action"] == "提出" and "人工补充" in manual["history"][0]["detail"] and "支持 7 天" in manual["history"][0]["detail"]
+    # 没有未确认事项时 409
+    c = await _req(client, title="空需求")
+    assert (await client.post(f"/api/v1/requirements/{c['req_id']}/questions/suggest", json={})).status_code == 409
+
+
+async def test_AI分析完成后自动推荐答案_开关打开时跑_故障只跳过(client, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "question_suggest", True)
+    r = await _req(client)
+    rid = r["req_id"]
+    app.state.llm = StubLLM([ANALYSIS_REPLY, SUGGEST_REPLY])
+    a = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
+    assert a["open_questions"] == 2 and sum(1 for q in a["questions"] if q.get("suggested_answer")) == 2
+    assert next(q for q in a["questions"] if q["question"].startswith("锁定期间"))["suggested_answer"]["basis"] == "原文"
+    # 推荐这一步故障：分析结果照常，没有推荐
+    app.state.llm = StubLLM([ANALYSIS_REPLY, "不是 JSON", "还不是 JSON"])
+    a = (await client.post(f"/api/v1/requirements/{rid}/analyze", json={})).json()
+    assert a["open_questions"] == 2 and all(q["suggested_answer"] for q in a["questions"])   # 上一次的推荐还在（没被清掉）

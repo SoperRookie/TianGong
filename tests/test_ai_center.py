@@ -375,3 +375,29 @@ async def test_prompt列表_类型状态计数_关键词与分页(client):
     assert p2["page"] == 2 and [p["key"] for p in p2["prompts"]] == [p["key"] for p in base["prompts"][5:10]]
     over = (await client.get("/api/v1/ai/prompts", params={"page": 99, "page_size": 5})).json()
     assert over["page"] == -(-n // 5) and over["prompts"][-1]["key"] == base["prompts"][-1]["key"]
+
+
+async def test_共享片段_取用时展开_定制一处全部生效_详情带展开全文(client):
+    """横向评审 1：维度枚举 / UI 外观清单 / ref 格式之前在五六条 Prompt 里各写一份、改一处漏一处。现在正文写「【共享:名称】」标记，
+    prompt_text 取用时展开成共享片段的生效正文；共享片段本身也是可定制的 Prompt（kind=shared），改一处全部生效。"""
+    from app.agents import prompts as P
+    from app.prompts import prompt_text
+
+    assert "【共享:维度枚举】" in P.ANALYST_SYSTEM and "【共享:UI外观清单】" in P.GAP_CHECK_SYSTEM
+    for key in ("analyst", "gap_check", "point_extend", "point_supplement", "point_combine", "generator", "reviewer", "point_review"):
+        assert "【共享:" not in prompt_text(key), key
+    assert P.SHARED_DIMENSIONS in prompt_text("analyst") and P.SHARED_UI_EXCLUSION in prompt_text("reviewer") and P.SHARED_REF_FORMAT in prompt_text("gap_check")
+    r = (await client.get("/api/v1/ai/prompts/analyst")).json()
+    assert "【共享:维度枚举】" in r["versions"][0]["content"] and P.SHARED_DIMENSIONS in r["expanded"] and "【共享:" not in r["expanded"]
+    shared = (await client.get("/api/v1/ai/prompts", params={"kind": "shared"})).json()
+    assert shared["total"] == 3 and {p["key"] for p in shared["prompts"]} == {"shared_dimensions", "shared_ui_exclusion", "shared_ref_format"}
+    # 定制共享片段：引用它的全部 Prompt 一起变；没登记的标记原样保留便于发现拼错
+    await client.post("/api/v1/ai/prompts/shared_dimensions/versions", json={"content": "正常流程 / 异常流程 / 自定义维度", "activate": True})
+    assert "自定义维度" in prompt_text("analyst") and "自定义维度" in prompt_text("gap_check") and "自定义维度" in prompt_text("point_combine")
+    assert P.expand_shared("前【共享:不存在】后") == "前【共享:不存在】后"
+    # 拆解调用时模型收到的 system 已展开
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(make_case()), review_reply(True)])
+    await client.post("/api/v1/projects", json={"name": "P"})
+    await client.post("/api/v1/tasks", data={"text": "登录需求", "project": "P"})
+    system = app.state.llm.calls[0]["messages"][0]["content"]
+    assert "自定义维度" in system and "【共享:" not in system
