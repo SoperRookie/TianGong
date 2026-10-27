@@ -2637,7 +2637,7 @@ function _renderDetail__impl() {
       <span class="pill ${t.status}">${statusText(t.status)}</span>
       ${t.progress?'<span class="hint">'+progressText(t.progress)+' <span class="spin"></span></span>':''}
       <div class="grow">
-        ${running?'<button class="btn ghost sm" onclick="cancelTask()">取消任务</button>':''}
+        ${running?(t.progress_detail&&t.progress_detail.job_active===false?'<button class="btn ghost sm" style="color:var(--danger)" onclick="cancelTask(true)" title="该任务没有后台执行句柄，不会再有进展：标记失败后可「继续完成」">标记失败</button>':'<button class="btn ghost sm" onclick="cancelTask()">取消任务</button>'):''}
         ${!running&&canDelete()?`<button class="btn ghost sm" style="color:var(--danger)" onclick="deleteTask(${jsq(t.task_id)}, true)" title="删除任务（可在任务列表「已删除」里恢复）">删除任务</button>`:''}
         <span class="hint">${t.created_by?esc(t.created_by)+' · ':''}${(t.context||{}).requirement_title?esc(t.context.requirement_title):(srcText_(t.sources)||'-')} · ${relTime(t.created_at)}</span></div>
     </div>
@@ -2650,11 +2650,13 @@ function _renderDetail__impl() {
   renderBatchBar();
 }
 
-async function cancelTask() {
-  if (!await uiConfirm('取消任务', '中断后台执行，任务将标记为失败（可重新提交）。', true)) return;
+async function cancelTask(force) {
+  if (force) {
+    if (!await uiConfirm('标记失败', '该任务在后台没有执行句柄（取消 / 重启打断或投入后台时出错），不会再有进展。标记失败后可点「继续完成」从检查点续跑。', true)) return;
+  } else if (!await uiConfirm('取消任务', '中断后台执行，任务将标记为失败（可继续完成）。', true)) return;
   try {
-    await api(`/api/v1/tasks/${currentTask.task_id}/cancel`, {method:'POST'});
-    toast('任务已取消', 'ok');
+    await api(`/api/v1/tasks/${currentTask.task_id}/cancel${force?'?force=true':''}`, {method:'POST'});
+    toast(force ? '已标记失败，可点「继续完成」' : '任务已取消', 'ok');
     await openTask(currentTask.task_id, true);
   } catch (e) { toast('取消失败：' + e.message, 'err'); }
 }
@@ -2669,13 +2671,21 @@ function stepperHtml(idx) {
 function renderProgress(t) {
   const stage = t.progress || 'queued';
   const idx = Math.max(0, STAGES.findIndex(s => s[0] === stage));
-  const elapsed = t.created_at ? Math.max(0, Math.floor((Date.now() - new Date(t.created_at).getTime())/1000)) : 0;
+  const since = (t.context||{}).retried_at || t.created_at;  // 续跑的任务从「继续」那一刻计时，不算上一次的
+  const elapsed = since ? Math.max(0, Math.floor((Date.now() - new Date(since).getTime())/1000)) : 0;
   const mm = String(Math.floor(elapsed/60)), ss = String(elapsed%60).padStart(2,'0');
+  const pd = t.progress_detail || {};
+  const ckAt = pd.checkpoint_at ? relTime(pd.checkpoint_at) : '';
+  const detail = pd.job_active === false
+    ? `<div class="warnline" style="margin-top:8px">后台没有这个任务的执行句柄（取消 / 重启打断，或投入后台时出错），不会再有进展；点右上角「标记失败」后可「继续完成」${pd.modules_done?`，已完成的 ${pd.modules_done} 个模块会保留`:''}。</div>`
+    : (pd.modules_done || pd.analysis_done)
+      ? `<div class="hint" style="margin-top:6px">检查点：${pd.analysis_done?'拆解已完成':''}${pd.analysis_done&&pd.modules_done?' · ':''}${pd.modules_done?`已生成 ${pd.modules_done} 个模块`:''}${ckAt?` · 最近落盘 ${ckAt}`:''}</div>`
+      : '';
   return `<div class="box accent" style="margin:0 0 14px;display:flex;gap:14px;align-items:flex-start">
     ${owlSvg('generating', 56)}
     <div style="flex:1;min-width:0">${stage==='parsing'?'正在解析需求文件':'正在生成'} <span class="spin"></span>
     <span class="hint">已耗时 ${mm}:${ss} · ${stage==='parsing'?'PDF 提取与图片理解（Vision）按页/按图进行，大文件需要几分钟':'生成与评审为主要耗时阶段（多模块并行）'}</span>
-    ${stepperHtml(idx)}</div></div>`;
+    ${stepperHtml(idx)}${detail}</div></div>`;
 }
 
 /* ==================== 概览 ==================== */
@@ -5271,19 +5281,26 @@ const ERROR_KIND_HINT = {
 function resumeHint(t) {
   const r = t.resume || {};
   const parts = [];
-  if (t.error_kind && ERROR_KIND_HINT[t.error_kind]) parts.push(ERROR_KIND_HINT[t.error_kind]);
+  if (t.error_kind && ERROR_KIND_HINT[t.error_kind] && !(t.error_kind === 'cancelled' && t.status === 'completed')) parts.push(ERROR_KIND_HINT[t.error_kind]);
   if (r.mode === 'resume') parts.push(`已完成${r.analysis_kept ? '拆解' : ''}${r.kept_modules.length ? `与 ${r.kept_modules.length} 个模块（${r.kept_modules.map(esc).join('、')}）` : ''}，继续时不重做`);
   else if (r.mode === 'fill') parts.push('只重新生成失败的模块，其余用例与审核状态不变');
+  else if (r.mode === 'restore') parts.push('这是已完成任务上的增量生成被中断：恢复后已生成的用例与审核原样，新通过的测试点在「测试点审核」页再点生成');
   return parts.length ? `<span class="hint" style="color:var(--text-2)">${parts.join('；')}</span>` : '';
 }
-function resumeLabel(t) { const m = (t.resume||{}).mode; return m === 'fill' ? '补全失败模块' : m === 'resume' ? '继续完成' : '重试'; }
+function resumeLabel(t) { const m = (t.resume||{}).mode; return m === 'fill' ? '补全失败模块' : m === 'resume' ? '继续完成' : m === 'restore' ? '恢复已完成结果' : '重试'; }
+function retryToast(r) {
+  return r.mode==='fill' ? `已开始补全 ${(r.failed_modules||[]).length} 个模块`
+    : r.mode==='resume' ? `已从断点继续（保留 ${(r.kept_modules||[]).length} 个已完成模块）`
+    : r.mode==='restore' ? `已恢复为已完成${r.pending_points ? `，${r.pending_points} 条新通过的测试点待生成` : ''}`
+    : '已重新提交，后台执行中';
+}
 async function retryTask() {
   if (!currentTask) return;
-  try { const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/retry`, {}); toast(r.mode==='fill'?`已开始补全 ${r.failed_modules.length} 个模块`:r.mode==='resume'?`已从断点继续（保留 ${r.kept_modules.length} 个已完成模块）`:'已重新提交，后台执行中', 'ok'); await refreshList(); openTask(currentTask.task_id); }
+  try { const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/retry`, {}); toast(retryToast(r), 'ok'); await refreshList(); openTask(currentTask.task_id); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function retryFromCenter(id) {
-  try { const r = await jpost(`/api/v1/tasks/${id}/retry`, {}); toast(r.mode==='fill'?'已开始补全失败模块':r.mode==='resume'?'已从断点继续':'已重新提交', 'ok'); renderAiCenter(); }
+  try { const r = await jpost(`/api/v1/tasks/${id}/retry`, {}); toast(retryToast(r), 'ok'); renderAiCenter(); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function renderAiCenter() {

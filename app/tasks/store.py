@@ -171,22 +171,40 @@ class TaskStore:
         logger.info("任务 {} 已恢复", task_id)
         return record
 
-    def cancel(self, task_id: str) -> bool:
+    def job_active(self, task_id: str) -> bool:
+        """该任务是否有存活的后台执行句柄（queued / running 却没有句柄 = 孤儿：句柄丢失或前台同步请求中）。"""
+        job = self._jobs.get(task_id)
+        return job is not None and not job.done()
+
+    def cancel(self, task_id: str, force: bool = False) -> bool:
         """取消后台任务（任务管理）：中断执行并标记失败留痕。
 
         仅对后台队列中的任务有效；前台同步请求中的执行无法从此处中断。
+        force=True 时没有后台句柄的 queued / running 记录也直接标记失败（孤儿任务：句柄丢失、
+        投入后台前出错等导致的「一直执行中」），让「继续完成」有路可走。
         """
         record = self._records.get(task_id)
         job = self._jobs.get(task_id)
-        if record is None or record.status not in ("queued", "running") or job is None:
+        if record is None or record.status not in ("queued", "running"):
             return False
-        job.cancel()
-        self._jobs.pop(task_id, None)
-        record.status = "failed"
-        record.error = "任务已被用户取消"
+        if job is None and not force:
+            return False
+        if job is not None:
+            job.cancel()
+            self._jobs.pop(task_id, None)
+            record.error = "任务已被用户取消"
+        else:
+            record.error = "任务已被用户标记失败（后台执行句柄已丢失）"
+        if (record.result or {}).get("cases"):
+            # 已完成任务上的增量生成（为新通过的测试点生成用例）被取消：回到已完成，现有用例与审核不动，
+            # 新通过的点仍是「待生成」再点一次即可；标失败会让「继续完成」整体重跑并覆盖现有用例
+            record.status = "completed"
+            record.error = f"{record.error}：已生成的用例保留，新通过的测试点仍待生成"
+        else:
+            record.status = "failed"
         record.progress = None
         self._persist(record)
-        logger.info("任务 {} 已被用户取消", task_id)
+        logger.info("任务 {} 已被用户{}（状态 {}）", task_id, "取消" if job is not None else "标记失败（无后台句柄）", record.status)
         return True
 
     def _slots(self) -> "asyncio.Semaphore":
@@ -220,6 +238,10 @@ class TaskStore:
                         record.progress = None
                         self.save(record)
                 finally:
-                    self._jobs.pop(task_id, None)
+                    # 只摘掉自己的句柄：取消后立刻「继续」会投入新句柄，旧协程收尾时不能把新句柄摘掉
+                    # （否则新任务再也取消不了，只能等它自己结束）
+                    if self._jobs.get(task_id) is me:
+                        self._jobs.pop(task_id, None)
 
-        self._jobs[task_id] = asyncio.create_task(_run())
+        me = asyncio.create_task(_run())
+        self._jobs[task_id] = me

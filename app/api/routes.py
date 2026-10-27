@@ -1739,12 +1739,42 @@ def _error_kind(error: str | None) -> str | None:
     return "other"
 
 
+def _submit_or_fail(store, task_id: str, job, request: Request, record: TaskRecord) -> None:
+    """置 running 并投入后台；中间任何一步出错都把任务放回 failed（否则记录停在 running 却没有后台句柄，
+    页面「一直执行中」、取消 409、继续 409，只能等重启）。"""
+    store.set_progress(task_id, status="running", progress="generating_reviewing")
+    try:
+        _ai_ctx(request, record)
+        store.submit(task_id, job)
+    except Exception as e:
+        rec = store.get(task_id)
+        if rec is not None:
+            rec.status, rec.error, rec.progress = "failed", f"投入后台执行失败：{e}"[:1000], None
+            store.save(rec)
+        logger.exception("任务 {} 投入后台执行失败：{}", task_id, e)
+        raise HTTPException(status_code=500, detail=f"投入后台执行失败：{e}")
+
+
+def _progress_detail(store, record: TaskRecord) -> dict | None:
+    """执行中任务的进展摘要（页面据此判断是在跑还是卡住）：是否有后台句柄、检查点里已完成的模块数与最近落盘时间。"""
+    if record.status not in ("queued", "running"):
+        return None
+    ck = record.checkpoint or {}
+    return {"job_active": store.job_active(record.task_id),
+            "modules_done": len(ck.get("modules") or {}),
+            "analysis_done": bool(ck.get("analysis") or ck.get("chunks")),
+            "checkpoint_at": ck.get("updated_at")}
+
+
 def _resume_info(record: TaskRecord) -> dict:
     """断点续跑摘要：失败任务 = 检查点里已完成的模块；完成任务 = 生成失败可补全的模块。"""
     ctx = record.context or {}
     ck = record.checkpoint or {}
     done = sorted((ck.get("modules") or {}).keys())
     failed = list(((record.result or {}).get("failed_modules") or []))
+    if record.status == "failed" and (record.result or {}).get("cases") and not done:
+        # 已完成任务上的增量生成失败 / 被取消后留在失败（旧记录）：不能整体重跑覆盖现有用例，只把状态恢复回已完成
+        return {"resumable": True, "mode": "restore", "kept_modules": [], "analysis_kept": True, "failed_modules": []}
     if record.status == "failed":
         resumable = bool((ctx.get("requirement") or "").strip())
         confirmed = (ctx.get("resume_stage") == "confirmed" or bool(ctx.get("confirm_points"))) \
@@ -1909,6 +1939,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
             raise HTTPException(status_code=409, detail="没有新通过、尚未生成用例的测试点")
         store.set_progress(task_id, status="running", progress="generating_reviewing")
         record.checkpoint = None
+        record.context = {**(record.context or {}), "resume_stage": "incremental"}  # 失败 / 取消回到已完成，不整体重跑
         store.save(record)
         return await _run_confirmed(request, store, task_id, pending, async_mode, merge_existing=True)
     if record.status != "awaiting_confirmation":
@@ -1958,12 +1989,19 @@ async def _run_confirmed(request: Request, store, task_id: str, test_points: lis
         try:
             await _generate_confirmed(request, task_id, test_points, merge_existing=merge_existing)
         except HTTPException as e:
-            # _generate_confirmed 已按故障类型恢复状态（待确认 / 失败）；后台没有响应体，把原因留在任务上
+            # _generate_confirmed 已按故障类型恢复状态（待确认 / 已完成 / 失败）；后台没有响应体，把原因留在任务上
             rec = store.get(task_id)
             if rec is not None:
                 rec.error = str(e.detail)[:1000]
                 store.save(rec)
             logger.warning("任务 {} 确认生成失败：{}", task_id, e.detail)
+        except Exception as e:
+            # 未预期异常：_generate_confirmed 已把状态放回待确认 / 已完成，这里只留原因（不能再被兜底标成失败）
+            rec = store.get(task_id)
+            if rec is not None:
+                rec.error = f"生成失败：{e}"[:1000]
+                store.save(rec)
+            logger.exception("任务 {} 确认生成出现未预期异常：{}", task_id, e)
 
     store.submit(task_id, _job)
     return {"task_id": task_id, "status": "queued", "poll_url": f"/api/v1/tasks/{task_id}"}
@@ -2007,6 +2045,8 @@ async def _generate_confirmed(request: Request, task_id: str, test_points: list[
         request.app, ctx.get("requirement", ""), ctx.get("project")
     )
     rule_notes, rule_snapshot = _gather_rules(request.app, ctx.get("project"))
+    # 故障恢复的落点：首次确认回到待确认（再点确认即可）；增量生成回到已完成（现有用例不动，新通过的点仍待生成）
+    fallback = "completed" if merge_existing else "awaiting_confirmation"
     try:
         result = await run_generation(
             ctx.get("requirement", ""),
@@ -2022,17 +2062,21 @@ async def _generate_confirmed(request: Request, task_id: str, test_points: list[
             checkpoint=checkpoint,
             on_module_done=lambda m, r: _save_checkpoint(store, task_id, module=(m, r)),
         )
+    # 故障恢复的落点：首次确认回到待确认（再点确认即可）；增量生成回到已完成（现有用例不动，新通过的点仍待生成）
     except (MissingAPIKeyError, LLMOutputError) as e:
-        # 可重试的故障：恢复待确认状态，用户可再次点击确认
-        store.set_progress(task_id, status="awaiting_confirmation", progress=None)
+        # 可重试的故障：恢复待确认 / 已完成状态，用户可再次点击生成
+        store.set_progress(task_id, status=fallback, progress=None)
         raise HTTPException(status_code=502, detail=str(e))
     except UnknownModelError as e:
-        store.set_progress(task_id, status="awaiting_confirmation", progress=None)
+        store.set_progress(task_id, status=fallback, progress=None)
         raise HTTPException(status_code=400, detail=str(e))
     except AllModelsFailedError as e:
         record = store.get(task_id)
-        record.status, record.error, record.progress = "failed", str(e)[:1000], None
-        record.context = {**(record.context or {}), "resume_stage": "confirmed"}  # 续跑时不再重新拆解
+        if merge_existing:
+            record.status, record.error, record.progress = "completed", str(e)[:1000], None
+        else:
+            record.status, record.error, record.progress = "failed", str(e)[:1000], None
+            record.context = {**(record.context or {}), "resume_stage": "confirmed"}  # 续跑时不再重新拆解
         store.save(record)
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
@@ -7868,17 +7912,23 @@ async def restore_task(request: Request, task_id: str) -> dict:
 
 
 @router.post("/api/v1/tasks/{task_id}/cancel")
-async def cancel_task(request: Request, task_id: str) -> dict:
-    """取消进行中的后台任务（任务管理）：中断执行，任务标记失败并留痕取消原因。"""
+async def cancel_task(request: Request, task_id: str, force: bool = False) -> dict:
+    """取消进行中的后台任务（任务管理）：中断执行，任务标记失败并留痕取消原因。
+
+    force=true：没有后台执行句柄却一直 queued / running 的孤儿任务直接标记失败（之后可「继续完成」）。
+    """
     store = request.app.state.tasks
     record = _task(request, task_id, "point.ai")
     if record.status not in ("queued", "running"):
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可取消的执行")
-    if not store.cancel(task_id):
+    forced = force and not store.job_active(task_id)
+    if not store.cancel(task_id, force=force):
         raise HTTPException(
-            status_code=409, detail="该任务正在前台请求中执行，无法从后台取消，请等待其完成"
+            status_code=409,
+            detail="该任务没有后台执行句柄（正在前台同步请求中执行，或句柄已丢失）：等待其完成，"
+                   "或确认它确实没在跑后用「标记失败」（force=true）结束它再继续完成",
         )
-    return {"task_id": task_id, "status": "failed", "canceled": True}
+    return {"task_id": task_id, "status": "failed", "canceled": True, "forced": forced}
 
 
 @router.post("/api/v1/tasks/{task_id}/retry")
@@ -7896,6 +7946,14 @@ async def retry_task(request: Request, task_id: str) -> dict:
     info = _resume_info(record)
     if record.status not in ("failed", "completed") or not info["resumable"]:
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，没有可继续的内容")
+    if info["mode"] == "restore":
+        # 已有生成结果的失败任务：恢复为已完成（用例与审核原样），新通过的测试点在测试点页再点生成
+        record.status, record.error, record.progress = "completed", None, None
+        store.save(record)
+        pending = _points_pending_generation(record)
+        logger.info("任务 {} 恢复为已完成（增量生成中断），待生成测试点 {} 条", task_id, sum(len(p["points"]) for p in pending))
+        return {"task_id": task_id, "status": "completed", "mode": "restore",
+                "pending_points": sum(len(p["points"]) for p in pending), "poll_url": f"/api/v1/tasks/{task_id}"}
     if not (ctx.get("requirement") or "").strip():
         raise HTTPException(status_code=409, detail="任务缺少需求文本，无法继续（请重新创建）")
     template = request.app.state.templates.get(ctx.get("template_id"))
@@ -7928,13 +7986,11 @@ async def retry_task(request: Request, task_id: str) -> dict:
         points = points or (record.result or {}).get("test_points") or []
         if not points:
             raise HTTPException(status_code=409, detail="任务没有可用的测试点，无法补全")
-        store.set_progress(task_id, status="running", progress="generating_reviewing")
-        _ai_ctx(request, record)
-
         async def _fill() -> None:
+            store.set_progress(task_id, status="running", progress="generating_reviewing")
             await _generate_confirmed(request, task_id, points, resume=True)
 
-        store.submit(task_id, _fill)
+        _submit_or_fail(store, task_id, _fill, request, record)
         logger.info("任务 {} 补全失败模块：{}（保留 {} 个模块）", task_id, info["failed_modules"], len(modules))
         return {"task_id": task_id, "status": "queued", "mode": "fill", "failed_modules": info["failed_modules"],
                 "poll_url": f"/api/v1/tasks/{task_id}"}
@@ -7945,13 +8001,11 @@ async def retry_task(request: Request, task_id: str) -> dict:
         points = confirmable_points(record.analysis["test_points"])
         if not points:
             raise HTTPException(status_code=409, detail="没有已通过的测试点，无法继续")
-        store.set_progress(task_id, status="running", progress="generating_reviewing")
-        _ai_ctx(request, record)
-
         async def _resume() -> None:
+            store.set_progress(task_id, status="running", progress="generating_reviewing")
             await _generate_confirmed(request, task_id, points, resume=True)
 
-        store.submit(task_id, _resume)
+        _submit_or_fail(store, task_id, _resume, request, record)
         logger.info("任务 {} 从已确认测试点续跑（已完成模块 {}）", task_id, info["kept_modules"])
         return {"task_id": task_id, "status": "queued", "mode": "resume", "kept_modules": info["kept_modules"],
                 "poll_url": f"/api/v1/tasks/{task_id}"}
@@ -8367,6 +8421,7 @@ async def get_task(request: Request, task_id: str) -> dict:
     pending = _points_pending_generation(record) if record.status == "completed" else []
     return {**record.model_dump(exclude={"checkpoint"}), "editing": _active_editing(request.app, task_id),
             "error_kind": _error_kind(record.error), "resume": _resume_info(record),
+            "progress_detail": _progress_detail(request.app.state.tasks, record),
             "blind_spots": blind_spot_entities(record), "dup_pairs": dup_pair_entities(record),
             "case_dup_pairs": dup_pair_entities(record, "cases"),
             "points_pending_generation": [p["tp_id"] for tp in pending for p in tp["points"]]}
