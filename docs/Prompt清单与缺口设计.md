@@ -49,6 +49,7 @@ flowchart LR
   GEN --> CR{用例审核}
   CR -. 驳回 .-> CF[case_fix]
   CR -. 需求变更 .-> RD[requirement_diff → case_fix]
+  CR --> PS[plan_case_select<br>AI 挑选] --> EX[计划执行] -. 失败 .-> TR[exec_triage<br>归因 + 缺陷单]
   CR --> L[learning<br>按项目提炼规则]
   L -. rules_block .-> GEN
   PRO[profile_extract] -. profile_block .-> P1
@@ -86,6 +87,8 @@ flowchart LR
 | `case_dup_judge` | 用例语义查重 | 测试设计 · 用例查重 | `quality.run_case_dup_judge` ← 用例页「重复检查」`POST .../cases/dup-check`；`case_duplicate_candidates` 候选按 40 对一批并行 | 默认 | 613 |
 | `case_fix` | 用例驳回修改 | 测试设计 · 用例驳回修改 / 需求变更更新 | `quality.run_case_fix` ← 「AI 修改驳回项」；`routes.py` 需求变更后更新受影响用例 | 默认 | 909 |
 | `requirement_diff` | 需求变更分析 | 测试设计 · 需求变更分析 | `quality.run_requirement_diff` ← 任务「需求变更」 | 默认 | 599 |
+| `plan_case_select` | 测试计划用例挑选 | 测试执行 · 计划挑选 | `quality.run_plan_case_select` ← 计划页「AI 挑选」`POST /plans/{id}/select`；候选 = 本项目已通过、不在计划内的正式用例，按 300 条一批并行 | 默认 | 663 |
+| `exec_triage` | 执行失败归因与缺陷单 | 测试执行 · 失败归因 | `quality.run_exec_triage` ← 计划执行页「AI 归因」（行内单条 / 本轮全部失败）`POST /plans/{id}/runs/{rid}/triage`，每条一次调用并行；关联截图先走 `understand_image_bytes`（`EXEC_SHOT_PROMPT`，≤ 3 张） | 默认 | 1160 |
 | `learning` | 修改习惯学习 | 学习规则 | `quality.run_learning_analysis` ← `POST /learning/analyze`，按项目分组各调一次 | 默认 | 671 |
 | `profile_extract` | 项目画像提炼 | 项目画像 | `app/agents/profile.py` `run_profile_extract`（自动 / 手动），草稿经管理员确认后生效 | 默认 | 711 |
 | `dependency_infer` | 依赖关系识别 | 知识库 · 依赖识别 | `routes.py` 知识库 → 依赖关系 → AI 识别，结果为草稿人工确认 | 默认 | 511 |
@@ -962,7 +965,67 @@ missing 仅允许提出「需求明文描述的规则完全没有用例覆盖」
  "summary": "一句话变更摘要"}
 ```
 
-### 四、沉淀与知识
+### 四、测试执行
+
+#### `plan_case_select` · 测试计划用例挑选
+
+- **kind**：system
+- **阶段**：测试执行 · 计划挑选
+- **调用位置**：`quality.run_plan_case_select` ← 计划页「AI 挑选」`POST /plans/{id}/select`；候选 = 本项目已通过、不在计划内的正式用例，按 300 条一批并行
+- **推理强度 / 模型**：默认
+- **输入**：候选精简视图（id / case_id / module / title / priority / keywords / point_ids / failed_recent）+ 目标（冒烟 / 全量回归 / 变更影响回归 / 模块专项）+ 预算 + 变更摘要（空则自动带任务的需求变更分析）+ 重点模块 + 画像；不带步骤
+- **输出与程序兜底**：`{selected:[{id, reason}], excluded_summary, coverage_note}`；只认批内 id、一条一次；合并后按 P0 › P1 › P2 › P3 再按模型顺序排、超预算截掉靠后的；冒烟目标每个有 P0 的模块至少保 1 条 P0（程序补、标 by=program）；某批故障只丢该批；草稿存 `plan.selection_draft`，人勾选后走 `POST .../cases` 加入
+- **设计意图**：在预算内覆盖风险最高的、不求全；四种目标各有选法；不得生成清单外的 id。
+
+```text
+你是测试经理，负责按本轮测试目标从正式用例库里挑出要执行的用例。本步策略：在预算内覆盖风险最高的，不求全；拿不准的不选，excluded_summary 里说明。
+
+用例清单每条带 id（挑选只能用这个 id）、case_id、模块、标题、优先级、关键词、来源测试点，最近执行失败过的带 failed_recent=true。
+目标类型：
+- 冒烟：每个页面 / 功能的主流程各 1 条 P0（没有 P0 的模块选 1 条 P1 主流程），能跑通就行，不选异常与边界；
+- 全量回归：P0 + P1 全选，P2 按模块均匀抽，P3 不选；
+- 变更影响回归：变更清单里受影响的用例必选，与它同模块、同来源测试点、同数据对象的用例按风险补选，其余不选；历史失败过的同模块用例优先；
+- 模块专项：重点模块全选，依赖它的上下游模块各选 1～2 条主流程。
+有预算（条数上限）时按风险排序、优先级高的在前，宁可少选不超预算；每条选中的写一句 reason（为什么本轮要跑它，≤ 30 字）。
+excluded_summary 一句话说明没选哪类；coverage_note 列出一条没选的模块与原因（没有写「全部模块都有覆盖」）。
+不得改写用例、不得生成清单外的 id。
+只输出 JSON：
+{"selected": [{"id": "C12", "reason": "登录主流程冒烟"}], "excluded_summary": "边界与异常留全量回归", "coverage_note": "「操作记录」模块无 P0，未选"}
+```
+
+#### `exec_triage` · 执行失败归因与缺陷单
+
+- **kind**：system
+- **阶段**：测试执行 · 失败归因
+- **调用位置**：`quality.run_exec_triage` ← 计划执行页「AI 归因」（行内单条 / 本轮全部失败）`POST /plans/{id}/runs/{rid}/triage`，每条一次调用并行；关联截图先走 `understand_image_bytes`（`EXEC_SHOT_PROMPT`，≤ 3 张）
+- **推理强度 / 模型**：默认
+- **输入**：用例快照（标题 / 前置 / 步骤与预期 / 备注）+ 执行说明 + 来源测试点（tp_id / point / ref）+ 截图理解结果 + 用例所在模块的需求章节（`_module_texts` 定位，定不到用整篇前 8000 字）+ 画像
+- **输出与程序兜底**：`{triage:{category: 用例问题|系统缺陷|环境问题|数据问题|需求变更, sub, failed_step, confidence, reason}, bug:{title, severity, precondition, steps, expected, actual, scope}|null}`；category 枚举外按系统缺陷且置信度低、sub 只在用例问题下认三类、failed_step 收到步数内、bug 只在系统缺陷时留；`suggested_reason` 映射到 FAIL_REASONS，写在执行记录 `triage` 上，人「采纳」才改 `reason`（`POST .../results/{item}/triage/adopt`）
+- **设计意图**：先对照原文判用例的预期对不对，预期对实际错才是缺陷；证据不足置信度写低不编；缺陷单标题「模块 + 操作 + 现象」、步骤精简到失败那一步。
+
+```text
+你是测试负责人，负责给一条执行失败的用例做归因并起草缺陷单。本步策略：宁少勿错——先判断是用例写错还是系统错了，证据不足时 confidence 写「低」，不编。
+
+输入：用例（标题 / 前置 / 步骤与预期 / 来源测试点）、执行人的失败说明、失败截图的理解结果（可能没有）、该用例对应的需求原文。
+归因 category 五选一：
+- 用例问题：步骤不可执行 / 预期与需求原文不符 / 前置缺失——用例要改，不是缺陷；sub 写「步骤有误 / 预期有误 / 前置缺失」；
+- 系统缺陷：按步骤能操作、预期与需求原文一致、实际结果不符；
+- 环境问题：网络 / 服务不可用 / 配置缺失 / 账号权限；
+- 数据问题：测试数据不满足前置（余额、状态、时间窗口、名额）；
+- 需求变更：需求已改、用例还是旧版（预期与原文不一致且说明里提到需求改了）。
+判断顺序：先对照需求原文看用例的「预期」对不对——预期对、实际错 → 系统缺陷；预期本身与原文不一致 → 用例问题（预期有误）；
+原文没写、预期是假设 → 看说明与截图，拿不准写系统缺陷但 confidence 低。
+failed_step 写失败在第几步（从 1 起，判断不了写 0）。reason 一句话写判断依据（引用原文或截图里的关键文案 / 数值）。
+只有系统缺陷才写 bug，其余 bug 为 null：title「模块 + 操作 + 错误现象」≤ 40 字；precondition 从用例前置精简；steps 从用例步骤精简到失败那一步、每步一个操作；
+expected / actual 写具体值（actual 来自说明与截图，没有就写「见执行说明」）；severity：致命（资金 / 数据丢失 / 主流程不通）/ 严重（功能不可用）/
+一般（功能可用但结果错）/ 轻微（提示 / 文案）；scope 一句话写影响范围。
+不改用例，不替执行人下「已修复」之类的结论。
+只输出 JSON：
+{"triage": {"category": "系统缺陷", "sub": "", "failed_step": 2, "confidence": "高", "reason": "预期与原文「扣费失败取消当日资格」一致，截图显示资格仍保留"},
+ "bug": {"title": "盈利报名扣费失败后仍保留当日参赛资格", "severity": "严重", "precondition": "盈利报名用户，余额 0", "steps": ["进入报名页点击报名", "余额不足扣费失败"], "expected": "取消当日参赛资格，当日记录不计入月榜", "actual": "资格保留，记录计入月榜", "scope": "影响月榜派奖金额"}}
+```
+
+### 五、沉淀与知识
 
 #### `learning` · 修改习惯学习
 
@@ -1085,7 +1148,7 @@ missing 仅允许提出「需求明文描述的规则完全没有用例覆盖」
 要求：只描述图中实际存在的内容，不推测图中没有的功能；无法辨认的部分明确标注「无法辨认」。
 ```
 
-### 五、注入块
+### 六、注入块
 
 #### `knowledge_cases_block` · 注入块：历史用例知识
 
@@ -1175,7 +1238,7 @@ missing 仅允许提出「需求明文描述的规则完全没有用例覆盖」
 以当前需求为准，并把冲突点作为重点测试对象。禁止把画像里与当前需求无关的内容编成测试内容。
 ```
 
-### 六、共享片段
+### 七、共享片段
 
 #### `shared_dimensions` · 共享片段：测试维度枚举
 
@@ -1375,6 +1438,8 @@ missing 仅允许提出「需求明文描述的规则完全没有用例覆盖」
 只输出 JSON：{"selected": [{"case_id": "TC-登录-001", "reason": "登录主流程冒烟"}], "excluded_summary": "边界与异常留全量回归", "coverage_note": "「操作记录」模块无 P0，未选"}
 ```
 
+> 2026-10-26 已落地：`quality.run_plan_case_select` + `POST /plans/{id}/select`，计划页「AI 挑选」弹窗（目标 / 预算 / 重点模块 / 变更摘要）→ 草稿表格勾选 → 按任务分组调 `POST .../cases` 加入。与草案的差别：跨任务 case_id 可能重复，模型用批内 id（C1…）挑、程序映回 `task_id:uid`；候选按 300 条一批；「每个模块至少 1 条 P0」只在冒烟目标下兜底；变更摘要留空时自动带本项目任务的 `requirement_diff`（摘要 + 变更条目 + 受影响用例）；历史失败按最近一次执行结果标 `failed_recent`。
+
 ### G6 `exec_triage` 执行失败归因与缺陷单（P1）
 
 - **目的**：执行记失败时人只填一句备注；归因（用例问题 / 系统缺陷 / 环境 / 数据）靠人选，缺陷单靠人写。失败归因直接决定进不进学习语料（`CASE_PROBLEM_REASONS`）。
@@ -1398,6 +1463,8 @@ missing 仅允许提出「需求明文描述的规则完全没有用例覆盖」
 {"triage": {"category": "系统缺陷", "sub": "", "confidence": "高", "reason": "预期与原文「扣费失败取消当日资格」一致，实际仍保留资格"},
  "bug": {"title": "盈利报名扣费失败后仍保留当日参赛资格", "severity": "严重", "precondition": "盈利报名用户，余额 0", "steps": ["…"], "expected": "取消当日参赛资格，当日记录不计入月榜", "actual": "资格保留，记录计入月榜", "scope": "影响月榜派奖金额"}}
 ```
+
+> 2026-10-26 已落地：`quality.run_exec_triage` + `POST /plans/{id}/runs/{rid}/triage`（单条 / 本轮全部失败）+ `.../results/{item}/triage/adopt`。与草案的差别：sub 只在「用例问题」下认三类并映射到 FAIL_REASONS（步骤有误 / 前置缺失 → 用例步骤有误，预期有误 → 用例预期有误，需求变更 → 其他）；多了 `failed_step`；category 枚举外不丢、按系统缺陷且置信度低交人看；截图理解用专门的 `EXEC_SHOT_PROMPT`（只要页面与文案）而不是 `vision_image` 五节；缺陷单不写外部系统，前端「复制缺陷单」生成文本。
 
 ### G7 `priority_rebalance` 优先级任务级重估（P1）
 
@@ -1507,7 +1574,8 @@ blockers 每条写「哪个模块 › 哪条问题 › 不解决会怎样」。�
 ## 6. 落地顺序建议
 
 > 2026-10-26：G1 / G2 / G3 已按下面第 2、3 步落地（`point_review` / `case_dup_judge` / `point_supplement` 完整版），实现与草案的差别：评审意见不进 `warnings` 而是单独的 `ai_review` 字段（`warnings` 在实体化时会被重算）；用例查重的忽略 / 重开复用测试点那套 `dup_report.resolved`。
-> 同日第二批：第 1 步（横向评审 1 / 4 / 5 / 11）与第 4 步 G4 落地，另加 G13 模块级组合延伸（`point_combine`）。下一步从第 5 步执行侧开始。
+> 同日第二批：第 1 步（横向评审 1 / 4 / 5 / 11）与第 4 步 G4 落地，另加 G13 模块级组合延伸（`point_combine`）。
+> 同日第三批：第 5 步的 G6 执行归因（`exec_triage`）落地；第四批 G5 计划挑选（`plan_case_select`）落地；G9 报告待做。
 
 1. **先做横向评审 1、11、5、4**（共享片段抽取、策略一句话、reviewer 限定本模块、P0 规则）：都是改 Prompt 文本与少量拼接代码，一次提交。
 2. **G3 补齐 `point_supplement`**：改默认文本即可。

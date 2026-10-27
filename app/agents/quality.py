@@ -561,6 +561,161 @@ async def run_question_suggest(llm: LLMClient, requirement: str, questions: list
     return {"suggestions": suggestions, "asked": len(qs), "batches": len(batches), "failed": failed}
 
 
+# ---- 测试计划用例挑选（Prompt plan_case_select）：按目标从正式用例里挑集合，草稿人勾选确认 ----
+
+
+PLAN_GOALS = ("冒烟", "全量回归", "变更影响回归", "模块专项")
+SELECT_BATCH = 300          # 一次调用最多看多少条用例（精简视图，不带步骤）
+_PRIO_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+async def run_plan_case_select(llm: LLMClient, cases: list[dict], goal: str, budget: int = 0, change_summary: str = "",
+                               focus_modules: list[str] | None = None, model: str | None = None) -> dict:
+    """计划用例挑选：cases 为候选精简视图 [{key, case_id, module, title, priority, keywords, point_ids, failed_recent}]（key 唯一，
+    跨任务的 case_id 可能重复所以不用它），按 SELECT_BATCH 条一批并行，每批带目标 / 预算 / 变更摘要 / 重点模块。
+    程序兜底：只认批内 id、一条一次；合并后按优先级（P0 › P1 › P2 › P3）再按模型给出的顺序排，超预算截掉靠后的；
+    冒烟目标下每个有 P0 的模块至少保 1 条 P0（模型漏的程序补、标 by=program）；某批故障只丢该批。
+    返回 {"selected": [{**case, reason, by}], "excluded_summary", "coverage_note", "batches", "failed", "truncated"}。"""
+    import asyncio
+
+    if goal not in PLAN_GOALS:
+        raise ValueError(f"目标类型只能是 {' / '.join(PLAN_GOALS)}")
+    cases = [c for c in cases if c.get("key")]
+    if not cases:
+        return {"selected": [], "excluded_summary": "", "coverage_note": "", "batches": 0, "failed": 0, "truncated": 0}
+    focus = [m for m in (focus_modules or []) if m]
+    batches = [cases[i:i + SELECT_BATCH] for i in range(0, len(cases), SELECT_BATCH)]
+
+    async def _one(no: int, batch: list[dict]) -> tuple[list[dict], str, str]:
+        ids = {f"C{i}": c for i, c in enumerate(batch, 1)}
+        view = [{"id": cid, "case_id": c.get("case_id", ""), "module": c.get("module", ""), "title": c.get("title", ""),
+                 "priority": c.get("priority", ""), **({"keywords": c["keywords"]} if c.get("keywords") else {}),
+                 **({"point_ids": c["point_ids"]} if c.get("point_ids") else {}),
+                 **({"failed_recent": True} if c.get("failed_recent") else {})} for cid, c in ids.items()]
+        head = f"本轮目标：{goal}" + (f"；预算：最多 {budget} 条" if budget else "；预算：不限") + \
+               (f"；重点模块：{'、'.join(focus)}" if focus else "")
+        if len(batches) > 1:
+            head += f"。候选分 {len(batches)} 批送审，这是第 {no} 批，预算是整体的——本批按比例掌握。"
+        user = head + "\n\n"
+        if change_summary.strip():
+            user += f"本轮变更摘要（变更影响回归的依据）：\n{wrap_data('变更摘要', change_summary.strip())}\n\n"
+        user += f"候选用例（共 {len(view)} 条，只能用这里的 id）：\n{wrap_data('用例清单', _dump(view))}" + profile_block()
+        data, _ = await _chat_json(llm, [{"role": "system", "content": prompt_text("plan_case_select")},
+                                         {"role": "user", "content": user}], model)
+        out: list[dict] = []
+        seen: set[str] = set()
+        for item in (data.get("selected") or []) if isinstance(data, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("id") or item.get("case_id") or "").strip()
+            c = ids.get(cid) or next((x for x in batch if x.get("case_id") == cid), None)
+            if c is None or c["key"] in seen:
+                continue
+            seen.add(c["key"])
+            out.append({**c, "reason": str(item.get("reason") or "").strip(), "by": "ai"})
+        ex = str(data.get("excluded_summary") or "").strip() if isinstance(data, dict) else ""
+        cov = str(data.get("coverage_note") or "").strip() if isinstance(data, dict) else ""
+        return out, ex, cov
+
+    outcomes = await asyncio.gather(*[_one(i, b) for i, b in enumerate(batches, 1)], return_exceptions=True)
+    selected: list[dict] = []
+    ex_parts: list[str] = []
+    cov_parts: list[str] = []
+    failed = 0
+    for i, o in enumerate(outcomes, 1):
+        if isinstance(o, BaseException):
+            failed += 1
+            logger.warning("计划挑选第 {} 批失败（只丢该批）：{}", i, o)
+        else:
+            selected.extend(o[0])
+            if o[1]:
+                ex_parts.append(o[1])
+            if o[2]:
+                cov_parts.append(o[2])
+    if failed == len(batches):
+        raise next(o for o in outcomes if isinstance(o, BaseException))
+    if goal == "冒烟":   # 每个有 P0 的模块至少 1 条 P0：模型漏的程序补
+        have = {c.get("module", "") for c in selected if c.get("priority") == "P0"}
+        chosen = {c["key"] for c in selected}
+        for c in cases:
+            if c.get("priority") == "P0" and c.get("module", "") not in have and c["key"] not in chosen:
+                selected.append({**c, "reason": "程序兜底：该模块没有选到 P0 主流程", "by": "program"})
+                have.add(c.get("module", ""))
+                chosen.add(c["key"])
+    order = {c["key"]: i for i, c in enumerate(selected)}
+    selected.sort(key=lambda c: (_PRIO_ORDER.get(c.get("priority", ""), 9), order[c["key"]]))
+    truncated = 0
+    if budget and len(selected) > budget:
+        truncated = len(selected) - budget
+        selected = selected[:budget]
+    logger.info("计划挑选（{}）：候选 {} 条 / {} 批 → 选 {} 条（截掉 {}，故障 {} 批）", goal, len(cases), len(batches), len(selected), truncated, failed)
+    return {"selected": selected, "excluded_summary": "；".join(dict.fromkeys(ex_parts)), "coverage_note": "；".join(dict.fromkeys(cov_parts)),
+            "batches": len(batches), "failed": failed, "truncated": truncated}
+
+
+# ---- 执行失败归因与缺陷单（Prompt exec_triage）：人只填一句说明，分类与缺陷单由模型起草 ----
+
+
+TRIAGE_CATEGORIES = ("用例问题", "系统缺陷", "环境问题", "数据问题", "需求变更")
+TRIAGE_SUBS = ("步骤有误", "预期有误", "前置缺失")
+TRIAGE_SEVERITIES = ("致命", "严重", "一般", "轻微")
+# 五类归因 → 执行记录的失败分类（FAIL_REASONS）：前两类进学习语料，所以「用例问题」按 sub 细分；需求变更没有对应项记「其他」
+_TRIAGE_REASON = {("用例问题", "步骤有误"): "用例步骤有误", ("用例问题", "预期有误"): "用例预期有误", ("用例问题", "前置缺失"): "用例步骤有误",
+                  ("用例问题", ""): "用例步骤有误", "系统缺陷": "系统缺陷", "环境问题": "环境问题", "数据问题": "测试数据问题", "需求变更": "其他"}
+
+
+def triage_reason(category: str, sub: str = "") -> str:
+    return _TRIAGE_REASON.get((category, sub)) or _TRIAGE_REASON.get(category) or "其他"
+
+
+async def run_exec_triage(llm: LLMClient, case: dict, note: str, requirement: str, screenshots: list[str], model: str | None,
+                          points: list[dict] | None = None) -> dict:
+    """执行失败归因：用例（标题 / 前置 / 步骤与预期 / 来源测试点）+ 执行说明 + 失败截图的理解结果 + 该用例对应的需求原文 → 一次调用。
+    程序兜底：category 不在五类内按「系统缺陷」且 confidence「低」（不丢，交人看）；sub 只在用例问题下认三类；failed_step 收到 0～步数；
+    confidence 枚举外按「中」；bug 只在系统缺陷时保留，severity 枚举外按「一般」，steps 只认字符串；`suggested_reason` 为映射到
+    FAIL_REASONS 的建议分类，人采纳才写进执行记录。返回 {"triage": {...}, "bug": {...} | None, "model_name"}。"""
+    steps = [s for s in (case.get("steps") or []) if isinstance(s, dict)]
+    view = {"title": case.get("title", ""), "module": case.get("module", ""), "priority": case.get("priority", ""),
+            "precondition": case.get("precondition", ""),
+            "steps": [{"no": i, "action": s.get("action", ""), "expected": s.get("expected", "")} for i, s in enumerate(steps, 1)],
+            **({"remark": case["remark"]} if case.get("remark") else {})}
+    user = f"用例：\n{wrap_data('用例', _dump(view))}\n\n执行人的失败说明：\n{wrap_data('失败说明', note or '（没填）')}\n\n"
+    if points:
+        user += f"用例的来源测试点：\n{wrap_data('测试点', _dump(points))}\n\n"
+    for i, shot in enumerate(screenshots or [], 1):
+        user += f"失败截图 {i} 的理解结果：\n{wrap_data(f'截图{i}', shot)}\n\n"
+    user += (f"该用例对应的需求原文：\n{wrap_data('需求原文', requirement or '（没有找到对应原文）')}\n\n"
+             "请归因并（仅系统缺陷时）起草缺陷单。") + profile_block()
+    data, result = await _chat_json(llm, [{"role": "system", "content": prompt_text("exec_triage")},
+                                          {"role": "user", "content": user}], model)
+    raw = data.get("triage") if isinstance(data, dict) else None
+    raw = raw if isinstance(raw, dict) else (data if isinstance(data, dict) and data.get("category") else {})
+    category = str(raw.get("category") or "").strip()
+    confidence = str(raw.get("confidence") or "").strip()
+    if category not in TRIAGE_CATEGORIES:
+        category, confidence = "系统缺陷", "低"
+    sub = str(raw.get("sub") or "").strip()
+    sub = sub if category == "用例问题" and sub in TRIAGE_SUBS else ""
+    try:
+        step = int(raw.get("failed_step") or 0)
+    except (TypeError, ValueError):
+        step = 0
+    triage = {"category": category, "sub": sub, "failed_step": max(0, min(step, len(steps))),
+              "confidence": confidence if confidence in ("高", "中", "低") else "中",
+              "reason": str(raw.get("reason") or "").strip(), "suggested_reason": triage_reason(category, sub)}
+    bug = None
+    rb = data.get("bug") if isinstance(data, dict) else None
+    if category == "系统缺陷" and isinstance(rb, dict) and str(rb.get("title") or "").strip():
+        sev = str(rb.get("severity") or "").strip()
+        bug = {"title": str(rb.get("title") or "").strip()[:60], "severity": sev if sev in TRIAGE_SEVERITIES else "一般",
+               "precondition": str(rb.get("precondition") or "").strip(),
+               "steps": [str(s).strip() for s in (rb.get("steps") or []) if isinstance(s, (str, int, float)) and str(s).strip()],
+               "expected": str(rb.get("expected") or "").strip(), "actual": str(rb.get("actual") or "").strip(),
+               "scope": str(rb.get("scope") or "").strip()}
+    logger.info("执行失败归因：{}（{}，置信度{}）{}", category, sub or "-", triage["confidence"], "，起草缺陷单" if bug else "")
+    return {"triage": triage, "bug": bug, "model_name": result.model_name}
+
+
 # ---- 重复复核（需求十一~十三）----
 
 
