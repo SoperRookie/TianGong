@@ -1487,6 +1487,25 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<dialog id="planSelectDlg" style="width:900px;max-width:96vw">
+  <div class="dlg-h"><h3>AI 挑选用例</h3><span class="meta">按本轮目标从本项目正式用例里挑集合，结果是草稿，勾选后才加入计划</span></div>
+  <div class="dlg-b">
+    <div class="filters" style="margin:0 0 8px">
+      <select id="psGoal" style="width:150px" onchange="psGoalHint()"><option>冒烟</option><option>全量回归</option><option>变更影响回归</option><option>模块专项</option></select>
+      <input type="number" id="psBudget" min="0" placeholder="预算（条数，0 不限）" style="width:170px" title="最多选多少条；超出按优先级截掉靠后的">
+      <input type="text" id="psModules" placeholder="重点模块（逗号分隔）" style="width:220px" title="模块专项时全选这些模块，其它目标作为优先考虑的模块">
+      <button class="btn sm" onclick="planSelectRun()">AI 挑选</button>
+    </div>
+    <textarea id="psChange" rows="2" style="width:100%;box-sizing:border-box;display:none" placeholder="变更摘要：改了什么、影响哪些功能（留空则自动带本项目任务里最近一次需求变更分析的结果）"></textarea>
+    <div class="hint" id="psHint" style="margin:6px 0"></div>
+    <div id="psList" style="max-height:380px;overflow:auto"></div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('planSelectDlg').close()">关闭</button>
+    <button class="btn" onclick="psAdd()">加入选中</button>
+  </div>
+</dialog>
+
 <dialog id="planCaseDlg" style="width:860px;max-width:96vw">
   <div class="dlg-h"><h3>加入用例（加入即快照定格）</h3></div>
   <div class="dlg-b">
@@ -2618,7 +2637,7 @@ function _renderDetail__impl() {
       <span class="pill ${t.status}">${statusText(t.status)}</span>
       ${t.progress?'<span class="hint">'+progressText(t.progress)+' <span class="spin"></span></span>':''}
       <div class="grow">
-        ${running?'<button class="btn ghost sm" onclick="cancelTask()">取消任务</button>':''}
+        ${running?(t.progress_detail&&t.progress_detail.job_active===false?'<button class="btn ghost sm" style="color:var(--danger)" onclick="cancelTask(true)" title="该任务没有后台执行句柄，不会再有进展：标记失败后可「继续完成」">标记失败</button>':'<button class="btn ghost sm" onclick="cancelTask()">取消任务</button>'):''}
         ${!running&&canDelete()?`<button class="btn ghost sm" style="color:var(--danger)" onclick="deleteTask(${jsq(t.task_id)}, true)" title="删除任务（可在任务列表「已删除」里恢复）">删除任务</button>`:''}
         <span class="hint">${t.created_by?esc(t.created_by)+' · ':''}${(t.context||{}).requirement_title?esc(t.context.requirement_title):(srcText_(t.sources)||'-')} · ${relTime(t.created_at)}</span></div>
     </div>
@@ -2631,11 +2650,13 @@ function _renderDetail__impl() {
   renderBatchBar();
 }
 
-async function cancelTask() {
-  if (!await uiConfirm('取消任务', '中断后台执行，任务将标记为失败（可重新提交）。', true)) return;
+async function cancelTask(force) {
+  if (force) {
+    if (!await uiConfirm('标记失败', '该任务在后台没有执行句柄（取消 / 重启打断或投入后台时出错），不会再有进展。标记失败后可点「继续完成」从检查点续跑。', true)) return;
+  } else if (!await uiConfirm('取消任务', '中断后台执行，任务将标记为失败（可继续完成）。', true)) return;
   try {
-    await api(`/api/v1/tasks/${currentTask.task_id}/cancel`, {method:'POST'});
-    toast('任务已取消', 'ok');
+    await api(`/api/v1/tasks/${currentTask.task_id}/cancel${force?'?force=true':''}`, {method:'POST'});
+    toast(force ? '已标记失败，可点「继续完成」' : '任务已取消', 'ok');
     await openTask(currentTask.task_id, true);
   } catch (e) { toast('取消失败：' + e.message, 'err'); }
 }
@@ -2650,13 +2671,21 @@ function stepperHtml(idx) {
 function renderProgress(t) {
   const stage = t.progress || 'queued';
   const idx = Math.max(0, STAGES.findIndex(s => s[0] === stage));
-  const elapsed = t.created_at ? Math.max(0, Math.floor((Date.now() - new Date(t.created_at).getTime())/1000)) : 0;
+  const since = (t.context||{}).retried_at || t.created_at;  // 续跑的任务从「继续」那一刻计时，不算上一次的
+  const elapsed = since ? Math.max(0, Math.floor((Date.now() - new Date(since).getTime())/1000)) : 0;
   const mm = String(Math.floor(elapsed/60)), ss = String(elapsed%60).padStart(2,'0');
+  const pd = t.progress_detail || {};
+  const ckAt = pd.checkpoint_at ? relTime(pd.checkpoint_at) : '';
+  const detail = pd.job_active === false
+    ? `<div class="warnline" style="margin-top:8px">后台没有这个任务的执行句柄（取消 / 重启打断，或投入后台时出错），不会再有进展；点右上角「标记失败」后可「继续完成」${pd.modules_done?`，已完成的 ${pd.modules_done} 个模块会保留`:''}。</div>`
+    : (pd.modules_done || pd.analysis_done)
+      ? `<div class="hint" style="margin-top:6px">检查点：${pd.analysis_done?'拆解已完成':''}${pd.analysis_done&&pd.modules_done?' · ':''}${pd.modules_done?`已生成 ${pd.modules_done} 个模块`:''}${ckAt?` · 最近落盘 ${ckAt}`:''}</div>`
+      : '';
   return `<div class="box accent" style="margin:0 0 14px;display:flex;gap:14px;align-items:flex-start">
     ${owlSvg('generating', 56)}
     <div style="flex:1;min-width:0">${stage==='parsing'?'正在解析需求文件':'正在生成'} <span class="spin"></span>
     <span class="hint">已耗时 ${mm}:${ss} · ${stage==='parsing'?'PDF 提取与图片理解（Vision）按页/按图进行，大文件需要几分钟':'生成与评审为主要耗时阶段（多模块并行）'}</span>
-    ${stepperHtml(idx)}</div></div>`;
+    ${stepperHtml(idx)}${detail}</div></div>`;
 }
 
 /* ==================== 概览 ==================== */
@@ -4451,6 +4480,7 @@ async function _renderPlanDetail__impl() {
         ${(it.assign_log || []).length > 1 ? `<div class="hint" title="${esc(it.assign_log.map(x => `${x.prev || '—'} → ${x.assignee}（${x.by}）`).join('\n'))}">已改派 ${it.assign_log.length - 1} 次</div>` : ''}</td>
       <td style="width:118px">${r ? `<span class="st ${EXEC_CLS[r.status]}">${EXEC_LABEL[r.status]}</span>
           ${r.note || r.reason ? `<div class="hint" style="color:var(--danger)">${r.reason?`【${esc(r.reason)}】`:''}${esc(r.note)}</div>` : ''}
+          ${r.triage ? `<div class="hint" style="color:var(--purple)" title="${esc(r.triage.reason||'')}">AI 归因：<b>${esc(r.triage.category)}${r.triage.sub?`·${esc(r.triage.sub)}`:''}</b>（置信度${esc(r.triage.confidence||'中')}${r.triage.failed_step?`，第 ${r.triage.failed_step} 步`:''}${r.triage.screenshots?`，看了 ${r.triage.screenshots} 张截图`:''}）${r.triage.suggested_reason && r.triage.suggested_reason !== r.reason && active ? ` <a onclick="planAdoptTriage('${it.item_id}')" title="把失败分类从「${esc(r.reason)}」改成 AI 建议的「${esc(r.triage.suggested_reason)}」；用例问题类会进入学习语料">采纳为「${esc(r.triage.suggested_reason)}」</a>` : r.triage.adopted ? ' <span class="tag">已采纳</span>' : ''}${r.triage.bug ? ` <a onclick="planCopyBug('${it.item_id}')" title="【${esc(r.triage.bug.severity)}】${esc(r.triage.bug.title)}：复制缺陷单文本，贴到外部缺陷系统">复制缺陷单</a>` : ''}${r.triage.reason?`<div>${esc(r.triage.reason)}</div>`:''}</div>` : ''}
           <div class="hint">${(r.history||[]).length ? `第 ${r.history.length+1} 次 · ` : ''}${esc(r.by)}${r.on_behalf_of ? ` <span title="代 ${esc(r.on_behalf_of)} 执行">代执行</span>` : ''}</div>`
         : '<span class="hint">未执行</span>'}</td>
       <td style="width:170px"><div class="rowops">
@@ -4459,6 +4489,7 @@ async function _renderPlanDetail__impl() {
         <button class="ibtn bad" title="失败（填写原因/缺陷号）" onclick="planExecAct('${it.item_id}','fail')">${IC.x}</button>
         <button class="ibtn" title="阻塞" onclick="planExecAct('${it.item_id}','blocked')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg></button>
         <button class="ibtn" title="跳过" onclick="planExecAct('${it.item_id}','skipped')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:15px;height:15px"><path d="M5 4l10 8-10 8M19 4v16"/></svg></button>` : ''}
+        ${r && r.status === 'fail' && can(p.project,'exec.run') ? `<button class="ibtn" title="AI 归因：用例 + 失败说明 + 关联截图 + 需求原文 → 用例问题 / 系统缺陷 / 环境 / 数据 / 需求变更，系统缺陷起草缺陷单；分类要人采纳才算" onclick="planTriage(['${it.item_id}'])"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:15px;height:15px"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6M11 8v6"/></svg></button>` : ''}
         ${run ? `<button class="ibtn" title="上传附件并关联此用例（失败截图/日志等）" onclick="planPickAtt('${it.item_id}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:15px;height:15px"><path d="M21 12.5l-8.5 8.5a6 6 0 01-8.5-8.5L12.5 4a4 4 0 015.7 5.7L9.7 18.2a2 2 0 01-2.9-2.9l8-8"/></svg></button>` : ''}
         ${editable && canDelete() ? `<button class="ibtn" title="从计划移除（有执行记录的不可移除）" onclick="planRemoveItem('${it.item_id}')">${IC.trash || '✕'}</button>` : ''}
       </div></td>
@@ -4480,6 +4511,7 @@ async function _renderPlanDetail__impl() {
       </select>
       ${editable ? `<button class="btn ghost sm" onclick="planAssignChecked()">分配选中</button>
       <button class="btn ghost sm" onclick="planAssignModule()">按模块分配</button>
+      <button class="btn ghost sm" onclick="openPlanSelectDlg()" title="按目标（冒烟 / 全量回归 / 变更影响回归 / 模块专项）、预算、变更摘要、重点模块从本项目正式用例里 AI 挑一组，勾选后加入">AI 挑选</button>
       <button class="btn sm" onclick="openPlanCaseDlg()">＋ 加入用例</button>` : ''}
     </div></div>
     <div class="card-b">${p.items.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
@@ -4518,6 +4550,7 @@ async function _renderPlanDetail__impl() {
         ${p.runs.map(r => `<option value="${r.run_id}" ${run && r.run_id===run.run_id?'selected':''}>${esc(r.name)}${r.executor?` · 执行人 ${esc(r.executor)}`:''} · ${r.finished_at?'已结束':'进行中'}</option>`).join('')}
       </select>` : ''}
       ${run ? `<button class="btn ghost sm" title="不关联具体用例的整轮附件；关联用例请用表格行内的回形针按钮" onclick="planPickAtt(null)">＋ 整轮附件</button>` : ''}
+      ${run && can(p.project,'exec.run') && Object.values(results).some(r => r.status === 'fail') ? `<button class="btn ghost sm" onclick="planTriage(null)" title="本轮全部失败用例逐条 AI 归因（每条一次调用，关联截图先走图片理解）">AI 归因（失败 ${Object.values(results).filter(r => r.status === 'fail').length}）</button>` : ''}
       ${active ? `<button class="btn ghost sm" onclick="planFinishRun()">结束本轮</button>` : ''}
       ${editable ? `<button class="btn sm" onclick="planNewRun()">＋ 新建执行轮次</button>` : ''}
     </div></div>
@@ -4560,6 +4593,61 @@ async function deletePlan() {
   if (!await uiConfirm('删除计划', `确定删除「${_planDetail.name}」？删除仅系统管理员可执行；已有执行记录的计划不可删除（请归档）。`, true)) return;
   try { await api('/api/v1/plans/' + curPlan, {method:'DELETE'}); toast('计划已删除', 'ok'); backToPlans(); }
   catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- AI 挑选用例：草稿勾选后按任务分组调加入接口 ---- */
+const PS_GOAL_HINT = {'冒烟': '每个页面 / 功能的主流程各 1 条 P0（没有 P0 的模块选 1 条 P1），不选异常与边界；程序保证每个有 P0 的模块至少 1 条',
+  '全量回归': 'P0 + P1 全选，P2 按模块均匀抽，P3 不选', '变更影响回归': '变更清单里受影响的用例必选，同模块 / 同测试点 / 同数据对象的按风险补选；历史失败过的优先',
+  '模块专项': '重点模块全选，依赖它的上下游各选 1～2 条主流程'};
+function psGoalHint() {
+  const g = $('psGoal').value;
+  $('psChange').style.display = g === '变更影响回归' ? '' : 'none';
+  $('psHint').textContent = PS_GOAL_HINT[g] || '';
+}
+function psRender(d) {
+  const sel = d.selected || [];
+  $('psHint').innerHTML = `${esc(PS_GOAL_HINT[d.goal] || '')}<div style="margin-top:4px">候选 ${d.candidates} 条 → 选 ${sel.length} 条${d.truncated ? `（超预算截掉 ${d.truncated} 条）` : ''}${d.failed ? `，${d.failed} 批失败` : ''}${d.excluded_summary ? ` · 没选：${esc(d.excluded_summary)}` : ''}${d.coverage_note ? ` · <span style="color:var(--warn)">${esc(d.coverage_note)}</span>` : ''}</div>`;
+  $('psList').innerHTML = sel.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
+    <tr><th style="width:26px">${allCheckedHtml('psck', '', '全选')}</th><th style="width:110px">编号</th><th>标题</th><th style="width:90px">模块</th><th style="width:50px">优先级</th><th>为什么本轮要跑</th></tr>
+    ${sel.map((c, i) => `<tr>
+      <td><input type="checkbox" class="psck" data-i="${i}" checked></td>
+      <td><span class="cid">${esc(c.case_id)}</span></td>
+      <td>${esc(c.title)}${c.failed_recent ? ' <span class="tag" style="color:var(--danger)" title="最近一次执行失败">近期失败</span>' : ''}</td>
+      <td>${esc(c.module)}</td><td><span class="prio ${esc(c.priority)}">${esc(c.priority)}</span></td>
+      <td class="hint">${esc(c.reason || '')}${c.by === 'program' ? ' <span class="tag">程序兜底</span>' : ''}</td></tr>`).join('')}</table></div>`
+    : '<div class="empty">没有选中任何用例</div>';
+}
+function openPlanSelectDlg() {
+  const d = _planDetail.selection_draft;
+  $('psGoal').value = (d && d.goal) || '冒烟'; $('psBudget').value = (d && d.budget) || '';
+  $('psModules').value = ((d && d.focus_modules) || []).join('，'); $('psChange').value = (d && d.change_summary) || '';
+  psGoalHint();
+  $('psList').innerHTML = d ? '' : '<div class="hint">选好目标点「AI 挑选」；候选为本项目已通过、还没在计划内的正式用例</div>';
+  if (d) psRender(d);
+  $('planSelectDlg').showModal();
+}
+async function planSelectRun() {
+  const body = {goal: $('psGoal').value, budget: parseInt($('psBudget').value || '0', 10) || 0,
+    focus_modules: $('psModules').value.split(/[,，、\s]+/).map(s => s.trim()).filter(Boolean), change_summary: $('psChange').value.trim()};
+  $('psList').innerHTML = '<div class="hint"><span class="spin"></span> AI 挑选中（候选每 300 条一批）…</div>';
+  try {
+    const d = await jpost(`/api/v1/plans/${curPlan}/select`, body);
+    _planDetail.selection_draft = d;
+    psRender(d);
+  } catch (e) { $('psList').innerHTML = ''; toast('AI 挑选失败：' + e.message, 'err'); }
+}
+async function psAdd() {
+  const d = _planDetail.selection_draft; if (!d) return;
+  const picked = [...document.querySelectorAll('.psck:checked')].map(x => d.selected[+x.dataset.i]).filter(Boolean);
+  if (!picked.length) return toast('请先勾选要加入的用例', 'warn');
+  const byTask = {};
+  for (const c of picked) (byTask[c.task_id] = byTask[c.task_id] || []).push(c.uid);
+  let added = 0;
+  try {
+    for (const [task_id, uids] of Object.entries(byTask)) added += (await jpost(`/api/v1/plans/${curPlan}/cases`, {task_id, uids})).added;
+    toast(`已加入 ${added} 条`, 'ok');
+    $('planSelectDlg').close(); renderPlanDetail();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 /* ---- 加入用例（快照） ---- */
@@ -4778,6 +4866,38 @@ async function planExecAct(itemId, status) {
       {items: [{item_id: itemId, status, note, reason}]});
     renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
+}
+/* 执行失败 AI 归因：结果写在记录上，分类要人「采纳」才改；系统缺陷的缺陷单复制到外部系统 */
+async function planTriage(itemIds) {
+  const run = curPlanRun(_planDetail); if (!run) return;
+  toast(itemIds ? 'AI 归因中：用例 + 失败说明 + 截图 + 需求原文…' : 'AI 归因中：逐条分析本轮失败用例（关联截图先做图片理解）…');
+  try {
+    const r = await jpost(`/api/v1/plans/${curPlan}/runs/${run.run_id}/triage`, {item_ids: itemIds});
+    toast(`已归因 ${r.triaged.length} 条${r.failed.length ? `，${r.failed.length} 条失败：${r.failed.map(f => f.case_id).join('、')}` : ''}`, r.failed.length ? 'warn' : 'ok');
+    renderPlanDetail();
+  } catch (e) { toast('AI 归因失败：' + e.message, 'err'); }
+}
+async function planAdoptTriage(itemId) {
+  const run = curPlanRun(_planDetail); if (!run) return;
+  try {
+    const r = await jpost(`/api/v1/plans/${curPlan}/runs/${run.run_id}/results/${itemId}/triage/adopt`, {});
+    toast(`失败分类已改为「${r.result.reason}」`, 'ok');
+    renderPlanDetail();
+  } catch (e) { toast(e.message, 'err'); }
+}
+function bugText(it, r) {
+  const b = r.triage.bug;
+  return [`【${b.severity}】${b.title}`, `用例：${it.case_id} ${it.title}（${it.module}）`, `前置：${b.precondition || '—'}`, '复现步骤：',
+    ...(b.steps || []).map((s, i) => `${i + 1}. ${s}`), `预期：${b.expected || '—'}`, `实际：${b.actual || '—'}`, `影响范围：${b.scope || '—'}`,
+    `执行说明：${r.note || ''}`, `归因依据：${r.triage.reason || ''}`].join('\n');
+}
+async function planCopyBug(itemId) {
+  const it = _planDetail.items.find(i => i.item_id === itemId);
+  const r = (curPlanRun(_planDetail) || {results: {}}).results[itemId];
+  if (!it || !r || !r.triage || !r.triage.bug) return;
+  const text = bugText(it, r);
+  try { await navigator.clipboard.writeText(text); toast('缺陷单已复制到剪贴板', 'ok'); }
+  catch (e) { await uiConfirm('缺陷单（复制失败，请手动选取）', text); }
 }
 async function planFinishRun() {
   const run = curPlanRun(_planDetail);
@@ -5161,19 +5281,26 @@ const ERROR_KIND_HINT = {
 function resumeHint(t) {
   const r = t.resume || {};
   const parts = [];
-  if (t.error_kind && ERROR_KIND_HINT[t.error_kind]) parts.push(ERROR_KIND_HINT[t.error_kind]);
+  if (t.error_kind && ERROR_KIND_HINT[t.error_kind] && !(t.error_kind === 'cancelled' && t.status === 'completed')) parts.push(ERROR_KIND_HINT[t.error_kind]);
   if (r.mode === 'resume') parts.push(`已完成${r.analysis_kept ? '拆解' : ''}${r.kept_modules.length ? `与 ${r.kept_modules.length} 个模块（${r.kept_modules.map(esc).join('、')}）` : ''}，继续时不重做`);
   else if (r.mode === 'fill') parts.push('只重新生成失败的模块，其余用例与审核状态不变');
+  else if (r.mode === 'restore') parts.push('这是已完成任务上的增量生成被中断：恢复后已生成的用例与审核原样，新通过的测试点在「测试点审核」页再点生成');
   return parts.length ? `<span class="hint" style="color:var(--text-2)">${parts.join('；')}</span>` : '';
 }
-function resumeLabel(t) { const m = (t.resume||{}).mode; return m === 'fill' ? '补全失败模块' : m === 'resume' ? '继续完成' : '重试'; }
+function resumeLabel(t) { const m = (t.resume||{}).mode; return m === 'fill' ? '补全失败模块' : m === 'resume' ? '继续完成' : m === 'restore' ? '恢复已完成结果' : '重试'; }
+function retryToast(r) {
+  return r.mode==='fill' ? `已开始补全 ${(r.failed_modules||[]).length} 个模块`
+    : r.mode==='resume' ? `已从断点继续（保留 ${(r.kept_modules||[]).length} 个已完成模块）`
+    : r.mode==='restore' ? `已恢复为已完成${r.pending_points ? `，${r.pending_points} 条新通过的测试点待生成` : ''}`
+    : '已重新提交，后台执行中';
+}
 async function retryTask() {
   if (!currentTask) return;
-  try { const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/retry`, {}); toast(r.mode==='fill'?`已开始补全 ${r.failed_modules.length} 个模块`:r.mode==='resume'?`已从断点继续（保留 ${r.kept_modules.length} 个已完成模块）`:'已重新提交，后台执行中', 'ok'); await refreshList(); openTask(currentTask.task_id); }
+  try { const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/retry`, {}); toast(retryToast(r), 'ok'); await refreshList(); openTask(currentTask.task_id); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function retryFromCenter(id) {
-  try { const r = await jpost(`/api/v1/tasks/${id}/retry`, {}); toast(r.mode==='fill'?'已开始补全失败模块':r.mode==='resume'?'已从断点继续':'已重新提交', 'ok'); renderAiCenter(); }
+  try { const r = await jpost(`/api/v1/tasks/${id}/retry`, {}); toast(retryToast(r), 'ok'); renderAiCenter(); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function renderAiCenter() {

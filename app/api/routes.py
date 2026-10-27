@@ -1739,12 +1739,42 @@ def _error_kind(error: str | None) -> str | None:
     return "other"
 
 
+def _submit_or_fail(store, task_id: str, job, request: Request, record: TaskRecord) -> None:
+    """置 running 并投入后台；中间任何一步出错都把任务放回 failed（否则记录停在 running 却没有后台句柄，
+    页面「一直执行中」、取消 409、继续 409，只能等重启）。"""
+    store.set_progress(task_id, status="running", progress="generating_reviewing")
+    try:
+        _ai_ctx(request, record)
+        store.submit(task_id, job)
+    except Exception as e:
+        rec = store.get(task_id)
+        if rec is not None:
+            rec.status, rec.error, rec.progress = "failed", f"投入后台执行失败：{e}"[:1000], None
+            store.save(rec)
+        logger.exception("任务 {} 投入后台执行失败：{}", task_id, e)
+        raise HTTPException(status_code=500, detail=f"投入后台执行失败：{e}")
+
+
+def _progress_detail(store, record: TaskRecord) -> dict | None:
+    """执行中任务的进展摘要（页面据此判断是在跑还是卡住）：是否有后台句柄、检查点里已完成的模块数与最近落盘时间。"""
+    if record.status not in ("queued", "running"):
+        return None
+    ck = record.checkpoint or {}
+    return {"job_active": store.job_active(record.task_id),
+            "modules_done": len(ck.get("modules") or {}),
+            "analysis_done": bool(ck.get("analysis") or ck.get("chunks")),
+            "checkpoint_at": ck.get("updated_at")}
+
+
 def _resume_info(record: TaskRecord) -> dict:
     """断点续跑摘要：失败任务 = 检查点里已完成的模块；完成任务 = 生成失败可补全的模块。"""
     ctx = record.context or {}
     ck = record.checkpoint or {}
     done = sorted((ck.get("modules") or {}).keys())
     failed = list(((record.result or {}).get("failed_modules") or []))
+    if record.status == "failed" and (record.result or {}).get("cases") and not done:
+        # 已完成任务上的增量生成失败 / 被取消后留在失败（旧记录）：不能整体重跑覆盖现有用例，只把状态恢复回已完成
+        return {"resumable": True, "mode": "restore", "kept_modules": [], "analysis_kept": True, "failed_modules": []}
     if record.status == "failed":
         resumable = bool((ctx.get("requirement") or "").strip())
         confirmed = (ctx.get("resume_stage") == "confirmed" or bool(ctx.get("confirm_points"))) \
@@ -1909,6 +1939,7 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
             raise HTTPException(status_code=409, detail="没有新通过、尚未生成用例的测试点")
         store.set_progress(task_id, status="running", progress="generating_reviewing")
         record.checkpoint = None
+        record.context = {**(record.context or {}), "resume_stage": "incremental"}  # 失败 / 取消回到已完成，不整体重跑
         store.save(record)
         return await _run_confirmed(request, store, task_id, pending, async_mode, merge_existing=True)
     if record.status != "awaiting_confirmation":
@@ -1958,12 +1989,19 @@ async def _run_confirmed(request: Request, store, task_id: str, test_points: lis
         try:
             await _generate_confirmed(request, task_id, test_points, merge_existing=merge_existing)
         except HTTPException as e:
-            # _generate_confirmed 已按故障类型恢复状态（待确认 / 失败）；后台没有响应体，把原因留在任务上
+            # _generate_confirmed 已按故障类型恢复状态（待确认 / 已完成 / 失败）；后台没有响应体，把原因留在任务上
             rec = store.get(task_id)
             if rec is not None:
                 rec.error = str(e.detail)[:1000]
                 store.save(rec)
             logger.warning("任务 {} 确认生成失败：{}", task_id, e.detail)
+        except Exception as e:
+            # 未预期异常：_generate_confirmed 已把状态放回待确认 / 已完成，这里只留原因（不能再被兜底标成失败）
+            rec = store.get(task_id)
+            if rec is not None:
+                rec.error = f"生成失败：{e}"[:1000]
+                store.save(rec)
+            logger.exception("任务 {} 确认生成出现未预期异常：{}", task_id, e)
 
     store.submit(task_id, _job)
     return {"task_id": task_id, "status": "queued", "poll_url": f"/api/v1/tasks/{task_id}"}
@@ -2007,6 +2045,8 @@ async def _generate_confirmed(request: Request, task_id: str, test_points: list[
         request.app, ctx.get("requirement", ""), ctx.get("project")
     )
     rule_notes, rule_snapshot = _gather_rules(request.app, ctx.get("project"))
+    # 故障恢复的落点：首次确认回到待确认（再点确认即可）；增量生成回到已完成（现有用例不动，新通过的点仍待生成）
+    fallback = "completed" if merge_existing else "awaiting_confirmation"
     try:
         result = await run_generation(
             ctx.get("requirement", ""),
@@ -2022,17 +2062,21 @@ async def _generate_confirmed(request: Request, task_id: str, test_points: list[
             checkpoint=checkpoint,
             on_module_done=lambda m, r: _save_checkpoint(store, task_id, module=(m, r)),
         )
+    # 故障恢复的落点：首次确认回到待确认（再点确认即可）；增量生成回到已完成（现有用例不动，新通过的点仍待生成）
     except (MissingAPIKeyError, LLMOutputError) as e:
-        # 可重试的故障：恢复待确认状态，用户可再次点击确认
-        store.set_progress(task_id, status="awaiting_confirmation", progress=None)
+        # 可重试的故障：恢复待确认 / 已完成状态，用户可再次点击生成
+        store.set_progress(task_id, status=fallback, progress=None)
         raise HTTPException(status_code=502, detail=str(e))
     except UnknownModelError as e:
-        store.set_progress(task_id, status="awaiting_confirmation", progress=None)
+        store.set_progress(task_id, status=fallback, progress=None)
         raise HTTPException(status_code=400, detail=str(e))
     except AllModelsFailedError as e:
         record = store.get(task_id)
-        record.status, record.error, record.progress = "failed", str(e)[:1000], None
-        record.context = {**(record.context or {}), "resume_stage": "confirmed"}  # 续跑时不再重新拆解
+        if merge_existing:
+            record.status, record.error, record.progress = "completed", str(e)[:1000], None
+        else:
+            record.status, record.error, record.progress = "failed", str(e)[:1000], None
+            record.context = {**(record.context or {}), "resume_stage": "confirmed"}  # 续跑时不再重新拆解
         store.save(record)
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
@@ -4334,6 +4378,73 @@ async def add_plan_cases(request: Request, plan_id: str, body: PlanCasesBody) ->
     return {"added": len(added), "skipped": len(pool) - len(added), "plan": _plan_view(plan)}
 
 
+class PlanSelectBody(BaseModel):
+    goal: str = "冒烟"                 # 冒烟 / 全量回归 / 变更影响回归 / 模块专项
+    budget: int = 0                    # 条数上限，0 不限
+    change_summary: str = ""           # 变更影响回归的依据；空则自动带本项目任务里最近一次需求变更分析的摘要与受影响用例
+    focus_modules: list[str] = []      # 模块专项的重点模块
+    task_ids: list[str] = []           # 只从这些任务挑；空 = 本项目全部有正式用例的任务
+    model: str | None = None
+
+
+@router.post("/api/v1/plans/{plan_id}/select")
+async def select_plan_cases(request: Request, plan_id: str, body: PlanSelectBody) -> dict:
+    """AI 挑选计划用例（Prompt plan_case_select）：候选 = 本项目任务里已通过、还没在计划内的正式用例（精简视图，不带步骤），
+    带最近执行失败标记；按目标 / 预算 / 变更摘要 / 重点模块挑出草稿，人勾选后用 POST .../cases 加入。草稿存 plan.selection_draft。"""
+    from app.agents.quality import PLAN_GOALS, run_plan_case_select
+    from app.reports import UNASSIGNED as _UN
+    from app.reports import plan_exec_index
+
+    plan = _plan(request, plan_id, "plan.manage")
+    if plan["status"] == "archived":
+        raise HTTPException(status_code=409, detail="计划已归档，不可再加入用例")
+    if body.goal not in PLAN_GOALS:
+        raise HTTPException(status_code=400, detail=f"目标类型只能是 {' / '.join(PLAN_GOALS)}")
+    _ai_ctx(request, project=plan.get("project"), purpose="计划用例挑选")
+    store = request.app.state.tasks
+    scoped = store.list(limit=100000, project=None if plan["project"] == _UN else plan["project"])
+    if plan["project"] == _UN:
+        scoped = [r for r in scoped if not (r.context or {}).get("project")]
+    if body.task_ids:
+        scoped = [r for r in scoped if r.task_id in body.task_ids]
+    in_plan = {(i["task_id"], i["uid"]) for i in plan["items"]}
+    exec_idx = plan_exec_index(request.app.state.plans.list(project=None if plan["project"] == _UN else plan["project"]))
+    cases: list[dict] = []
+    diffs: list[str] = []
+    for r in scoped:
+        for c in _approved_cases(r):
+            uid = str(c.get("uid") or "")
+            if (r.task_id, uid) in in_plan:
+                continue
+            latest = (exec_idx.get((r.task_id, uid)) or {}).get("latest") or {}
+            cases.append({"key": f"{r.task_id}:{uid}", "task_id": r.task_id, "uid": uid, "case_id": str(c.get("case_id") or ""),
+                          "module": c.get("module", ""), "title": c.get("title", ""), "priority": c.get("priority", ""),
+                          "keywords": c.get("keywords", ""), "point_ids": c.get("point_ids") or [],
+                          "failed_recent": latest.get("status") == "fail"})
+        d = r.requirement_diff or {}
+        if d.get("summary") or d.get("changes"):
+            lines = [f"任务 {r.task_id}（{(r.sources or [r.task_id])[0]}）：{d.get('summary', '')}"]
+            lines += [f"- {ch.get('type', '')}：{ch.get('description', '')}" + (f"（受影响用例 {'、'.join(ch['affected_cases'])}）" if ch.get("affected_cases") else "")
+                      for ch in (d.get("changes") or []) if isinstance(ch, dict)]
+            diffs.append("\n".join(lines))
+    if not cases:
+        raise HTTPException(status_code=409, detail="本项目没有可挑选的正式用例（已全部在计划内，或还没有评审通过的用例）")
+    summary = body.change_summary.strip() or ("\n\n".join(diffs) if body.goal == "变更影响回归" else "")
+    try:
+        out = await run_plan_case_select(request.app.state.llm, cases, body.goal, max(0, body.budget), summary,
+                                         body.focus_modules, body.model)
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    draft = {"goal": body.goal, "budget": body.budget, "focus_modules": body.focus_modules, "change_summary": summary,
+             "candidates": len(cases), "selected": out["selected"], "excluded_summary": out["excluded_summary"],
+             "coverage_note": out["coverage_note"], "batches": out["batches"], "failed": out["failed"], "truncated": out["truncated"],
+             "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    plan["selection_draft"] = draft
+    request.app.state.plans.save(plan)
+    request.state.audit_detail = f"{body.goal} 候选 {len(cases)} 选 {len(out['selected'])}"
+    return {"plan_id": plan_id, **draft}
+
+
 @router.delete("/api/v1/plans/{plan_id}/cases/{item_id}")
 async def remove_plan_case(request: Request, plan_id: str, item_id: str) -> dict:
     plan = _plan(request, plan_id, "plan.manage")
@@ -4582,6 +4693,126 @@ async def finish_plan_run(request: Request, plan_id: str, run_id: str) -> dict:
     request.app.state.plans.save(plan)
     logger.info("计划 {} 轮次 {} 已结束：{}，计划状态 {}", plan_id, run_id, summary, plan["status"])
     return {"run_id": run_id, "finished_at": run["finished_at"], "summary": summary, "plan_status": plan["status"]}
+
+
+class TriageBody(BaseModel):
+    item_ids: list[str] | None = None   # 只归因这些用例；空 = 本轮全部失败的用例
+    model: str | None = None
+
+
+def _triage_context(app, item: dict) -> tuple[str, list[dict]]:
+    """归因要对照的需求原文（用例所在模块的章节，定位不到用整篇前 8000 字）与用例来源测试点（tp_id / point / ref）。"""
+    record = app.state.tasks.get(item.get("task_id") or "")
+    if record is None:
+        return "", []
+    from app.agents.quality import _module_texts
+
+    requirement = (record.context or {}).get("requirement", "") or ""
+    modules = (record.analysis or {}).get("test_points") or []
+    snap = item.get("snapshot") or {}
+    wanted = set(snap.get("point_ids") or [])
+    points = [{"tp_id": p["tp_id"], "point": p.get("point", ""), **({"ref": p["ref"]} if p.get("ref") else {})}
+              for m in modules for p in m.get("points", []) if isinstance(p, dict) and p.get("tp_id") in wanted]
+    text = ""
+    try:
+        text = _module_texts(requirement, modules).get(str(snap.get("module") or item.get("module") or ""), "") if modules else ""
+    except Exception as e:   # 定位失败不影响归因
+        logger.warning("归因定位需求章节失败，用整篇：{}", e)
+    return (text or requirement[:8000]), points
+
+
+async def _triage_screenshots(app, run: dict, item_id: str, limit: int = 3) -> list[str]:
+    """该用例关联的失败截图（最多 limit 张）走图片理解，单张失败跳过。"""
+    import mimetypes
+
+    from app.agents.prompts import EXEC_SHOT_PROMPT
+    from app.parsers.image import understand_image_bytes
+
+    out: list[str] = []
+    for att in [a for a in run.get("attachments", []) if a.get("item_id") == item_id and a.get("kind") == "image"][:limit]:
+        path = Path(att.get("stored") or "")
+        if not path.exists():
+            continue
+        mime = att.get("content_type") or mimetypes.guess_type(path.name)[0] or "image/png"
+        try:
+            text = await understand_image_bytes(path.read_bytes(), mime, app.state.llm, prompt=EXEC_SHOT_PROMPT)
+            if text and text.strip():
+                out.append(f"文件 {att.get('filename', '')}：\n{text.strip()}")
+        except Exception as e:
+            logger.warning("失败截图 {} 理解失败，跳过：{}", att.get("filename"), e)
+    return out
+
+
+@router.post("/api/v1/plans/{plan_id}/runs/{run_id}/triage")
+async def triage_plan_failures(request: Request, plan_id: str, run_id: str, body: TriageBody | None = None) -> dict:
+    """执行失败 AI 归因与缺陷单（Prompt exec_triage）：本轮失败的用例（或指定的几条）逐条送模型——用例 + 执行说明 + 关联截图的理解结果 +
+    用例所在模块的需求原文 → 五类归因（用例问题 / 系统缺陷 / 环境问题 / 数据问题 / 需求变更）+ 置信度 + 依据，系统缺陷时起草缺陷单。
+    结果写在执行记录 `triage` 上，失败分类 `reason` 不动，人「采纳」才改；单条故障只丢该条。"""
+    from app.agents.quality import run_exec_triage
+
+    plan = _plan(request, plan_id, "exec.run")
+    run = _plan_run(plan, run_id)
+    body = body or TriageBody()
+    _ai_ctx(request, project=plan.get("project"), purpose="执行失败归因")
+    by_item = {i["item_id"]: i for i in plan["items"]}
+    targets = [iid for iid, r in run["results"].items() if r.get("status") == "fail" and iid in by_item
+               and (not body.item_ids or iid in body.item_ids)]
+    if not targets:
+        raise HTTPException(status_code=409, detail="没有失败的执行记录可归因")
+
+    async def _one(iid: str) -> dict:
+        item = by_item[iid]
+        requirement, points = _triage_context(request.app, item)
+        shots = await _triage_screenshots(request.app, run, iid)
+        out = await run_exec_triage(request.app.state.llm, item.get("snapshot") or {}, run["results"][iid].get("note", ""),
+                                    requirement, shots, body.model, points)
+        return {**out["triage"], "bug": out["bug"], "screenshots": len(shots), "model": out["model_name"],
+                "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+
+    import asyncio
+    outcomes = await asyncio.gather(*[_one(i) for i in targets], return_exceptions=True)
+    triaged: list[str] = []
+    failed: list[dict] = []
+    for iid, o in zip(targets, outcomes):
+        if isinstance(o, BaseException):
+            failed.append({"item_id": iid, "case_id": by_item[iid].get("case_id"), "error": str(o)})
+            logger.warning("用例 {} 归因失败：{}", by_item[iid].get("case_id"), o)
+        else:
+            run["results"][iid]["triage"] = o
+            triaged.append(iid)
+    if not triaged:
+        raise HTTPException(status_code=502, detail=f"归因失败：{failed[0]['error']}")
+    request.app.state.plans.save(plan)
+    request.state.audit_detail = f"归因 {len(triaged)} 条" + (f"，失败 {len(failed)} 条" if failed else "")
+    return {"run_id": run_id, "triaged": triaged, "failed": failed, "results": run["results"]}
+
+
+class TriageAdoptBody(BaseModel):
+    reason: str | None = None   # 不传 = 采纳 AI 建议的分类
+
+
+@router.post("/api/v1/plans/{plan_id}/runs/{run_id}/results/{item_id}/triage/adopt")
+async def adopt_plan_triage(request: Request, plan_id: str, run_id: str, item_id: str, body: TriageAdoptBody | None = None) -> dict:
+    """采纳 AI 归因：把执行记录的失败分类改成建议值（或人指定的分类），记采纳人与时间；用例问题类随之进入学习语料。"""
+    from app.plans import FAIL_REASONS
+
+    plan = _plan(request, plan_id, "exec.run")
+    run = _plan_run(plan, run_id)
+    r = run["results"].get(item_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="没有该用例的执行记录")
+    if run.get("finished_at"):
+        raise HTTPException(status_code=409, detail="该执行轮次已结束，分类不可再改")
+    if r.get("status") != "fail" or not r.get("triage"):
+        raise HTTPException(status_code=409, detail="该记录不是失败记录或还没有 AI 归因")
+    reason = ((body.reason if body else None) or r["triage"].get("suggested_reason") or "").strip()
+    if reason not in FAIL_REASONS:
+        raise HTTPException(status_code=400, detail=f"失败分类须为 {'/'.join(FAIL_REASONS)}")
+    r["reason"] = reason
+    r["triage"]["adopted"] = {"reason": reason, "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    request.app.state.plans.save(plan)
+    request.state.audit_detail = f"{r.get('case_id')} 采纳归因 {reason}"
+    return {"item_id": item_id, "result": r}
 
 
 @router.post("/api/v1/plans/{plan_id}/runs/{run_id}/attachments")
@@ -7681,17 +7912,23 @@ async def restore_task(request: Request, task_id: str) -> dict:
 
 
 @router.post("/api/v1/tasks/{task_id}/cancel")
-async def cancel_task(request: Request, task_id: str) -> dict:
-    """取消进行中的后台任务（任务管理）：中断执行，任务标记失败并留痕取消原因。"""
+async def cancel_task(request: Request, task_id: str, force: bool = False) -> dict:
+    """取消进行中的后台任务（任务管理）：中断执行，任务标记失败并留痕取消原因。
+
+    force=true：没有后台执行句柄却一直 queued / running 的孤儿任务直接标记失败（之后可「继续完成」）。
+    """
     store = request.app.state.tasks
     record = _task(request, task_id, "point.ai")
     if record.status not in ("queued", "running"):
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，无可取消的执行")
-    if not store.cancel(task_id):
+    forced = force and not store.job_active(task_id)
+    if not store.cancel(task_id, force=force):
         raise HTTPException(
-            status_code=409, detail="该任务正在前台请求中执行，无法从后台取消，请等待其完成"
+            status_code=409,
+            detail="该任务没有后台执行句柄（正在前台同步请求中执行，或句柄已丢失）：等待其完成，"
+                   "或确认它确实没在跑后用「标记失败」（force=true）结束它再继续完成",
         )
-    return {"task_id": task_id, "status": "failed", "canceled": True}
+    return {"task_id": task_id, "status": "failed", "canceled": True, "forced": forced}
 
 
 @router.post("/api/v1/tasks/{task_id}/retry")
@@ -7709,6 +7946,14 @@ async def retry_task(request: Request, task_id: str) -> dict:
     info = _resume_info(record)
     if record.status not in ("failed", "completed") or not info["resumable"]:
         raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，没有可继续的内容")
+    if info["mode"] == "restore":
+        # 已有生成结果的失败任务：恢复为已完成（用例与审核原样），新通过的测试点在测试点页再点生成
+        record.status, record.error, record.progress = "completed", None, None
+        store.save(record)
+        pending = _points_pending_generation(record)
+        logger.info("任务 {} 恢复为已完成（增量生成中断），待生成测试点 {} 条", task_id, sum(len(p["points"]) for p in pending))
+        return {"task_id": task_id, "status": "completed", "mode": "restore",
+                "pending_points": sum(len(p["points"]) for p in pending), "poll_url": f"/api/v1/tasks/{task_id}"}
     if not (ctx.get("requirement") or "").strip():
         raise HTTPException(status_code=409, detail="任务缺少需求文本，无法继续（请重新创建）")
     template = request.app.state.templates.get(ctx.get("template_id"))
@@ -7741,13 +7986,11 @@ async def retry_task(request: Request, task_id: str) -> dict:
         points = points or (record.result or {}).get("test_points") or []
         if not points:
             raise HTTPException(status_code=409, detail="任务没有可用的测试点，无法补全")
-        store.set_progress(task_id, status="running", progress="generating_reviewing")
-        _ai_ctx(request, record)
-
         async def _fill() -> None:
+            store.set_progress(task_id, status="running", progress="generating_reviewing")
             await _generate_confirmed(request, task_id, points, resume=True)
 
-        store.submit(task_id, _fill)
+        _submit_or_fail(store, task_id, _fill, request, record)
         logger.info("任务 {} 补全失败模块：{}（保留 {} 个模块）", task_id, info["failed_modules"], len(modules))
         return {"task_id": task_id, "status": "queued", "mode": "fill", "failed_modules": info["failed_modules"],
                 "poll_url": f"/api/v1/tasks/{task_id}"}
@@ -7758,13 +8001,11 @@ async def retry_task(request: Request, task_id: str) -> dict:
         points = confirmable_points(record.analysis["test_points"])
         if not points:
             raise HTTPException(status_code=409, detail="没有已通过的测试点，无法继续")
-        store.set_progress(task_id, status="running", progress="generating_reviewing")
-        _ai_ctx(request, record)
-
         async def _resume() -> None:
+            store.set_progress(task_id, status="running", progress="generating_reviewing")
             await _generate_confirmed(request, task_id, points, resume=True)
 
-        store.submit(task_id, _resume)
+        _submit_or_fail(store, task_id, _resume, request, record)
         logger.info("任务 {} 从已确认测试点续跑（已完成模块 {}）", task_id, info["kept_modules"])
         return {"task_id": task_id, "status": "queued", "mode": "resume", "kept_modules": info["kept_modules"],
                 "poll_url": f"/api/v1/tasks/{task_id}"}
@@ -8180,6 +8421,7 @@ async def get_task(request: Request, task_id: str) -> dict:
     pending = _points_pending_generation(record) if record.status == "completed" else []
     return {**record.model_dump(exclude={"checkpoint"}), "editing": _active_editing(request.app, task_id),
             "error_kind": _error_kind(record.error), "resume": _resume_info(record),
+            "progress_detail": _progress_detail(request.app.state.tasks, record),
             "blind_spots": blind_spot_entities(record), "dup_pairs": dup_pair_entities(record),
             "case_dup_pairs": dup_pair_entities(record, "cases"),
             "points_pending_generation": [p["tp_id"] for tp in pending for p in tp["points"]]}
