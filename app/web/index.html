@@ -5422,7 +5422,7 @@ async function aiCallsHtml() {
         <td class="hint">${esc(c.project||'—')}</td>
         <td class="hint">${c.task_id?`<a onclick="event.stopPropagation();openTaskFromProject('${c.task_id}')">${c.task_id}</a>`:''}${c.requirement_id?`<div><a onclick="event.stopPropagation();openRequirement('${c.requirement_id}')">需求 ${c.requirement_id}</a></div>`:''}</td>
         <td class="hint">${esc(c.by||'')}</td><td class="hint">${c.elapsed_ms} ms${c.attempts>1?`<div>${c.attempts} 次尝试</div>`:''}</td>
-        <td class="hint">${c.prompt_tokens||0} / ${c.completion_tokens||0}</td>
+        <td class="hint">${c.prompt_tokens||0} / ${c.completion_tokens||0}${c.cached_tokens?`<div title="输入里命中前缀缓存的部分，按折扣计费">缓存 ${c.cached_tokens}</div>`:''}${c.reasoning_tokens?`<div title="推理型模型的思考 token，按输出计费">推理 ${c.reasoning_tokens}</div>`:''}</td>
         <td>${c.status==='ok'?'<span class="st approved">成功</span>':`<span class="st rejected" title="${esc(c.error)}">失败</span>`}${c.finish_reason==='length'?'<div class="hint" style="color:var(--warn)">输出截断</div>':''}</td></tr>`).join('')
         || `<tr><td colspan="10"><div class="empty">${filtering ? '没有符合筛选条件的调用记录' : (aiDays ? '该时间范围内暂无调用记录' : '暂无调用记录')}</div></td></tr>`}</tbody></table></div>
     ${data.total > PT_PAGE_SIZES[0] || aiCallPage > 1 ? pagerHtml(data.total, aiCallPage, aiCallSize, 'acallSet', '次') : ''}`;
@@ -5430,7 +5430,7 @@ async function aiCallsHtml() {
 async function openAiCall(id) {
   let c; try { c = await api('/api/v1/ai/calls/' + id); } catch (e) { return toast(e.message, 'err'); }
   $('acTitle').textContent = `调用记录 #${id} · ${c.purpose} · ${c.model}`;
-  $('acBody').innerHTML = `<div class="hint" style="margin-bottom:6px">${esc(fmtTime(c.at, true))} · ${esc(c.by||'')} · ${esc(c.project||'')} · ${c.elapsed_ms} ms · token ${c.prompt_tokens}/${c.completion_tokens} · Prompt ${Object.entries(c.prompt_versions||{}).map(([k,v])=>`${PROMPT_NAMES[k]||k} v${v}`).join('，')||'—'}${c.status==='error'?`<div style="color:var(--danger)">错误：${esc(c.error)}</div>`:''}</div>
+  $('acBody').innerHTML = `<div class="hint" style="margin-bottom:6px">${esc(fmtTime(c.at, true))} · ${esc(c.by||'')} · ${esc(c.project||'')} · ${c.elapsed_ms} ms · token ${c.prompt_tokens}/${c.completion_tokens}${c.cached_tokens?`（缓存命中 ${c.cached_tokens}）`:''}${c.reasoning_tokens?`（推理 ${c.reasoning_tokens}）`:''} · Prompt ${Object.entries(c.prompt_versions||{}).map(([k,v])=>`${PROMPT_NAMES[k]||k} v${v}`).join('，')||'—'}${c.status==='error'?`<div style="color:var(--danger)">错误：${esc(c.error)}</div>`:''}</div>
     <div class="section-t">输入（前 3000 字）</div><pre style="white-space:pre-wrap;max-height:220px;overflow:auto;background:var(--line-2);padding:8px;border-radius:6px;font-size:12px">${esc(c.input_preview)}</pre>
     <div class="section-t">输出（前 3000 字）</div><pre style="white-space:pre-wrap;max-height:220px;overflow:auto;background:var(--line-2);padding:8px;border-radius:6px;font-size:12px">${esc(c.output_preview||'（无）')}</pre>`;
   $('aiCallDlg').showModal();
@@ -5452,8 +5452,8 @@ async function aiStatsHtml() {
       ${budgetCard}
       <div class="stat"><div class="lab">失败调用</div><div class="num">${d.by_purpose.reduce((a,b)=>a+b.errors,0)}</div></div></div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px 26px;margin-top:12px">
-      <div><div class="section-t">按模型</div><div class="tbl-wrap" style="margin-top:4px"><table><tr><th>模型</th><th>调用</th><th>输入 Token</th><th>输出 Token</th><th>费用</th><th>平均耗时</th></tr>
-        ${d.by_model.map(m=>`<tr><td>${esc(m.model)}</td><td>${m.calls}</td><td>${m.prompt_tokens.toLocaleString()}</td><td>${m.completion_tokens.toLocaleString()}</td><td>${m.priced?usd(m.cost_usd):'<span class="hint" title="未配置单价">—</span>'}</td><td>${m.calls?Math.round(m.elapsed_ms/m.calls):0} ms</td></tr>`).join('')||'<tr><td colspan="6" class="hint">无</td></tr>'}</table></div></div>
+      <div><div class="section-t">按模型</div><div class="tbl-wrap" style="margin-top:4px"><table><tr><th>模型</th><th>调用</th><th>输入 Token</th><th title="输入里命中前缀缓存的部分（已含在输入里），按折扣计费；为 0 说明厂商没返回或没命中">其中缓存命中</th><th>输出 Token</th><th title="推理型模型的思考 token（已含在输出里），按输出计费">其中推理</th><th>费用</th><th>平均耗时</th></tr>
+        ${d.by_model.map(m=>`<tr><td>${esc(m.model)}</td><td>${m.calls}</td><td>${m.prompt_tokens.toLocaleString()}</td><td class="hint">${(m.cached_tokens||0).toLocaleString()}</td><td>${m.completion_tokens.toLocaleString()}</td><td class="hint">${(m.reasoning_tokens||0).toLocaleString()}</td><td>${m.priced?usd(m.cost_usd):'<span class="hint" title="未配置单价">—</span>'}</td><td>${m.calls?Math.round(m.elapsed_ms/m.calls):0} ms</td></tr>`).join('')||'<tr><td colspan="8" class="hint">无</td></tr>'}</table></div></div>
       <div><div class="section-t">按用途</div><div class="tbl-wrap" style="margin-top:4px"><table><tr><th>用途</th><th>调用</th><th>失败</th></tr>
         ${d.by_purpose.map(p=>`<tr><td>${esc(p.purpose)}</td><td>${p.calls}</td><td>${p.errors?`<b style="color:var(--danger)">${p.errors}</b>`:0}</td></tr>`).join('')||'<tr><td colspan="3" class="hint">无</td></tr>'}</table></div></div></div>`;
 }

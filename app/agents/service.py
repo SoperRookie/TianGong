@@ -364,13 +364,16 @@ async def _run_from_points(
     done = (checkpoint or {}).get("modules") or {}
     if not test_points:  # 拆解为空的兜底：回退图内拆解
         return await _run_single(requirement, llm, model, reviewer_model, template, **kw)
+    texts = _module_requirements(requirement, test_points)
 
     async def _module(tp: dict) -> GenerationResult:
         name = str(tp.get("module", ""))
         if name in done:
             logger.info("断点续跑：模块「{}」复用已生成结果", name)
             return GenerationResult.model_validate(done[name])
-        result = await _run_single(requirement, llm, model, reviewer_model, template, test_points=[tp], **kw)
+        text = texts.get(name) or requirement
+        result = await _run_single(text, llm, model, reviewer_model, template, test_points=[tp],
+                                   requirement_scoped=len(text) < len(requirement), **kw)
         if on_module_done:
             try:
                 on_module_done(name, result)
@@ -388,6 +391,28 @@ async def _run_from_points(
     return merged
 
 
+def _module_requirements(requirement: str, test_points: list[dict]) -> dict[str, str]:
+    """每个模块生成 / 评审时带的需求原文：配置 generation_module_scope 开着就只带该模块所在章节（与查漏同一套 `_module_texts`
+    定位：整篇不足一批、模块名与 ref 都对不上、跨章节的仍是整篇），关着或只有一个模块、定位出错都返回空（调用方用整篇）。"""
+    if not get_settings().generation_module_scope or len(test_points) <= 1:
+        return {}
+    try:
+        from app.agents.quality import _module_texts
+
+        texts = _module_texts(requirement, test_points)
+    except Exception as e:   # 定位失败不影响生成
+        logger.warning("按模块定位需求章节失败，生成带整份需求：{}", e)
+        return {}
+    scoped = [n for n, t in texts.items() if len(t) < len(requirement)]
+    if scoped:
+        avg = sum(len(texts[n]) for n in scoped) // len(scoped)
+        logger.info("生成 / 评审按模块只带所在章节：{}/{} 个模块定位到章节（平均 {} 字，整篇 {} 字），其余带整篇",
+                    len(scoped), len(test_points), avg, len(requirement))
+    else:
+        logger.info("生成 / 评审带整篇需求（{} 字）：整篇不足一批或模块定位不到章节", len(requirement))
+    return texts
+
+
 async def _run_single(
     requirement: str,
     llm: LLMClient,
@@ -399,6 +424,7 @@ async def _run_single(
     knowledge_cases: str | None = None,
     memory_notes: str | None = None,
     rule_notes: str | None = None,
+    requirement_scoped: bool = False,
 ) -> GenerationResult:
     graph = build_graph(llm, template, knowledge_refs=knowledge_refs,
                         knowledge_cases=knowledge_cases, memory_notes=memory_notes,
@@ -410,6 +436,8 @@ async def _run_single(
         "review_rounds": 0,
         "trace": [],
     }
+    if requirement_scoped:
+        initial["requirement_scope"] = "module"   # 只带本模块所在章节：Prompt 里注明，模型不把别处规则当遗漏
     if test_points:
         initial["test_points"] = test_points  # 已确认拆解：图从生成节点开始
     final = await graph.ainvoke(initial, {"recursion_limit": 10 + MAX_REVIEW_ROUNDS * 10})

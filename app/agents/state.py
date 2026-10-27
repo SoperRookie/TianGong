@@ -1,6 +1,6 @@
 """编排状态定义。"""
 
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 MAX_REVIEW_ROUNDS = 3  # 生成-评审修正回环上限，超限强制出稿（PRD 异常流程）
 
@@ -13,6 +13,7 @@ class ReviewIssue(TypedDict):
 class OrchestrationState(TypedDict, total=False):
     # 输入
     requirement: str
+    requirement_scope: NotRequired[str]  # module = 只带本模块所在章节的原文（service._module_requirements），Prompt 里注明
     model: str | None           # 生成/拆解使用的模型（任务级切换）
     reviewer_model: str | None  # 评审模型，可与生成不同（生成-评审分离）
 

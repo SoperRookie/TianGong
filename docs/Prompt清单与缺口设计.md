@@ -720,7 +720,7 @@ additions 不得提出 UI 检查类测试点（【共享:UI外观清单】等外
 - **阶段**：测试设计 · 用例生成
 - **调用位置**：`graph.py` `generate` 节点 ← `service._run_single`，按模块并行（每模块一次调用）
 - **推理强度 / 模型**：默认；任务模型
-- **输入**：需求原文（整份）+ 该模块测试点（tp_id / ref / basis）+ 需求与规则知识 + 画像 + 记忆 + 团队规则 + 模板字段规范 `template_spec`
+- **输入**：需求原文（配置 `generation_module_scope` 默认只带该模块所在章节，与查漏同一套定位；整篇不足一批、定位不到的带整篇）+ 该模块测试点（tp_id / ref / basis）+ 需求与规则知识 + 画像 + 记忆 + 团队规则 + 模板字段规范 `template_spec`
 - **输出与程序兜底**：`{cases:[{case_id, module, title, priority, precondition, steps:[{action, expected}], keywords, remark, extras, point_ids}]}`；`drop_ui_check_cases` 剔 UI 用例、`renumber_case_ids`、`rule_check` 校验优先级与编号；定点修正走 `fix_instruction` + `merge_fix`
 - **设计意图**：六种方法论；一个点几条用例的判定规则；人话表达；触发条件必须可构造；延伸点按 basis 写用例、remark 标「经验延伸：」。
 
@@ -802,7 +802,7 @@ additions 不得提出 UI 检查类测试点（【共享:UI外观清单】等外
 - **阶段**：测试设计 · 用例评审
 - **调用位置**：`graph.py` `review` 节点，≤ 3 轮回环，超限强制出稿标 unresolved
 - **推理强度 / 模型**：默认；`reviewer_model or model`
-- **输入**：需求 + 本模块用例 + 历史用例 / 缺陷知识 + 画像
+- **输入**：需求原文（放 user 消息最前，各轮共享前缀命中缓存；与生成同样只带本模块所在章节）+ 评审范围与轮次 + 本模块用例 + 上轮问题 + 历史用例 / 缺陷知识 + 画像
 - **输出与程序兜底**：`{passed, issues:[{case_id, problem}], missing:[...], suggestions:[...]}`；issues 与 missing 为空才通过
 - **设计意图**：区分阻断缺陷与建议避免评审不收敛；复审只核对上一轮问题；延伸用例不得以超出需求打回。
 
@@ -1317,12 +1317,13 @@ expected / actual 写具体值（actual 来自说明与截图，没有就写「�
 ## 4. 横向评审：现有 Prompt 的共性问题
 
 > 2026-10-26 落地：1（共享片段 `shared_*`，kind=shared，`prompt_text` 展开）、4（P0 只给页面级主路径且 ≤ 10%）、5（reviewer 的 missing 限定本模块 ref 指向的需求点）、11（每条 Prompt 第一段「本步策略」）；9 只改了 `point_extend` 的 Prompt（「用户消息里若附有已确认的需求分析…优先出点」），user 消息还没把 risks / exception_flows 带进去。其余待排期。
+> 2026-10-27 落地 3：生成与评审只带本模块所在章节原文（`service._module_requirements` 复用查漏的 `_module_texts`，配置 `TIANGONG_GENERATION_MODULE_SCOPE` 默认开；整篇不足一批、模块定位不到或跨章节的仍带整篇；user 消息标「只含本模块所在章节的原文」）；顺带把 reviewer 的需求原文挪到 user 消息最前，各轮评审共享前缀命中模型侧缓存（之前「评审范围 / 第 N 轮」在前，每次前缀都不同），调用日志加记 `cached_tokens` / `reasoning_tokens`。与建议的差别：「确认结论里对到该模块的条目」没单独带——整理稿模式下确认结论已按模块回到对应章节分片。
 
 | # | 问题 | 涉及 | 影响 | 建议 |
 |---|---|---|---|---|
 | 1 | **共享片段各写一份**：10 个维度枚举、UI 外观排除清单、ref 格式「页面或章节 › 需求点」、「只输出 JSON」声明分别写在 `analyst` / `gap_check` / `point_extend` / `reviewer` / `generator` 里 | 5 条 | 改一处漏一处（这次加「流程图是规则」就改了两处，`point_extend` 没加） | 抽成 `SHARED_BLOCKS = {dimensions, ui_exclusion, ref_format, json_only}`，`prompt_text` 组装时按 Prompt 声明拼接；Prompt 管理页显示拼接结果 |
 | 2 | **长 Prompt 规则密度高、无示例**：`requirement_extract` 3613 字、`generator` 2905 字、`analyst` 2553 字；「硬性」标记 6 处，优先级不清 | 3 条 | 低档模型（gpt-5.6-sol）执行力随长度下降，实测同片拆点数只有一半 | 规则分「必须 / 应当 / 可以」三级，每级 ≤ 7 条；每条关键规则配一对正反例（已拆 vs 合写、原文 vs 改写）；结尾固定一段「输出前自检」（analyst 已有，其余补） |
-| 3 | **生成每模块一次调用都带整份需求**：7.6 万字 × 111 模块 ≈ 850 万输入 token / 任务 | `generator` | 成本与噪音；模型在整份需求里找该模块的规则 | user 消息只带该模块所在页面的章节正文（`match_module` 已能定位）+ 确认结论里对到该模块的条目 + 画像；定位不到再退回整份 |
+| 3 | **生成每模块一次调用都带整份需求**（已落地，见上）：7.6 万字 × 111 模块 ≈ 850 万输入 token / 任务，评审每轮再带一遍 | `generator` / `reviewer` | 成本与噪音；模型在整份需求里找该模块的规则 | user 消息只带该模块所在页面的章节正文（`match_module` 已能定位）+ 确认结论里对到该模块的条目 + 画像；定位不到再退回整份 |
 | 4 | **P0 泛滥**：规则 5「每个主要功能模块必须有 1-2 条 P0」在 111 个模块的任务里出 100+ 条 P0 | `generator` | 冒烟集失去意义 | P0 只给页面级模块（模块名两段以内）；或任务级重估（见 G7），P0 ≤ 用例总数 10% |
 | 5 | **评审与查漏重叠查「遗漏」**：`reviewer` 看单模块用例 + 整份需求，容易把别的模块的规则报成 missing | `reviewer` | 评审不收敛、误打回 | reviewer 的 missing 限定「本模块测试点 ref 指向的需求点」，别的模块不报 |
 | 6 | **模型档位只有评审可单配**：大纲、查重、盲区复核、提取补漏、分析裁判是判定型任务，却都用任务主模型 | 6 条 | 贵模型做便宜活 | 按 Prompt key 配档位（`TIANGONG_MODEL_TIER_{KEY}`）：判定型 → gpt-5.4 / nano；创作型 → 主模型 |

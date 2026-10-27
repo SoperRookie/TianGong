@@ -140,8 +140,36 @@ def get_engine():
     import app.audit  # noqa: F401  — 注册 audit_log 表
     import app.llm.calllog  # noqa: F401  — 注册 ai_calls 表后再建表
     metadata.create_all(engine)
+    ensure_columns(engine)
     logger.info("数据库已连接：{}", engine.url.render_as_string(hide_password=True))
     return engine
+
+
+def ensure_columns(engine) -> list[str]:
+    """已有库补新列：`create_all` 只建缺的表不加列，登记表里有、库里没有的列用 ALTER TABLE ADD COLUMN 补上（带 NOT NULL 与
+    标量默认值，老行按默认值填）。返回补了哪些「表.列」。"""
+    from sqlalchemy import inspect, text
+
+    added: list[str] = []
+    insp = inspect(engine)
+    for table in metadata.sorted_tables:
+        if not insp.has_table(table.name):
+            continue
+        have = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in have:
+                continue
+            ddl = f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col.type.compile(engine.dialect)}"
+            default = col.default.arg if col.default is not None and not callable(col.default.arg) else None
+            if default is not None:
+                ddl += " DEFAULT " + (str(default) if isinstance(default, (int, float)) else "'" + str(default).replace("'", "''") + "'")
+            if not col.nullable:
+                ddl += " NOT NULL"
+            with engine.begin() as conn:
+                conn.execute(text(ddl))
+            added.append(f"{table.name}.{col.name}")
+            logger.info("数据库补列：{}.{}", table.name, col.name)
+    return added
 
 
 def reset_engine_cache() -> None:

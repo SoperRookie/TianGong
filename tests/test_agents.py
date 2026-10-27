@@ -564,3 +564,59 @@ async def test_直接生成模式也走经验延伸_延伸点进同一模块一�
     assert [t["agent"] for t in result.trace][:2] == ["需求分析", "经验延伸"]
     gen_user = llm.calls[2]["messages"][1]["content"]
     assert "登录请求发出后断网再恢复" in gen_user and "弱网下请求重发" in gen_user
+
+
+async def test_多模块生成只带本模块所在章节_评审需求原文在前可缓存_关掉恢复整篇(monkeypatch):
+    """线上 7.6 万字需求 × 111 模块：每个模块的生成与每轮评审都带整份需求，同一份需求被送几百遍。"""
+    import app.agents.quality as Q
+    from app.config import get_settings
+    from app.llm.calllog import record_call
+    from app.llm.client import ChatResult
+    from app.llm.schemas import UsageInfo
+    from app.prompts import prompt_text
+    from tests.test_quality_loop import _整理稿_for_gap
+
+    monkeypatch.setattr(Q, "GAP_BATCH_CHARS", 1500)
+    req = _整理稿_for_gap()
+    points = [
+        {"module": "需求说明-创建活动", "points": [{"tp_id": "TP001", "point": "活动名称必填", "ref": "1.1 创建活动 › 名称"}]},
+        {"module": "活动运营后台-派奖查询", "points": [{"tp_id": "TP003", "point": "待派可查", "ref": "2.2.1 派奖查询 › 状态"}]},
+    ]
+
+    class Routing:
+        def __init__(self):
+            self.calls: list[list[dict]] = []
+
+        async def chat(self, messages, model=None, **kw):
+            self.calls.append(messages)
+            system, user = messages[0]["content"], messages[-1]["content"]
+            if system.startswith(prompt_text("reviewer")[:60]):
+                content = review_reply(True)
+            else:
+                module = "需求说明-创建活动" if "TP001" in user else "活动运营后台-派奖查询"
+                content = generator_reply(make_case(case_id=f"TC-{module}-001", module=module, title=module))
+            result = ChatResult(content=content, model_name="stub", provider="stub", usage=UsageInfo(), elapsed_ms=1)
+            record_call(messages, result)
+            return result
+
+    llm = Routing()
+    result = await run_generation(req, llm=llm, test_points=points)
+    assert result.passed and {c.module for c in result.cases} == {"需求说明-创建活动", "活动运营后台-派奖查询"}
+    gens = [m[-1]["content"] for m in llm.calls if not m[0]["content"].startswith(prompt_text("reviewer")[:60])]
+    revs = [m[-1]["content"] for m in llm.calls if m[0]["content"].startswith(prompt_text("reviewer")[:60])]
+    assert len(gens) == 2 and len(revs) == 2
+    a = next(u for u in gens if "TP001" in u)
+    b = next(u for u in gens if "TP003" in u)
+    # 各自只带所在章节：创建活动那片没有派奖查询章节，反之亦然；标签注明只含本模块章节
+    assert "### 1.1 创建活动" in a and "#### 2.2.1 派奖查询" not in a and "只含本模块所在章节" in a
+    assert "#### 2.2.1 派奖查询" in b and "### 1.1 创建活动" not in b
+    assert len(a) < len(req) and len(b) < len(req)
+    # 评审：需求原文在 user 消息最前，评审范围与轮次在后（各轮共享前缀命中缓存）
+    r = revs[0]
+    assert r.startswith("需求内容（只含本模块所在章节的原文") and r.index("本次评审范围仅限模块") > r.index("需求原文")
+    # 关掉配置：两个模块都带整篇，不加注明
+    monkeypatch.setattr(get_settings(), "generation_module_scope", False)
+    llm = Routing()
+    await run_generation(req, llm=llm, test_points=points)
+    gens = [m[-1]["content"] for m in llm.calls if not m[0]["content"].startswith(prompt_text("reviewer")[:60])]
+    assert all("### 1.1 创建活动" in u and "#### 2.2.1 派奖查询" in u and "只含本模块所在章节" not in u for u in gens)
