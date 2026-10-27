@@ -4815,6 +4815,116 @@ async def adopt_plan_triage(request: Request, plan_id: str, run_id: str, item_id
     return {"item_id": item_id, "result": r}
 
 
+class ReportBody(BaseModel):
+    model: str | None = None
+
+
+def _report_inputs(app, plan: dict, run: dict) -> tuple[dict, dict, list[dict], list[dict]]:
+    """测试报告的输入：范围（计划 / 周期 / 需求标题 / 模块）、程序统计的执行数据（总体 / 按模块 / 按优先级，含未执行）、
+    失败与阻塞清单（带 AI 归因与缺陷单摘要）、计划内用例所属需求上未关闭的待确认事项（编号 Q1…）。"""
+    from app.plans import run_summary
+
+    results = run.get("results") or {}
+
+    def _bucket() -> dict:
+        return {"total": 0, **{k: 0 for k in EXEC_STATUSES}, "not_executed": 0}
+
+    def _count(b: dict, item: dict) -> None:
+        b["total"] += 1
+        st = (results.get(item["item_id"]) or {}).get("status")
+        b[st if st in EXEC_STATUSES else "not_executed"] += 1
+
+    overall = _bucket()
+    by_mod: dict[str, dict] = {}
+    by_prio: dict[str, dict] = {}
+    for it in plan["items"]:
+        _count(overall, it)
+        _count(by_mod.setdefault(it.get("module") or "", _bucket()), it)
+        _count(by_prio.setdefault(it.get("priority") or "", _bucket()), it)
+    stats = {**overall, "executed": overall["total"] - overall["not_executed"], "pass_rate": run_summary(plan, run).get("pass_rate"),
+             "by_module": [{"module": m, **b} for m, b in sorted(by_mod.items())],
+             "by_priority": [{"priority": p, **b} for p, b in sorted(by_prio.items())]}
+    failures: list[dict] = []
+    for it in plan["items"]:
+        r = results.get(it["item_id"]) or {}
+        if r.get("status") not in ("fail", "blocked"):
+            continue
+        t = r.get("triage") or {}
+        failures.append({"ref": it.get("case_id", ""), "title": it.get("title", ""), "module": it.get("module", ""), "priority": it.get("priority", ""),
+                         "status": r["status"], "reason": r.get("reason", ""), "note": r.get("note", ""), "retests": len(r.get("history") or []),
+                         "triage": {"category": t.get("category", ""), "sub": t.get("sub", ""), "confidence": t.get("confidence", ""),
+                                    "suggested_reason": t.get("suggested_reason", ""), "adopted": bool(t.get("adopted"))} if t else None,
+                         "bug": {"title": t["bug"].get("title", ""), "severity": t["bug"].get("severity", "")} if t.get("bug") else None})
+    req_ids: list[str] = []
+    sources: list[str] = []
+    for tid in dict.fromkeys(i["task_id"] for i in plan["items"]):
+        rec = app.state.tasks.get(tid)
+        if rec is None:
+            continue
+        sources += [s for s in (rec.sources or []) if s]
+        ctx = rec.context or {}
+        req_ids += [x for x in (ctx.get("requirement_ids") or [ctx.get("requirement_id")]) if x]
+    requirements: list[dict] = []
+    questions: list[dict] = []
+    for req_id in dict.fromkeys(req_ids):
+        item = app.state.requirements.get(req_id)
+        if not item:
+            continue
+        requirements.append({"title": item.get("title", ""), "status": item.get("status", "")})
+        for q in app.state.requirements.open_questions(item):
+            questions.append({"ref": f"Q{len(questions) + 1}", "q_id": q.get("q_id"), "level": "必须确认" if (q.get("level") or "must") == "must" else "建议确认",
+                              "module": q.get("module", ""), "question": q.get("question", ""), "requirement": item.get("title", ""),
+                              **({"assumption": q["assumption"]} if q.get("assumption") else {})})
+    scope = {"plan": plan.get("name", ""), "project": plan.get("project", ""), "owner": plan.get("owner", ""),
+             "period": f"{plan.get('start_date') or '—'} ～ {plan.get('end_date') or '—'}", "run_name": run.get("name", ""),
+             "round": next((i for i, r in enumerate(plan["runs"], 1) if r["run_id"] == run["run_id"]), len(plan["runs"])),
+             "started_at": run.get("started_at"), "finished": bool(run.get("finished_at")),
+             "requirements": requirements, "sources": list(dict.fromkeys(sources))[:10], "modules": [m for m in sorted(by_mod) if m]}
+    return scope, stats, failures, questions
+
+
+@router.post("/api/v1/plans/{plan_id}/runs/{run_id}/report")
+async def plan_run_report(request: Request, plan_id: str, run_id: str, body: ReportBody | None = None) -> dict:
+    """测试报告总结（Prompt test_report）：范围 + 程序统计的执行数据 + 失败与阻塞清单（带归因 / 缺陷单）+ 未关闭待确认事项 → 结论
+    （可发布 / 有条件发布 / 不可发布）、摘要、风险、遗留、建议与整份 markdown；结论与数据对不上由程序校正（adjusted）。轮次没结束也能出阶段性报告。
+    结果存 run.report（重新生成覆盖），`GET .../report.md` 下载。"""
+    from app.agents.quality import run_test_report
+
+    plan = _plan(request, plan_id, "exec.run")
+    run = _plan_run(plan, run_id)
+    if not any(r.get("status") in EXEC_STATUSES for r in (run.get("results") or {}).values()):
+        raise HTTPException(status_code=409, detail="本轮还没有执行记录，无从总结")
+    _ai_ctx(request, project=plan.get("project"), purpose="测试报告")
+    scope, stats, failures, questions = _report_inputs(request.app, plan, run)
+    try:
+        out = await run_test_report(request.app.state.llm, scope, stats, failures, questions, body.model if body else None)
+    except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    report = {**out, "model": out.pop("model_name", None), "stats": stats, "failures": len(failures), "open_questions": len(questions),
+              "interim": not run.get("finished_at"), "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    run["report"] = report
+    request.app.state.plans.save(plan)
+    request.state.audit_detail = f"{run['name']}：{report['conclusion']}" + ("（程序校正）" if report["adjusted"] else "")
+    return {"plan_id": plan_id, "run_id": run_id, **report}
+
+
+@router.get("/api/v1/plans/{plan_id}/runs/{run_id}/report.md")
+async def plan_run_report_md(request: Request, plan_id: str, run_id: str):
+    """下载本轮测试报告 markdown。"""
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    plan = _plan(request, plan_id, "exec.view")
+    run = _plan_run(plan, run_id)
+    rep = run.get("report")
+    if not rep:
+        raise HTTPException(status_code=404, detail="本轮还没有生成测试报告")
+    name = f"测试报告_{plan.get('name', '')}_{run.get('name', '')}.md"
+    return Response(content=rep.get("markdown", ""), media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
+
+
 @router.post("/api/v1/plans/{plan_id}/runs/{run_id}/attachments")
 async def upload_plan_attachment(
     request: Request, plan_id: str, run_id: str,

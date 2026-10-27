@@ -1506,6 +1506,16 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
   </div>
 </dialog>
 
+<dialog id="planReportDlg" style="width:860px;max-width:96vw">
+  <div class="dlg-h"><h3 id="prTitle">测试报告</h3><span class="meta" id="prMeta"></span></div>
+  <div class="dlg-b" id="prBody" style="max-height:70vh;overflow:auto"></div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('planReportDlg').close()">关闭</button>
+    <button class="btn ghost" onclick="planReportCopy()">复制 markdown</button>
+    <button class="btn" onclick="planReportDownload()">下载 .md</button>
+  </div>
+</dialog>
+
 <dialog id="planCaseDlg" style="width:860px;max-width:96vw">
   <div class="dlg-h"><h3>加入用例（加入即快照定格）</h3></div>
   <div class="dlg-b">
@@ -4551,6 +4561,8 @@ async function _renderPlanDetail__impl() {
       </select>` : ''}
       ${run ? `<button class="btn ghost sm" title="不关联具体用例的整轮附件；关联用例请用表格行内的回形针按钮" onclick="planPickAtt(null)">＋ 整轮附件</button>` : ''}
       ${run && can(p.project,'exec.run') && Object.values(results).some(r => r.status === 'fail') ? `<button class="btn ghost sm" onclick="planTriage(null)" title="本轮全部失败用例逐条 AI 归因（每条一次调用，关联截图先走图片理解）">AI 归因（失败 ${Object.values(results).filter(r => r.status === 'fail').length}）</button>` : ''}
+      ${run && run.summary.executed && can(p.project,'exec.run') ? `<button class="btn ghost sm" onclick="planReport()" title="范围 + 程序统计的执行数据 + 失败与阻塞清单（带归因 / 缺陷单）+ 未关闭待确认事项 → 结论（可发布 / 有条件发布 / 不可发布）、风险、遗留、建议与整份报告；结论与数据对不上由程序校正${active ? '；本轮未结束出的是阶段性报告' : ''}">${run.report ? '重新生成报告' : '生成报告'}</button>` : ''}
+      ${run && run.report ? `<button class="btn ghost sm" onclick="openPlanReport()">查看报告</button>` : ''}
       ${active ? `<button class="btn ghost sm" onclick="planFinishRun()">结束本轮</button>` : ''}
       ${editable ? `<button class="btn sm" onclick="planNewRun()">＋ 新建执行轮次</button>` : ''}
     </div></div>
@@ -4562,6 +4574,7 @@ async function _renderPlanDetail__impl() {
         <span><i style="background:var(--s-pend)"></i>跳过 <b>${run.summary.skipped}</b></span>
         <span style="margin-left:auto">进度 <b>${run.summary.executed}/${run.summary.total}</b>${run.summary.pass_rate != null ? ` · 通过率 <b>${(run.summary.pass_rate*100).toFixed(1)}%</b>` : ''} · 执行人在上方表格逐条记录</span>
       </div>` : '<div class="empty">尚未开始执行。加入用例并分配后，点击「＋ 新建执行轮次」</div>'}
+      ${run && run.report ? `<div class="hint" style="margin-top:6px">测试报告：<span class="st ${REPORT_CLS[run.report.conclusion] || 'pending'}">${esc(run.report.conclusion)}</span> ${esc(run.report.verdict_basis || '')}${run.report.interim ? '（阶段性）' : ''} · ${esc(run.report.by || '')} ${esc(fmtTime(run.report.at))} · <a onclick="openPlanReport()">查看</a></div>` : ''}
       ${atts.length ? `<div class="section-t">本轮附件</div><div class="tbl-wrap" style="margin-top:4px"><table>
         <tr><th>文件</th><th style="width:70px">类型</th><th style="width:90px">大小</th><th style="width:110px">关联用例</th><th style="width:200px">上传人 / 时间</th></tr>
         ${attRows}</table></div>` : ''}
@@ -4648,6 +4661,37 @@ async function psAdd() {
     toast(`已加入 ${added} 条`, 'ok');
     $('planSelectDlg').close(); renderPlanDetail();
   } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ---- 测试报告：数字程序统计、结论 / 风险 / 遗留 / 建议模型写、结论与数据对不上程序校正；轮次没结束也能出阶段性报告 ---- */
+const REPORT_CLS = {'可发布': 'approved', '有条件发布': 'candidate', '不可发布': 'rejected'};
+async function planReport() {
+  const run = curPlanRun(_planDetail); if (!run) return;
+  if (run.report && !await uiConfirm('重新生成报告', `本轮已有 ${fmtTime(run.report.at)} 生成的报告（${run.report.conclusion}），重新生成会覆盖它。继续？`)) return;
+  toast(run.finished_at ? 'AI 生成测试报告中…' : 'AI 生成阶段性报告中（本轮未结束，未执行的会写进风险）…');
+  try {
+    await jpost(`/api/v1/plans/${curPlan}/runs/${run.run_id}/report`, {});
+    await renderPlanDetail();
+    openPlanReport();
+  } catch (e) { toast('生成报告失败：' + e.message, 'err'); }
+}
+function openPlanReport() {
+  const run = curPlanRun(_planDetail); const r = run && run.report; if (!r) return;
+  $('prTitle').textContent = `测试报告 · ${run.name}${r.interim ? '（阶段性）' : ''}`;
+  $('prMeta').innerHTML = `<span class="st ${REPORT_CLS[r.conclusion] || 'pending'}">${esc(r.conclusion)}</span> ${esc(r.verdict_basis || '')} · ${esc(r.by || '')} ${esc(fmtTime(r.at))}${r.model ? ` · ${esc(r.model)}` : ''}`;
+  $('prBody').innerHTML = (r.adjusted && r.adjusted.length ? `<div class="hint" style="color:var(--warn);margin-bottom:8px">程序按数据校正：${r.adjusted.map(esc).join('；')}</div>` : '') + mdLite(r.markdown || '');
+  $('planReportDlg').showModal();
+}
+function planReportDownload() {
+  const run = curPlanRun(_planDetail); if (!run || !run.report) return;
+  const blob = new Blob([run.report.markdown || ''], {type: 'text/markdown;charset=utf-8'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `测试报告_${_planDetail.name}_${run.name}.md`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+async function planReportCopy() {
+  const run = curPlanRun(_planDetail); if (!run || !run.report) return;
+  try { await navigator.clipboard.writeText(run.report.markdown || ''); toast('报告 markdown 已复制', 'ok'); }
+  catch (e) { await uiConfirm('报告（复制失败，请手动选取）', run.report.markdown || ''); }
 }
 
 /* ---- 加入用例（快照） ---- */
