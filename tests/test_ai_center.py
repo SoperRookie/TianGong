@@ -127,7 +127,8 @@ async def test_用量统计_按单价折算费用与月预算余额(client):
     )
     msgs = [{"role": "user", "content": "hi"}]
     record_call(msgs, ChatResult(content="ok", model_name="paid", provider="openai", elapsed_ms=1,
-                                 usage=UsageInfo(prompt_tokens=1_000_000, completion_tokens=100_000, total_tokens=1_100_000)))
+                                 usage=UsageInfo(prompt_tokens=1_000_000, completion_tokens=100_000, total_tokens=1_100_000,
+                                                 cached_tokens=600_000, reasoning_tokens=40_000)))
     record_call(msgs, ChatResult(content="ok", model_name="free", provider="ollama", elapsed_ms=1,
                                  usage=UsageInfo(prompt_tokens=5000, completion_tokens=5000, total_tokens=10000)))
     from app.db import wait_persist
@@ -135,6 +136,9 @@ async def test_用量统计_按单价折算费用与月预算余额(client):
     d = (await client.get("/api/v1/ai/stats?days=0")).json()
     paid = next(m for m in d["by_model"] if m["model"] == "paid")
     assert paid["prompt_tokens"] == 1_000_000 and paid["completion_tokens"] == 100_000
+    assert paid["cached_tokens"] == 600_000 and paid["reasoning_tokens"] == 40_000   # 缓存命中 / 推理 token 单独可见
+    item = next(c for c in (await client.get("/api/v1/ai/calls")).json()["items"] if c["model"] == "paid")
+    assert item["cached_tokens"] == 600_000 and item["reasoning_tokens"] == 40_000
     assert paid["cost_usd"] == 3.0 and paid["priced"]          # 1M×$2 + 0.1M×$10
     assert d["cost_usd"] == 3.0 and d["unpriced_models"] == ["free"]
     assert d["budget"]["monthly_budget_usd"] == 100 and d["budget"]["spent_usd"] == 3.0 and d["budget"]["remaining_usd"] == 97.0

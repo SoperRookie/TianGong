@@ -469,6 +469,11 @@ def apply_extensions(modules: list[dict], additions: list[dict]) -> int:
     return n
 
 
+def _scope_note(state: dict) -> str:
+    """生成 / 评审只带本模块所在章节时在需求标签上注明，模型不把别的章节的规则当遗漏、也不去整份里找。"""
+    return "（只含本模块所在章节的原文，其它章节由其他实例负责）" if state.get("requirement_scope") == "module" else ""
+
+
 def build_graph(
     llm: LLMClient,
     template: CustomTemplate | None = None,
@@ -503,7 +508,7 @@ def build_graph(
             action = "定点修正"
         else:
             user = (
-                f"需求内容：\n{wrap_data('需求原文', state['requirement'])}\n\n"
+                f"需求内容{_scope_note(state)}：\n{wrap_data('需求原文', state['requirement'])}\n\n"
                 f"测试点拆解结果：\n{wrap_data('测试点', _dump(state['test_points']))}\n\n"
                 "请为上述全部测试点生成详细测试用例。"
             )
@@ -559,6 +564,8 @@ def build_graph(
         if knowledge_cases:
             # 历史用例注入评审 Agent 辅助覆盖度把关（PRD：用例库进评审与拆解，不进生成）
             prior += prompt_text("knowledge_cases_block").format(knowledge=wrap_data("历史用例知识", knowledge_cases))
+        # 需求原文放在 user 消息最前：各轮评审（以及带整篇时各模块）共享「系统 Prompt + 需求原文」前缀，命中模型侧的前缀缓存；
+        # 之前「本次评审范围仅限模块 X」「第 N 轮」在前面，每次调用前缀都不同，缓存全部失效
         data, result = await _chat_json(
             llm,
             [
@@ -566,8 +573,8 @@ def build_graph(
                 {
                     "role": "user",
                     "content": (
+                        f"需求内容{_scope_note(state)}：\n{wrap_data('需求原文', state['requirement'])}\n\n"
                         f"{scope_line}本次为第 {current_round} 轮评审。\n\n"
-                        f"需求内容：\n{wrap_data('需求原文', state['requirement'])}\n\n"
                         f"待评审用例：\n{wrap_data('待评审用例', _dump(state['cases']))}{prior}"
                     ),
                 },

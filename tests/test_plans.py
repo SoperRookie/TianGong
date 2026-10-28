@@ -619,3 +619,68 @@ async def test_AI挑选计划用例_只认候选id_冒烟兜底每模块P0_预�
     for c in cases:
         await client.post(f"/api/v1/plans/{pid}/cases", json={"task_id": task_id})
     assert (await client.post(f"/api/v1/plans/{pid}/select", json={"goal": "冒烟"})).status_code == 409
+
+
+# ---- 测试报告总结 ----
+
+
+async def test_测试报告_程序统计入参_结论按数据校正_编号只认输入_阶段性与下载(client):
+    cases = [make_case(case_id="TC-登录-001", priority="P0", title="登录主流程"),
+             make_case(case_id="TC-登录-002", priority="P2", title="密码错误提示"),
+             make_case(case_id="TC-下单-001", module="下单", priority="P0", title="下单主流程"),
+             make_case(case_id="TC-下单-002", module="下单", priority="P1", title="余额不足下单失败")]
+    task_id = await _task_with_approved(client, *cases)
+    # 任务挂到需求上，需求有一条未确认事项 → 报告带 Q1
+    req_id = (await client.post("/api/v1/requirements", data={"project": "P端", "title": "下单改版", "text": "下单 余额不足不允许下单"})).json()["req_id"]
+    app.state.requirements.add_question(req_id, "冻结金额算不算余额？", operator="admin", level="must", module="下单")
+    rec = app.state.tasks.get(task_id)
+    rec.context["requirement_id"] = req_id
+    app.state.tasks.save(rec)
+    plan = await _plan(client, name="回归计划", start_date="2026-10-20", end_date="2026-10-27")
+    pid = plan["plan_id"]
+    await client.post(f"/api/v1/plans/{pid}/cases", json={"task_id": task_id})
+    rid = (await client.post(f"/api/v1/plans/{pid}/runs", json={"name": "第一轮"})).json()["run_id"]
+    items = {i["case_id"]: i["item_id"] for i in (await client.get(f"/api/v1/plans/{pid}")).json()["items"]}
+    assert (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/report", json={})).status_code == 409   # 没有执行记录
+    assert (await client.get(f"/api/v1/plans/{pid}/runs/{rid}/report.md")).status_code == 404
+    await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results", json={"items": [
+        {"item_id": items["TC-登录-001"], "status": "pass"},
+        {"item_id": items["TC-下单-001"], "status": "fail", "note": "余额不足仍能下单", "reason": "系统缺陷"},
+        {"item_id": items["TC-下单-002"], "status": "blocked", "note": "沙箱不可用"}]})
+    # 模型说「可发布」但 P0 系统缺陷未关闭 → 程序校正为不可发布；清单外编号去掉、kind 枚举外按事项；when 枚举外按 must；空风险丢掉；阶段性报告
+    app.state.llm = StubLLM([json.dumps({"conclusion": "可发布", "verdict_basis": "都挺好", "summary": "本轮 4 条",
+        "risks": [{"text": "下单阻塞 1 条", "impact": "余额规则未验证"}, "  "],
+        "open_items": [{"ref": "TC-下单-001", "kind": "缺陷", "text": "余额不足仍能下单"}, {"ref": "TC-不存在", "kind": "怪", "text": "编造的"}, {"ref": "Q1", "kind": "事项", "text": "冻结金额口径"}],
+        "suggestions": [{"when": "必须", "text": "修复后复测"}, {"when": "later", "text": "补测阻塞"}],
+        "markdown": "# 测试报告：回归计划\n\n## 结论\n\n可发布"}, ensure_ascii=False)])
+    r = await client.post(f"/api/v1/plans/{pid}/runs/{rid}/report", json={})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["conclusion"] == "不可发布" and d["interim"] is True and any("TC-下单-001" in a and "不可发布" in a for a in d["adjusted"])
+    assert d["risks"] == [{"text": "下单阻塞 1 条", "impact": "余额规则未验证"}]
+    assert [(o["ref"], o["kind"]) for o in d["open_items"]] == [("TC-下单-001", "缺陷"), ("", "事项"), ("Q1", "事项")]
+    assert [s["when"] for s in d["suggestions"]] == ["must", "later"]
+    assert d["markdown"].startswith("# 测试报告：回归计划\n\n> 程序按数据校正") and "## 执行数据（程序统计）" in d["markdown"]
+    assert "| 总体 | 4 | 1 | 1 | 1 | 0 | 1 |" in d["markdown"]
+    assert d["stats"]["not_executed"] == 1 and d["stats"]["executed"] == 3 and d["failures"] == 2 and d["open_questions"] == 1 and d["model"] == "stub"
+    user = app.state.llm.calls[0]["messages"][-1]["content"]
+    assert "阶段性报告" in user and "| 模块 · 下单 | 2 | 0 | 1 | 1 | 0 | 0 |" in user and "| 优先级 · P0 | 2 | 1 | 1 | 0 | 0 | 0 |" in user
+    assert "冻结金额算不算余额" in user and '"ref": "Q1"' in user and "下单改版" in user and "余额不足仍能下单" in user and "沙箱不可用" in user
+    assert "2026-10-20 ～ 2026-10-27" in user
+    assert (await client.get(f"/api/v1/plans/{pid}")).json()["runs"][0]["report"]["conclusion"] == "不可发布"   # 报告存在轮次上
+    md = await client.get(f"/api/v1/plans/{pid}/runs/{rid}/report.md")
+    assert md.status_code == 200 and md.text.startswith("# 测试报告") and "filename*=UTF-8''" in md.headers["content-disposition"]
+    # 结束轮次后重新生成：失败分类改成用例问题 → P0 不算缺陷；还有阻塞 / 未执行 → 「可发布」校正为「有条件发布」；模型没给 markdown 用字段拼
+    await client.post(f"/api/v1/plans/{pid}/runs/{rid}/results", json={"items": [{"item_id": items["TC-下单-001"], "status": "fail", "note": "预期写错", "reason": "用例预期有误"}]})
+    await client.post(f"/api/v1/plans/{pid}/runs/{rid}/finish")
+    app.state.llm = StubLLM([json.dumps({"conclusion": "可发布", "summary": "s", "risks": ["阻塞 1 条"], "open_items": [], "suggestions": []}, ensure_ascii=False)])
+    d = (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/report", json={})).json()
+    assert d["conclusion"] == "有条件发布" and d["interim"] is False and d["risks"] == [{"text": "阻塞 1 条", "impact": ""}]
+    assert d["markdown"].startswith("# 测试报告：回归计划") and "## 执行数据" in d["markdown"] and "- 阻塞 1 条" in d["markdown"]
+    assert "本轮已结束" in app.state.llm.calls[0]["messages"][-1]["content"]
+    # 结论枚举外按有条件发布；模型 markdown 自带表格就不补；模型故障 502
+    app.state.llm = StubLLM([json.dumps({"conclusion": "大概行", "markdown": "# x\n\n|a|\n|---|\n|1|"})])
+    d = (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/report", json={})).json()
+    assert d["conclusion"] == "有条件发布" and d["adjusted"] and "## 执行数据（程序统计）" not in d["markdown"]
+    app.state.llm = StubLLM(["不是 JSON", "还不是"])
+    assert (await client.post(f"/api/v1/plans/{pid}/runs/{rid}/report", json={})).status_code == 502

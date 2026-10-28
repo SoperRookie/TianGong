@@ -50,6 +50,7 @@ flowchart LR
   CR -. 驳回 .-> CF[case_fix]
   CR -. 需求变更 .-> RD[requirement_diff → case_fix]
   CR --> PS[plan_case_select<br>AI 挑选] --> EX[计划执行] -. 失败 .-> TR[exec_triage<br>归因 + 缺陷单]
+  EX --> RPT[test_report<br>测试报告]
   CR --> L[learning<br>按项目提炼规则]
   L -. rules_block .-> GEN
   PRO[profile_extract] -. profile_block .-> P1
@@ -89,6 +90,7 @@ flowchart LR
 | `requirement_diff` | 需求变更分析 | 测试设计 · 需求变更分析 | `quality.run_requirement_diff` ← 任务「需求变更」 | 默认 | 599 |
 | `plan_case_select` | 测试计划用例挑选 | 测试执行 · 计划挑选 | `quality.run_plan_case_select` ← 计划页「AI 挑选」`POST /plans/{id}/select`；候选 = 本项目已通过、不在计划内的正式用例，按 300 条一批并行 | 默认 | 663 |
 | `exec_triage` | 执行失败归因与缺陷单 | 测试执行 · 失败归因 | `quality.run_exec_triage` ← 计划执行页「AI 归因」（行内单条 / 本轮全部失败）`POST /plans/{id}/runs/{rid}/triage`，每条一次调用并行；关联截图先走 `understand_image_bytes`（`EXEC_SHOT_PROMPT`，≤ 3 张） | 默认 | 1160 |
+| `test_report` | 测试报告总结 | 测试执行 · 测试报告 | `quality.run_test_report` ← 计划执行页「生成报告」`POST /plans/{id}/runs/{rid}/report`，一次调用；轮次没结束出阶段性报告；`GET .../report.md` 下载 | 默认 | 1488 |
 | `learning` | 修改习惯学习 | 学习规则 | `quality.run_learning_analysis` ← `POST /learning/analyze`，按项目分组各调一次 | 默认 | 671 |
 | `profile_extract` | 项目画像提炼 | 项目画像 | `app/agents/profile.py` `run_profile_extract`（自动 / 手动），草稿经管理员确认后生效 | 默认 | 711 |
 | `dependency_infer` | 依赖关系识别 | 知识库 · 依赖识别 | `routes.py` 知识库 → 依赖关系 → AI 识别，结果为草稿人工确认 | 默认 | 511 |
@@ -718,7 +720,7 @@ additions 不得提出 UI 检查类测试点（【共享:UI外观清单】等外
 - **阶段**：测试设计 · 用例生成
 - **调用位置**：`graph.py` `generate` 节点 ← `service._run_single`，按模块并行（每模块一次调用）
 - **推理强度 / 模型**：默认；任务模型
-- **输入**：需求原文（整份）+ 该模块测试点（tp_id / ref / basis）+ 需求与规则知识 + 画像 + 记忆 + 团队规则 + 模板字段规范 `template_spec`
+- **输入**：需求原文（配置 `generation_module_scope` 默认只带该模块所在章节，与查漏同一套定位；整篇不足一批、定位不到的带整篇）+ 该模块测试点（tp_id / ref / basis）+ 需求与规则知识 + 画像 + 记忆 + 团队规则 + 模板字段规范 `template_spec`
 - **输出与程序兜底**：`{cases:[{case_id, module, title, priority, precondition, steps:[{action, expected}], keywords, remark, extras, point_ids}]}`；`drop_ui_check_cases` 剔 UI 用例、`renumber_case_ids`、`rule_check` 校验优先级与编号；定点修正走 `fix_instruction` + `merge_fix`
 - **设计意图**：六种方法论；一个点几条用例的判定规则；人话表达；触发条件必须可构造；延伸点按 basis 写用例、remark 标「经验延伸：」。
 
@@ -800,7 +802,7 @@ additions 不得提出 UI 检查类测试点（【共享:UI外观清单】等外
 - **阶段**：测试设计 · 用例评审
 - **调用位置**：`graph.py` `review` 节点，≤ 3 轮回环，超限强制出稿标 unresolved
 - **推理强度 / 模型**：默认；`reviewer_model or model`
-- **输入**：需求 + 本模块用例 + 历史用例 / 缺陷知识 + 画像
+- **输入**：需求原文（放 user 消息最前，各轮共享前缀命中缓存；与生成同样只带本模块所在章节）+ 评审范围与轮次 + 本模块用例 + 上轮问题 + 历史用例 / 缺陷知识 + 画像
 - **输出与程序兜底**：`{passed, issues:[{case_id, problem}], missing:[...], suggestions:[...]}`；issues 与 missing 为空才通过
 - **设计意图**：区分阻断缺陷与建议避免评审不收敛；复审只核对上一轮问题；延伸用例不得以超出需求打回。
 
@@ -1023,6 +1025,36 @@ expected / actual 写具体值（actual 来自说明与截图，没有就写「�
 只输出 JSON：
 {"triage": {"category": "系统缺陷", "sub": "", "failed_step": 2, "confidence": "高", "reason": "预期与原文「扣费失败取消当日资格」一致，截图显示资格仍保留"},
  "bug": {"title": "盈利报名扣费失败后仍保留当日参赛资格", "severity": "严重", "precondition": "盈利报名用户，余额 0", "steps": ["进入报名页点击报名", "余额不足扣费失败"], "expected": "取消当日参赛资格，当日记录不计入月榜", "actual": "资格保留，记录计入月榜", "scope": "影响月榜派奖金额"}}
+```
+
+#### `test_report` · 测试报告总结
+
+- **kind**：system
+- **阶段**：测试执行 · 测试报告
+- **调用位置**：`quality.run_test_report` ← 计划执行页「生成报告」`POST /plans/{id}/runs/{rid}/report`，一次调用；轮次没结束出阶段性报告；`GET .../report.md` 下载
+- **推理强度 / 模型**：默认
+- **输入**：范围（计划 / 周期 / 需求标题 / 覆盖模块 / 来源文件）+ 程序统计的执行数据（`report_tables`：总体 / 按模块 / 按优先级的通过 / 失败 / 阻塞 / 跳过 / 未执行）+ 失败与阻塞清单（用例编号 / 优先级 / 失败分类 / 执行说明 / AI 归因与缺陷单摘要 / 复测次数）+ 计划内用例所属需求未关闭的待确认事项（Q1…）+ 画像
+- **输出与程序兜底**：`{conclusion: 可发布|有条件发布|不可发布, verdict_basis, summary, risks:[{text, impact}], open_items:[{ref, kind, text}], suggestions:[{when: must|later, text}], markdown}`；conclusion 枚举外按有条件发布；有 P0 失败且分类不是用例问题类必须不可发布、还有失败 / 阻塞 / 未执行不得可发布（校正记 `adjusted`，markdown 开头注明）；open_items 的 ref 只认输入里的用例编号 / 事项编号、kind 枚举外按事项；markdown 为空用字段拼、没表格补程序统计表；存 `run.report`
+- **设计意图**：结论必须有数据支撑、不写空话、不编造编号与数字；用例问题类失败不算缺陷；归因置信度低的写待确认。
+
+```text
+你是测试负责人，负责写本轮测试报告。本步策略：结论必须有数据支撑——每个判断都要能指到输入里的数字或编号；不写「基本符合预期」「整体质量良好」这类空话；不编造输入里没有的编号与数字。
+
+输入：范围（计划 / 周期 / 需求标题 / 覆盖模块）、执行统计（程序统计的总体、按模块、按优先级的通过 / 失败 / 阻塞 / 跳过 / 未执行，数字以此为准）、失败与阻塞清单（用例编号、优先级、失败分类、执行说明、AI 归因与缺陷单摘要）、未关闭的待确认事项（编号、等级、问题）。本轮可能还没结束（阶段性报告），输入会注明。
+输出：
+1. conclusion 三选一：可发布 / 有条件发布 / 不可发布。判据：P0 有系统缺陷未关闭或主流程不通 → 不可发布；P0 全部通过、P1 以下有缺陷或还有未执行 / 阻塞 / 未确认事项 → 有条件发布（条件写进 suggestions 的 must）；全部执行完且没有遗留缺陷 → 可发布。verdict_basis 一句话给判据（如「P0 12/12 通过，2 个一般缺陷待修复」）。
+2. summary：3～5 句——范围（需求 / 模块）、执行量与通过率、缺陷数按严重级、阻塞与未执行数。
+3. risks：没测到或测不了的各一条——阻塞的用例、未执行的模块、环境 / 数据依赖、待确认事项未定；impact 写对业务的影响，不写「存在一定风险」。
+4. open_items：未关闭的缺陷（系统缺陷类失败）、阻塞、待确认事项，每条带 ref（输入里的用例编号或事项编号）、kind（缺陷 / 阻塞 / 事项 / 用例待修）、text。
+5. suggestions：每条带 when（must = 发布前必须做 / later = 可延后）与 text；缺陷修复、复测、补测、事项确认分开写。
+6. markdown：以上内容排成一份可直接发出的报告——「# 测试报告：计划名」→「## 结论」→「## 执行数据」（照抄输入的统计表）→「## 失败与缺陷」（表格）→「## 风险」→「## 遗留事项」→「## 建议」；数字与编号必须和输入一致。
+用例问题类失败（用例步骤有误 / 用例预期有误）不算缺陷，遗留里 kind 写「用例待修」；归因置信度低的写「待确认」不下定论；跳过的用例不算通过也不算失败，写进执行数据即可。
+只输出 JSON：
+{"conclusion": "有条件发布", "verdict_basis": "P0 12/12 通过，P1 2 个一般缺陷待修复，1 条阻塞未执行", "summary": "本轮覆盖「登录」「下单」2 个模块共 36 条用例……",
+ "risks": [{"text": "「提现」模块 3 条阻塞（第三方沙箱不可用），提现到账规则本轮未验证", "impact": "上线后提现失败无法及时发现"}],
+ "open_items": [{"ref": "TC-下单-002", "kind": "缺陷", "text": "余额不足下单未拦截（严重）"}, {"ref": "Q1", "kind": "事项", "text": "锁定期间能否找回密码未确认"}],
+ "suggestions": [{"when": "must", "text": "修复 TC-下单-002 后复测「下单」模块 P0 / P1"}, {"when": "later", "text": "补测「提现」模块 3 条阻塞用例"}],
+ "markdown": "# 测试报告：……"}
 ```
 
 ### 五、沉淀与知识
@@ -1285,12 +1317,13 @@ expected / actual 写具体值（actual 来自说明与截图，没有就写「�
 ## 4. 横向评审：现有 Prompt 的共性问题
 
 > 2026-10-26 落地：1（共享片段 `shared_*`，kind=shared，`prompt_text` 展开）、4（P0 只给页面级主路径且 ≤ 10%）、5（reviewer 的 missing 限定本模块 ref 指向的需求点）、11（每条 Prompt 第一段「本步策略」）；9 只改了 `point_extend` 的 Prompt（「用户消息里若附有已确认的需求分析…优先出点」），user 消息还没把 risks / exception_flows 带进去。其余待排期。
+> 2026-10-27 落地 3：生成与评审只带本模块所在章节原文（`service._module_requirements` 复用查漏的 `_module_texts`，配置 `TIANGONG_GENERATION_MODULE_SCOPE` 默认开；整篇不足一批、模块定位不到或跨章节的仍带整篇；user 消息标「只含本模块所在章节的原文」）；顺带把 reviewer 的需求原文挪到 user 消息最前，各轮评审共享前缀命中模型侧缓存（之前「评审范围 / 第 N 轮」在前，每次前缀都不同），调用日志加记 `cached_tokens` / `reasoning_tokens`。与建议的差别：「确认结论里对到该模块的条目」没单独带——整理稿模式下确认结论已按模块回到对应章节分片。
 
 | # | 问题 | 涉及 | 影响 | 建议 |
 |---|---|---|---|---|
 | 1 | **共享片段各写一份**：10 个维度枚举、UI 外观排除清单、ref 格式「页面或章节 › 需求点」、「只输出 JSON」声明分别写在 `analyst` / `gap_check` / `point_extend` / `reviewer` / `generator` 里 | 5 条 | 改一处漏一处（这次加「流程图是规则」就改了两处，`point_extend` 没加） | 抽成 `SHARED_BLOCKS = {dimensions, ui_exclusion, ref_format, json_only}`，`prompt_text` 组装时按 Prompt 声明拼接；Prompt 管理页显示拼接结果 |
 | 2 | **长 Prompt 规则密度高、无示例**：`requirement_extract` 3613 字、`generator` 2905 字、`analyst` 2553 字；「硬性」标记 6 处，优先级不清 | 3 条 | 低档模型（gpt-5.6-sol）执行力随长度下降，实测同片拆点数只有一半 | 规则分「必须 / 应当 / 可以」三级，每级 ≤ 7 条；每条关键规则配一对正反例（已拆 vs 合写、原文 vs 改写）；结尾固定一段「输出前自检」（analyst 已有，其余补） |
-| 3 | **生成每模块一次调用都带整份需求**：7.6 万字 × 111 模块 ≈ 850 万输入 token / 任务 | `generator` | 成本与噪音；模型在整份需求里找该模块的规则 | user 消息只带该模块所在页面的章节正文（`match_module` 已能定位）+ 确认结论里对到该模块的条目 + 画像；定位不到再退回整份 |
+| 3 | **生成每模块一次调用都带整份需求**（已落地，见上）：7.6 万字 × 111 模块 ≈ 850 万输入 token / 任务，评审每轮再带一遍 | `generator` / `reviewer` | 成本与噪音；模型在整份需求里找该模块的规则 | user 消息只带该模块所在页面的章节正文（`match_module` 已能定位）+ 确认结论里对到该模块的条目 + 画像；定位不到再退回整份 |
 | 4 | **P0 泛滥**：规则 5「每个主要功能模块必须有 1-2 条 P0」在 111 个模块的任务里出 100+ 条 P0 | `generator` | 冒烟集失去意义 | P0 只给页面级模块（模块名两段以内）；或任务级重估（见 G7），P0 ≤ 用例总数 10% |
 | 5 | **评审与查漏重叠查「遗漏」**：`reviewer` 看单模块用例 + 整份需求，容易把别的模块的规则报成 missing | `reviewer` | 评审不收敛、误打回 | reviewer 的 missing 限定「本模块测试点 ref 指向的需求点」，别的模块不报 |
 | 6 | **模型档位只有评审可单配**：大纲、查重、盲区复核、提取补漏、分析裁判是判定型任务，却都用任务主模型 | 6 条 | 贵模型做便宜活 | 按 Prompt key 配档位（`TIANGONG_MODEL_TIER_{KEY}`）：判定型 → gpt-5.4 / nano；创作型 → 主模型 |
@@ -1310,12 +1343,12 @@ expected / actual 写具体值（actual 来自说明与截图，没有就写「�
 | G1 | `point_review` | 测试点独立评审 | P0 · **已落地** | 拆解 → 人工审核之间没有质量门禁，1483 条全靠人看 |
 | G2 | `case_dup_judge` | 用例语义查重裁判 | P0 · **已落地** | 用例只有文字相似候选，没有语义裁判；测试点有 `dup_judge` 用例没有 |
 | G3 | `point_supplement` | AI 补充测试点（完整版） | P0 · **已落地** | 现在默认文本 39 字，没有颗粒度 / ref / 不复述 / 不越界要求 |
-| G4 | `question_suggest` | 待确认事项推荐答案 | P1 | must 级事项没有推荐答案，需求负责人从零想 |
-| G5 | `plan_case_select` | 测试计划用例挑选 | P1 | 冒烟 / 回归 / 变更影响集靠人勾，用例上千条勾不动 |
-| G6 | `exec_triage` | 执行失败归因与缺陷单 | P1 | 失败分类靠人选，缺陷单靠人写；归因「用例问题」才进学习语料 |
+| G4 | `question_suggest` | 待确认事项推荐答案 | P1 · **已落地** | must 级事项没有推荐答案，需求负责人从零想 |
+| G5 | `plan_case_select` | 测试计划用例挑选 | P1 · **已落地** | 冒烟 / 回归 / 变更影响集靠人勾，用例上千条勾不动 |
+| G6 | `exec_triage` | 执行失败归因与缺陷单 | P1 · **已落地** | 失败分类靠人选，缺陷单靠人写；归因「用例问题」才进学习语料 |
 | G7 | `priority_rebalance` | 优先级任务级重估 | P1 | 每模块独立生成，P0 / P1 比例没人统筹 |
 | G8 | `case_reuse_rewrite` | 历史用例复用改写 | P2 | 复用提示只提示不改写，相似度 0.78 的历史用例要人手搬 |
-| G9 | `test_report` | 测试报告总结 | P2 | 计划执行完没有结论性文字 |
+| G9 | `test_report` | 测试报告总结 | P2 · **已落地** | 计划执行完没有结论性文字 |
 | G10 | `test_data_design` | 测试数据设计 | P2 | 用例里「造数」靠执行人临场想 |
 | G11 | `requirement_readiness` | 需求可测性门禁 | P2 | 分析出 37 条盲区也能直接发起设计，没有一句整体结论 |
 | G12 | `case_import_normalize` | 导入用例结构化清洗 | P2 | 外部 Excel 导入只按列名映射，步骤合在一格的拆不开 |
@@ -1521,6 +1554,8 @@ expected / actual 写具体值（actual 来自说明与截图，没有就写「�
 只引用输入里有的编号与数字，不编造。只输出 JSON。
 ```
 
+> 2026-10-27 已落地：`quality.run_test_report` + `POST /plans/{id}/runs/{rid}/report`（结果存 `run.report`，`GET .../report.md` 下载），计划执行页「生成报告」/「查看报告」弹窗（结论标签 + 校正说明 + markdown 渲染，复制 / 下载 .md）。与草案的差别：数字不让模型算——`report_tables` 程序统计总体 / 按模块 / 按优先级（含未执行）与失败阻塞清单（带归因 / 缺陷单摘要 / 复测次数）当输入，模型 markdown 没表格时程序补；结论由程序按数据校正——有 P0 失败且分类不是用例问题类必须「不可发布」、还有失败 / 阻塞 / 未执行不得「可发布」，校正原因记 `adjusted` 并写在 markdown 开头；多了 `verdict_basis`，risks 带 `impact`、open_items 带 `kind`（缺陷 / 阻塞 / 事项 / 用例待修）、suggestions 带 `when`（must / later）；open_items 的 ref 只认输入里的用例编号与事项编号（Q1…）；待确认事项取计划内用例所属任务的需求（`requirement_ids`）上未关闭的；轮次没结束也能出阶段性报告。
+
 ### G10 `test_data_design` 测试数据设计（P2）
 
 - **目的**：用例里「余额 0 的盈利报名用户」「同分并列的两名玩家」这类前置，执行时要临场造；按模块给一张数据设计表与造数说明。
@@ -1575,7 +1610,8 @@ blockers 每条写「哪个模块 › 哪条问题 › 不解决会怎样」。�
 
 > 2026-10-26：G1 / G2 / G3 已按下面第 2、3 步落地（`point_review` / `case_dup_judge` / `point_supplement` 完整版），实现与草案的差别：评审意见不进 `warnings` 而是单独的 `ai_review` 字段（`warnings` 在实体化时会被重算）；用例查重的忽略 / 重开复用测试点那套 `dup_report.resolved`。
 > 同日第二批：第 1 步（横向评审 1 / 4 / 5 / 11）与第 4 步 G4 落地，另加 G13 模块级组合延伸（`point_combine`）。
-> 同日第三批：第 5 步的 G6 执行归因（`exec_triage`）落地；第四批 G5 计划挑选（`plan_case_select`）落地；G9 报告待做。
+> 同日第三批：第 5 步的 G6 执行归因（`exec_triage`）落地；第四批 G5 计划挑选（`plan_case_select`）落地。
+> 2026-10-27 第五批：G9 测试报告（`test_report`）落地，第 5 步执行侧闭环补齐；剩 G7 / G8 / G10 / G11 / G12。
 
 1. **先做横向评审 1、11、5、4**（共享片段抽取、策略一句话、reviewer 限定本模块、P0 规则）：都是改 Prompt 文本与少量拼接代码，一次提交。
 2. **G3 补齐 `point_supplement`**：改默认文本即可。
