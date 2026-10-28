@@ -481,6 +481,10 @@ def dup_pair_entities(record, kind: str = "points") -> list[dict]:
     else:
         modules = (record.analysis or {}).get("test_points") or []
         alive = {p.get("tp_id") for _, p in iter_points(modules)}
+    if kind == "cases" and pairs and not all(p.get("a_uid") and p.get("b_uid") for p in pairs):
+        pairs = [dict(p) for p in pairs]   # 旧报告：显示时按当前编号临时补 uid（评审删除前会持久化补上）
+        _tmp = type("R", (), {"dup_report": {"cases": pairs}, "result": record.result})()
+        attach_dup_uids(_tmp)
     out: list[dict] = []
     for p in pairs:
         p = dict(p)
@@ -655,8 +659,17 @@ def case_duplicate_candidates(cases: list[dict], threshold: float = 0.6) -> list
 
     pairs: list[dict] = []
     grams = [_bigrams(_text(c)) for c in cases]
-    for i in range(len(cases)):
-        for j in range(i + 1, len(cases)):
+    # 按二元组数预筛：Jaccard ≥ t 要求两集合大小之比 ≥ t（|A∩B| ≤ min，|A∪B| ≥ max），
+    # 按大小排序后小集合只需与大小在 [t·|A|, |A|] 内的比较，上千条用例的 O(n²) 从秒级降到毫秒级
+    order = sorted(range(len(cases)), key=lambda k: len(grams[k]))
+    sizes = [len(grams[k]) for k in order]
+    for a in range(len(order)):
+        if not sizes[a]:
+            continue
+        for b in range(a - 1, -1, -1):
+            if sizes[b] < sizes[a] * threshold:
+                break
+            i, j = sorted((order[a], order[b]))
             score = _jaccard(grams[i], grams[j])
             if score >= threshold:
                 pairs.append({
@@ -668,6 +681,25 @@ def case_duplicate_candidates(cases: list[dict], threshold: float = 0.6) -> list
                 })
     pairs.sort(key=lambda x: -x["similarity"])
     return pairs
+
+
+def attach_dup_uids(record) -> int:
+    """给没带 uid 的用例查重报告（按编号记录的旧报告）按当前编号补上 a_uid / b_uid。
+    只在编号还没被重排（删除）前调用才准确：评审删除前先补，之后存活判断就认 uid 了。返回补上的对数。"""
+    report = record.dup_report or {}
+    pairs = report.get("cases") or []
+    if not pairs or all(p.get("a_uid") and p.get("b_uid") for p in pairs):
+        return 0
+    by_id = {str(c.get("case_id")): str(c.get("uid") or "") for c in ((record.result or {}).get("cases") or [])}
+    n = 0
+    for p in pairs:
+        if p.get("a_uid") and p.get("b_uid"):
+            continue
+        a_uid, b_uid = by_id.get(str(p.get("a"))), by_id.get(str(p.get("b")))
+        if a_uid and b_uid:
+            p["a_uid"], p["b_uid"] = a_uid, b_uid
+            n += 1
+    return n
 
 
 def new_uid() -> str:

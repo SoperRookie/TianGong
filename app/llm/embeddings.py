@@ -5,16 +5,19 @@
 
 import asyncio
 
+from loguru import logger
+
 import openai
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from app.llm.schemas import MissingAPIKeyError  # noqa: F401  复用密钥缺失异常语义
 
+# APITimeoutError 是 APIConnectionError 的子类，超时也重试
 _RETRYABLE = (openai.APIConnectionError, openai.RateLimitError, openai.InternalServerError)
 
-# 单次请求的批量上限：兼顾商用 API 的 batch 限制与内网服务吞吐
-_BATCH_SIZE = 32
+# 单次请求的批量上限：兼顾商用 API 的 batch 限制与内网服务吞吐；一批太大网关慢时整批超时重来
+_BATCH_SIZE = 16
 
 
 class EmbeddingConfig(BaseModel):
@@ -96,9 +99,9 @@ class EmbeddingRegistry:
 class EmbeddingClient:
     """批量向量化客户端：自动分批、暂时性错误重试。"""
 
-    def __init__(self, registry: EmbeddingRegistry, max_retries: int = 1):
+    def __init__(self, registry: EmbeddingRegistry, max_retries: int = 2):
         self.registry = registry
-        self.max_retries = max_retries
+        self.max_retries = max_retries   # 这里统一重试；SDK 自身不重试（之前 SDK 2 次 × 这里 1 次，一批超时能拖 6 分钟）
         self._clients: dict[str, AsyncOpenAI] = {}
 
     def _client_for(self, cfg: EmbeddingConfig) -> AsyncOpenAI:
@@ -107,6 +110,7 @@ class EmbeddingClient:
                 base_url=cfg.base_url,
                 api_key=cfg.resolve_api_key(),
                 timeout=cfg.timeout,
+                max_retries=0,
             )
         return self._clients[cfg.name]
 
@@ -144,5 +148,7 @@ class EmbeddingClient:
             except _RETRYABLE as e:
                 last_error = e
                 if attempt < self.max_retries:
-                    await asyncio.sleep(0.5 * (attempt + 1))
+                    logger.warning("Embedding 一批（{} 片）失败，{} 秒后重试（{}/{}）：{}", len(batch), attempt + 1,
+                                   attempt + 1, self.max_retries, e)
+                    await asyncio.sleep(1.0 * (attempt + 1))
         raise last_error

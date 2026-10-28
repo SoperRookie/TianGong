@@ -135,3 +135,40 @@ async def test_全链路模型不可用抛AllModelsFailedError():
     client._clients = {"primary": NotFoundOpenAI(), "backup": NotFoundOpenAI()}
     with pytest.raises(AllModelsFailedError):
         await client.chat([{"role": "user", "content": "hi"}])
+
+
+async def _no_sleep(_):
+    return None
+
+
+async def test_embedding_批16_超时重试2次后抛出_SDK不自行重试(monkeypatch):
+    from app.llm import embeddings as emb
+
+    registry = emb.EmbeddingRegistry(default_embedding="e", configs=[emb.EmbeddingConfig(
+        name="e", provider="openai", base_url="http://e", model="m", dimensions=2)])
+    client = emb.EmbeddingClient(registry)
+    calls = []
+
+    class _Emb:
+        async def create(self, model, input):
+            calls.append(len(input))
+            if len(calls) <= 2:
+                raise openai.APITimeoutError(request=httpx.Request("POST", "http://e"))
+            return SimpleNamespace(data=[SimpleNamespace(index=i, embedding=[1.0, 0.0]) for i in range(len(input))])
+    sdk = client._client_for(registry.get())
+    assert sdk.max_retries == 0
+    monkeypatch.setattr(sdk, "embeddings", _Emb())
+    monkeypatch.setattr(emb.asyncio, "sleep", _no_sleep)
+    vectors = await client.embed([f"t{i}" for i in range(20)])
+    assert len(vectors) == 20 and calls == [16, 16, 16, 4]        # 第一批超时 2 次后第 3 次成功；第二批 4 条
+    calls.clear()
+    monkeypatch.setattr(client, "max_retries", 1)
+
+    class _Dead:
+        async def create(self, model, input):
+            calls.append(len(input))
+            raise openai.APITimeoutError(request=httpx.Request("POST", "http://e"))
+    monkeypatch.setattr(sdk, "embeddings", _Dead())
+    with pytest.raises(openai.APITimeoutError):
+        await client.embed(["a"])
+    assert calls == [1, 1]

@@ -45,6 +45,7 @@ class TaskRecord(BaseModel):
     point_combine: dict | None = Field(default=None, description="模块级组合延伸摘要：{modules, added, skipped, failed, at}")
     coverage_notes: dict = Field(default_factory=dict)   # 维度 → 说明（如「查漏补充 12 条」）：矩阵合并后每格的来龙去脉
     dup_report: dict | None = Field(default=None, description="重复检查结果（需求十一~十三）：疑似重复对与人工处置")
+    quality_cache: dict | None = Field(default=None, description="质量摘要的查重缓存（全量候选对与各用例内容签名），不对外")
     point_compare: dict | None = Field(default=None, description="人工 vs AI 测试点对比报告：匹配对、人工独有、AI 独有与覆盖率")
     reuse_hints: list[dict] = Field(default_factory=list, description="历史用例复用提示（需求二十九）：高度相关的正式用例")
     requirement_diff: dict | None = Field(default=None, description="需求变更差异分析（需求四十~四十五）：变化类型与受影响资产")

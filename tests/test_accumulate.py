@@ -296,3 +296,66 @@ async def test_存量项目回溯沉淀_历史任务与需求补入知识库(cli
     assert "F" in {x["project"] for x in (await client.get("/api/v1/knowledge/backfill")).json()["items"]}
     actions = [x["action"] for x in (await client.get("/api/v1/audit?limit=50")).json()["items"]]
     assert "回溯沉淀历史知识" in actions and "回溯沉淀全部项目" in actions
+
+
+async def test_沉淀作业同来源合并与延迟_增量只算变化的切片(client, monkeypatch):
+    import asyncio
+
+    acc = app.state.accumulator
+    ran: list[str] = []
+
+    async def _job(tag):
+        ran.append(tag)
+    # 同 label 连续 3 次：在跑 / 在等的期间只记最新一次，总共跑 2 次（第一次 + 补跑最新）
+    monkeypatch.setattr(get_settings(), "knowledge_ingest_delay_seconds", 30.0)
+    acc.schedule("x:1", lambda: _job("a"), delay=30)
+    acc.schedule("x:1", lambda: _job("b"), delay=30)
+    acc.schedule("x:1", lambda: _job("c"), delay=30)
+    acc.schedule("x:2", lambda: _job("other"))
+    assert acc.pending("x:1") and len(acc.jobs) == 2
+    await asyncio.sleep(0)
+    assert ran == ["other"]                                   # 带延迟的还在等，不带延迟的已跑
+    await acc.drain()                                         # drain 立即放行延迟
+    assert ran == ["other", "c"] and not acc.pending("x:1")
+    # 在跑期间再来的：跑完补跑一次最新的
+    gate = asyncio.Event()
+
+    async def _slow(tag):
+        await gate.wait()
+        ran.append(tag)
+    ran.clear()
+    acc.schedule("y", lambda: _slow("first"))
+    await asyncio.sleep(0)
+    acc.schedule("y", lambda: _job("second"))
+    acc.schedule("y", lambda: _job("third"))
+    gate.set()
+    await acc.drain()
+    assert ran == ["first", "third"]
+
+    # 增量：评审通过两条沉淀后，再删一条只复用向量、一条都不新算；切片不带编号
+    await client.post("/api/v1/projects", json={"name": "B"})
+    cases = [make_case(), make_case(case_id="TC-登录-002", title="验证密码错误提示"), make_case(case_id="TC-登录-003", title="验证码错误提示")]
+    app.state.llm = StubLLM([ANALYST_REPLY, generator_reply(*cases), review_reply(True)])
+    task_id = (await client.post("/api/v1/tasks", data={"text": "登录 需求三", "project": "B"})).json()["task_id"]
+    await acc.drain()
+    emb = app.state.knowledge.embedder
+    emb.calls.clear()
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": c["case_id"], "action": "approve"} for c in cases]})
+    assert acc.pending(f"cases:{task_id}")
+    await acc.drain()
+    docs = [d for d in _docs("B") if d.category == "test_cases"]
+    assert len(docs) == 1 and docs[0].chunk_count == 3 and len(emb.calls) == 1 and len(emb.calls[0]) == 3
+    assert all("编号：" not in t for t in emb.calls[0])
+    emb.calls.clear()
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": "TC-登录-001", "action": "delete"}]})
+    await acc.drain()
+    docs = [d for d in _docs("B") if d.category == "test_cases"]
+    assert len(docs) == 1 and docs[0].chunk_count == 2 and emb.calls == []          # 删一条：全部复用，没调 embedding
+    texts = {h.text for h in app.state.knowledge.store.doc_chunks(docs[0].doc_id)}
+    assert any("验证密码错误提示" in t for t in texts) and not any("验证正确账号密码登录成功" in t for t in texts)
+    # 改一条：只算改的那条
+    cur = next(c for c in app.state.tasks.get(task_id).result["cases"] if c["title"] == "验证码错误提示")
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": cur["case_id"], "action": "modify",
+                      "case": {**cur, "title": "验证码错误提示文案", "base_version": cur.get("version", 1)}}]})
+    await acc.drain()
+    assert len(emb.calls) == 1 and len(emb.calls[0]) == 1 and "验证码错误提示文案" in emb.calls[0][0]
