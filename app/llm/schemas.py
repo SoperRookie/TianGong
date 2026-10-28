@@ -52,3 +52,5 @@ class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cached_tokens: int = 0       # 输入里命中前缀缓存的部分（OpenAI prompt_tokens_details.cached_tokens），已含在 prompt_tokens 里、按折扣计费
+    reasoning_tokens: int = 0    # 推理型模型的思考 token（completion_tokens_details.reasoning_tokens），已含在 completion_tokens 里、按输出计费

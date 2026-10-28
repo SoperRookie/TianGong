@@ -140,14 +140,19 @@ class LLMClient:
 
         usage = UsageInfo()
         if resp.usage:
+            pd = getattr(resp.usage, "prompt_tokens_details", None)
+            cd = getattr(resp.usage, "completion_tokens_details", None)
             usage = UsageInfo(
-                prompt_tokens=resp.usage.prompt_tokens,
-                completion_tokens=resp.usage.completion_tokens,
-                total_tokens=resp.usage.total_tokens,
+                prompt_tokens=resp.usage.prompt_tokens or 0,
+                completion_tokens=resp.usage.completion_tokens or 0,
+                total_tokens=resp.usage.total_tokens or 0,
+                cached_tokens=getattr(pd, "cached_tokens", 0) or 0,
+                reasoning_tokens=getattr(cd, "reasoning_tokens", 0) or 0,
             )
         logger.info(
-            "LLM 调用完成：{} {}ms tokens={}（输入 {} / 输出 {}）",
-            cfg.name, elapsed_ms, usage.total_tokens, usage.prompt_tokens, usage.completion_tokens,
+            "LLM 调用完成：{} {}ms tokens={}（输入 {}，其中缓存命中 {} / 输出 {}，其中推理 {}）",
+            cfg.name, elapsed_ms, usage.total_tokens, usage.prompt_tokens, usage.cached_tokens,
+            usage.completion_tokens, usage.reasoning_tokens,
         )
         if not resp.choices:
             raise openai.APIError("模型返回空 choices（可能被内容安全策略拦截）", request=None, body=None)

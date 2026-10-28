@@ -716,6 +716,134 @@ async def run_exec_triage(llm: LLMClient, case: dict, note: str, requirement: st
     return {"triage": triage, "bug": bug, "model_name": result.model_name}
 
 
+# ---- 测试报告总结（Prompt test_report）：数字由程序统计、结论 / 风险 / 遗留 / 建议由模型写、结论由程序按数据校验 ----
+
+
+REPORT_CONCLUSIONS = ("可发布", "有条件发布", "不可发布")
+REPORT_ITEM_KINDS = ("缺陷", "阻塞", "事项", "用例待修")
+_REPORT_KEYS = ("pass", "fail", "blocked", "skipped")
+
+
+def _pct(s: dict) -> str:
+    done = sum(int(s.get(k) or 0) for k in _REPORT_KEYS)
+    return f"{int(s.get('pass') or 0) / done * 100:.1f}%" if done else "—"
+
+
+def _cell(text) -> str:
+    return " ".join(str(text or "").split()).replace("|", "｜")[:80]
+
+
+def report_tables(stats: dict, failures: list[dict]) -> str:
+    """程序统计的数据表（总体 / 按模块 / 按优先级 + 失败与阻塞清单）：送模型当依据，模型 markdown 里没有表时也用它兜底。"""
+    def row(name: str, s: dict) -> str:
+        return (f"| {name} | {s.get('total', 0)} | {s.get('pass', 0)} | {s.get('fail', 0)} | {s.get('blocked', 0)} | {s.get('skipped', 0)} "
+                f"| {s.get('not_executed', 0)} | {_pct(s)} |")
+    lines = ["| 范围 | 用例数 | 通过 | 失败 | 阻塞 | 跳过 | 未执行 | 通过率 |", "|---|---|---|---|---|---|---|---|", row("总体", stats)]
+    lines += [row(f"模块 · {m.get('module') or '（未分模块）'}", m) for m in stats.get("by_module") or []]
+    lines += [row(f"优先级 · {m.get('priority') or '—'}", m) for m in stats.get("by_priority") or []]
+    out = "\n".join(lines)
+    if failures:
+        out += "\n\n| 用例 | 模块 | 优先级 | 状态 | 失败分类 | AI 归因 | 缺陷单 | 执行说明 |\n|---|---|---|---|---|---|---|---|"
+        for f in failures:
+            t = f.get("triage") or {}
+            tri = (f"{t.get('category', '')}{'·' + t['sub'] if t.get('sub') else ''}（置信度{t.get('confidence') or '中'}"
+                   f"{'，已采纳' if t.get('adopted') else ''}）") if t else "—"
+            b = f.get("bug") or {}
+            out += (f"\n| {f.get('ref', '')} | {_cell(f.get('module', ''))} | {f.get('priority', '')} | {'失败' if f.get('status') == 'fail' else '阻塞'} "
+                    f"| {f.get('reason') or '—'} | {tri} | {('【' + b.get('severity', '') + '】' + _cell(b.get('title', ''))) if b else '—'} | {_cell(f.get('note', ''))} |")
+    return out
+
+
+def _report_markdown(scope: dict, conclusion: str, basis: str, summary: str, risks: list[dict], open_items: list[dict],
+                     suggestions: list[dict], tables: str) -> str:
+    """模型没给 markdown 时用字段拼一份。"""
+    md = [f"# 测试报告：{scope.get('plan', '')}", "", f"轮次：{scope.get('run_name', '')}" + ("" if scope.get("finished") else "（阶段性）"), "",
+          "## 结论", "", f"**{conclusion}**" + (f"——{basis}" if basis else ""), ""]
+    if summary:
+        md += [summary, ""]
+    md += ["## 执行数据", "", tables, "", "## 风险", ""]
+    md += [f"- {r['text']}" + (f"（影响：{r['impact']}）" if r.get("impact") else "") for r in risks] or ["- 无"]
+    md += ["", "## 遗留事项", ""]
+    md += [f"- 【{o['kind']}】" + (f"{o['ref']} " if o.get("ref") else "") + o["text"] for o in open_items] or ["- 无"]
+    md += ["", "## 建议", ""]
+    md += [f"- {'发布前必须' if s['when'] == 'must' else '可延后'}：{s['text']}" for s in suggestions] or ["- 无"]
+    return "\n".join(md)
+
+
+async def run_test_report(llm: LLMClient, scope: dict, stats: dict, failures: list[dict], questions: list[dict],
+                          model: str | None = None) -> dict:
+    """测试报告：范围（计划 / 周期 / 需求标题 / 模块）+ 程序统计的执行数据（总体 / 模块 / 优先级，含未执行）+ 失败与阻塞清单（带归因与缺陷单摘要）
+    + 未关闭的待确认事项 → 一次调用。程序兜底：conclusion 枚举外按「有条件发布」；结论与数据对不上时程序校正——有 P0 失败且分类不是用例问题类
+    （系统缺陷 / 环境 / 数据 / 其他）必须「不可发布」、还有失败 / 阻塞 / 未执行时不得「可发布」，校正原因记在 adjusted；risks / suggestions 只认
+    带文字的条目、suggestions.when 枚举外按 must；open_items 的 ref 只认输入里有的编号（用例编号 / 事项编号），对不上的清空只留文字、kind 枚举外按事项；
+    markdown 为空用字段拼一份，没有表格的补程序统计表，结论被校正时在开头注明。返回 {conclusion, verdict_basis, summary, risks, open_items,
+    suggestions, markdown, adjusted, model_name}。"""
+    from app.plans import CASE_PROBLEM_REASONS
+
+    tables = report_tables(stats, failures)
+    head = (f"计划「{scope.get('plan', '')}」第 {scope.get('round') or 1} 轮「{scope.get('run_name', '')}」，"
+            + ("本轮已结束。" if scope.get("finished") else "本轮尚未结束——这是阶段性报告，未执行的用例要写进风险。"))
+    user = (head + "\n\n范围：\n" + wrap_data("范围", _dump(scope))
+            + "\n\n执行统计（程序统计，数字以此为准）：\n" + wrap_data("执行数据", tables)
+            + "\n\n失败与阻塞清单：\n" + wrap_data("失败清单", _dump(failures) if failures else "（没有失败与阻塞）")
+            + "\n\n未关闭的待确认事项：\n" + wrap_data("待确认事项", _dump(questions) if questions else "（没有）")
+            + "\n\n请写本轮测试报告。" + profile_block())
+    data, result = await _chat_json(llm, [{"role": "system", "content": prompt_text("test_report")},
+                                          {"role": "user", "content": user}], model)
+    data = data if isinstance(data, dict) else {}
+    adjusted: list[str] = []
+    conclusion = str(data.get("conclusion") or "").strip()
+    if conclusion not in REPORT_CONCLUSIONS:
+        adjusted.append(f"模型结论「{conclusion or '空'}」不在枚举内，按「有条件发布」")
+        conclusion = "有条件发布"
+    p0 = [f for f in failures if f.get("priority") == "P0" and f.get("status") == "fail" and (f.get("reason") or "") not in CASE_PROBLEM_REASONS]
+    pending = int(stats.get("fail") or 0) + int(stats.get("blocked") or 0) + int(stats.get("not_executed") or 0)
+    if p0 and conclusion != "不可发布":
+        adjusted.append(f"P0 用例 {'、'.join(f.get('ref') or '' for f in p0)} 失败且分类不是用例问题，结论由「{conclusion}」校正为「不可发布」")
+        conclusion = "不可发布"
+    elif pending and conclusion == "可发布":
+        adjusted.append(f"还有失败 {stats.get('fail', 0)} / 阻塞 {stats.get('blocked', 0)} / 未执行 {stats.get('not_executed', 0)} 条，结论由「可发布」校正为「有条件发布」")
+        conclusion = "有条件发布"
+
+    def _items(key: str, fields: tuple[str, ...]) -> list[dict]:
+        out: list[dict] = []
+        for it in (data.get(key) or []) if isinstance(data.get(key), list) else []:
+            if isinstance(it, str) and it.strip():
+                out.append({f: "" for f in fields} | {fields[0]: it.strip()})
+            elif isinstance(it, dict) and str(it.get(fields[0]) or "").strip():
+                out.append({f: str(it.get(f) or "").strip() for f in fields})
+        return out
+
+    risks = _items("risks", ("text", "impact"))
+    suggestions = [{**s, "when": s["when"] if s["when"] in ("must", "later") else "must"} for s in _items("suggestions", ("text", "when"))]
+    known = {str(f.get("ref") or "") for f in failures} | {str(q.get("ref") or "") for q in questions}
+    known.discard("")
+    open_items: list[dict] = []
+    bad_refs: list[str] = []
+    for it in _items("open_items", ("text", "ref", "kind")):
+        if it["ref"] and it["ref"] not in known:
+            bad_refs.append(it["ref"])
+            it["ref"] = ""
+        open_items.append({"ref": it["ref"], "kind": it["kind"] if it["kind"] in REPORT_ITEM_KINDS else "事项", "text": it["text"]})
+    if bad_refs:
+        adjusted.append(f"遗留事项引用了输入里没有的编号 {'、'.join(dict.fromkeys(bad_refs))}，已去掉编号只留文字")
+    basis = str(data.get("verdict_basis") or "").strip()
+    summary = str(data.get("summary") or "").strip()
+    md = str(data.get("markdown") or "").strip()
+    if not md:
+        md = _report_markdown(scope, conclusion, basis, summary, risks, open_items, suggestions, tables)
+    elif "|---" not in md and "| ---" not in md:
+        md += "\n\n## 执行数据（程序统计）\n\n" + tables
+    if adjusted:
+        note = "> 程序按数据校正：" + "；".join(adjusted) + f"。最终结论：**{conclusion}**"
+        lines = md.split("\n")
+        md = "\n".join([lines[0], "", note, *lines[1:]]) if lines and lines[0].startswith("# ") else note + "\n\n" + md
+    logger.info("测试报告（{}）：{}{}，风险 {} 条、遗留 {} 条、建议 {} 条", scope.get("plan", ""), conclusion,
+                f"（程序校正 {len(adjusted)} 处）" if adjusted else "", len(risks), len(open_items), len(suggestions))
+    return {"conclusion": conclusion, "verdict_basis": basis, "summary": summary, "risks": risks, "open_items": open_items,
+            "suggestions": suggestions, "markdown": md, "adjusted": adjusted, "model_name": result.model_name}
+
+
 # ---- 重复复核（需求十一~十三）----
 
 

@@ -46,6 +46,8 @@ ai_calls = Table(
     Column("elapsed_ms", Integer, nullable=False, default=0),
     Column("prompt_tokens", Integer, nullable=False, default=0),
     Column("completion_tokens", Integer, nullable=False, default=0),
+    Column("cached_tokens", Integer, nullable=False, default=0),      # 输入里命中前缀缓存的部分（含在 prompt_tokens 内）
+    Column("reasoning_tokens", Integer, nullable=False, default=0),   # 推理型模型的思考 token（含在 completion_tokens 内）
     Column("input_chars", Integer, nullable=False, default=0),
     Column("output_chars", Integer, nullable=False, default=0),
     Column("input_preview", Text().with_variant(LONGTEXT, "mysql"), nullable=False, default=""),
@@ -139,6 +141,8 @@ def record_call(messages: list[dict], result: Any = None, error: Exception | Non
             "elapsed_ms": getattr(result, "elapsed_ms", elapsed_ms) if result is not None else elapsed_ms,
             "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
             "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+            "cached_tokens": getattr(usage, "cached_tokens", 0) or 0,
+            "reasoning_tokens": getattr(usage, "reasoning_tokens", 0) or 0,
             "input_chars": len(text_in), "output_chars": len(content),
             "input_preview": _input_preview(messages), "output_preview": content[:PREVIEW_CHARS],
         }
@@ -242,7 +246,8 @@ def stats(since: str | None = None, visible: set[str] | None = None, project: st
     with get_engine().begin() as conn:
         by_model = conn.execute(
             select(ai_calls.c.model, func.count(), func.sum(ai_calls.c.prompt_tokens),
-                   func.sum(ai_calls.c.completion_tokens), func.sum(ai_calls.c.elapsed_ms))
+                   func.sum(ai_calls.c.completion_tokens), func.sum(ai_calls.c.elapsed_ms),
+                   func.sum(ai_calls.c.cached_tokens), func.sum(ai_calls.c.reasoning_tokens))
             .where(*conds).group_by(ai_calls.c.model)
         ).all()
         by_purpose = conn.execute(
@@ -257,7 +262,8 @@ def stats(since: str | None = None, visible: set[str] | None = None, project: st
             p["errors"] += n
     return {
         "by_model": [{"model": m, "calls": n, "prompt_tokens": int(pt or 0), "completion_tokens": int(ct or 0),
-                      "tokens": int(pt or 0) + int(ct or 0), "elapsed_ms": int(e or 0)} for m, n, pt, ct, e in by_model],
+                      "tokens": int(pt or 0) + int(ct or 0), "elapsed_ms": int(e or 0),
+                      "cached_tokens": int(ca or 0), "reasoning_tokens": int(rs or 0)} for m, n, pt, ct, e, ca, rs in by_model],
         "by_purpose": sorted(purposes.values(), key=lambda x: -x["calls"]),
     }
 

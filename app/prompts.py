@@ -71,6 +71,8 @@ PROMPT_DEFS: list[dict] = [
      "where": "计划页「AI 挑选」：按目标（冒烟 / 全量回归 / 变更影响回归 / 模块专项）、预算、变更摘要、重点模块从本项目正式用例里挑集合，草稿人勾选后加入"},
     {"key": "exec_triage", "name": "执行失败归因与缺陷单", "kind": "system", "default": P.EXEC_TRIAGE_SYSTEM,
      "where": "计划执行页「AI 归因」（单条 / 本轮全部失败）：用例 + 失败说明 + 截图理解 + 对应需求原文 → 五类归因（用例问题 / 系统缺陷 / 环境 / 数据 / 需求变更）+ 系统缺陷时起草缺陷单，人采纳分类才算"},
+    {"key": "test_report", "name": "测试报告总结", "kind": "system", "default": P.TEST_REPORT_SYSTEM,
+     "where": "计划执行页「生成报告」：范围 + 程序统计的执行数据（总体 / 模块 / 优先级）+ 失败与阻塞清单（带归因与缺陷单）+ 未关闭待确认事项 → 结论（可发布 / 有条件发布 / 不可发布）、摘要、风险、遗留、建议与整份 markdown；结论与数据对不上由程序校正"},
     {"key": "dependency_infer", "name": "依赖关系识别", "kind": "system", "default": P.DEPENDENCY_INFER_SYSTEM,
      "where": "知识库 → 依赖关系 → AI 识别（需求功能依赖 / 用例依赖链路）"},
     {"key": "vision_image", "name": "图片理解（Vision）", "kind": "user", "default": None,

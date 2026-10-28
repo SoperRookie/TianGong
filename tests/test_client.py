@@ -105,3 +105,27 @@ async def test_推理强度_只对配置了reasoning_effort的模型下发_阶�
     assert cap_r["reasoning_effort"] == "high"
     await client.chat([{"role": "user", "content": "hi"}], model="plain", reasoning_effort="high")
     assert "reasoning_effort" not in cap_p  # 未配置推理强度的模型：阶段覆盖也不下发
+
+
+async def test_用量记缓存命中与推理token(registry_with_vision):
+    """厂商返回 prompt_tokens_details.cached_tokens / completion_tokens_details.reasoning_tokens 时记下来；没返回按 0。"""
+    client = LLMClient(registry_with_vision)
+    captured: dict = {}
+    stub = _stub_openai(captured)
+
+    async def create(**params):
+        captured.update(params)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="好的"))],
+            usage=SimpleNamespace(prompt_tokens=1000, completion_tokens=500, total_tokens=1500,
+                                  prompt_tokens_details=SimpleNamespace(cached_tokens=800),
+                                  completion_tokens_details=SimpleNamespace(reasoning_tokens=300)),
+        )
+
+    stub.chat.completions.create = AsyncMock(side_effect=create)
+    client._clients["deepseek-chat"] = stub
+    result = await client.chat([{"role": "user", "content": "你好"}])
+    assert (result.usage.cached_tokens, result.usage.reasoning_tokens) == (800, 300)
+    client._clients["deepseek-chat"] = _stub_openai(captured)
+    result = await client.chat([{"role": "user", "content": "你好"}])
+    assert (result.usage.cached_tokens, result.usage.reasoning_tokens) == (0, 0)

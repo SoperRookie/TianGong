@@ -30,3 +30,24 @@ def test_无密码与_sqlite_原样返回():
     assert normalize_db_url("mysql+pymysql://root@127.0.0.1:3306/tiangong") == "mysql+pymysql://root@127.0.0.1:3306/tiangong"
     assert normalize_db_url("sqlite:///./x.db") == "sqlite:///./x.db"
     assert normalize_db_url("sqlite://") == "sqlite://"
+
+
+def test_已有库补列_按登记表加缺的列带默认值(tmp_path):
+    """create_all 只建表不加列：老库的 ai_calls 没有 cached_tokens / reasoning_tokens，启动时按登记表补上，老行按默认值填。"""
+    from sqlalchemy import create_engine, inspect, text
+
+    import app.llm.calllog  # noqa: F401  — 注册 ai_calls 表
+    from app.db import ensure_columns
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE ai_calls (id INTEGER PRIMARY KEY, at VARCHAR(32) NOT NULL, prompt_tokens INTEGER NOT NULL DEFAULT 0)"))
+        conn.execute(text("INSERT INTO ai_calls (at, prompt_tokens) VALUES ('2026-10-27', 12)"))
+    added = ensure_columns(engine)
+    assert "ai_calls.cached_tokens" in added and "ai_calls.reasoning_tokens" in added and "ai_calls.purpose" in added
+    cols = {c["name"] for c in inspect(engine).get_columns("ai_calls")}
+    assert {"cached_tokens", "reasoning_tokens", "completion_tokens", "purpose"} <= cols
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT prompt_tokens, cached_tokens, reasoning_tokens, purpose FROM ai_calls")).one()
+    assert tuple(row) == (12, 0, 0, "")
+    assert ensure_columns(engine) == []   # 再跑一次没有可补的
