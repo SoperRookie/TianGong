@@ -241,6 +241,24 @@ class KnowledgeStore:
                 break
         return sorted(hits, key=lambda h: h.chunk_index)
 
+    def doc_vectors(self, doc_id: str) -> dict[str, list[float]]:
+        """某篇文档的 {切片文本: 向量}（按来源替换时复用没变的切片向量）。"""
+        out: dict[str, list[float]] = {}
+        offset = None
+        while True:
+            points, offset = self._client.scroll(
+                collection_name=_COLLECTION,
+                scroll_filter=Filter(must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]),
+                limit=256, offset=offset, with_payload=True, with_vectors=True,
+            )
+            for p in points:
+                vec = p.vector if isinstance(p.vector, list) else None
+                if vec is not None:
+                    out[p.payload["text"]] = list(vec)
+            if offset is None:
+                break
+        return out
+
     def delete_doc(self, doc_id: str) -> bool:
         if doc_id not in self._docs:
             return False

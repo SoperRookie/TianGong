@@ -1543,3 +1543,73 @@ async def test_拆解时自动组合延伸_查漏之后查重之前_开关打开
     resp = await client.post("/api/v1/tasks", data={"text": "登录需求：账号密码登录，连续错误5次锁定", "confirm_points": "true"})
     assert resp.status_code == 200, resp.text
     assert [p["source"] for p in resp.json()["test_points"][0]["points"]] == ["ai", "ai", "gap"]
+
+
+def test_用例查重长度预筛_结果与暴力比对一致():
+    import random
+    from app.tasks.points import _bigrams, _jaccard
+
+    random.seed(7)
+    words = ["登录", "密码", "账号", "提交", "提示", "错误", "锁定", "页面", "跳转", "排行", "奖励", "领取", "会员", "订单"]
+    cases = [make_case(f"TC-登录-{i:03d}", uid=f"u{i}", title=" ".join(random.choices(words, k=random.randint(2, 6))),
+                       precondition=" ".join(random.choices(words, k=3)),
+                       steps=[{"action": " ".join(random.choices(words, k=4)), "expected": " ".join(random.choices(words, k=3))}])
+             for i in range(120)]
+    cases.append(make_case("TC-登录-900", uid="u900", **{k: cases[3][k] for k in ("title", "precondition", "steps")}))   # 完全相同
+    cases.append(make_case("TC-登录-901", uid="u901", title=cases[5]["title"] + " 移动端", precondition=cases[5]["precondition"], steps=cases[5]["steps"]))
+
+    def _text(c):
+        return f"{c['title']} {c['precondition']} " + " ".join(f"{s['action']} {s['expected']}" for s in c["steps"])
+    brute = set()
+    for i in range(len(cases)):
+        for j in range(i + 1, len(cases)):
+            if _jaccard(_bigrams(_text(cases[i])), _bigrams(_text(cases[j]))) >= 0.6:
+                brute.add((cases[i]["case_id"], cases[j]["case_id"]))
+    got = case_duplicate_candidates(cases)
+    assert {(p["a"], p["b"]) for p in got} == brute and brute
+    assert all(p["a_uid"] and p["b_uid"] for p in got)                 # 带 uid
+    assert [p["similarity"] for p in got] == sorted((p["similarity"] for p in got), reverse=True)
+
+
+async def test_评审删除不重算查重_只过滤_旧报告补uid后删一条立即处置(client, monkeypatch):
+    import app.api.routes as routes
+    from app.tasks import points as points_mod
+
+    c1 = make_case("TC-登录-001", title="密码为空点击登录被拦截", steps=[{"action": "密码留空点击登录", "expected": "提示请输入密码"}])
+    c2 = make_case("TC-登录-002", title="密码为空点击登录被拦住", steps=[{"action": "密码留空点击登录", "expected": "提示请输入密码"}])
+    c3 = make_case("TC-登录-003", title="验证码错误登录失败", steps=[{"action": "输入错误验证码", "expected": "提示验证码错误"}])
+    task_id = await _create_completed_task(client, c1, c2, c3)
+    calls = []
+    real = points_mod.case_duplicate_candidates
+
+    def _counted(cases, threshold=0.6):
+        calls.append(len(cases))
+        return real(cases, threshold)
+    monkeypatch.setattr(points_mod, "case_duplicate_candidates", _counted)
+    store = app.state.tasks
+    rec = store.get(task_id)
+    assert rec.quality_cache and rec.quality_cache["dup_pairs"] and len(rec.quality_cache["case_sigs"]) == 3
+    uid = {c["case_id"]: c["uid"] for c in rec.result["cases"]}
+    # 模拟改前的旧查重报告：只按编号记录、没有 uid
+    rec.dup_report = {"points": [], "resolved": [], "cases": [{"a": "TC-登录-001", "a_title": c1["title"], "b": "TC-登录-002",
+                                                                 "b_title": c2["title"], "similarity": 0.9, "verdict": "重复"}]}
+    store.save(rec)
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert "quality_cache" not in t                                                            # 缓存不进接口
+    assert t["case_dup_pairs"][0]["status"] == "open" and t["case_dup_pairs"][0]["a_uid"] == uid["TC-登录-001"]   # 显示时临时补 uid
+    # 删第一条（触发重排：002 → 001）：查重不重算，只从缓存里过滤；旧报告删前补了 uid，这组立即已处置
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": "TC-登录-001", "action": "delete"}]})
+    assert calls == []
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert [c["case_id"] for c in t["result"]["cases"]] == ["TC-登录-001", "TC-登录-002"]
+    assert t["quality"]["疑似重复用例对"] == [] and t["quality"]["重复风险"] == "低"
+    assert t["case_dup_pairs"][0]["status"] == "resolved" and t["case_dup_pairs"][0]["deleted"] == ["TC-登录-001"]
+    assert t["case_dup_pairs"][0]["b"] == "TC-登录-001"                                        # 活着的换成当前编号
+    assert store.get(task_id).dup_report["cases"][0]["a_uid"] == uid["TC-登录-001"]            # 补的 uid 已落库
+    # 通过一条（内容不变）也不重算；人工修改内容才重算
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": "TC-登录-001", "action": "approve"}]})
+    assert calls == []
+    cur = store.get(task_id).result["cases"][0]
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": "TC-登录-001", "action": "modify",
+                      "case": {**cur, "title": "改了标题", "base_version": cur.get("version", 1)}}]})
+    assert calls == [2]

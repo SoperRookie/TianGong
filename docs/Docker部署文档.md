@@ -77,6 +77,7 @@ MYSQL_PASSWORD=<强密码>
 # TIANGONG_POINT_COMBINE=true   # 拆解后模块级「组合延伸」：每个模块（≥ 3 条点）各调一次模型，找单条规则叠加后的组合场景，标「组合延伸」带依据与来源编号、待审核；false 则只能手动点「组合延伸」
 # TIANGONG_QUESTION_SUGGEST=true   # AI 需求分析完成后给未确认事项「推荐答案」（原文 › 历史结论 › 行业惯例），页面预填、人确认才算；false 则只能手动点「推荐答案」
 # TIANGONG_GENERATION_MODULE_SCOPE=true   # 用例生成 / 评审只带本模块所在章节的需求原文（整篇不足一批、模块定位不到章节的仍带整篇）；false 则每个模块每次调用都带整份需求，上百模块的任务 token 高一个数量级
+# TIANGONG_KNOWLEDGE_INGEST_DELAY_SECONDS=30   # 评审动作触发的用例知识沉淀延迟合并：这段时间内同一任务的连续评审只沉淀一次，沉淀只给变化的用例算向量；0 = 每次评审立即沉淀
 ```
 
 不用填 `TIANGONG_DB_URL` 和 `TIANGONG_TRUSTED_PROXIES`，compose 文件已按容器网络写死。`MYSQL_PASSWORD` 会被拼进连接串，密码含 `@ # / % ?` 等符号也可以，应用会自动编码；但 compose 自身对 `$` 有特殊解释，密码里避免用 `$`。

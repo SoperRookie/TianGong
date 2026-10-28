@@ -128,6 +128,13 @@ async def lifespan(app: FastAPI):
         settings.log_dir,
     )
     yield
+    # 关停：在等延迟的知识沉淀作业立即放行并等它跑完（最多 60 秒），不丢最后一次评审的沉淀
+    acc = getattr(app.state, "accumulator", None)
+    if acc is not None and acc.jobs:
+        try:
+            await asyncio.wait_for(acc.drain(), 60)
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.warning("关停时等待知识沉淀作业未完成：{}", e)
     from app.db import flush_persist
 
     flush_persist()
