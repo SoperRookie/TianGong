@@ -18,6 +18,32 @@ _FILE_FIELDS = ("module", "title", "priority", "precondition", "steps", "keyword
 _CONTENT_SKIP = ("uid", "version", "case_id")
 
 
+_FIELD_NAMES = {"case_id": "编号", "module": "模块", "title": "标题", "priority": "优先级", "precondition": "前置条件",
+                "steps": "步骤", "keywords": "关键词", "remark": "备注", "action": "操作", "expected": "预期"}
+
+
+def _explain(e: Exception) -> str:
+    """pydantic 校验错误 → 人能看懂的一句：哪个字段、什么问题（之前只给「1 validation error for TestCase」）。"""
+    errors = getattr(e, "errors", None)
+    if not callable(errors):
+        return str(e).splitlines()[0][:120]
+    out = []
+    for err in errors()[:3]:
+        loc = [x for x in err.get("loc", ())]
+        field = "".join(f"第 {x + 1} 步" if isinstance(x, int) else _FIELD_NAMES.get(str(x), str(x)) for x in loc)
+        msg = str(err.get("msg", ""))
+        if err.get("type") == "too_short":
+            msg = "至少要有一步"
+        elif err.get("type") in ("enum", "literal_error") or "P0" in msg:
+            msg = "只能是 P0 / P1 / P2 / P3"
+        elif err.get("type") == "missing":
+            msg = "缺少"
+        else:
+            msg = msg.removeprefix("Value error, ")
+        out.append(f"{field}{msg}")
+    return "；".join(out)[:200]
+
+
 def _content(case: dict) -> dict:
     return {k: v for k, v in case.items() if k not in _CONTENT_SKIP}
 
@@ -75,7 +101,7 @@ def apply_final(existing: list[dict], final: list[dict], new_uid) -> dict:
         try:
             case = TestCase.model_validate(merged).model_dump()
         except Exception as e:
-            invalid.append(f"第 {n} 条「{_norm_title(f) or '（无标题）'}」：{str(e).splitlines()[0][:120]}")
+            invalid.append(f"第 {n} 条「{_norm_title(f) or '（无标题）'}」：{_explain(e)}")
             continue
         if origin is None:
             added.append(case)

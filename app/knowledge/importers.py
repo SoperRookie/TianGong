@@ -308,18 +308,31 @@ def _rows_to_cases(rows: list[list[str]], filename: str) -> list[dict]:
     return cases
 
 
+def _split_items(text: str) -> list[str]:
+    """一个单元格的多行文本 → 条目列表。有行前编号时按编号分条：没编号的行并入上一条（一条预期里换行列了好几个字段），
+    编号前的散行算第一条；整格都没编号时每行一条（禅道等用 <br> 分行、不编号的导出）。"""
+    lines = [s for s in text.splitlines() if s.strip()]
+    if not any(_STEP_NO_RE.match(s) for s in lines):
+        return [s.strip() for s in lines]
+    items: list[str] = []
+    for s in lines:
+        if _STEP_NO_RE.match(s) or not items:
+            items.append(_STEP_NO_RE.sub("", s).strip())
+        else:
+            items[-1] = (items[-1] + "\n" + s.strip()).strip()
+    return items
+
+
 def _pair_steps(steps_text: str, expected_text: str) -> list[dict]:
-    """把「1. 动作」与「1. 预期」两列多行文本还原为步骤对（数量不齐时补空）。"""
-    actions = [_STEP_NO_RE.sub("", s).strip() for s in steps_text.splitlines() if s.strip()]
-    expecteds = [_STEP_NO_RE.sub("", s).strip() for s in expected_text.splitlines() if s.strip()]
-    length = max(len(actions), len(expecteds))
-    return [
-        {
-            "action": actions[i] if i < len(actions) else "",
-            "expected": expecteds[i] if i < len(expecteds) else "",
-        }
-        for i in range(length)
-    ]
+    """把「1. 动作」与「1. 预期」两列多行文本还原为步骤对。数量不齐时：多出来的预期并入最后一步的预期
+    （一步操作、预期里逐条列了十几个字段，之前被拆成十几步、后面的步骤动作为空导致整条不合法），多出来的动作预期留空。"""
+    actions = _split_items(steps_text)
+    expecteds = _split_items(expected_text)
+    if not actions:
+        return [{"action": "", "expected": e} for e in expecteds]   # 没有动作：留给校验报「测试步骤不能为空」
+    if len(expecteds) > len(actions):
+        expecteds = expecteds[:len(actions) - 1] + ["\n".join(expecteds[len(actions) - 1:])]
+    return [{"action": a, "expected": expecteds[i] if i < len(expecteds) else ""} for i, a in enumerate(actions)]
 
 
 # ---- XMind（ZEN 格式：zip + content.json）----
