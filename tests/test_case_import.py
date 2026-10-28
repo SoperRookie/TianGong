@@ -191,3 +191,31 @@ def test_ai用例仍要求每步有预期_存量导入放宽():
     with pytest.raises(ValidationError):
         TestCase.model_validate(raw, context={"require_expected": True})
     assert any("预期结果不能为空" in i["problem"] for i in rule_check([raw]))
+
+
+def test_步骤预期按编号分条_预期多行并入上一条_预期条数多于步骤并入最后一步():
+    from app.knowledge.importers import _pair_steps
+
+    # 一步操作、预期里编号列了多个字段检查项 → 一步，预期合在一起（之前拆成多步、后面的动作为空）
+    steps = _pair_steps("1. 打开日榜实时排名页面", "1. 商户名称显示正确\n2. 排名按积分降序\n3. 积分保留两位小数")
+    assert len(steps) == 1 and steps[0]["action"] == "打开日榜实时排名页面" and steps[0]["expected"].count("\n") == 2
+    # 编号内换行：没编号的行并入上一条
+    steps = _pair_steps("1. 输入账号\n2. 点击登录", "1. 账号回显\n   格式校验通过\n2. 跳转首页")
+    assert [s["expected"] for s in steps] == ["账号回显\n格式校验通过", "跳转首页"]
+    # 整格没编号：每行一条；动作多于预期的预期留空
+    steps = _pair_steps("打开页面\n点击按钮", "弹出确认框")
+    assert steps == [{"action": "打开页面", "expected": "弹出确认框"}, {"action": "点击按钮", "expected": ""}]
+    # 没有动作：留给校验报错
+    assert _pair_steps("", "1. 有预期没步骤") == [{"action": "", "expected": "有预期没步骤"}]
+
+
+def test_终稿不合法原因可读():
+    from app.tasks.final_apply import apply_final
+
+    plan = apply_final([], [{"case_id": "TC-登录-001", "module": "登录", "title": "没步骤", "priority": "P1", "steps": []},
+                           {"case_id": "TC-登录-002", "module": "登录", "title": "动作为空", "priority": "P1",
+                            "steps": [{"action": "", "expected": "有预期"}]},
+                           {"case_id": "TC-登录-003", "module": "登录", "title": "优先级错", "priority": "P9",
+                            "steps": [{"action": "a", "expected": "b"}]}], lambda: "u")
+    assert plan["invalid"] == ["第 1 条「没步骤」：步骤至少要有一步", "第 2 条「动作为空」：步骤第 1 步操作测试步骤不能为空",
+                               "第 3 条「优先级错」：优先级只能是 P0 / P1 / P2 / P3"]
