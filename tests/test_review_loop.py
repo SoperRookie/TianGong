@@ -165,3 +165,59 @@ async def test_offline_final_rejects_bad_file(client):
         files={"file": ("bad.csv", "字段A,字段B\n1,2\n".encode("utf-8-sig"), "text/csv")},
     )
     assert resp.status_code == 400
+
+
+async def test_离线终稿以终稿为准_覆盖线上用例_配对沿用uid_删的进回收站_全部人工定稿(client, tmp_path):
+    from app.recycle import list_bin
+    from app.versions import list_versions
+
+    c1 = make_case("TC-登录-001", title="验证正确账号密码登录成功")
+    c2 = make_case("TC-登录-002", title="验证密码错误提示")
+    c3 = make_case("TC-登录-003", title="验证验证码错误")
+    task_id = await _create_task(client, c1, c2, c3)
+    before = (await client.get(f"/api/v1/tasks/{task_id}")).json()["result"]["cases"]
+    uid = {c["case_id"]: c["uid"] for c in before}
+    # 终稿：001 标题改了但编号在（按编号配）、002 优先级改 P0 且顺序挪到最前（按标题配）、003 文件里没有（删）、新增一条
+    final = [
+        TestCase.model_validate(make_case("TC-登录-002", title="验证密码错误提示", priority="P0")),
+        TestCase.model_validate(make_case("TC-登录-001", title="验证账号密码正确时登录成功")),
+        TestCase.model_validate(make_case("TC-登录-009", title="验证断线重连", precondition="已登录")),
+    ]
+    path = export_excel(final, tmp_path / "终稿.xlsx")
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    resp = await client.post(f"/api/v1/tasks/{task_id}/final", files={"file": ("终稿.xlsx", path.read_bytes(), mime)},
+                             data={"apply": "true"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["applied"] and body["apply_stats"] == {"total": 3, "modified": 2, "added": 1, "deleted": 1}
+    assert body["stats"]["final"] == 3                                   # diff 留痕照旧
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    cases = t["result"]["cases"]
+    assert [c["title"] for c in cases] == ["验证密码错误提示", "验证账号密码正确时登录成功", "验证断线重连"]   # 顺序按文件
+    assert [c["case_id"] for c in cases] == ["TC-登录-001", "TC-登录-002", "TC-登录-003"]                     # 编号重排
+    assert cases[0]["uid"] == uid["TC-登录-002"] and cases[0]["priority"] == "P0" and cases[0]["version"] == 2
+    assert cases[1]["uid"] == uid["TC-登录-001"] and cases[1]["version"] == 2
+    assert cases[2]["uid"] not in uid.values() and cases[2]["source"] == "import" and cases[2]["precondition"] == "已登录"
+    assert all(s["status"] == "approved" and s["locked"] for s in t["case_reviews"].values()) and len(t["case_reviews"]) == 3
+    assert t["offline_review"]["applied"] and t["offline_review"]["apply_stats"]["deleted"] == 1
+    bin_items = list_bin(task_id)
+    assert len(bin_items) == 1 and bin_items[0]["entity_id"] == uid["TC-登录-003"]
+    vs = list_versions(task_id, "case", uid["TC-登录-002"])
+    assert [v["source"] for v in vs] == ["ai_original", "final"] and vs[-1]["version_no"] == 2
+    assert [v["source"] for v in list_versions(task_id, "case", cases[2]["uid"])] == ["import"]
+    # 计划能直接选这些用例（已通过）
+    r = await client.get(f"/api/v1/tasks/{task_id}")
+    assert r.status_code == 200
+    # 不勾「以终稿为准」：只留痕，不改用例
+    final2 = [TestCase.model_validate(make_case("TC-登录-001", title="验证密码错误提示", priority="P2"))]
+    p2 = export_excel(final2, tmp_path / "终稿2.xlsx")
+    resp = await client.post(f"/api/v1/tasks/{task_id}/final", files={"file": ("终稿2.xlsx", p2.read_bytes(), mime)})
+    assert resp.status_code == 200 and "applied" not in resp.json()
+    t2 = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert [c["title"] for c in t2["result"]["cases"]] == [c["title"] for c in cases] and t2["result"]["cases"][0]["priority"] == "P0"
+    assert not t2["offline_review"].get("applied")
+    # 不合法的终稿（没有步骤）整份不应用
+    bad = "用例编号,模块,用例标题,优先级,前置条件,步骤,预期结果\nTC-登录-001,登录,没有步骤的用例,P1,,,\n".encode("utf-8-sig")
+    resp = await client.post(f"/api/v1/tasks/{task_id}/final", files={"file": ("bad.csv", bad, "text/csv")}, data={"apply": "true"})
+    assert resp.status_code == 400 and "没有步骤的用例" in resp.json()["detail"]
+    assert [c["title"] for c in (await client.get(f"/api/v1/tasks/{task_id}")).json()["result"]["cases"]] == [c["title"] for c in cases]
