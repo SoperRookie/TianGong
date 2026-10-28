@@ -473,16 +473,33 @@ def dup_pair_entities(record, kind: str = "points") -> list[dict]:
     report = record.dup_report or {}
     pairs = report.get(kind) or []
     reviews = {r["key"]: r for r in (report.get("resolved") or []) if isinstance(r, dict) and r.get("key")}
+    by_uid: dict[str, dict] = {}
     if kind == "cases":
-        alive = {str(c.get("case_id")) for c in ((record.result or {}).get("cases") or [])}
+        cases = (record.result or {}).get("cases") or []
+        alive = {str(c.get("case_id")) for c in cases}
+        by_uid = {str(c.get("uid")): c for c in cases if c.get("uid")}
     else:
         modules = (record.analysis or {}).get("test_points") or []
         alive = {p.get("tp_id") for _, p in iter_points(modules)}
     out: list[dict] = []
     for p in pairs:
-        key = _pair_key(p.get("a", ""), p.get("b", ""))
-        rv = reviews.get(key) or {}
-        gone = [x for x in (p.get("a"), p.get("b")) if x not in alive]
+        p = dict(p)
+        legacy_key = _pair_key(p.get("a", ""), p.get("b", ""))
+        if kind == "cases" and p.get("a_uid") and p.get("b_uid"):
+            # 用例编号删除后会重排：存活与否认 uid，编号与标题换成当前的；被删那条保留检查时的编号与标题供辨认
+            key = _pair_key(p["a_uid"], p["b_uid"])
+            gone = []
+            for side in ("a", "b"):
+                cur = by_uid.get(p[f"{side}_uid"])
+                if cur is None:
+                    gone.append(p.get(side))
+                else:
+                    p[side], p[f"{side}_title"] = str(cur.get("case_id")), str(cur.get("title") or p.get(f"{side}_title", ""))
+            rv = reviews.get(key) or reviews.get(legacy_key) or {}
+        else:
+            key = legacy_key
+            rv = reviews.get(key) or {}
+            gone = [x for x in (p.get("a"), p.get("b")) if x not in alive]
         status = "resolved" if gone else (rv.get("status") or "open")
         out.append({**p, "key": key, "status": status, "deleted": gone,
                     "note": rv.get("note", ""), "by": rv.get("by"), "at": rv.get("at")})
@@ -645,6 +662,8 @@ def case_duplicate_candidates(cases: list[dict], threshold: float = 0.6) -> list
                 pairs.append({
                     "a": str(cases[i].get("case_id")), "a_title": str(cases[i].get("title")),
                     "b": str(cases[j].get("case_id")), "b_title": str(cases[j].get("title")),
+                    # 用例编号会在删除后按模块重排（被删那条的编号立刻被下一条顶上），配对身份认稳定的 uid
+                    "a_uid": str(cases[i].get("uid") or ""), "b_uid": str(cases[j].get("uid") or ""),
                     "similarity": round(score, 3),
                 })
     pairs.sort(key=lambda x: -x["similarity"])

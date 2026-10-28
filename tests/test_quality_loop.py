@@ -1436,11 +1436,23 @@ async def test_用例语义查重_文字候选交裁判_重复可合并进列表
     r = (await client.post(f"/api/v1/tasks/{task_id}/cases/dup-pairs/{key}", json={"action": "reopen"})).json()
     assert r["dup_pair"]["status"] == "open"
     assert (await client.post(f"/api/v1/tasks/{task_id}/cases/dup-pairs/no-such", json={"action": "ignore"})).status_code == 404
-    # 删掉重复对里的一条 → 该组自动已处置
-    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": "TC-登录-004", "action": "delete"}]})
+    # 删掉重复对里的一条 → 该组自动已处置。删的是第一条：删除后模块内重排编号，原 002 顶上成 001、003 成 002、004 成 003，
+    # 配对身份认 uid 不认编号——之前按编号判存活，被删那条的编号被下一条顶上，这组永远「待处置」、再点删除删的是别的用例
+    uid = {c["case_id"]: c["uid"] for c in (await client.get(f"/api/v1/tasks/{task_id}")).json()["result"]["cases"]}
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": "TC-登录-001", "action": "delete"}]})
     t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
-    st = {p["key"]: p["status"] for p in t["case_dup_pairs"]}
-    assert st["TC-登录-003|TC-登录-004"] == "resolved" and st["TC-登录-001|TC-登录-002"] == "open"
+    assert [c["case_id"] for c in t["result"]["cases"]] == ["TC-登录-001", "TC-登录-002", "TC-登录-003"]   # 重排了
+    ent = {frozenset((p["a_uid"], p["b_uid"])): p for p in t["case_dup_pairs"]}
+    p12, p34 = ent[frozenset((uid["TC-登录-001"], uid["TC-登录-002"]))], ent[frozenset((uid["TC-登录-003"], uid["TC-登录-004"]))]
+    assert p12["status"] == "resolved" and p12["deleted"] == ["TC-登录-001"] and p12["b"] == "TC-登录-001"   # 被删的留旧编号，活着的换成当前编号
+    assert p34["status"] == "open" and (p34["a"], p34["b"]) == ("TC-登录-002", "TC-登录-003")                 # 显示的是重排后的编号
+    assert p34["key"] == "|".join(sorted((uid["TC-登录-003"], uid["TC-登录-004"])))
+    # 忽略 / 重开用 uid 键留痕，再删活着那组里显示的编号 → 该组已处置
+    r = (await client.post(f"/api/v1/tasks/{task_id}/cases/dup-pairs/{p34['key']}", json={"action": "ignore"})).json()
+    assert r["dup_pair"]["status"] == "ignored"
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": p34["b"], "action": "delete"}]})
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert all(p["status"] == "resolved" for p in t["case_dup_pairs"] if frozenset((p["a_uid"], p["b_uid"])) in (frozenset((uid["TC-登录-001"], uid["TC-登录-002"])), frozenset((uid["TC-登录-003"], uid["TC-登录-004"]))))
 
 
 # ---- 模块级组合延伸：单条规则叠在一起的交叉场景，每模块一次调用 ----
