@@ -179,12 +179,12 @@ def _table_rows(path: Path) -> list[list[str]]:
     return _html_table_rows(path)
 
 
-def render_case_chunk(case: dict) -> str:
-    """将一条用例渲染为知识切片文本（检索与注入的最小单元）。"""
+def render_case_chunk(case: dict, with_id: bool = True) -> str:
+    """将一条用例渲染为知识切片文本（检索与注入的最小单元）。with_id=False 不带编号（任务沉淀用：编号会重排）。"""
     head_parts = [f"模块：{case.get('module', '')}"]
     if case.get("priority"):
         head_parts.append(f"优先级：{case['priority']}")
-    if case.get("case_id"):
+    if with_id and case.get("case_id"):
         head_parts.append(f"编号：{case['case_id']}")
     lines = [f"【历史用例】{case.get('title', '')}", " | ".join(head_parts)]
     if case.get("precondition"):

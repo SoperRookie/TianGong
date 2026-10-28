@@ -4,6 +4,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from loguru import logger
+
 from app.knowledge.chunker import split_knowledge
 from app.knowledge.schemas import (
     CATEGORIES,
@@ -65,13 +67,29 @@ class KnowledgeService:
         chunks = [c for c in chunks if c and c.strip()]
         if not chunks:
             raise ValueError(f"{source} 无有效内容，未入库")
-        vectors = await self.embedder.embed(chunks)
+        vectors = await self._embed_reusing(chunks, space, category, source)
         self._check_dims(vectors)
         self._drop_same_source(space, category, source)
         record = self._new_doc(source=source, category=category, space=space, chunk_count=len(chunks), **meta)
         self.store.upsert_chunks(record, chunks, vectors)
         self.invalidate_cache()
         return record
+
+    async def _embed_reusing(self, chunks: list[str], space: str, category: str, source: str) -> list[list[float]]:
+        """按来源替换时的增量向量化：同空间同分类同来源已有切片里文本一模一样的直接复用向量，只给新增 / 改过的切片调 embedding。
+        评审删一条用例之前要把整任务上千条全部重算，现在一条都不用算。"""
+        known: dict[str, list[float]] = {}
+        model = self.embedder.registry.default_embedding
+        for old in self.store.list_docs(space, category):
+            if old.source == source and old.embedding_model == model:
+                known.update(self.store.doc_vectors(old.doc_id))
+        todo = list(dict.fromkeys(c for c in chunks if c not in known))
+        if todo:
+            fresh = await self.embedder.embed(todo)
+            known.update(zip(todo, fresh))
+        if len(todo) < len(chunks):
+            logger.info("知识入库「{}」{} 片：复用已有向量 {} 片、新算 {} 片", source, len(chunks), len(chunks) - len(todo), len(todo))
+        return [known[c] for c in chunks]
 
     def _drop_same_source(self, space: str, category: str, source: str) -> None:
         for old in self.store.list_docs(space, category):

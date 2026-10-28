@@ -1899,12 +1899,21 @@ def _quality_report(record: TaskRecord, result) -> dict:
     coverage_score = round(len(covered) / len(applicable) * 100) if applicable else None
 
     import hashlib as _hl
-    sig = _hl.sha1(("|".join(f"{c.case_id}#{c.title}#{c.precondition}#{c.steps}" for c in result.cases)).encode()).hexdigest()
+    # 查重缓存按「uid + 内容」签名（不带编号：删除会重排编号，带编号的签名每删一条都失效、上千条用例每次评审都重算 O(n²) 还卡住事件循环）
+    case_sigs = {c.uid: _hl.sha1(f"{c.title}#{c.precondition}#{c.steps}".encode()).hexdigest()[:16] for c in result.cases}
+    sig = _hl.sha1("|".join(f"{u}#{h}" for u, h in sorted(case_sigs.items())).encode()).hexdigest()
     prev_q = record.quality or {}
+    cache = record.quality_cache or {}
+    prev_sigs, prev_pairs = cache.get("case_sigs") or {}, cache.get("dup_pairs")
     if prev_q.get("_sig") == sig and "疑似重复用例对" in prev_q:
-        dup_pairs = prev_q.get("_dup_pairs") or prev_q["疑似重复用例对"]  # 用例未变化：复用上次 O(n²) 查重结果
+        dup_pairs = prev_pairs if prev_pairs is not None else (prev_q.get("_dup_pairs") or prev_q["疑似重复用例对"])  # 用例未变化：复用上次结果
+    elif prev_pairs is not None and all(prev_sigs.get(u) == h for u, h in case_sigs.items()):
+        # 只删没改（现有用例的内容签名都在上次里）：从上次结果里去掉涉及已删用例的对即可，不重算
+        dup_pairs = [p for p in prev_pairs if p.get("a_uid") in case_sigs and p.get("b_uid") in case_sigs]
     else:
         dup_pairs = case_duplicate_candidates([c.model_dump() for c in result.cases])
+    # 删除后过滤用的全量候选（上限 2000 对，超过的不缓存、下次改动重算）与各用例内容签名；单独字段，不进接口
+    record.quality_cache = {"dup_pairs": dup_pairs if len(dup_pairs) <= 2000 else None, "case_sigs": case_sigs}
     dup_risk = "高" if len(dup_pairs) >= 3 else "中" if dup_pairs else "低"
     return {
         "测试维度覆盖度": coverage_score,
@@ -2279,6 +2288,8 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
 
     if any(i.action == "delete" for i in body.items):
         _require_delete(request)
+    from app.tasks.points import attach_dup_uids
+    attach_dup_uids(record)   # 按编号记录的旧查重报告：删除会重排编号，动手前先把配对身份换成 uid
     cases: list[dict] = list(record.result["cases"])
     by_id = {str(c.get("case_id")): c for c in cases}
     operator = _operator(request)
@@ -2404,8 +2415,10 @@ async def review_task(request: Request, task_id: str, body: ReviewBody) -> dict:
     response["review"] = {**counts, "log_entries": len(record.review_log), "hints": hints}
     if any(counts[k] for k in ("approve", "modify", "delete", "unlock")):
         # 知识沉淀：评审通过 / 人工定稿的用例进测试用例库（整任务按来源替换）
+        # 同任务只保留一个在跑的作业、连续评审合并成一次（延迟 knowledge_ingest_delay_seconds），只给变化的用例算向量
         _acc = _accumulator(request.app)
-        _acc.schedule(f"cases:{task_id}", lambda: _acc.ingest_cases(store.get(task_id), operator))
+        _acc.schedule(f"cases:{task_id}", lambda: _acc.ingest_cases(store.get(task_id), operator),
+                      delay=get_settings().knowledge_ingest_delay_seconds)
     return response
 
 
@@ -8529,7 +8542,7 @@ async def get_task(request: Request, task_id: str) -> dict:
 
     record = _task(request, task_id, "case.view")
     pending = _points_pending_generation(record) if record.status == "completed" else []
-    return {**record.model_dump(exclude={"checkpoint"}), "editing": _active_editing(request.app, task_id),
+    return {**record.model_dump(exclude={"checkpoint", "quality_cache"}), "editing": _active_editing(request.app, task_id),
             "error_kind": _error_kind(record.error), "resume": _resume_info(record),
             "progress_detail": _progress_detail(request.app.state.tasks, record),
             "blind_spots": blind_spot_entities(record), "dup_pairs": dup_pair_entities(record),

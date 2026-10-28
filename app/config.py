@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     # 知识自动沉淀：任务 / 需求过程产物（需求原文与附件、审核通过的测试点、评审通过的用例、离线终稿）
     # 自动入项目知识库，带来源标记；项目级可在项目设置里关闭（knowledge_auto）
     knowledge_auto_ingest: bool = True
+    # 评审动作触发的用例沉淀延迟合并：这段时间内同一任务的连续评审只沉淀一次（0 = 立即）
+    knowledge_ingest_delay_seconds: float = 30.0
 
     # 项目画像：AI 从已沉淀的需求 / 测试点 / 用例中提炼业务背景、角色、流程、术语与规则，管理员确认后
     # 注入拆解 / 生成 / 查漏 / 评审全链路；每新增 profile_refresh_tasks 个任务自动生成一版待确认草稿

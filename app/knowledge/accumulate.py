@@ -90,6 +90,8 @@ class KnowledgeAccumulator:
     def __init__(self, app):
         self.app = app
         self.jobs: set[asyncio.Task] = set()
+        self._slots: dict[str, dict] = {}   # label -> {task, pending, delay}：同一来源同时只跑一个作业
+        self._flush: tuple | None = None    # (loop, Event)：drain 时置位，跳过所有延迟
         self._backfill_doc = None
         self.backfills: dict[str, dict] = {}  # project -> 最近一次回溯状态（running / done / failed）
 
@@ -121,24 +123,68 @@ class KnowledgeAccumulator:
 
     # ---- 后台调度 ----
 
-    def schedule(self, label: str, job: Callable[[], Awaitable[None]]) -> None:
-        async def _run() -> None:
-            try:
-                await job()
-            except Exception as e:  # 沉淀故障绝不影响主链路
-                logger.warning("知识沉淀失败（{}）：{}", label, e)
+    def _flush_event(self) -> asyncio.Event:
+        loop = asyncio.get_running_loop()
+        if self._flush is None or self._flush[0] is not loop:
+            self._flush = (loop, asyncio.Event())
+        return self._flush[1]
 
+    def schedule(self, label: str, job: Callable[[], Awaitable[None]], delay: float = 0.0) -> None:
+        """同一 label（同一任务的同一类沉淀）同时只跑一个作业：在跑或在等的期间再来的请求只替换成最新一次，
+        跑完补跑一次；delay > 0 时先等这么久再跑（连续评审合并成一次，等待期间 drain 可立即放行）。
+        之前每点一次评审就起一个全量作业，上千条用例的任务几个作业并发重算同一份向量。"""
         try:
-            task = asyncio.get_running_loop().create_task(_run())
+            loop = asyncio.get_running_loop()
         except RuntimeError:  # 无事件循环（同步调用场景）：直接放弃，不阻塞
             return
+        slot = self._slots.get(label)
+        if slot is not None and not slot["task"].done():
+            slot["pending"], slot["delay"] = job, delay
+            return
+        slot = {"pending": job, "delay": delay}
+        self._slots[label] = slot
+
+        async def _worker() -> None:
+            try:
+                while slot["pending"] is not None:
+                    current, wait = slot["pending"], float(slot["delay"] or 0)
+                    slot["pending"] = None
+                    if wait > 0:
+                        flush = self._flush_event()
+                        if not flush.is_set():
+                            try:
+                                await asyncio.wait_for(flush.wait(), wait)
+                            except asyncio.TimeoutError:
+                                pass
+                        if slot["pending"] is not None:   # 等待期间又来了：只跑最新一次
+                            current, slot["pending"] = slot["pending"], None
+                    try:
+                        await current()
+                    except Exception as e:  # 沉淀故障绝不影响主链路
+                        logger.warning("知识沉淀失败（{}）：{}", label, e)
+            finally:
+                if self._slots.get(label) is slot:
+                    del self._slots[label]
+
+        task = loop.create_task(_worker())
+        slot["task"] = task
         self.jobs.add(task)
         task.add_done_callback(self.jobs.discard)
 
+    def pending(self, label: str) -> bool:
+        """该来源是否有在等 / 在跑的沉淀作业。"""
+        slot = self._slots.get(label)
+        return slot is not None and not slot["task"].done()
+
     async def drain(self) -> None:
-        """等待全部沉淀作业结束（测试与关停用）。"""
-        while self.jobs:
-            await asyncio.gather(*list(self.jobs), return_exceptions=True)
+        """等待全部沉淀作业结束（测试与关停用）：在等延迟的作业立即放行。"""
+        flush = self._flush_event()
+        flush.set()
+        try:
+            while self.jobs:
+                await asyncio.gather(*list(self.jobs), return_exceptions=True)
+        finally:
+            flush.clear()
 
     # ---- 各类沉淀 ----
 
@@ -194,9 +240,10 @@ class KnowledgeAccumulator:
             service._drop_same_source(project, "test_cases", source)
             service.invalidate_cache()
             return None
-        doc = await service.ingest_chunks([render_case_chunk(c) for c in cases], source=source, category="test_cases",
-                                          space=project, module=module, created_by=by, origin="task",
-                                          origin_ref=record.task_id)
+        # 切片不带编号：编号随删除重排，带上每删一条全任务的切片文本都变、一条向量都复用不上
+        doc = await service.ingest_chunks([render_case_chunk(c, with_id=False) for c in cases], source=source,
+                                          category="test_cases", space=project, module=module, created_by=by,
+                                          origin="task", origin_ref=record.task_id)
         logger.info("知识沉淀：{}「{}」{} 条用例（{}）", project, source, doc.chunk_count, record.task_id)
         return doc
 
