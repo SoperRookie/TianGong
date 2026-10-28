@@ -5269,9 +5269,11 @@ function renderHistory(t) {
     <div class="section-t">离线终稿回传</div>
     <div class="toolbar" style="margin-top:4px">
       <input type="file" id="finalFile" class="mf" accept=".xlsx,.csv,.xmind" multiple style="width:auto;flex:1" title="可选多个文件（可分批追加），合并后作为一份终稿对比">
-      <button class="btn ghost sm" onclick="uploadFinal()">上传并对比</button>
+      <button class="btn ghost sm" onclick="uploadFinal()">上传</button>
     </div>
-    ${t.offline_review ? renderOfflineDiff(t.offline_review) : '<div class="hint" style="margin-top:6px">下载导出文件离线评审后，回传定稿自动计算差异，作为学习语料（「学习规则」页可提炼规则）</div>'}
+    <label class="hint" style="display:flex;gap:6px;align-items:flex-start;margin-top:4px;cursor:pointer"><input type="checkbox" id="finalApply" ${window._finalApply===false?'':'checked'} onchange="window._finalApply=this.checked" style="margin-top:2px">
+      <span><b>以终稿为准</b>：上传的用例直接成为线上用例并整份标为人工定稿（已通过、锁定）——按「编号 + 标题 › 标题 › 编号」配对，配上的沿用审核与版本链、内容变了记一版，文件里没有的进回收站（可恢复），多出来的新增，顺序按文件。不勾则只算差异留痕，线上用例不动。</span></label>
+    ${t.offline_review ? renderOfflineDiff(t.offline_review) : '<div class="hint" style="margin-top:6px">下载导出文件离线评审后回传：勾「以终稿为准」线上用例换成你的文件；差异自动计算，作为学习语料（「学习规则」页可提炼规则）</div>'}
     ${t.fix_log && t.fix_log.length ? `<div class="section-t">定点修改留痕</div>${t.fix_log.slice().reverse().map(f=>
       `<div class="hint">· ${esc(fmtTime(f.at))}　${fixKind[f.kind]||esc(f.kind)}　${(f.diff||[]).length} 处改动${f.added&&f.added.length?` · 新增 ${f.added.length}`:''}</div>`).join('')}` : ''}`;
 }
@@ -5289,7 +5291,9 @@ async function reviseGo() {
 }
 function renderOfflineDiff(o) {
   const s = o.stats;
+  const a = o.apply_stats;
   return `<div class="box" style="margin-top:8px">
+    ${o.applied ? `<div style="margin-bottom:4px"><span class="st approved">已按终稿覆盖</span> ${esc(fmtTime(o.at))} ${esc(o.by||'')} · 线上 ${a?a.total:'-'} 条用例全部为人工定稿（改 ${a?a.modified:'-'} / 增 ${a?a.added:'-'} / 删 ${a?a.deleted:'-'}，删的在回收站）</div>` : ''}
     <b>${esc(o.filename)}</b> 对比结果：完全采纳率 <b>${(s.adoption_rate*100).toFixed(1)}%</b>
     <span class="hint">（新增 ${s.added} / 删除 ${s.deleted} / 修改 ${s.modified} / 未改动 ${s.unchanged}）</span>
     <div class="chips" style="margin-top:6px">
@@ -8409,13 +8413,17 @@ async function deleteUser(username) {
 async function uploadFinal() {
   const fs = Array.from($('finalFile').files || []);
   if (!fs.length) return toast('请选择终稿文件', 'warn');
+  const apply = !!($('finalApply') && $('finalApply').checked);
+  if (apply && !await uiConfirm('以终稿为准', `用 ${fs.length} 个文件里的用例替换线上用例并整份标为人工定稿？文件里没有的用例进回收站（可恢复），所有用例变为已通过、锁定。`, true)) return;
   const fd = new FormData(); for (const f of fs) fd.append('files', f);
+  fd.append('apply', apply ? 'true' : 'false');
   try {
-    await api(`/api/v1/tasks/${currentTask.task_id}/final`, {method:'POST', body:fd});
+    const r = await api(`/api/v1/tasks/${currentTask.task_id}/final`, {method:'POST', body:fd});
     await openTask(currentTask.task_id, true);
     detailTab = 'overview'; renderDetail();
     setTimeout(() => { const d = document.querySelector('#detail details.fold:nth-of-type(2)'); if (d) { d.open = true; d.scrollIntoView({block:'start'}); } }, 50);
-    toast('终稿对比完成', 'ok');
+    const a = r.apply_stats;
+    toast(a ? `已按终稿覆盖：${a.total} 条用例全部为人工定稿（改 ${a.modified} / 增 ${a.added} / 删 ${a.deleted}）` : '终稿对比完成', 'ok');
   } catch (e) { toast('上传失败：' + e.message, 'err'); }
 }
 

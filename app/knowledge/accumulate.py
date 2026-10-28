@@ -252,7 +252,7 @@ class KnowledgeAccumulator:
         from app.knowledge.importers import parse_cases_file
 
         review = record.offline_review or {}
-        if not review.get("files"):
+        if not review.get("files") or review.get("applied"):   # 已按终稿覆盖：用例本身就是评审通过的，走用例沉淀，不再重复入一份
             return None
         output_dir = Path(self.app.state.tasks.output_dir)
         paths: list[Path] = [output_dir / rel for rel in (review.get("paths") or [])]

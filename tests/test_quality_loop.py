@@ -1613,3 +1613,30 @@ async def test_评审删除不重算查重_只过滤_旧报告补uid后删一条
     await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": "TC-登录-001", "action": "modify",
                       "case": {**cur, "title": "改了标题", "base_version": cur.get("version", 1)}}]})
     assert calls == [2]
+
+
+async def test_重置用例审核状态脚本_只挑非未审核与锁定的_草稿不动_解锁后全部pending(client):
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("reset_case_reviews", Path(__file__).resolve().parents[1] / "scripts" / "reset_case_reviews.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    cases = [make_case(f"TC-登录-{i:03d}", title=f"用例 {i}") for i in range(1, 5)]
+    task_id = await _create_completed_task(client, *cases)
+    await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [
+        {"case_id": "TC-登录-001", "action": "approve"},
+        {"case_id": "TC-登录-002", "action": "reject", "comment": "预期空泛", "reject_types": ["预期不可验证"]},
+    ]})
+    rec = app.state.tasks.get(task_id)
+    rec.case_reviews[rec.result["cases"][3]["uid"]]["status"] = "draft"
+    app.state.tasks.save(rec)
+    task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    targets, counts = mod.plan_items(task)
+    assert targets == ["TC-登录-001", "TC-登录-002"] and counts == {"approved": 1, "rejected": 1, "pending": 1, "draft": 1}
+    r = await client.post(f"/api/v1/tasks/{task_id}/review", json={"items": [{"case_id": c, "action": "unlock"} for c in targets]})
+    assert r.status_code == 200
+    task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    targets, counts = mod.plan_items(task)
+    assert targets == [] and counts == {"pending": 3, "draft": 1}
+    assert all(not s.get("locked") for s in task["case_reviews"].values())

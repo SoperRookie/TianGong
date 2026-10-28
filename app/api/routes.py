@@ -7882,11 +7882,14 @@ async def delete_rule(request: Request, rule_id: str) -> dict:
 async def upload_final_cases(
     request: Request, task_id: str,
     files: list[UploadFile] = File(default=[]), file: UploadFile | None = File(default=None),
+    apply: bool = Form(default=False),
 ) -> dict:
     """离线评审终稿回传（F-6-8）：上传人工定稿文件，与生成结果做字段级 diff 留痕。
 
     与在线评审（F-6-6）构成评审闭环双通道，diff 是离线通道的学习语料入口。
     终稿可分多个文件上传（如按模块拆分的多个 Excel），合并后作为一份终稿对比。
+    apply=true「以终稿为准」：文件里的用例直接成为线上用例（配得上的沿用 uid、内容变了版本 +1，文件里没有的进回收站，
+    多出来的新增，顺序按文件、编号重排），整份标为人工定稿（已通过、锁定）；diff 留痕照旧。
     """
     import asyncio
 
@@ -7898,6 +7901,8 @@ async def upload_final_cases(
     record = _task(request, task_id, "case.review")
     if not (record.result or {}).get("cases"):
         raise HTTPException(status_code=409, detail="任务无生成结果，无法对比终稿")
+    if apply and record.status != "completed":
+        raise HTTPException(status_code=409, detail=f"任务状态为 {record.status}，不能用终稿覆盖用例")
 
     uploads = _upload_list(files, file, "终稿文件")
     final_cases: list[dict] = []
@@ -7915,20 +7920,68 @@ async def upload_final_cases(
 
     diff = diff_cases(record.result["cases"], final_cases)
     logger.info("任务 {} 终稿回传 diff：{}", task_id, diff["stats"])
+    _by = _operator(request)
     record.offline_review = {
         "filename": "、".join(names),
         "files": names,
         "paths": paths,
-        "by": _operator(request),
+        "by": _by,
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         **diff,
     }
-    store.save(record)
     _acc = _accumulator(request.app)
-    _by = _operator(request)
-    _acc.schedule(f"final:{task_id}", lambda: _acc.ingest_cases(record, _by, cases=final_cases, label="离线终稿"))
-    return {"task_id": task_id, "stats": diff["stats"], "added": diff["added"],
-            "deleted": diff["deleted"], "modified": diff["modified"]}
+    if not apply:
+        store.save(record)
+        _acc.schedule(f"final:{task_id}", lambda: _acc.ingest_cases(record, _by, cases=final_cases, label="离线终稿"))
+        return {"task_id": task_id, "stats": diff["stats"], "added": diff["added"],
+                "deleted": diff["deleted"], "modified": diff["modified"]}
+
+    # ---- 以终稿为准：覆盖线上用例并整份标为人工定稿 ----
+    from app.agents import GenerationResult
+    from app.agents.service import _renumber
+    from app.recycle import add_to_bin
+    from app.tasks.final_apply import apply_final
+    from app.tasks.points import new_uid
+    from app.versions import case_entities, ensure_versions, record_version
+
+    plan = apply_final(record.result["cases"], final_cases, new_uid)
+    if plan["invalid"]:
+        raise HTTPException(status_code=400, detail="终稿里有用例不合法，整份未应用：" + "；".join(plan["invalid"][:10])
+                            + (f"…（共 {len(plan['invalid'])} 条）" if len(plan["invalid"]) > 10 else ""))
+    if plan["deleted"]:
+        _require_delete(request)   # 文件里没有的用例要进回收站：删除权限与在线评审删除一致
+    ensure_versions(task_id, "case", case_entities(record.result["cases"]), by=record.created_by)   # 存量任务打底首版
+    for uid, _before, after in plan["modified"]:
+        record_version(task_id, "case", uid, "final", after, by=_by, reason="离线终稿覆盖")
+    for case in plan["deleted"]:
+        uid = str(case.get("uid") or "")
+        add_to_bin(task_id, "case", uid, f"{case.get('case_id', '')} {case.get('title', '')}",
+                   {"case": case, "review": dict(record.case_reviews.get(uid) or {})}, by=_by)
+        record.case_reviews.pop(uid, None)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for case in plan["cases"]:   # 人工定稿即通过并锁定；驳回意见清掉
+        state = record.case_reviews.setdefault(case["uid"], {"status": "pending", "comment": "", "reject_count": 0, "locked": False})
+        state.update(status="approved", locked=True, comment="离线终稿", fields=[], steps=[])
+        state.pop("reject_types", None)
+    record.review_log.append({"action": "final_apply", "by": _by, "at": now, "file": "、".join(names),
+                              "modified": len(plan["modified"]), "added": len(plan["added"]), "deleted": len(plan["deleted"])})
+    result = GenerationResult.model_validate({**record.result, "cases": plan["cases"]})
+    _renumber(result.cases)
+    for case in result.cases:   # 新增的记首版（配上的已在上面记过改动版本）
+        if any(case.uid == a["uid"] for a in plan["added"]):
+            record_version(task_id, "case", case.uid, "import", case.model_dump(), by=_by, reason="离线终稿新增")
+    record.offline_review.update(applied=True, apply_stats={"total": len(result.cases), "modified": len(plan["modified"]),
+                                                            "added": len(plan["added"]), "deleted": len(plan["deleted"])})
+    response = _finalize_task(store, task_id, store.output_dir / task_id, record.sources, result,
+                              request.app.state.templates.get((record.context or {}).get("template_id")))
+    logger.info("任务 {} 终稿覆盖：{} 条用例（改 {} / 增 {} / 删 {}），全部标为人工定稿", task_id, len(result.cases),
+                len(plan["modified"]), len(plan["added"]), len(plan["deleted"]))
+    request.state.audit_detail = f"以终稿为准：{len(result.cases)} 条（改 {len(plan['modified'])} / 增 {len(plan['added'])} / 删 {len(plan['deleted'])}）"
+    # 知识沉淀：全部用例已是评审通过的，按「评审通过用例」入库；之前以「离线终稿」来源入过的清掉，不重复
+    _acc.schedule(f"cases:{task_id}", lambda: _acc.ingest_cases(store.get(task_id), _by))
+    _acc.schedule(f"final:{task_id}", lambda: _acc.ingest_cases(store.get(task_id), _by, cases=[], label="离线终稿"))
+    return {**response, "stats": diff["stats"], "added": diff["added"], "deleted": diff["deleted"], "modified": diff["modified"],
+            "applied": True, "apply_stats": record.offline_review["apply_stats"]}
 
 
 @router.get("/api/v1/tasks")
