@@ -189,10 +189,24 @@ class RequirementStore:
         meta = {**meta, "rev": 0}
         item["extraction"] = {"text": data["text"], "meta": meta, "edited": None,
                               "modules": data.get("modules"), "dropped": data.get("dropped") or [], "reviewed": None,
-                              "ledger": data.get("ledger") or {"stats": None, "decisions": {}}}
+                              "ledger": data.get("ledger") or {"stats": None, "decisions": {}},
+                              # 顶层章节 → 端（提取时模型判定；人工改的记 terminal_edits）；没判的按关键词兜底（terminals.section_terminals）
+                              "terminals": dict(data.get("terminals") or {}), "terminal_reasons": dict(data.get("terminal_reasons") or {}),
+                              "terminal_edits": {}}
         item["extracting"], item["extraction_error"] = False, None
         self._inherit_ledger(item, previous)
         self._render_text(item)
+        self._persist(item)
+        return item
+
+    def set_extraction_terminal(self, req_id: str, section: str, terminal: str, by: str | None = None) -> dict:
+        """三端汇总：把某个顶层章节改到别的端（人工判定优先于模型）。不动整理稿正文与 rev。"""
+        item = self._get_alive(req_id)
+        ex = item.get("extraction") or {}
+        if not ex.get("modules"):
+            raise RequirementError("整理稿没有逐条结构，不能按章节归端")
+        ex.setdefault("terminals", {})[section] = terminal
+        ex.setdefault("terminal_edits", {})[section] = {"by": by, "at": _now()}
         self._persist(item)
         return item
 

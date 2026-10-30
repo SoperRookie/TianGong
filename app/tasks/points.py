@@ -154,7 +154,7 @@ def normalize_points(modules: list[dict]) -> list[dict]:
                     item["ref"] = ref
                 # 保留实体字段（已实体化的测试点二次归一化时不丢状态）
                 for key in ("tp_id", "status", "locked", "comment", "reject_count", "source", "warnings",
-                            "version", "basis", "combo_from", "ai_review", *REJECT_FIELDS):
+                            "version", "basis", "combo_from", "ai_review", "terminal", "scenario", *REJECT_FIELDS):
                     if key in p:
                         item[key] = p[key]
                 points.append(item)
@@ -308,6 +308,12 @@ def apply_point_review(modules: list[dict], items: list[dict]) -> dict:
                 point["dimension"] = str(item.get("dimension", ""))
             if item.get("ref") is not None:
                 point["ref"] = point_ref(item)
+            if item.get("terminal"):
+                from app.terminals import valid_key
+
+                if valid_key(str(item["terminal"])) is None:
+                    raise PointReviewError(f"测试点 {tp_id} 的端无效: {item['terminal']}")
+                point["terminal"] = str(item["terminal"])
             point["status"], point["locked"] = "pending", False
             clear_reject_fields(point)
             point["warnings"] = coarse_warnings(text)
@@ -348,29 +354,40 @@ def rejected_points(modules: list[dict]) -> list[dict]:
     return [dict(p, module=entry["module"]) for entry, p in iter_points(modules) if p.get("status") == "rejected"]
 
 
-def confirmable_points(modules: list[dict]) -> list[dict]:
+def generation_view(p: dict) -> dict:
+    """测试点送生成 Agent 的投影：描述 / 维度 / 编号 / ref / 依据，端跟着走（用例按来源测试点归端）。"""
+    return {"point": p["point"], "dimension": p.get("dimension", ""),
+            **({"tp_id": p["tp_id"]} if p.get("tp_id") else {}),
+            **({"ref": p["ref"]} if p.get("ref") else {}),
+            **({"basis": p["basis"]} if p.get("basis") else {}),
+            **({"terminal": p["terminal"]} if p.get("terminal") else {})}
+
+
+def confirmable_points(modules: list[dict], terminal: str | None = None) -> list[dict]:
     """确认生成时的正式测试点集（需求六十一：通过→锁定→正式测试点）。
 
     有任何已通过的点 → 只用已通过的；全部未审核 → 沿用全量（兼容整批确认流程）。
-    被驳回的点永不进入生成。
+    被驳回的点永不进入生成。terminal 给了只取该端的测试点（按端单独生成），「有没有已通过」也只在该端内判断。
     """
-    any_approved = any(p.get("status") == "approved" for _, p in iter_points(modules))
+    from app.terminals import point_terminal
+
+    def _in(p: dict) -> bool:
+        return not terminal or point_terminal(p) == terminal
+
+    any_approved = any(p.get("status") == "approved" for _, p in iter_points(modules) if _in(p))
     result: list[dict] = []
     for entry in modules:
         wanted = [
-            {"point": p["point"], "dimension": p.get("dimension", ""),
-             **({"tp_id": p["tp_id"]} if p.get("tp_id") else {}),
-             **({"ref": p["ref"]} if p.get("ref") else {}),
-             **({"basis": p["basis"]} if p.get("basis") else {})}
+            generation_view(p)
             for p in entry["points"]
-            if (p.get("status") == "approved" if any_approved else p.get("status") != "rejected")
+            if _in(p) and (p.get("status") == "approved" if any_approved else p.get("status") != "rejected")
         ]
         if wanted:
             result.append({"module": entry["module"], "points": wanted})
     return result
 
 
-AI_SOURCES = ("ai", "gap", "supplement", "ai_fix", "derived", "combined")   # derived：经验延伸（需求之外、带依据）；combined：模块级组合延伸（带依据与来源编号）
+AI_SOURCES = ("ai", "gap", "supplement", "ai_fix", "derived", "combined", "e2e")   # derived：经验延伸（需求之外、带依据）；combined：模块级组合延伸（带依据与来源编号）；e2e：端到端场景点
 
 
 RESOLVE_MODULE_SIM = 0.6   # AI 补的点模块名对不上已有模块时，名字相似度到这么多才归到最像的那个
@@ -418,6 +435,8 @@ def add_points(modules: list[dict], additions: list[dict], source: str, seq_floo
             **({"ref": ref} if (ref := point_ref(item)) else {}),
             **({"basis": basis} if (basis := str(item.get("basis") or "").strip()) else {}),
             **({"combo_from": list(item["combo_from"])} if isinstance(item.get("combo_from"), list) and item["combo_from"] else {}),
+            **({"terminal": term} if (term := str(item.get("terminal") or "").strip()) else {}),
+            **({"scenario": sc} if (sc := str(item.get("scenario") or "").strip()) else {}),
             "status": "pending", "locked": False, "comment": "",
             "reject_count": 0, "source": source, "version": 1,
             "warnings": coarse_warnings(text),

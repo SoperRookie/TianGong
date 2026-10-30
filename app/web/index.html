@@ -994,6 +994,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <select id="pdDim"></select>
     <label class="f">需求来源<span class="hint">（设计需求页 › 需求点，如「3.2 登录失败处理 › 密码错误 5 次锁定」，供确认 / 评审时回到需求核对）</span></label>
     <input type="text" id="pdRef" placeholder="页面或章节 › 条目编号或原文摘录">
+    <div id="pdTermWrap" style="display:none"><label class="f">所属端<span class="hint">（H5 / 游戏后台管理 / 商户后台 / 端到端 …：按端分列表审核、按端生成与导出）</span></label>
+    <select id="pdTerm"></select></div>
   </div>
   <div class="dlg-f">
     <button class="btn ghost" onclick="resolvePoint(null)">取消</button>
@@ -1564,6 +1566,18 @@ const DIMENSIONS = ["正常流程","异常流程","输入校验","边界值","�
 let currentTask = null, editingCase = null, currentView = 'board';
 let detailTab = 'overview', caseTab = 'all', caseModule = '', caseView = 'table', pointView = 'table';
 let ptSub = 'blind', ptPage = 1, ptSize = 20, ptModule = '', ptStatus = '', bsPage = 1, bsSize = 20, bsFilter = 'open', bsKw = '';
+let ptTerminal = '', caseTerminal = '';   // 按端（H5 / 游戏后台管理 / 商户后台 / 端到端）看测试点与用例：空 = 全部
+/* 端：任务详情带 terminals（清单）、point_terminals（按端统计）、case_terminals（uid → 端） */
+function termLabel(t, key) { const x = ((t && t.terminals) || []).find(z => z.key === key); return x ? x.label : (key || '其他'); }
+function termTabsHtml(rows, cur, setExpr, allLabel) {
+  // rows: [{key, label, total}]；只有一个端且是「其他」时不显示（没有分端意义）
+  if (!rows.length || (rows.length === 1 && rows[0].key === 'other')) return '';
+  const all = rows.reduce((a, r) => a + r.total, 0);
+  return `<div class="seg" style="margin-bottom:8px">
+    <button class="${!cur?'on':''}" onclick="${setExpr}('terminal','')">${allLabel} <span class="cnt">${all}</span></button>
+    ${rows.map(r => `<button class="${cur===r.key?'on':''}" onclick="${setExpr}('terminal',${jsq(r.key)})" title="${r.key==='e2e'?'跨端业务主线上的一致性测试点（拆解前通读全文梳理）':r.key==='common'?'需求说明 / 版本记录等不属于某个界面的章节':r.key==='other'?'没对上端的模块（可在修改测试点时改端）':'按整理稿章节归属判定，可在修改测试点时改端'}">${esc(r.label)} <span class="cnt${r.hot?' hot':''}">${r.badge!==undefined?r.badge:r.total}</span></button>`).join('')}
+  </div>`;
+}
 let dpPage = 1, dpSize = 20, dpFilter = 'open', dpKw = '';
 const bsSel = new Set(), dpSel = new Set();   // 盲区 / 重复对的勾选（跨页保留；切任务清空）
 function selToggle(set, id, checked, render) { if (checked) set.add(id); else set.delete(id); render(); }
@@ -1796,7 +1810,7 @@ function rejectInfoLine(s) {
   return `<div class="hint" style="color:var(--danger)">${types} 原因：${esc(s.comment)}${extra?' · '+extra:''}</div>`;
 }
 let _pdResolve = null;
-function askPoint(title, {module=null, point='', dimension='', ref=''}={}) {
+function askPoint(title, {module=null, point='', dimension='', ref='', terminal=null, terminals=null}={}) {
   return new Promise(res => {
     _pdResolve = res;
     $('pdTitle').textContent = title;
@@ -1806,6 +1820,10 @@ function askPoint(title, {module=null, point='', dimension='', ref=''}={}) {
     $('pdDim').innerHTML = '<option value="">（未指定）</option>' + DIMENSIONS.map(d=>`<option>${d}</option>`).join('');
     $('pdDim').value = dimension || '';
     $('pdRef').value = ref || '';
+    const terms = terminals || (currentTask && currentTask.terminals) || [];
+    $('pdTermWrap').style.display = terminal===null || !terms.length ? 'none' : '';
+    $('pdTerm').innerHTML = (terminal===null ? '' : '<option value="">（按模块自动判定）</option>') + terms.map(x=>`<option value="${esc(x.key)}">${esc(x.label)}</option>`).join('');
+    $('pdTerm').value = terminal || '';
     $('pointDlg').showModal();
   });
 }
@@ -1815,7 +1833,8 @@ function submitPoint() {
   const needModule = $('pdModuleWrap').style.display !== 'none';
   const module = $('pdModule').value.trim();
   if (needModule && !module) return toast('请填写模块名', 'warn');
-  resolvePoint({module, point, dimension: $('pdDim').value, ref: $('pdRef').value.trim()});
+  const terminal = $('pdTermWrap').style.display !== 'none' ? $('pdTerm').value : '';
+  resolvePoint({module, point, dimension: $('pdDim').value, ref: $('pdRef').value.trim(), ...(terminal ? {terminal} : {})});
 }
 function resolvePoint(v) { $('pointDlg').close(); const r=_pdResolve; _pdResolve=null; r && r(v); }
 let _inResolve = null;
@@ -2605,7 +2624,7 @@ async function openTask(id, keepLocal) {
   if (!keepLocal) {
     lastPointDiff = null; lastCaseDiff = null; lastHints = [];
     caseTab = 'all'; caseModule = ''; expandedSteps = new Set(); pointView = 'table';
-    ptSub = 'blind'; ptPage = 1; ptModule = ''; ptStatus = ''; bsPage = 1; bsFilter = 'open'; bsKw = ''; dpPage = 1; dpFilter = 'open'; dpKw = '';
+    ptSub = 'blind'; ptPage = 1; ptModule = ''; ptStatus = ''; ptTerminal = ''; caseTerminal = ''; bsPage = 1; bsFilter = 'open'; bsKw = ''; dpPage = 1; dpFilter = 'open'; dpKw = '';
     bsSel.clear(); dpSel.clear();
     casePage = 1; casePrio = ''; caseKw = '';
     detailTab = currentTask.status === 'awaiting_confirmation' ? 'points'
@@ -2815,7 +2834,9 @@ function renderOverview(t) {
           ${['xlsx','csv','xmind'].map(f=>`<a class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/files/'+f)}+'?scope='+(exportApprovedOnly?'approved':'all')+(exportCompactMind?'&layout=compact':''), ${jsq('测试用例.'+f)})">${esc(f)}</a>`).join('')}
           <label class="check" title="默认导出任务内全部用例（含待审核、已驳回、草稿）；勾选后只导出审核通过的正式用例"><input type="checkbox" ${exportApprovedOnly?'checked':''} onchange="exportApprovedOnly=this.checked"> 只导出正式用例</label>
           <label class="check" title="XMind 默认每步操作与预期各占一个节点，节点数远多于用例数；勾选后脑图只到用例一层，步骤与预期放在备注里，节点数与用例数一致"><input type="checkbox" ${exportCompactMind?'checked':''} onchange="exportCompactMind=this.checked"> 紧凑脑图</label>
-          <span class="hint">文件按当前内容即时生成，与页面一致</span></div>` : ''}
+          <span class="hint">文件按当前内容即时生成，与页面一致</span></div>
+          ${(() => { const ct = t.case_terminals || {}; const rows = (t.terminals||[]).map(x => ({...x, n: (t.result.cases||[]).filter(c => (ct[c.uid]||'other') === x.key).length})).filter(x => x.n);
+            return rows.length > 1 || (rows.length === 1 && rows[0].key !== 'other') ? `<div class="hint" style="margin:6px 0 2px">按端单独导出（表格 / 脑图）：</div><div class="toolbar" style="margin-top:0;flex-wrap:wrap">${rows.map(x => `<span class="hint" style="display:inline-flex;align-items:center;gap:4px;margin-right:8px"><b>${esc(x.label)}</b> ${x.n} 条 ${['xlsx','csv','xmind'].map(f=>`<a class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/files/'+f+'?terminal=')}+encodeURIComponent(${jsq(x.key)})+'&scope='+(exportApprovedOnly?'approved':'all')+(exportCompactMind&&${jsq(f)}==='xmind'?'&layout=compact':''), ${jsq('测试用例-'+x.label+'.'+f)})">${f}</a>`).join('')}</span>`).join('')}</div>` : ''; })()}` : ''}
       </div>
       <div>
         <div class="section-t">质量提示与注入<span class="hint">（AI 自检仅供参考，不作为自动通过依据）</span></div>
@@ -2884,10 +2905,12 @@ function allPoints(t) {
   const modules = (t.analysis||{}).test_points || [];
   return modules.flatMap(m => (m.points||[]).map(p => ({...normPoint(p), module:m.module})));
 }
-const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增', blind_spot:'盲区转入', derived:'经验延伸', combined:'组合延伸'};
+const srcText = {ai:'AI 拆解', gap:'查漏新增', supplement:'AI 补充', manual:'人工', ai_fix:'修改新增', blind_spot:'盲区转入', derived:'经验延伸', combined:'组合延伸', e2e:'端到端场景'};
 const BS_STATUS = {open:'待处置', question:'已转待确认事项', point:'已转测试点', explained:'需求已说明', ignored:'已忽略'};
 const srcChip = src => src === 'derived'
   ? `<span class="tag" style="color:var(--purple)" title="需求没写、按资深测试经验补的场景；依据见测试点下方">延伸</span><div class="hint">经验延伸</div>`
+  : src === 'e2e'
+  ? `<span class="tag" style="color:var(--purple)" title="拆解前通读全文梳理的跨端业务主线（商户后台配置 → H5 参与 → 游戏后台结算 → 商户报表）上的一致性测试点；主线见测试点下方">端到端</span><div class="hint">端到端场景</div>`
   : src === 'combined'
   ? `<span class="tag" style="color:var(--purple)" title="模块内几条规则叠加后的组合场景（条件组合 / 流程串联 / 状态×角色×端 / 规则优先级 / 数据流转）；依据与来源编号见测试点下方">组合</span><div class="hint">组合延伸</div>`
   : src === 'manual' || src === 'blind_spot'
@@ -2921,6 +2944,7 @@ function ptSet(name, value) {
   else if (name === 'size') { ptSize = value; ptPage = 1; }
   else if (name === 'module') { ptModule = value; ptPage = 1; }
   else if (name === 'status') { ptStatus = value; ptPage = 1; }
+  else if (name === 'terminal') { ptTerminal = value; ptModule = ''; ptPage = 1; }
   renderDetail();
 }
 function caseSet(name, value) {
@@ -2930,6 +2954,7 @@ function caseSet(name, value) {
   else if (name === 'module') { caseModule = value; casePage = 1; }
   else if (name === 'prio') { casePrio = value; casePage = 1; }
   else if (name === 'kw') { caseKw = (value || '').trim(); casePage = 1; }
+  else if (name === 'terminal') { caseTerminal = value; caseModule = ''; casePage = 1; }
   renderDetail();
 }
 function dpSet(name, value) {
@@ -2972,8 +2997,15 @@ function renderPointWorkbench(t) {
   if (ptSub === 'blind') return sub + renderBlindSpots(t);
   if (ptSub === 'dup') return sub + renderDupPairs(t, confirmable);
 
-  // 测试点列表：按模块 / 状态筛选后分页，页内保留模块分组行
-  const filtered = pts.filter(p => (!ptModule || p.module === ptModule) && (!ptStatus || (ptStatus === 'ai_review' ? !!p.ai_review : p.status === ptStatus)));
+  // 按端分列表：H5 / 游戏后台管理 / 商户后台 / 端到端 … 各自一张列表，各自审核、各自生成用例
+  const termRows = (t.point_terminals || []).map(r => ({...r, badge: r.pending ? `${r.total}<span style="opacity:.7"> · 待审 ${r.pending}</span>` : r.total, hot: !!r.pending}));
+  if (ptTerminal && !termRows.some(r => r.key === ptTerminal)) ptTerminal = '';
+  const termTabs = termTabsHtml(termRows, ptTerminal, 'ptSet', '全部端');
+  const curTerm = termRows.find(r => r.key === ptTerminal) || null;
+  const termQ = ptTerminal ? '&terminal=' + encodeURIComponent(ptTerminal) : '';
+  // 测试点列表：按端 / 模块 / 状态筛选后分页，页内保留模块分组行
+  const filtered = pts.filter(p => (!ptTerminal || (p.terminal || 'other') === ptTerminal) && (!ptModule || p.module === ptModule) && (!ptStatus || (ptStatus === 'ai_review' ? !!p.ai_review : p.status === ptStatus)));
+  const termModules = ptTerminal ? modules.filter(m => (m.points||[]).some(p => (p.terminal || 'other') === ptTerminal)) : modules;
   const pages = Math.max(1, Math.ceil(filtered.length / ptSize));
   if (ptPage > pages) ptPage = pages;
   const pageItems = filtered.slice((ptPage - 1) * ptSize, ptPage * ptSize);
@@ -2981,9 +3013,9 @@ function renderPointWorkbench(t) {
       <tr>
         <td style="width:30px">${p.legacy?'':`<input type="checkbox" class="ptck" data-tp="${esc(p.tp_id)}" data-mod="${esc(p.module)}">`}</td>
         <td style="width:70px"><span class="cid">${esc(p.tp_id)}</span></td>
-        <td style="width:150px">${modTag(p.module)}</td>
+        <td style="width:150px">${modTag(p.module)}${!ptTerminal&&p.terminal?`<div class="hint" title="所属端（修改测试点时可改）">${esc(termLabel(t, p.terminal))}</div>`:''}</td>
         <td>${esc(p.point)}
-          ${p.basis?`<div class="hint" style="color:var(--purple)" title="${p.source==='combined'?'组合延伸：为什么这个组合值得测':'经验延伸：为什么要测'}">${p.source==='combined'?'组合依据':'依据'}：${esc(p.basis)}${(p.combo_from||[]).length?` <span class="hint">（由 ${p.combo_from.map(esc).join('、')} 组合）</span>`:''}</div>`:''}
+          ${p.basis?`<div class="hint" style="color:var(--purple)" title="${p.source==='combined'?'组合延伸：为什么这个组合值得测':p.source==='e2e'?'端到端场景：为什么要跨端验证':'经验延伸：为什么要测'}">${p.source==='combined'?'组合依据':p.source==='e2e'?`主线${p.scenario?'「'+esc(p.scenario)+'」':''}`:'依据'}：${esc(p.basis)}${(p.combo_from||[]).length?` <span class="hint">（由 ${p.combo_from.map(esc).join('、')} 组合）</span>`:''}</div>`:''}
           ${p.ai_review?`<div class="hint" style="color:var(--danger)" title="${esc(p.ai_review.quote?'原文：'+p.ai_review.quote:'独立评审 Agent 的意见，不改动测试点；通过 / 驳回 / 修改后撤掉')}">AI 评审·${esc(p.ai_review.verdict)}${p.ai_review.unverified?'（引文未核验）':''}：${esc(p.ai_review.fix||p.ai_review.note||'')}${p.ai_review.fix&&p.ai_review.note?`<span class="hint">（${esc(p.ai_review.note)}）</span>`:''}${canEditPt&&p.ai_review.fix&&!['UI 外观','超出需求','维度不符'].includes(p.ai_review.verdict)?` <a onclick="pointModify(${jsq(p.tp_id)}, ${jsq(p.ai_review.fix)})" title="打开修改框，预填 AI 建议的写法">按建议修改</a>`:''}</div>`:''}
           ${(p.warnings||[]).map(w=>`<div class="hint" style="color:var(--warn)">⚠ ${esc(w)}</div>`).join('')}
           ${editingHint('point', p.tp_id)}
@@ -3017,16 +3049,16 @@ function renderPointWorkbench(t) {
     rows += rowOf(p);
   }
   const filters = pointView==='table' ? `<div class="filters" style="margin-top:0">
-      <select style="width:180px" onchange="ptSet('module', this.value)"><option value="">全部模块</option>
-        ${modules.map(m=>`<option value="${esc(m.module)}" ${ptModule===m.module?'selected':''}>${esc(m.module)}（${(m.points||[]).length}）</option>`).join('')}</select>
+      <select style="width:180px" onchange="ptSet('module', this.value)"><option value="">全部模块${ptTerminal?'（'+esc(termLabel(t, ptTerminal))+'）':''}</option>
+        ${termModules.map(m=>`<option value="${esc(m.module)}" ${ptModule===m.module?'selected':''}>${esc(m.module)}（${ptTerminal?(m.points||[]).filter(p=>(p.terminal||'other')===ptTerminal).length:(m.points||[]).length}）</option>`).join('')}</select>
       <select style="width:110px" onchange="ptSet('status', this.value)"><option value="">全部状态</option>
         ${Object.entries(pStatusText).map(([k,v])=>`<option value="${k}" ${ptStatus===k?'selected':''}>${v}</option>`).join('')}
         ${aiReviewCnt?`<option value="ai_review" ${ptStatus==='ai_review'?'selected':''}>有 AI 评审意见（${aiReviewCnt}）</option>`:''}</select>
-      ${ptModule||ptStatus?`<span class="hint">筛选出 ${filtered.length} 条</span>`:''}
+      ${ptModule||ptStatus||ptTerminal?`<span class="hint">筛选出 ${filtered.length} 条</span>`:''}
     </div>` : '';
 
-  return sub + `<div class="toolbar" style="margin-top:0">
-      <span class="hint">共 ${pts.length} 条 · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b>${derivedCnt?` · 经验延伸 <b style="color:var(--purple)" title="需求没写、按资深测试经验补的场景">${derivedCnt}</b>`:''}${combinedCnt?` · 组合延伸 <b style="color:var(--purple)" title="模块内几条规则叠加后的组合场景">${combinedCnt}</b>`:''}${aiReviewCnt?` · <a onclick="ptSet('status','ai_review')" title="独立评审 Agent 标出的硬伤：合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符">AI 评审意见 <b style="color:var(--danger)">${aiReviewCnt}</b></a>`:''}</span>
+  return sub + termTabs + `<div class="toolbar" style="margin-top:0">
+      <span class="hint">${ptTerminal?`<b>${esc(termLabel(t, ptTerminal))}</b> ${curTerm?curTerm.total:0} 条 · 待审核 <b>${curTerm?curTerm.pending:0}</b> · 已通过 <b style="color:var(--ok)">${curTerm?curTerm.approved:0}</b> · 已驳回 <b style="color:var(--danger)">${curTerm?curTerm.rejected:0}</b>${curTerm&&curTerm.generated?` · 已生成用例 ${curTerm.generated}`:''} · 全部 ${pts.length} 条`:`共 ${pts.length} 条`} · 待审核 <b>${pending}</b> · 已通过 <b style="color:var(--ok)">${approved}</b> · 已驳回 <b style="color:var(--danger)">${rejected}</b>${derivedCnt?` · 经验延伸 <b style="color:var(--purple)" title="需求没写、按资深测试经验补的场景">${derivedCnt}</b>`:''}${combinedCnt?` · 组合延伸 <b style="color:var(--purple)" title="模块内几条规则叠加后的组合场景">${combinedCnt}</b>`:''}${aiReviewCnt?` · <a onclick="ptSet('status','ai_review')" title="独立评审 Agent 标出的硬伤：合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符">AI 评审意见 <b style="color:var(--danger)">${aiReviewCnt}</b></a>`:''}</span>
       <div class="seg">
         <button class="${pointView==='table'?'on':''}" onclick="pointView='table';renderDetail()">表格</button>
         <button class="${pointView==='mind'?'on':''}" onclick="pointView='mind';renderDetail()">脑图</button>
@@ -3040,8 +3072,8 @@ function renderPointWorkbench(t) {
         <button class="btn ghost sm" onclick="supplementPoints()">AI 补充</button>
         <button class="btn ghost sm" onclick="manualAddPoint()">手工新增</button>`:''}
         ${canEditPt&&!pts.every(p=>p.legacy)?`<button class="btn ghost sm" onclick="openCompareDlg()" title="录入人工编写的测试点，与 AI 生成的逐条对比">人工对比</button>`:''}
-        ${pts.length?`<button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export')}+(exportApprovedOnly?'?scope=approved':''), '测试点.xlsx')" title="导出测试点 Excel：编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例、延伸依据">导出 xlsx</button>
-        <button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export?fmt=xmind')}+(exportApprovedOnly?'&scope=approved':''), '测试点.xmind')" title="导出测试点思维导图（XMind）：需求 → 模块 → 测试点（维度 / 来源 / 状态标签）→ 需求来源、依据、审核与 AI 评审意见、覆盖用例；与页面脑图同结构">导出脑图</button>
+        ${pts.length?`<button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export?x=1')}+(exportApprovedOnly?'&scope=approved':'')+${jsq(termQ)}, ${jsq('测试点'+(ptTerminal?'-'+termLabel(t, ptTerminal):'')+'.xlsx')})" title="导出测试点 Excel：编号、模块、端、测试点、维度、来源、状态、审核意见、是否已生成用例、延伸依据${ptTerminal?'；当前只导「'+esc(termLabel(t, ptTerminal))+'」':''}">导出 xlsx${ptTerminal?'（'+esc(termLabel(t, ptTerminal))+'）':''}</button>
+        <button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/points/export?fmt=xmind')}+(exportApprovedOnly?'&scope=approved':'')+${jsq(termQ)}, ${jsq('测试点'+(ptTerminal?'-'+termLabel(t, ptTerminal):'')+'.xmind')})" title="导出测试点思维导图（XMind）：需求 → 模块 → 测试点（维度 / 来源 / 状态标签）→ 需求来源、依据、审核与 AI 评审意见、覆盖用例；与页面脑图同结构${ptTerminal?'；当前只导「'+esc(termLabel(t, ptTerminal))+'」':''}">导出脑图${ptTerminal?'（'+esc(termLabel(t, ptTerminal))+'）':''}</button>
         <label class="check" title="勾选后只导出已通过的测试点"><input type="checkbox" ${exportApprovedOnly?'checked':''} onchange="exportApprovedOnly=this.checked"> 只导已通过</label>`:''}
       </div></div>
     ${renderCoverage(t)}
@@ -3049,7 +3081,7 @@ function renderPointWorkbench(t) {
     ${renderPointCompare(t)}
     ${lastHints.length?`<div class="warnline">${lastHints.map(esc).join('<br>')}</div>`:''}
     ${pts.length && pts.every(p=>p.legacy) ? '<div class="hint" style="margin:6px 0">项目化之前的旧版任务：测试点为只读留档，不支持审核操作</div>' : ''}
-    ${pointView==='mind' ? renderPointMind(t, modules, confirmable) : filters + `<div class="tbl-wrap"><table>
+    ${pointView==='mind' ? renderPointMind(t, ptTerminal ? termModules.map(m => ({...m, points: (m.points||[]).filter(p => (p.terminal||'other') === ptTerminal)})) : modules, confirmable) : filters + `<div class="tbl-wrap"><table>
       <tr><th>${pts.some(p=>!p.legacy)?allCheckedHtml('ptck', 'renderBatchBar', '全选本页测试点（批量通过 / 驳回）'):''}</th><th>编号</th><th>模块</th><th>测试点</th><th title="设计需求页来源：页面或章节 › 需求点，用于确认与评审时回到需求核对逻辑">需求来源</th><th>维度</th><th>来源</th><th>状态</th><th>操作</th></tr>
       ${rows || `<tr><td colspan="9"><div class="empty">${pts.length?'没有符合筛选条件的测试点':'暂无测试点'}</div></td></tr>`}
     </table></div>` + (filtered.length > PT_PAGE_SIZES[0] || ptPage > 1 ? pagerHtml(filtered.length, ptPage, ptSize, 'ptSet') : '')}
@@ -3057,13 +3089,17 @@ function renderPointWorkbench(t) {
       :rejected&&confirmable?`<div class="toolbar"><button class="btn soft sm" onclick="fixPoints()" id="fixPtBtn">AI 修改驳回项（${rejected}）</button>
       <span class="hint">只输入被驳回项与结构化驳回信息；产出修改提案，逐项确认后落地</span></div>`:''}
     ${lastPointDiff?renderPointDiff(lastPointDiff):''}
-    ${confirmable?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
-      <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">确认并生成用例${approved?`（仅已通过的 ${approved} 条）`:'（全部未驳回项）'}</button>
+    ${confirmable?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px;flex-wrap:wrap">
+      ${curTerm?`<button class="btn" onclick="confirmPointsGo(${jsq(ptTerminal)})" id="confirmBtn" title="只为「${esc(curTerm.label)}」的测试点生成用例，其它端审完后各自再生成（增量并入、单独评审）">只生成「${esc(curTerm.label)}」用例${curTerm.approved?`（仅已通过的 ${curTerm.approved} 条）`:`（该端全部未驳回项 ${curTerm.total-curTerm.rejected} 条）`}</button>
+      <button class="btn ghost" onclick="confirmPointsGo()" title="不分端，一次生成全部">全部端一起生成${approved?`（已通过 ${approved} 条）`:''}</button>`
+      :`<button class="btn" onclick="confirmPointsGo()" id="confirmBtn">确认并生成用例${approved?`（仅已通过的 ${approved} 条）`:'（全部未驳回项）'}</button>
+      ${termRows.length>1?`<span class="hint">要按端分别生成（如移动端先审完先生成），先在上方切到该端再点生成</span>`:''}`}
       <span class="hint">通过 = 锁定为正式测试点；驳回项修改后需再审核，不进入生成${bsOpen?`；还有 <b style="color:var(--warn)">${bsOpen}</b> 条需求盲区待处置`:''}${dpOpen?`；<b style="color:var(--warn)">${dpOpen}</b> 组疑似重复待处置`:''}</span>
-    </div>`:t.status==='completed'?(pendingGen.length?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px">
-      <button class="btn" onclick="confirmPointsGo()" id="confirmBtn">为新通过的 ${pendingGen.length} 条测试点生成用例</button>
+    </div>`:t.status==='completed'?(pendingGen.length?`<div class="toolbar" style="border-top:1px solid var(--line-2);padding-top:14px;flex-wrap:wrap">
+      ${termRows.filter(r => r.pending_generation).map(r => `<button class="btn${ptTerminal&&ptTerminal!==r.key?' ghost':''}" onclick="confirmPointsGo(${jsq(r.key)})" title="只为「${esc(r.label)}」新通过的测试点生成用例，并入现有用例、单独评审">生成「${esc(r.label)}」用例（${r.pending_generation} 条）</button>`).join('')}
+      ${termRows.filter(r => r.pending_generation).length>1?`<button class="btn ghost" onclick="confirmPointsGo()" id="confirmBtn">全部新通过的 ${pendingGen.length} 条一起生成</button>`:''}
       <span class="hint">分批审核、分批生成：只为这些测试点生成，并入现有用例，已有用例与审核状态不变</span>
-    </div>`:'<div class="hint" style="margin-top:12px">该任务已完成生成；继续通过新的测试点后，这里会出现「为新通过的测试点生成用例」</div>'):''}`;
+    </div>`:'<div class="hint" style="margin-top:12px">该任务已完成生成；继续通过新的测试点后，这里会出现按端的「生成用例」按钮</div>'):''}`;
 }
 
 /* 测试点脑图：需求 → 模块 → 测试点（维度 / 状态标签）→ 驳回意见；选中节点后用工具栏审核，双击修改 */
@@ -3073,7 +3109,7 @@ function buildPointMinderJson(t, modules) {
     children: modules.map(m => ({
       data: {text: `${m.module}（${(m.points||[]).length}）`, kind: 'module'},
       children: (m.points||[]).map(normPoint).map(p => ({
-        data: {text: p.point, kind: 'point', tpId: p.tp_id, resource: [p.tp_id, ...(p.dimension ? [p.dimension] : []), ...(p.source === 'derived' ? ['延伸'] : p.source === 'combined' ? ['组合'] : []), label[p.status] || p.status]},
+        data: {text: p.point, kind: 'point', tpId: p.tp_id, resource: [p.tp_id, ...(p.dimension ? [p.dimension] : []), ...(p.terminal && p.terminal !== 'other' ? [termLabel(t, p.terminal)] : []), ...(p.source === 'derived' ? ['延伸'] : p.source === 'combined' ? ['组合'] : p.source === 'e2e' ? ['端到端'] : []), label[p.status] || p.status]},
         children: [
           ...(p.ref ? [{data: {text: `来源：${p.ref}`, kind: 'note', resource: ['需求来源']}}] : []),
           ...(p.basis ? [{data: {text: `${p.source === 'combined' ? '组合依据' : '依据'}：${p.basis}${(p.combo_from||[]).length ? `（由 ${p.combo_from.join('、')} 组合）` : ''}`, kind: 'note', resource: [p.source === 'combined' ? '组合延伸' : '经验延伸']}}] : []),
@@ -3460,10 +3496,10 @@ async function pointModify(tp, prefill) {
   jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'start'})
     .then(d => { if (d.holder) toast(`${d.holder.by} 正在编辑此测试点，注意保存冲突`, 'warn'); })
     .catch(()=>{});
-  const v = await askPoint('修改测试点 ' + tp + (p&&p.module ? '（' + p.module + '）' : ''), {point: prefill || (p?p.point:''), dimension: p?p.dimension:'', ref: p?p.ref:''});
+  const v = await askPoint('修改测试点 ' + tp + (p&&p.module ? '（' + p.module + '）' : ''), {point: prefill || (p?p.point:''), dimension: p?p.dimension:'', ref: p?p.ref:'', terminal: (p&&p.terminal)||'other'});
   jpost(`/api/v1/tasks/${currentTask.task_id}/editing`, {kind:'point', entity_id:tp, action:'stop'}).catch(()=>{});
   if (v) pointsReview([{tp_id:tp, action:'modify', point:v.point, dimension:v.dimension, ref:v.ref,
-                        base_version: (p&&p.version)||1}]);
+                        ...(v.terminal && v.terminal !== (p&&p.terminal) ? {terminal: v.terminal} : {}), base_version: (p&&p.version)||1}]);
 }
 function toggleModule(mod, checked) {
   document.querySelectorAll(`.ptck[data-mod="${CSS.escape(mod)}"]`).forEach(c=>c.checked=checked);
@@ -3535,7 +3571,7 @@ async function supplementPoints() {
   } catch (e) { toast('补充失败：' + e.message, 'err'); }
 }
 async function manualAddPoint() {
-  const v = await askPoint('手工新增测试点', {module:''});
+  const v = await askPoint('手工新增测试点', {module: ptModule || '', terminal: ptTerminal || ''});
   if (!v) return;
   try {
     const r = await jpost(`/api/v1/tasks/${currentTask.task_id}/points/add`, {points:[v]});
@@ -3544,15 +3580,15 @@ async function manualAddPoint() {
   } catch (e) { toast('新增失败：' + e.message, 'err'); }
 }
 let confirming = false;
-async function confirmPointsGo() {
+async function confirmPointsGo(terminal) {
   if (confirming) return;
   confirming = true;
   document.querySelectorAll('#detail .btn').forEach(b=>b.disabled=true);
   currentTask.status = 'running'; currentTask.progress = 'generating_reviewing';
   renderDetail();
   try {
-    // 后台生成：立即返回，页面按运行中任务轮询；可取消、不受网关超时影响
-    await jpost(`/api/v1/tasks/${currentTask.task_id}/confirm`, {async_mode: true});
+    // 后台生成：立即返回，页面按运行中任务轮询；可取消、不受网关超时影响；terminal 给了只生成该端的测试点
+    await jpost(`/api/v1/tasks/${currentTask.task_id}/confirm`, {async_mode: true, ...(terminal ? {terminal} : {})});
     await openTask(currentTask.task_id);
   } catch (e) {
     toast('生成失败：' + e.message, 'err');
@@ -3582,14 +3618,21 @@ function renderCases(t) {
   const kw = caseKw.toLowerCase();
   const hit = c => !kw || [c.case_id, c.title, c.module, c.keywords, c.precondition, c.remark, ...(c.point_ids||[]), ...refsOf(c),
     ...(c.steps||[]).flatMap(st=>[st.action, st.expected])].some(x => String(x||'').toLowerCase().includes(kw));
+  const cterms = t.case_terminals || {};
+  const ctRows = (t.terminals || []).map(x => ({key: x.key, label: x.label, total: r.cases.filter(c => (cterms[c.uid] || 'other') === x.key).length})).filter(x => x.total);
+  if (caseTerminal && !ctRows.some(x => x.key === caseTerminal)) caseTerminal = '';
+  const caseTermTabs = termTabsHtml(ctRows, caseTerminal, 'caseSet', '全部端');
   const visible = r.cases.filter(c =>
     (caseTab==='all' || caseState(t, c).status===caseTab) &&
+    (!caseTerminal || (cterms[c.uid] || 'other') === caseTerminal) &&
     (!caseModule || c.module===caseModule) &&
     (!casePrio || c.priority===casePrio) && hit(c));
+  const termCases = caseTerminal ? r.cases.filter(c => (cterms[c.uid] || 'other') === caseTerminal) : r.cases;
+  const termModules = [...new Set(termCases.map(c=>c.module))];
   const pages = Math.max(1, Math.ceil(visible.length / caseSize));
   if (casePage > pages) casePage = pages;
   const pageItems = caseView==='mind' ? visible : visible.slice((casePage - 1) * caseSize, casePage * caseSize);
-  const filtering = caseTab!=='all' || caseModule || casePrio || kw;
+  const filtering = caseTab!=='all' || caseModule || casePrio || kw || caseTerminal;
 
   const rows = pageItems.map(c => {
     const s = caseState(t, c);
@@ -3618,17 +3661,18 @@ function renderCases(t) {
       </div></td></tr>`;
   }).join('');
 
-  return `<div class="filters" style="margin-top:0">
+  const stOf = c => caseState(t, c).status;
+  return caseTermTabs + `<div class="filters" style="margin-top:0">
       <div class="seg">
-        <button class="${caseTab==='all'?'on':''}" onclick="caseSet('tab','all')">全部 ${r.cases.length}</button>
-        <button class="${caseTab==='rejected'?'on':''}" onclick="caseSet('tab','rejected')">待修改 ${nRejected}</button>
-        <button class="${caseTab==='approved'?'on':''}" onclick="caseSet('tab','approved')">已通过 ${nApproved}</button>
-        ${nDraft?`<button class="${caseTab==='draft'?'on':''}" onclick="caseSet('tab','draft')">草稿 ${nDraft}</button>`:''}
-        <button class="${caseTab==='pending'?'on':''}" onclick="caseSet('tab','pending')">未审核 ${nPending}</button>
+        <button class="${caseTab==='all'?'on':''}" onclick="caseSet('tab','all')">全部 ${termCases.length}</button>
+        <button class="${caseTab==='rejected'?'on':''}" onclick="caseSet('tab','rejected')">待修改 ${caseTerminal?termCases.filter(c=>stOf(c)==='rejected').length:nRejected}</button>
+        <button class="${caseTab==='approved'?'on':''}" onclick="caseSet('tab','approved')">已通过 ${caseTerminal?termCases.filter(c=>stOf(c)==='approved').length:nApproved}</button>
+        ${nDraft?`<button class="${caseTab==='draft'?'on':''}" onclick="caseSet('tab','draft')">草稿 ${caseTerminal?termCases.filter(c=>stOf(c)==='draft').length:nDraft}</button>`:''}
+        <button class="${caseTab==='pending'?'on':''}" onclick="caseSet('tab','pending')">未审核 ${caseTerminal?termCases.filter(c=>stOf(c)==='pending').length:nPending}</button>
       </div>
       <select onchange="caseSet('module', this.value)" style="width:150px">
-        <option value="">全部模块</option>
-        ${modules.map(m=>`<option value="${esc(m)}" ${caseModule===m?'selected':''}>${esc(m)}（${r.cases.filter(c=>c.module===m).length}）</option>`).join('')}
+        <option value="">全部模块${caseTerminal?'（'+esc(termLabel(t, caseTerminal))+'）':''}</option>
+        ${termModules.map(m=>`<option value="${esc(m)}" ${caseModule===m?'selected':''}>${esc(m)}（${termCases.filter(c=>c.module===m).length}）</option>`).join('')}
       </select>
       <select onchange="caseSet('prio', this.value)" style="width:90px">
         <option value="">优先级</option>
@@ -3641,7 +3685,8 @@ function renderCases(t) {
         <button class="${caseView==='table'?'on':''}" onclick="caseView='table';renderDetail()">表格</button>
         <button class="${caseView==='mind'?'on':''}" onclick="caseView='mind';renderDetail()">脑图</button>
       </div>
-      <div style="margin-left:auto;display:flex;gap:6px">
+      <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
+        ${caseTerminal?['xlsx','xmind'].map(f=>`<button class="btn ghost sm" onclick="downloadFile(${jsq('/api/v1/tasks/'+t.task_id+'/files/'+f+'?terminal=')}+encodeURIComponent(${jsq(caseTerminal)})+'&scope='+(exportApprovedOnly?'approved':'all')+(exportCompactMind&&${jsq(f)}==='xmind'?'&layout=compact':''), ${jsq('测试用例-'+termLabel(t, caseTerminal)+'.'+f)})" title="只导出「${esc(termLabel(t, caseTerminal))}」的用例（${f==='xmind'?'脑图':'表格'}）；概览页可导全部">导出${f==='xmind'?'脑图':' xlsx'}（${esc(termLabel(t, caseTerminal))}）</button>`).join(''):''}
         ${canEditCases?`<button class="btn ghost sm" onclick="openManualCaseDlg()">＋ 新建用例</button>
         <button class="btn ghost sm" onclick="openImportDlg()">导入 Excel</button>`:''}
         ${canEditCases?`<button class="btn ghost sm" onclick="caseDupCheck()" title="文字初筛 + AI 语义裁判：判重复 / 可合并 / 不重复，AI 不删，人工处置">重复检查</button>`:''}
@@ -5305,7 +5350,7 @@ function renderOfflineDiff(o) {
 /* ==================== AI 中心（M5）：任务中心 / 调用日志 / Prompt 管理 ==================== */
 const PROMPT_NAMES = {analyst:'需求拆解', requirement_analysis:'需求分析', generator:'用例生成', reviewer:'用例评审', fix_instruction:'定点修正指令',
   gap_check:'覆盖查漏', dup_judge:'语义查重', point_fix:'测试点修改', case_fix:'用例修改', requirement_diff:'需求变更', learning:'修改习惯学习',
-  point_supplement:'测试点补充', point_compare:'人工与 AI 测试点对比', vision_image:'图片理解', requirement_analysis_review:'需求分析复核', analysis_judge:'评测裁判', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
+  point_supplement:'测试点补充', point_compare:'人工与 AI 测试点对比', vision_image:'图片理解', e2e_scenarios:'端到端场景', terminal_classify:'章节归端', requirement_analysis_review:'需求分析复核', analysis_judge:'评测裁判', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
 let aiTab = 'tasks', aiStatus = '', aiMine = false, aiCallPage = 1, aiCallSize = 50, aiCallPurpose = '', aiCallStatus = '', aiCallModel = '', aiCallBy = '', aiCallProject = '', aiCallKw = '', aiDays = 30;
 function acallSet(name, value) {
   if (name === 'page') aiCallPage = value;
@@ -6059,6 +6104,28 @@ const anItem = x => (x && typeof x === 'object') ? {text: x.text || '', quote: x
 const anModelOpts = () => [...$('modelSel').options].map(o=>`<option value="${esc(o.value)}">${esc(o.text.replace('生成：默认','默认模型'))}</option>`).join('');
 let _exEditing = false, _extractDefaultModel = '', _exFilter = 'preview', _exEditItem = null, _exHist = null, _exHistSel = null, _exHistView = null;
 let _exLedger = null, _exLedgerF = null, _exLedgerReasonFor = null, _exLedgerLoading = false;   // 底稿核对：明细按需拉取
+let _exTermOpen = true;
+/* 三端汇总：整理稿顶层章节按端（H5 / 游戏后台管理 / 商户后台 / 通用）归类后的总需求——每个端有哪些页面、多少区块与条目；章节的端可改 */
+function exTerminalSummaryHtml(ex, canEdit) {
+  const s = ex && ex.terminal_summary;
+  if (!s || !s.terminals || !s.terminals.length) return '';
+  const opts = ex.terminal_options || [];
+  const sel = sec => canEdit ? `<select style="width:120px;font-size:12px" onchange="exSetTerminal(${jsq(sec.key)}, this.value)" title="改这个章节所属的端（之后发起的测试设计按改后的端归测试点）">${opts.map(o=>`<option value="${esc(o.key)}" ${o.key===sec.terminal?'selected':''}>${esc(o.label)}</option>`).join('')}</select>` : '';
+  const edits = (ex.terminal_edits || {}), reasons = (ex.terminal_reasons || {});
+  const rows = s.terminals.map(tm => `<tr>
+      <td style="width:120px;white-space:nowrap"><b>${esc(tm.label)}</b></td>
+      <td style="width:170px;white-space:nowrap">${tm.pages} 页 · ${tm.blocks} 区块 · <b>${tm.items}</b> 条</td>
+      <td>${tm.sections.map(sec => `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0">
+          <span title="${esc(reasons[sec.key]?'判定依据：'+reasons[sec.key]:'')}">${esc(sec.no?sec.no+'. ':'')}${esc(sec.key)}${edits[sec.key]?` <span class="st approved" title="${esc(edits[sec.key].by||'')} ${esc(relTime(edits[sec.key].at))}">人工</span>`:''}</span>
+          <span class="hint">${sec.group ? sec.pages.map(p=>esc(p.title)+'（'+p.items+'）').join('、') : sec.pages[0] && sec.pages[0].items + ' 条'}</span>${sel(sec)}</div>`).join('')}</td></tr>`).join('');
+  return `<details class="fold" ${_exTermOpen?'open':''} ontoggle="_exTermOpen=this.open" style="margin-bottom:10px"><summary>三端汇总 · 总需求 ${s.total.items} 条（${s.total.sections} 个章节 / ${s.total.pages} 页 / ${s.total.blocks} 区块）：${s.terminals.map(tm=>`${esc(tm.label)} ${tm.items}`).join(' · ')}</summary>
+    <div class="fold-b"><div class="hint" style="margin-bottom:6px">按整理稿顶层章节（文件夹 / 页面）归端：提取完成时模型判一次，拿不准的按章节名关键词兜底；判错的在右侧改。发起测试设计时测试点按这里的端分列表、按端单独生成用例与导出。</div>
+    <div class="tbl-wrap"><table><tr><th>端</th><th>规模</th><th>章节 › 页面（条目数）</th></tr>${rows}</table></div></div></details>`;
+}
+async function exSetTerminal(section, terminal) {
+  try { await api(`/api/v1/requirements/${curReq}/extraction/terminals`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({section, terminal})}); toast(`「${section}」已归到新的端`, 'ok'); renderRequirementDetail(); }
+  catch (e) { toast('改端失败：' + e.message, 'err'); }
+}
 function _exItemsOf(r) { return ((r.extraction && r.extraction.modules) || []).flatMap(m => m.items.map(it => ({...it, module: m.name}))); }
 function reqExtractionHtml(r, canAI, canEdit) {
   const ex = r.extraction, m = (ex && ex.meta) || {}, st = r.extraction_status, gap = m.gap || null;
@@ -6097,6 +6164,7 @@ function reqExtractionHtml(r, canAI, canEdit) {
   const filt = `<div class="toolbar" style="margin-bottom:8px;flex-wrap:wrap">
       ${[['preview','预览'],['all',`逐条审核 ${all.length}`],['unverified',`⚠ 待核对 ${nPend}`],['gap',`补漏 ${nGap}`],['forced',`兜底 ${nForced}`],['doubt',`疑点 ${nDoubt}`],['draft',`疑似草稿 ${nDraft}`],['reviewed',`已处理 ${nRev}`],['ledger',`底稿核对${ls&&(ls.todo||ls.review_open)?` <b style="color:${ls.todo?'var(--danger)':'var(--warn)'}">${(ls.todo||0)+(ls.review_open||0)}</b>`:''}`]].map(([k,t])=>`<button class="btn ghost sm ${_exFilter===k?'on':''}" style="${_exFilter===k?'font-weight:600':''}" onclick="_exFilter='${k}';renderRequirementDetail()">${t}</button>`).join('')}
       <span class="hint">${_exFilter==='preview'?'整理稿正文预览（与 docs 文档同一格式：页面 › 区块 › 条目，表格、子标题、缩进；〔补漏〕〔兜底〕〔疑点〕〔疑似草稿〕是标记）；要核对通过 / 修改 / 删除条目切到「逐条审核」':_exFilter==='ledger'?'底稿 = 产品原文的每一句（原型控件行、文档段落、说明备注，重复的只记一次；图片理解的描述不算，截图里转录的文字单列「图中文字」），每句的去向：收录 / 排除（原因与判定方）/ 待处理。要人看的只有「需复核」（模型排除的、像规则的句子）和「待处理」；程序按类排除的折叠起来。待处理为 0、需复核都看过才能完成审核':'⚠ = 没在材料里逐字找到（多半是模型改了写法），请对照原文核对通过、改成原句或删除；〔补漏〕= 模型判定是需求后补进的原句；〔兜底〕= 模型没判定去向、程序按原句收进来的，请核对后留下或在底稿里排除；〔疑点〕= 原文本身的问题（错别字、前后台 / PC 与移动口径不一致、占位符），原句照抄不改，疑点单列供需求澄清；〔疑似草稿〕= 画布上与主体不相连、与正式内容重复却有出入的区块（旧版本），已照抄收录但用例不要照它写'}</span></div>`;
+  bar += exTerminalSummaryHtml(ex, canEdit);
   if (_exFilter === 'ledger') return intro + toolbar + bar + filt + exLedgerHtml(r, canEdit);
   if (_exFilter === 'preview') return intro + toolbar + bar + filt + exDocHtml(ex.text);
   const keep = it => _exFilter==='all' || (_exFilter==='unverified' && it.verified===false && !it.review) || (_exFilter==='gap' && it.gap && !it.forced) || (_exFilter==='forced' && it.forced) || (_exFilter==='doubt' && it.doubt) || (_exFilter==='draft' && it.draft) || (_exFilter==='reviewed' && it.review);

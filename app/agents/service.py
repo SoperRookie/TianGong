@@ -87,6 +87,7 @@ class AnalysisResult(BaseModel):
     blind_spot_refs: dict[str, dict] = Field(default_factory=dict, description="盲区出处 {盲区文本: {module, ref}}")
     resolved_blind_spots: list[dict] = Field(default_factory=list, description="分片盲区复核剔除项（含原文依据）")
     trace: list[dict] = Field(default_factory=list)
+    e2e: dict | None = Field(default=None, description="端到端场景摘要：{scenarios: [{name, terminals, flow, points}], points, model_name} 或 {error}")
 
 
 async def _verify_chunk_blind_spots(
@@ -106,6 +107,27 @@ async def _verify_chunk_blind_spots(
 
 def _extend_enabled(extend: bool | None) -> bool:
     return get_settings().point_extension if extend is None else bool(extend)
+
+
+async def _e2e_step(llm: LLMClient, requirement: str, model: str | None, e2e: bool | None,
+                    section_terminals: dict[str, str] | None) -> tuple[str, list[dict], dict | None]:
+    """拆解前的端到端场景（配置 point_e2e / 参数 e2e）：通读全文理出跨端主线。返回 (注入各分片的参考块, 场景点模块, 摘要)；
+    故障只丢这一步，拆解照常。"""
+    if not (get_settings().point_e2e if e2e is None else bool(e2e)):
+        return "", [], None
+    from app.agents.quality import e2e_reference_block, run_e2e_scenarios
+
+    try:
+        r = await run_e2e_scenarios(llm, requirement, model, section_terminals)
+    except Exception as e:  # 端到端是参考与补充：故障不影响明文拆解
+        logger.warning("端到端场景故障，跳过（拆解不带端到端参考）：{}", e)
+        return "", [], {"error": str(e)}
+    modules: dict[str, list[dict]] = {}
+    for a in r["additions"]:
+        modules.setdefault(a["module"], []).append({"point": a["point"], "dimension": a["dimension"], "ref": a["ref"], "basis": a["basis"],
+                                                    "source": "e2e", "terminal": a["terminal"], "scenario": a["scenario"]})
+    summary = {"scenarios": r["scenarios"], "points": len(r["additions"]), "model_name": r["model_name"]}
+    return e2e_reference_block(r["scenarios"]), [{"module": m, "points": pts} for m, pts in modules.items()], summary
 
 
 async def _analyze_and_extend(
@@ -141,24 +163,32 @@ async def run_analysis(
     chunk_max_chars: int | None = None,
     knowledge_cases: str | None = None,
     extend: bool | None = None,
+    e2e: bool | None = None,
+    section_terminals: dict[str, str] | None = None,
 ) -> AnalysisResult:
     """仅执行需求分析（拆解确认流程 F-3-3 第一阶段）；超长需求分片并行拆解后合并。
 
     knowledge_cases：历史用例知识（知识管家在拆解阶段注入，覆盖度查漏）。
     extend：拆解后是否再做经验延伸（None 取配置 point_extension）；分片模式各片拆完各自延伸。
+    e2e：拆解前是否先理端到端场景（None 取配置 point_e2e）：跨端主线注入各片拆解作参考，场景点以「端到端」模块追加；
+    section_terminals：整理稿章节 → 端（需求提取时判定），给端到端场景当提示。
     """
     chunk_max_chars = chunk_max_chars or get_settings().chunk_max_chars
     requirement = clean_manual_sections(requirement)   # 「人工收录」小节去样例留规则、并入所在页面（模型会整节跳过）
     chunks, titles = requirement_chunks(requirement, chunk_max_chars)
+    e2e_ref, e2e_modules, e2e_summary = await _e2e_step(llm, requirement, model, e2e, section_terminals)
+    e2e_trace = ([{"agent": "端到端场景", **({"error": e2e_summary["error"]} if e2e_summary.get("error") else
+                                           {"model": e2e_summary.get("model_name"), "scenarios": len(e2e_summary.get("scenarios") or []),
+                                            "points": e2e_summary.get("points", 0)})}] if e2e_summary else [])
     if len(chunks) == 1:
-        a = await _analyze_and_extend(llm, requirement, model, extend, knowledge_cases=knowledge_cases)
-        return AnalysisResult(test_points=a["test_points"], blind_spots=a["blind_spots"],
+        a = await _analyze_and_extend(llm, requirement, model, extend, knowledge_cases=knowledge_cases, e2e_ref=e2e_ref or None)
+        return AnalysisResult(test_points=a["test_points"] + e2e_modules, blind_spots=a["blind_spots"],
                               blind_spot_refs=a.get("blind_spot_refs") or {},
-                              trace=a["trace"])
+                              trace=e2e_trace + a["trace"], e2e=e2e_summary)
     outline = await _outline_for(llm, requirement, chunks, model)
     analyses = await gather_or_cancel(
         [_analyze_and_extend(llm, chunk, model, extend, knowledge_cases=knowledge_cases, outline=outline,
-                             chunk_no=i, chunk_total=len(chunks), allow_empty=len(chunks) > 1, req_title=title)
+                             chunk_no=i, chunk_total=len(chunks), allow_empty=len(chunks) > 1, req_title=title, e2e_ref=e2e_ref or None)
          for i, (chunk, title) in enumerate(zip(chunks, titles), 1)]
     )
     if all(not a["test_points"] for a in analyses):
@@ -183,11 +213,12 @@ async def run_analysis(
     if removed:
         logger.info("分片合并后同模块同文测试点去重 {} 条", removed)
     return AnalysisResult(
-        test_points=test_points,
+        test_points=test_points + e2e_modules,
         blind_spots=blind_spots,
         blind_spot_refs=blind_spot_refs,
         resolved_blind_spots=resolved,
-        trace=trace + extra,
+        trace=e2e_trace + trace + extra,
+        e2e=e2e_summary,
     )
 
 

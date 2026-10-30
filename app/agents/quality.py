@@ -1571,3 +1571,152 @@ async def run_learning_analysis(
             "scope_hint": str(c.get("scope_hint", "project")),
         })
     return candidates
+
+
+# ---- 端：整理稿章节归端（Prompt terminal_classify）与端到端场景（Prompt e2e_scenarios）----
+
+TERMINAL_CLASSIFY_SAMPLE = 6     # 每个顶层章节带几条条目原文给模型看角色 / 入口
+E2E_MAX_SCENARIOS = 10           # 端到端场景条数上限（Prompt 同口径）
+E2E_MAX_POINTS = 8               # 每条场景最多收几条测试点
+E2E_SOURCE_MAX_CHARS = 120_000   # 一次送模型的需求上限：超过按各章节开头拼接（与全文大纲同口径）
+_E2E_LIST_KEYS = ("scenarios", "e2e", "场景", "端到端")
+
+
+def _terminal_options_text() -> str:
+    from app.terminals import E2E, terminals
+
+    return "\n".join(f"- {t['key']}：{t['label']}" for t in terminals() if t["key"] != E2E)
+
+
+async def run_terminal_classify(llm: LLMClient, modules: list[dict], model: str | None) -> dict:
+    """整理稿顶层章节 → 端：送章节键、页面名、区块名与每章前几条条目，模型按角色 / 入口判端；只认输入里的章节键与端 key。
+    返回 {"terminals": {章节键: 端}, "reasons": {章节键: 依据}, "model_name"}。没有顶层章节直接返回空。"""
+    from app.agents.extraction import extraction_outline
+    from app.terminals import top_sections, valid_key
+
+    outline = extraction_outline(modules)
+    tops = top_sections(outline)
+    if not tops:
+        return {"terminals": {}, "reasons": {}, "model_name": None}
+    by_module = {m["name"]: m for m in modules}
+    view = []
+    for top in tops:
+        samples: list[str] = []
+        blocks: list[str] = []
+        for sec in outline:
+            if (sec.get("group") or sec.get("title")) != top["key"]:
+                continue
+            for b in sec.get("blocks") or []:
+                blocks.append(str(b.get("name") or ""))
+                for it in (by_module.get(b.get("module")) or {}).get("items") or []:
+                    if len(samples) < TERMINAL_CLASSIFY_SAMPLE and it.get("text"):
+                        samples.append(str(it["text"])[:80])
+        view.append({"key": top["key"], "pages": [p["title"] for p in top["pages"]], "blocks": blocks[:12], "samples": samples})
+    user = (f"可选的端：\n{_terminal_options_text()}\n\n"
+            f"整理稿的顶层章节（共 {len(view)} 个；key 原样写回）：\n{wrap_data('章节', _dump(view))}") + profile_block()
+    data, result = await _chat_json(llm, [{"role": "system", "content": prompt_text("terminal_classify")},
+                                          {"role": "user", "content": user}], model, reasoning_effort="low")
+    raw = data.get("sections") if isinstance(data, dict) else data
+    keys = {t["key"] for t in tops}
+    terms: dict[str, str] = {}
+    reasons: dict[str, str] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or item.get("section") or "").strip()
+        term = valid_key(str(item.get("terminal") or "").strip())
+        if key in keys and term:
+            terms[key] = term
+            if item.get("reason"):
+                reasons[key] = str(item["reason"])[:200]
+    logger.info("整理稿章节归端：{}/{} 个章节判定", len(terms), len(tops))
+    return {"terminals": terms, "reasons": reasons, "model_name": result.model_name}
+
+
+def _e2e_source(requirement: str) -> str:
+    if len(requirement) <= E2E_SOURCE_MAX_CHARS:
+        return requirement
+    from app.agents.outline import requirement_chunks
+
+    chunks, _ = requirement_chunks(requirement, 20_000)
+    head = max(1500, E2E_SOURCE_MAX_CHARS // max(len(chunks), 1))
+    return "\n\n……\n\n".join(c[:head] for c in chunks)
+
+
+def e2e_reference_block(scenarios: list[dict]) -> str:
+    """注入分片拆解的端到端参考：只带场景名、端与环节链（不带场景点，场景点另有去处）。"""
+    if not scenarios:
+        return ""
+    from app.terminals import label_of
+
+    lines = []
+    for i, s in enumerate(scenarios, 1):
+        chain = " → ".join(label_of(t) for t in s.get("terminals") or []) or "—"
+        lines.append(f"{i}. {s.get('name', '')}（{chain}）：{s.get('flow', '')}")
+    return ("\n\n下面是通读全文梳理出的端到端业务主线（跨 H5 / 游戏后台管理 / 商户后台）。拆解本片时注意本片页面在这些主线里承担的环节："
+            "后台配置在前台何时生效、前台产生的数据在后台与报表里的口径、一端撤销 / 关闭后另一端的状态——这类跨端一致性规则在本片原文里有写到的，"
+            "拆成测试点（ref 仍指本片原文）；原文没写的不要补（端到端场景点另有环节处理）。\n" + wrap_data("端到端场景参考", "\n".join(lines)))
+
+
+async def run_e2e_scenarios(llm: LLMClient, requirement: str, model: str | None,
+                            section_terminals: dict[str, str] | None = None) -> dict:
+    """端到端场景：通读需求找跨端业务主线，每条主线带跨端一致性测试点。程序兜底：terminals 只认端清单里的 key、至少 2 个不同的端
+    （单端不是端到端）；场景 ≤ E2E_MAX_SCENARIOS、每条点 ≤ E2E_MAX_POINTS；没 point 的跳过。
+    返回 {"scenarios": [{name, terminals, flow, points: n}], "additions": [{module, point, dimension, ref, basis, terminal: e2e, scenario}],
+    "model_name"}。"""
+    from app.terminals import E2E, label_of, valid_key
+
+    hint = ""
+    if section_terminals:
+        by_term: dict[str, list[str]] = {}
+        for sec, t in section_terminals.items():
+            by_term.setdefault(t, []).append(sec)
+        hint = "\n各章节所属的端（需求提取时判定）：\n" + "\n".join(f"- {label_of(t)}（{t}）：{'、'.join(secs)}" for t, secs in by_term.items())
+    user = (f"可选的端：\n{_terminal_options_text()}\n{hint}\n\n{wrap_data('需求原文', _e2e_source(requirement))}"
+            "\n\n请找出跨端的端到端业务主线及每条主线上的跨端一致性测试点。") + profile_block()
+    data, result = await _chat_json(llm, [{"role": "system", "content": prompt_text("e2e_scenarios")},
+                                          {"role": "user", "content": user}], model, reasoning_effort="high")
+    raw = None
+    if isinstance(data, dict):
+        raw = next((data[k] for k in _E2E_LIST_KEYS if isinstance(data.get(k), list)), None)
+    elif isinstance(data, list):
+        raw = data
+    scenarios: list[dict] = []
+    additions: list[dict] = []
+    for item in raw or []:
+        if not isinstance(item, dict) or len(scenarios) >= E2E_MAX_SCENARIOS:
+            continue
+        name = str(item.get("name") or item.get("scenario") or item.get("场景") or "").strip()[:40]
+        terms = item.get("terminals") or item.get("ends") or []
+        if isinstance(terms, str):
+            terms = re.split(r"[,，、;；\s→>]+", terms)
+        terms = [t for t in (valid_key(str(x).strip()) for x in terms) if t and t != E2E]
+        terms = list(dict.fromkeys(terms))
+        flow = str(item.get("flow") or item.get("链路") or "").strip()[:300]
+        pts = item.get("points") or item.get("test_points") or []
+        if not name or len(terms) < 2 or not isinstance(pts, list):
+            continue
+        module = f"端到端-{name}"
+        n = 0
+        for p in pts:
+            if n >= E2E_MAX_POINTS:
+                break
+            if isinstance(p, str):
+                p = {"point": p}
+            if not isinstance(p, dict):
+                continue
+            text = str(p.get("point") or p.get("text") or p.get("description") or "").strip()
+            if not text:
+                continue
+            dim = p.get("dimension")
+            additions.append({"module": module, "point": text,
+                              "dimension": str(dim).strip() if isinstance(dim, (str, int, float)) else "",
+                              "ref": str(p.get("ref") or "").strip(),
+                              "basis": str(p.get("basis") or p.get("reason") or flow or "跨端一致性").strip()[:200],
+                              "terminal": E2E, "scenario": name})
+            n += 1
+        if not n:
+            continue
+        scenarios.append({"name": name, "terminals": terms, "flow": flow, "points": n})
+    logger.info("端到端场景：{} 条主线 / {} 条场景点", len(scenarios), len(additions))
+    return {"scenarios": scenarios, "additions": additions, "model_name": result.model_name}

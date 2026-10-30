@@ -90,10 +90,16 @@ class Settings(BaseSettings):
     # 默认模型为省钱改成低档时，这里单独钉住提取模型（手动提取页面选了模型时以页面为准）
     requirement_extract_model: str = ""
     requirement_extract_crosscheck: bool = True   # 提取最后整稿交叉核对（跨页面矛盾、疑似遗留草稿），多一次模型调用
+    # 提取完成后按顶层章节判端（H5 / 游戏后台管理 / 商户后台 / 通用，Prompt terminal_classify，一次调用）：三端汇总与按端拆解据此；
+    # 关掉只按章节名关键词判，提取页仍可人工改
+    requirement_extract_terminals: bool = True
     analysis_eval_auto_sample: bool = True
     # 经验延伸：拆解测试点之后再调一次模型，按资深测试经验补需求没写到的场景（并发 / 中断 / 跨天 / 越权 / 脏数据），
     # 条目标「经验延伸」并带依据、待审核；关掉则只在测试点页手动点「经验延伸」时跑
     point_extension: bool = True
+    # 端到端场景：拆解测试点前先通读需求找跨端业务主线（商户后台配置 → H5 参与 → 游戏后台结算 → 商户报表），注入各分片拆解作参考，
+    # 场景上的跨端一致性测试点以「端到端」一端单列、待审核；关掉则拆解不带端到端参考
+    point_e2e: bool = True
     # 测试点独立评审：拆解 / 延伸 / 查漏之后再按章节分批调模型逐条挑硬伤（合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符），
     # 意见标到条目上供人工审核先看；关掉则只在测试点页手动点「AI 评审」时跑
     point_review: bool = True
