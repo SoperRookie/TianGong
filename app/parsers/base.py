@@ -77,14 +77,22 @@ class NonTextParser:
 
 
 class HtmlParser:
-    suffixes = (".html", ".htm", ".xhtml", ".mht")
+    suffixes = (".html", ".htm", ".xhtml")
 
     def parse(self, path: Path) -> ParsedDocument:
-        from app.parsers.link import html_to_markdown
-        from app.parsers.text import TextParser
+        import lxml.html
 
-        title, body = html_to_markdown(read_text_any(path))
-        doc = TextParser().parse_string((f"# {title}\n\n" if title else "") + body)
+        from app.parsers.mhtml import html_to_document
+
+        raw = read_text_any(path)
+        doc = html_to_document(raw)
+        try:
+            title_el = lxml.html.fromstring(raw).find(".//title")
+            title = " ".join((title_el.text or "").split()) if title_el is not None else ""
+        except Exception:
+            title = ""
+        if title and not (doc.sections and doc.sections[0].title == title):
+            doc.sections.insert(0, Section(level=1, title=title))
         doc.source, doc.doc_type = path.name, "html"
         return doc
 
@@ -93,6 +101,7 @@ def _registry() -> dict[str, Parser]:
     from app.parsers.container import ArchiveParser, EmailParser
     from app.parsers.convert import OfficeConvertParser
     from app.parsers.docx import DocxParser
+    from app.parsers.mhtml import MhtmlParser
     from app.parsers.pdf import PdfParser
     from app.parsers.pptx import PptxParser
     from app.parsers.table import TableParser
@@ -100,7 +109,7 @@ def _registry() -> dict[str, Parser]:
 
     mapping: dict[str, Parser] = {}
     for parser in (TextParser(), DocxParser(), PdfParser(), TableParser(), PptxParser(), OfficeConvertParser(),
-                   HtmlParser(), ArchiveParser(), EmailParser(), NonTextParser()):
+                   HtmlParser(), MhtmlParser(), ArchiveParser(), EmailParser(), NonTextParser()):
         for suffix in parser.suffixes:
             mapping[suffix] = parser
     return mapping
