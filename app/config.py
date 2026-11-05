@@ -141,6 +141,7 @@ class Settings(BaseSettings):
     max_pdf_pages: int = 300            # PDF 解析页数上限
     max_zip_uncompressed_mb: int = 300  # zip 类文档（docx/xlsx/xmind）解压后总大小上限
     max_vision_image_mb: int = 5        # 送 Vision 模型的单图上限
+    office_convert_timeout: int = 180   # LibreOffice 转换单个老版 Office / WPS 文件的超时（秒），超时强杀进程组
 
     # LLM / Embedding 并发上限与限流退避
     llm_max_concurrency: int = 4
