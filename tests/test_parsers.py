@@ -686,3 +686,76 @@ def test_Axure示例图单元格_说明在前图里短文案紧随其后_流程�
                            "[u12] 报名方式说明：\n")                                                       # 长段落不进单元格、原位
     assert "【流程图结束】\n[u13] 注：以上tips说明文本以运营最终提供为准" in body   # 左列下方的「注：」说明不被没有下边界的说明吸走
     assert "参赛报名 —悬浮时tips显示→ 报名方式说明：…\n" in body and "分批扣除→" not in body   # 流程节点只取整段的首行
+
+
+def test_伪doc按文件头识别_网页导出与改名docx不经LibreOffice(tmp_path, monkeypatch):
+    """Confluence / WPS「导出为 Word」给出的 .doc 常是 HTML；docx 改名 .doc 也常见。这类文件不能交给 LibreOffice
+    （按网页加载会逐个拉外链图片，内网无外网时直到超时），按真实内容走本地解析器。"""
+    from docx import Document
+
+    from app.parsers import convert
+    from app.parsers.convert import ConversionUnavailableError, sniff_real_format
+
+    monkeypatch.setattr(convert, "soffice_path", lambda: None)  # 未装 LibreOffice 也必须能读
+    html_doc = tmp_path / "扫码枪流程优化需求.doc"
+    html_doc.write_bytes(
+        "<html><head><meta charset='utf-8'><title>扫码枪流程优化需求</title></head><body>"
+        "<h1>一、背景</h1><p>收银台扫码枪识别慢。</p><img src='http://10.0.0.1/x.png'>"
+        "<h2>二、需求</h2><p>扫码后 300ms 内回显商品。</p></body></html>".encode("utf-8")
+    )
+    assert sniff_real_format(html_doc) == "html"
+    doc = parse_file(html_doc)
+    assert doc.doc_type == "doc" and doc.source == html_doc.name
+    assert "扫码后 300ms 内回显商品" in doc.full_text and "收银台扫码枪识别慢" in doc.full_text
+
+    gbk_doc = tmp_path / "gbk.doc"
+    gbk_doc.write_bytes("<html><body><p>国标编码网页</p></body></html>".encode("gb18030"))
+    assert sniff_real_format(gbk_doc) == "html"
+    assert "国标编码网页" in parse_file(gbk_doc).full_text
+
+    renamed = tmp_path / "需求.doc"
+    d = Document()
+    d.add_paragraph("改名的 docx 正文")
+    d.save(renamed)
+    assert sniff_real_format(renamed) == "zip"
+    assert "改名的 docx 正文" in parse_file(renamed).full_text
+
+    mht = tmp_path / "导出.doc"
+    mht.write_bytes(b"MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"b\"\r\n\r\n--b\r\n"
+                    b"Content-Type: text/html; charset=utf-8\r\n\r\n<html><body><p>mht body</p></body></html>\r\n--b--\r\n")
+    assert sniff_real_format(mht) == "mht"
+
+    real = tmp_path / "真二进制.doc"
+    real.write_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 64)
+    assert sniff_real_format(real) == "ole"
+    with pytest.raises(ConversionUnavailableError, match="LibreOffice"):
+        parse_file(real)
+
+
+def test_LibreOffice转换超时_强杀进程组不留残留(tmp_path, monkeypatch):
+    import os
+    import time
+
+    from app.parsers import convert
+    from app.parsers.convert import ConversionUnavailableError
+
+    fake = tmp_path / "soffice"
+    pidfile = tmp_path / "child.pid"
+    # 模拟 soffice 启动脚本再拉起子进程并挂住：超时后两层都必须被杀掉
+    fake.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\nwait\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(convert, "soffice_path", lambda: str(fake))
+    src = tmp_path / "x.doc"
+    src.write_bytes(b"\xd0\xcf\x11\xe0" + b"\x00" * 64)
+    t0 = time.monotonic()
+    with pytest.raises(ConversionUnavailableError, match="转换超时（1 秒）"):
+        convert.convert(src, "docx", timeout=1)
+    assert time.monotonic() - t0 < 10
+    child = int(pidfile.read_text().strip())
+    time.sleep(0.3)
+    try:
+        os.kill(child, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    assert not alive, "后台 sleep 子进程应随进程组一起被杀"

@@ -7,9 +7,12 @@
 
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
+
+from loguru import logger
 
 from app.parsers.base import ParsedDocument, UnsupportedFormatError
 
@@ -49,9 +52,46 @@ def soffice_path() -> str | None:
     return None
 
 
-def convert(path: str | Path, target: str, timeout: float = 180.0) -> Path:
-    """用 LibreOffice 把 path 转成 target 后缀，返回转换后文件（放在临时目录，调用方用后可不清理）。"""
+# 按文件头识别「扩展名是老格式、内容其实不是」的文件：网页 / Confluence / WPS「导出为 Word」常给出 .doc 后缀的 HTML、
+# MHTML，或把 docx 直接改名为 .doc。这类文件交给 LibreOffice 会按网页加载并逐个拉取外链图片，内网机器无外网时
+# 每个链接都要等到网络超时，整体轻易超过转换时限；这里先识别出来走本地解析器，根本不启动 LibreOffice。
+_ZIP_TO_MODERN = {"docx": ".docx", "xlsx": ".xlsx", "pptx": ".pptx"}
+
+
+def sniff_real_format(path: Path) -> str:
+    """返回 ole（真正的老版二进制）/ zip（改名的现代 Office）/ html / mht / rtf / text / unknown。"""
+    with open(path, "rb") as f:
+        head = f.read(8192)
+    if head.startswith(b"\xd0\xcf\x11\xe0"):
+        return "ole"
+    if head.startswith(b"PK\x03\x04"):
+        return "zip"
+    if head.lstrip().startswith(b"{\\rtf"):
+        return "rtf"
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        text = head.decode("utf-16", errors="ignore")
+    else:
+        text = head.decode("utf-8", errors="ignore")  # 标签都是 ASCII，GBK 正文按 ignore 丢掉即可
+    low = text.lstrip("\ufeff \t\r\n").lower()
+    if low.startswith("mime-version:") or ("content-type: multipart/related" in low[:2048]):
+        return "mht"
+    if low.startswith("<") and any(tag in low for tag in ("<html", "<!doctype html", "<body", "<head", "<meta ", "<table", "<div", "<p>", "<p ")):
+        return "html"
+    if "\x00" not in text[:4096] and any(ch.isprintable() for ch in text[:200]):
+        return "text"
+    return "unknown"
+
+
+def convert(path: str | Path, target: str, timeout: float | None = None) -> Path:
+    """用 LibreOffice 把 path 转成 target 后缀，返回转换后文件（放在临时目录，调用方用后可不清理）。
+
+    超时后强杀整个进程组（soffice 启动脚本 → oosplash → soffice.bin 三层），不留后台残留进程。
+    """
+    from app.config import get_settings
+
     path = Path(path)
+    if timeout is None:
+        timeout = float(get_settings().office_convert_timeout)
     exe = soffice_path()
     if exe is None:
         raise ConversionUnavailableError(
@@ -61,19 +101,38 @@ def convert(path: str | Path, target: str, timeout: float = 180.0) -> Path:
         )
     outdir = Path(tempfile.mkdtemp(prefix="tg-convert-"))
     profile = Path(tempfile.mkdtemp(prefix="tg-lo-profile-"))  # 独立 profile：并发转换互不阻塞
-    cmd = [exe, "--headless", "--norestore", "--nologo", f"-env:UserInstallation=file://{profile}",
+    cmd = [exe, "--headless", "--norestore", "--nologo", "--nolockcheck", f"-env:UserInstallation=file://{profile}",
            "--convert-to", target, "--outdir", str(outdir), str(path)]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True, stdin=subprocess.DEVNULL)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise ConversionUnavailableError(f"{path.name} 转换超时（{int(timeout)} 秒），请另存为现代格式后重传") from None
+        _kill_group(proc)
+        logger.warning("LibreOffice 转换超时被强杀：{} → {}（{} 秒）", path.name, target, int(timeout))
+        raise ConversionUnavailableError(
+            f"{path.name} 转换超时（{int(timeout)} 秒）。常见原因：文件是网页导出的「伪 Word」且含外链图片、文件损坏、"
+            "或服务器 LibreOffice 首次启动过慢；请另存为 docx / pdf 后重传，或联系管理员在服务器上手工执行 "
+            f"soffice --headless --convert-to {target.split(':')[0]} 排查"
+        ) from None
     finally:
         shutil.rmtree(profile, ignore_errors=True)
     outputs = list(outdir.glob(f"*.{target.split(':')[0]}"))
     if proc.returncode != 0 or not outputs:
-        err = (proc.stderr or proc.stdout or "").strip()[-300:]
-        raise ConversionUnavailableError(f"{path.name} 转换失败：{err or '未生成输出文件'}；可另存为现代格式后重传")
+        msg = (err or out or "").strip()[-300:]
+        raise ConversionUnavailableError(f"{path.name} 转换失败：{msg or '未生成输出文件'}；可另存为现代格式后重传")
     return outputs[0]
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 class OfficeConvertParser:
@@ -84,11 +143,25 @@ class OfficeConvertParser:
     def parse(self, path: Path) -> ParsedDocument:
         from app.parsers.base import parse_file
 
-        converted = convert(path, OFFICE_CONVERT[path.suffix.lower()])
-        try:
-            doc = parse_file(converted)
-        finally:
-            shutil.rmtree(converted.parent, ignore_errors=True)
+        target = OFFICE_CONVERT[path.suffix.lower()]
+        kind = sniff_real_format(path)
+        if kind in ("zip", "html", "mht", "text") and target in _ZIP_TO_MODERN:
+            # 后缀是老格式、内容不是：按真实内容走本地解析器，不启动 LibreOffice
+            real_suffix = {"zip": _ZIP_TO_MODERN[target], "html": ".html", "mht": ".mht", "text": ".txt"}[kind]
+            tmpdir = Path(tempfile.mkdtemp(prefix="tg-sniff-"))
+            alias = tmpdir / (path.stem + real_suffix)
+            try:
+                shutil.copyfile(path, alias)
+                logger.info("{} 按文件头识别为 {}，直接解析不经 LibreOffice", path.name, real_suffix)
+                doc = parse_file(alias)
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+        else:
+            converted = convert(path, target)
+            try:
+                doc = parse_file(converted)
+            finally:
+                shutil.rmtree(converted.parent, ignore_errors=True)
         doc.source = path.name
         doc.doc_type = path.suffix.lstrip(".").lower()
         return doc
