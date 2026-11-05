@@ -75,7 +75,7 @@ def export_xmind(cases: list[TestCase], path: str | Path, root_title: str = "测
 
 
 _POINT_SOURCE = {"ai": "AI 拆解", "gap": "查漏新增", "supplement": "AI 补充", "manual": "人工", "ai_fix": "修改新增",
-                 "blind_spot": "盲区转入", "derived": "经验延伸", "combined": "组合延伸"}
+                 "blind_spot": "盲区转入", "derived": "经验延伸", "combined": "组合延伸", "e2e": "端到端场景"}
 _POINT_STATUS = {"pending": "待审核", "approved": "已通过", "rejected": "已驳回"}
 
 
@@ -84,6 +84,8 @@ def export_points_xmind(modules: list[dict], path: str | Path, root_title: str =
     """测试点 → .xmind（与页面「脑图」同一结构）：需求 → 模块（条数）→ 测试点「编号 描述」（labels=维度 / 来源 / 状态）→
     子节点：需求来源、依据（经验延伸 / 组合延伸的 basis，组合点带来源编号）、驳回意见、AI 评审意见、覆盖用例编号；
     备注里再写一遍 ref / 依据 / 审核意见，方便只看一层的人。approved_only 只导已通过的；空模块不出现。"""
+    from app.terminals import label_of, point_terminal
+
     path = Path(path)
     case_links = case_links or {}
     root = _topic(root_title)
@@ -98,7 +100,9 @@ def export_points_xmind(modules: list[dict], path: str | Path, root_title: str =
             pts.append(p)
         if not pts:
             continue
-        mod = _attach(root, _topic(f"{entry.get('module', '')}（{len(pts)}）"))
+        mod_terms = {point_terminal(p) for p in pts}
+        mod = _attach(root, _topic(f"{entry.get('module', '')}（{len(pts)}）",
+                                   labels=[label_of(t) for t in sorted(mod_terms)] if mod_terms else None))
         for p in pts:
             tp = str(p.get("tp_id") or "")
             src = str(p.get("source") or "ai")

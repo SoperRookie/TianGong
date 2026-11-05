@@ -1196,7 +1196,7 @@ async def test_points_extend_手动经验延伸_只新增标来源与依据_确�
     rows = [[str(c) if c is not None else "" for c in row] for row in load_workbook(str(f)).active.iter_rows(values_only=True)]
     assert rows[0][-1] == "延伸依据"
     by_id = {row[0]: row for row in rows[1:]}
-    assert by_id[added_ids[0]][5] == "经验延伸" and by_id[added_ids[0]][-1].startswith("弱网")
+    assert by_id[added_ids[0]][6] == "经验延伸" and by_id[added_ids[0]][-1].startswith("弱网")
     assert by_id["TP001"][-1] == ""
     # 通过一条明文 + 一条延伸后确认生成：延伸点连依据一起进生成 Prompt
     await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [
@@ -1503,7 +1503,7 @@ async def test_points_combine_模块级组合延伸_只认本模块且至少两�
     r = await client.get(f"/api/v1/tasks/{task_id}/points/export")
     f = tmp_path / "pts.xlsx"; f.write_bytes(r.content)
     rows = {str(row[0]): row for row in load_workbook(str(f)).active.iter_rows(values_only=True)}
-    assert rows[new_id][5] == "组合延伸" and rows[new_id][-1].startswith("锁定计数")
+    assert rows[new_id][6] == "组合延伸" and rows[new_id][-1].startswith("锁定计数")
     r = await client.get(f"/api/v1/tasks/{task_id}/points/export", params={"fmt": "xmind"})
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/vnd.xmind")
     f = tmp_path / "pts.xmind"; f.write_bytes(r.content)
