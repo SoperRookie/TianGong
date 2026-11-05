@@ -34,6 +34,8 @@ os.environ["TIANGONG_REQUIREMENT_EXTRACT_CROSSCHECK"] = "false"
 os.environ["TIANGONG_POINT_EXTENSION"] = "false"
 os.environ["TIANGONG_POINT_REVIEW"] = "false"   # 测试点独立评审同理
 os.environ["TIANGONG_POINT_COMBINE"] = "false"   # 模块级组合延伸同理
+os.environ["TIANGONG_POINT_E2E"] = "false"   # 端到端场景同理（拆解前多一次调用）
+os.environ["TIANGONG_REQUIREMENT_EXTRACT_TERMINALS"] = "false"   # 整理稿章节归端同理（提取后多一次调用；专项测试显式开启）
 os.environ["TIANGONG_QUESTION_SUGGEST"] = "false"   # 待确认事项推荐答案同理（分析后多一次调用）   # 经验延伸多一次模型调用，桩回复列表不含它；专门的测试单独打开   # 交叉核对多一次模型调用，桩回复列表不含它；专门的测试单独打开
 
 # 数据库隔离：测试用临时 SQLite（持久化层同一套 SQLAlchemy 代码，生产为 MySQL）

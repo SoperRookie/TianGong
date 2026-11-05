@@ -75,6 +75,8 @@ MYSQL_PASSWORD=<强密码>
 # TIANGONG_POINT_EXTENSION=true   # 拆解测试点后再调一次模型做「经验延伸」：补需求没写到的并发 / 中断 / 跨天 / 越权 / 脏数据场景，标来源带依据、待审核；false 则只能在测试点页手动点
 # TIANGONG_POINT_REVIEW=true   # 拆解后测试点独立评审：按章节分批调模型逐条挑硬伤（合写 / 不可验证 / 数值改写 / ref 对不上 / UI 外观 / 超出需求 / 维度不符）标到条目上；false 则只能手动点「AI 评审」
 # TIANGONG_POINT_COMBINE=true   # 拆解后模块级「组合延伸」：每个模块（≥ 3 条点）各调一次模型，找单条规则叠加后的组合场景，标「组合延伸」带依据与来源编号、待审核；false 则只能手动点「组合延伸」
+# TIANGONG_POINT_E2E=true   # 拆解前「端到端场景」：通读全文找跨端业务主线注入各分片拆解作参考，主线上的跨端一致性测试点单列「端到端」一端、待审核
+# TIANGONG_REQUIREMENT_EXTRACT_TERMINALS=true   # 提取完成后按顶层章节判端（H5 / 游戏后台管理 / 商户后台，一次调用），提取页「三端汇总」与任务按端分列表 / 生成 / 导出据此；false 只按章节名关键词判
 # TIANGONG_QUESTION_SUGGEST=true   # AI 需求分析完成后给未确认事项「推荐答案」（原文 › 历史结论 › 行业惯例），页面预填、人确认才算；false 则只能手动点「推荐答案」
 # TIANGONG_GENERATION_MODULE_SCOPE=true   # 用例生成 / 评审只带本模块所在章节的需求原文（整篇不足一批、模块定位不到章节的仍带整篇）；false 则每个模块每次调用都带整份需求，上百模块的任务 token 高一个数量级
 # TIANGONG_KNOWLEDGE_INGEST_DELAY_SECONDS=30   # 评审动作触发的用例知识沉淀延迟合并：这段时间内同一任务的连续评审只沉淀一次，沉淀只给变化的用例算向量；0 = 每次评审立即沉淀
@@ -168,6 +170,8 @@ docker compose logs -f app
 ```
 
 表结构变更与数据迁移在应用启动时自动执行。回滚：切回旧标签重新 `up -d --build app`，必要时用备份恢复数据库。
+
+升级到 v2.2.0 后：无新增依赖、无表结构变更；已有任务测试点按模块名关键词自动补端（分到「其他」的在修改弹窗里改），已有整理稿按关键词显示三端汇总可逐章改；拆解前多一次「端到端场景」、提取后多一次章节归端调用，不想要关 `TIANGONG_POINT_E2E` / `TIANGONG_REQUIREMENT_EXTRACT_TERMINALS`；端的关键词可用 `config/terminals.yaml` 覆盖。
 
 升级到 v2.1.4 后：低档模型自动提取的整理稿偏薄，需求页「重新提取」（选 gpt-6-astra / gpt-6-sol）后重新分析；默认模型改成低档时加 `TIANGONG_REQUIREMENT_EXTRACT_MODEL`；压缩包内中文文件名乱码的存量需求「重新解析」可补回 Axure 页面名与说明备注。
 

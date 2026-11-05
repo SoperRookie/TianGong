@@ -1149,6 +1149,9 @@ async def _run_point_quality_checks(app, task_id: str, requirement: str, model: 
             logger.info("测试点独立评审：{} 条标上意见", n)
         except Exception as e:
             logger.warning("测试点独立评审故障，跳过（不阻塞主链路）：{}", e)
+    from app.terminals import fill_point_terminals
+
+    fill_point_terminals(record.analysis)   # 查漏 / 组合新增的点按模块归端
     store.save(record)
 
 
@@ -1569,13 +1572,16 @@ async def _launch_task(
                 request.app, requirement, ("analysis",), knowledge_space
             )
             store.set_progress(task_id, progress="analyzing")
+            section_terms = dict(task_context.get("terminals") or {})   # 整理稿章节 → 端（需求提取时判定；上传路径为空）
             analysis = await run_analysis(
                 requirement,
                 llm=request.app.state.llm,
                 model=model,
                 knowledge_cases=knowledge["cases"],
+                section_terminals=section_terms or None,
             )
             from app.tasks.points import assign_entities
+            from app.terminals import fill_point_terminals
 
             analysis_data = analysis.model_dump()
             # 测试点实体化：tp_id + 审核状态机（通过/驳回/锁定），支撑逐条与批量审核
@@ -1584,6 +1590,9 @@ async def _launch_task(
                 analysis_data["test_points"], seq_floor=tp_seq_of(prior.analysis if prior else None)
             )
             bump_tp_seq(analysis_data)
+            # 测试点归端：模块名按整理稿章节对回端（H5 / 游戏后台管理 / 商户后台），对不上按关键词；端到端场景点固定「端到端」
+            analysis_data["terminal_rules"] = {"sections": section_terms, "titles": list(task_context.get("requirement_titles") or [])}
+            fill_point_terminals(analysis_data)
             record = prior or TaskRecord(task_id=task_id)
             record.created_by = record.created_by or _operator(request)
             record.status = "awaiting_confirmation"
@@ -1932,20 +1941,29 @@ def _quality_report(record: TaskRecord, result) -> dict:
 class ConfirmBody(BaseModel):
     test_points: list[dict] | None = None  # 缺省沿用拆解草稿；传入则以用户修改后的为准
     async_mode: bool = False               # True：后台生成并立即返回（页面轮询），可取消、不受代理超时影响
+    terminal: str | None = None            # 只为这个端（h5 / game_admin / merchant_admin / e2e …）的测试点生成用例：各端审完各自生成、各自评审
 
 
 @router.post("/api/v1/tasks/{task_id}/confirm")
 async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None = None) -> dict:
     """确认（或修改后确认）测试点，继续生成（F-3-3 第二阶段）。多模块按模块并行生成。"""
+    from app.terminals import fill_point_terminals, label_of, valid_key
+
     store = request.app.state.tasks
     record = _task(request, task_id, "point.review")
     _ai_ctx(request, record)
     async_mode = bool(body and body.async_mode)
+    terminal = (body.terminal or "").strip() if body else ""
+    if terminal and not valid_key(terminal):
+        raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
+    if fill_point_terminals(record.analysis):
+        store.save(record)
     if record.status == "completed":
         # 分批审核、分批生成：第一批生成后又审核通过了新的测试点 → 只为这些点增量生成，并入现有用例
-        pending = _points_pending_generation(record)
+        pending = _points_pending_generation(record, terminal or None)
         if not pending:
-            raise HTTPException(status_code=409, detail="没有新通过、尚未生成用例的测试点")
+            raise HTTPException(status_code=409, detail=(f"「{label_of(terminal)}」没有新通过、尚未生成用例的测试点" if terminal
+                                                        else "没有新通过、尚未生成用例的测试点"))
         store.set_progress(task_id, status="running", progress="generating_reviewing")
         record.checkpoint = None
         record.context = {**(record.context or {}), "resume_stage": "incremental"}  # 失败 / 取消回到已完成，不整体重跑
@@ -1961,25 +1979,24 @@ async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None 
     ctx = record.context or {}
     if body and body.test_points:
         # 用户直接提交修改后的测试点（兼容 JSON 编辑路径）；带 tp_id 的保留，用例 point_ids 与分批生成记录才有依据
+        from app.tasks.points import generation_view
+
         test_points = normalize_points(body.test_points)
         test_points = [
-            {"module": e["module"],
-             "points": [{"point": p["point"], "dimension": p.get("dimension", ""),
-                         **({"tp_id": p["tp_id"]} if p.get("tp_id") else {}),
-                         **({"ref": p["ref"]} if p.get("ref") else {}),
-                         **({"basis": p["basis"]} if p.get("basis") else {})} for p in e["points"]]}
+            {"module": e["module"], "points": [generation_view(p) for p in e["points"]]}
             for e in test_points if e.get("points")
         ]
     else:
-        # 正式测试点（需求六十一）：有审核记录时只用已通过的；驳回项永不进入生成
-        test_points = confirmable_points((record.analysis or {}).get("test_points", []))
+        # 正式测试点（需求六十一）：有审核记录时只用已通过的；驳回项永不进入生成；按端生成时只取该端
+        test_points = confirmable_points((record.analysis or {}).get("test_points", []), terminal or None)
     if not test_points:
-        raise HTTPException(status_code=400, detail="测试点为空，无法生成（请先通过至少一条测试点）")
+        raise HTTPException(status_code=400, detail=(f"「{label_of(terminal)}」没有可生成的测试点（请先通过该端至少一条测试点）" if terminal
+                                                    else "测试点为空，无法生成（请先通过至少一条测试点）"))
     # 确认即锁定：状态先置 running（重复点击/重复请求直接 409，避免并行重复生成）
     store.set_progress(task_id, status="running", progress="generating_reviewing")
     record.checkpoint = None  # 全新确认：不沿用旧检查点
     # 确认后的失败（含服务重启）一律从已确认测试点续跑，不重新拆解（否则审核记录会被新拆解覆盖）
-    record.context = {**ctx, "resume_stage": "confirmed"}
+    record.context = {**ctx, "resume_stage": "confirmed", **({"confirm_terminal": terminal} if terminal else {})}   # 失败续跑仍只跑这个端
     store.save(record)
     _acc = _accumulator(request.app)
     _by = _operator(request)
@@ -2016,20 +2033,25 @@ async def _run_confirmed(request: Request, store, task_id: str, test_points: lis
     return {"task_id": task_id, "status": "queued", "poll_url": f"/api/v1/tasks/{task_id}"}
 
 
-def _points_pending_generation(record: TaskRecord) -> list[dict]:
-    """已通过但尚未生成过用例的测试点（按模块分组），供任务完成后的增量生成。"""
-    from app.tasks.points import iter_points
-
+def _generated_tp_ids(record: TaskRecord) -> set[str]:
     generated = set((record.context or {}).get("generated_tp_ids") or [])
     if not generated:  # 旧任务没有记录：以用例的 point_ids 追溯为准
         for c in (record.result or {}).get("cases") or []:
             generated.update(str(x) for x in (c.get("point_ids") or []))
+    return generated
+
+
+def _points_pending_generation(record: TaskRecord, terminal: str | None = None) -> list[dict]:
+    """已通过但尚未生成过用例的测试点（按模块分组），供任务完成后的增量生成；terminal 给了只看该端。"""
+    from app.tasks.points import generation_view, iter_points
+    from app.terminals import point_terminal
+
+    generated = _generated_tp_ids(record)
     out: dict[str, list[dict]] = {}
     for entry, p in iter_points((record.analysis or {}).get("test_points") or []):
-        if p.get("status") == "approved" and p.get("tp_id") and p["tp_id"] not in generated:
-            out.setdefault(entry["module"], []).append({"point": p["point"], "dimension": p.get("dimension", ""), "tp_id": p["tp_id"],
-                                                       **({"ref": p["ref"]} if p.get("ref") else {}),
-                                                       **({"basis": p["basis"]} if p.get("basis") else {})})
+        if p.get("status") == "approved" and p.get("tp_id") and p["tp_id"] not in generated \
+                and (not terminal or point_terminal(p) == terminal):
+            out.setdefault(entry["module"], []).append(generation_view(p))
     return [{"module": m, "points": pts} for m, pts in out.items()]
 
 
@@ -2126,7 +2148,7 @@ async def _generate_confirmed(request: Request, task_id: str, test_points: list[
     saved.analysis = record.analysis
     done = set((saved.context or {}).get("generated_tp_ids") or []) if merge_existing else set()
     done.update(p["tp_id"] for tp in test_points for p in tp.get("points", []) if isinstance(p, dict) and p.get("tp_id"))
-    saved.context = {**{k: v for k, v in (saved.context or {}).items() if k != "resume_stage"},
+    saved.context = {**{k: v for k, v in (saved.context or {}).items() if k not in ("resume_stage", "confirm_terminal")},
                      "generated_tp_ids": sorted(done)}
     store.save(saved)
     _maybe_auto_profile(request.app, ctx.get("project"), saved.created_by)
@@ -2860,6 +2882,7 @@ class PointReviewItem(BaseModel):
     point: str | None = None       # modify 时的新描述
     dimension: str | None = None
     ref: str | None = None         # modify 时的设计需求页来源（页面或章节 › 需求点），None 表示不改
+    terminal: str | None = None    # modify 时改所属端（h5 / game_admin / merchant_admin / common / e2e / other），None 表示不改
     comment: str = ""              # reject 时的驳回原因
     # 结构化驳回（完整需求 6.4）
     reject_types: list[str] = []   # 驳回类型，多选必填
@@ -5254,6 +5277,16 @@ async def _run_extraction(app, req_id: str, model: str | None, by: str | None, a
         raise
     if (rstore.get(req_id) or {}).get("deleted_at") or rstore.get(req_id) is None:
         raise ValueError("提取进行中需求已被删除，结果未保存")   # 模型已经跑完，但没地方落：明确告诉用户，而不是报「需求不存在」
+    if get_settings().requirement_extract_terminals and data.get("modules"):
+        # 顶层章节归端（H5 / 游戏后台管理 / 商户后台 / 通用）：三端汇总与按端拆解据此；故障只按关键词兜底，提取页可人工改
+        from app.agents.quality import run_terminal_classify
+
+        try:
+            tc = await run_terminal_classify(app.state.llm, data["modules"], model)
+            data["terminals"] = tc["terminals"]
+            data["terminal_reasons"] = tc["reasons"]
+        except Exception as e:
+            logger.warning("整理稿章节归端故障，按章节名关键词兜底：{}", e)
     meta = {"id": uuid.uuid4().hex[:8], "model": data.get("model_name"), "chunks": data.get("chunks"), "inputs": inputs,
             "by": by, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "auto": auto,
             "source_chars": data.get("source_chars"), "chars": len(data["text"]), "modules": len(data.get("modules") or []),
@@ -5893,6 +5926,33 @@ async def review_requirement_extraction_item(request: Request, req_id: str, body
     return _req_view(request, item)
 
 
+class ExtractionTerminalBody(BaseModel):
+    section: str      # 顶层章节键（文件夹名或页面名，与三端汇总里一致）
+    terminal: str     # 端：h5 / game_admin / merchant_admin / common / other
+
+
+@router.post("/api/v1/requirements/{req_id}/extraction/terminals")
+async def set_requirement_extraction_terminal(request: Request, req_id: str, body: ExtractionTerminalBody) -> dict:
+    """三端汇总里把某个章节改到别的端（模型判错或没判的）。之后发起的测试设计按改后的端归测试点；已发起的任务不回改。"""
+    from app.terminals import valid_key
+
+    item = _req(request, req_id, "requirement.edit")
+    ex = item.get("extraction") or {}
+    if not ex.get("modules"):
+        raise HTTPException(status_code=409, detail="整理稿没有逐条结构，不能按章节归端")
+    term = valid_key(body.terminal)
+    if term is None or term == "e2e":
+        raise HTTPException(status_code=400, detail=f"未知的端：{body.terminal}")
+    section = body.section.strip()
+    view = _extraction_view(item) or {}
+    if section not in (view.get("section_terminals") or {}):
+        raise HTTPException(status_code=404, detail=f"整理稿里没有章节「{section}」")
+    rstore = request.app.state.requirements
+    item = rstore.set_extraction_terminal(req_id, section, term, by=_operator(request))
+    request.state.audit_detail = f"章节「{section}」→ {term}"
+    return _req_view(request, item)
+
+
 @router.post("/api/v1/requirements/{req_id}/extraction/review-done")
 async def finish_requirement_extraction_review(request: Request, req_id: str) -> dict:
     """标记整理稿已审核（⚠ 条目都处理过才允许）。之后逐条改动会取消该标记。"""
@@ -5920,11 +5980,17 @@ def _extraction_view(item: dict) -> dict | None:
     led = ex.get("ledger") or {}
     out = {**ex, "ledger": {"stats": led.get("stats"), "image": led.get("image"), "inherited": led.get("inherited")}, "outline": None}
     if ex.get("modules"):
+        from app.terminals import section_terminals, terminal_summary, terminals
+
         view = copy.deepcopy(item)   # 在副本上按当前规则收口（草稿只认独立区域、流程框不重复），不改库里的数据
         tidy_modules(view)
         mods = view["extraction"]["modules"]
         out["modules"], out["outline"] = mods, outline_view(mods)   # 页面 › 区块 › 条目层级，页面按这个渲染
         out["text"] = extraction_markdown(mods, ex.get("dropped"), head=extraction_head(view))
+        # 三端汇总：顶层章节归端（模型判定 / 人工改 / 关键词兜底），每个端有哪些页面、多少区块与条目
+        out["section_terminals"] = section_terminals(out["outline"], ex.get("terminals") or {})
+        out["terminal_summary"] = terminal_summary(out["outline"], ex.get("terminals") or {})
+        out["terminal_options"] = [{"key": t["key"], "label": t["label"]} for t in terminals() if t["key"] != "e2e"]
     return out
 
 
@@ -6510,9 +6576,16 @@ async def _design_from_requirements(request: Request, items: list[dict], body: D
     ids = [it["req_id"] for it in items]
     titles = [it["title"] for it in items]
     same = lambda key: items[0].get(key) if len({it.get(key) for it in items}) == 1 else None  # noqa: E731
+    from app.terminals import extraction_section_terminals
+
+    # 整理稿章节 → 端：多需求合并时模块名带「需求标题-」前缀，章节键也带上
+    terms: dict[str, str] = {}
+    for it in items:
+        for sec, t in extraction_section_terminals(it.get("extraction")).items():
+            terms[f"{it['title']}-{sec}" if len(items) > 1 else sec] = t
     extra = {"requirement_id": ids[0], "requirement_title": " + ".join(titles) if len(items) > 1 else titles[0],
              "requirement_ids": ids, "requirement_titles": titles,
-             "module_id": same("module_id"), "version_id": same("version_id")}
+             "module_id": same("module_id"), "version_id": same("version_id"), "terminals": terms}
     if len(items) == 1:
         brief = design_brief(items[0])
     else:
@@ -8174,7 +8247,7 @@ async def retry_task(request: Request, task_id: str) -> dict:
     # 情形 B：确认测试点之后失败（含服务重启打断）→ 直接从已确认的测试点续生成，不重新拆解；
     # 拆解确认模式的任务只要已有拆解结果就走这里，避免重新拆解覆盖人工审核记录
     if (ctx.get("resume_stage") == "confirmed" or ctx.get("confirm_points")) and (record.analysis or {}).get("test_points"):
-        points = confirmable_points(record.analysis["test_points"])
+        points = confirmable_points(record.analysis["test_points"], ctx.get("confirm_terminal") or None)   # 按端确认的只续跑该端
         if not points:
             raise HTTPException(status_code=409, detail="没有已通过的测试点，无法继续")
         async def _resume() -> None:
@@ -8593,14 +8666,21 @@ async def get_task(request: Request, task_id: str) -> dict:
     from app.tasks.blind_spots import blind_spot_entities
     from app.tasks.points import dup_pair_entities
 
+    from app.terminals import case_terminals, fill_point_terminals, point_terminal_stats, terminals
+
     record = _task(request, task_id, "case.view")
+    if fill_point_terminals(record.analysis):   # 旧任务 / 新增的点按模块补端（幂等）
+        request.app.state.tasks.save(record)
     pending = _points_pending_generation(record) if record.status == "completed" else []
     return {**record.model_dump(exclude={"checkpoint", "quality_cache"}), "editing": _active_editing(request.app, task_id),
             "error_kind": _error_kind(record.error), "resume": _resume_info(record),
             "progress_detail": _progress_detail(request.app.state.tasks, record),
             "blind_spots": blind_spot_entities(record), "dup_pairs": dup_pair_entities(record),
             "case_dup_pairs": dup_pair_entities(record, "cases"),
-            "points_pending_generation": [p["tp_id"] for tp in pending for p in tp["points"]]}
+            "points_pending_generation": [p["tp_id"] for tp in pending for p in tp["points"]],
+            "terminals": [{"key": t["key"], "label": t["label"]} for t in terminals()],
+            "point_terminals": point_terminal_stats((record.analysis or {}).get("test_points") or [], _generated_tp_ids(record)),
+            "case_terminals": case_terminals(record)}
 
 
 # ---- 编辑占用提示（完整需求 11 章）：内存瞬态状态，重启即清（占用本就随会话失效）----
@@ -8676,28 +8756,41 @@ _MEDIA_TYPES = {
 
 
 @router.get("/api/v1/tasks/{task_id}/points/export")
-async def export_points(request: Request, task_id: str, scope: str = "all", fmt: str = "xlsx") -> FileResponse:
-    """测试点导出：fmt=xlsx（编号、模块、测试点、维度、来源、状态、审核意见、是否已生成用例与覆盖用例编号、延伸依据）
-    或 fmt=xmind（思维导图，与页面脑图同结构：需求 → 模块 → 测试点 → 来源 / 依据 / 意见）；scope=approved 只导已通过的。"""
+async def export_points(request: Request, task_id: str, scope: str = "all", fmt: str = "xlsx", terminal: str = "") -> FileResponse:
+    """测试点导出：fmt=xlsx（编号、模块、端、测试点、维度、来源、状态、审核意见、是否已生成用例与覆盖用例编号、延伸依据）
+    或 fmt=xmind（思维导图，与页面脑图同结构：需求 → 模块 → 测试点 → 来源 / 依据 / 意见）；scope=approved 只导已通过的；
+    terminal=h5 / game_admin / merchant_admin / e2e … 只导该端的测试点（文件名带端名）。"""
     import asyncio
+
+    from app.terminals import fill_point_terminals, filter_modules, label_of, valid_key
 
     if fmt not in ("xlsx", "xmind"):
         raise HTTPException(status_code=400, detail="fmt 仅支持 xlsx / xmind")
+    terminal = (terminal or "").strip()
+    if terminal and not valid_key(terminal):
+        raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
 
     record = _task(request, task_id, "case.export")
+    if fill_point_terminals(record.analysis):
+        request.app.state.tasks.save(record)
     modules = (record.analysis or {}).get("test_points") or []
     if not modules:
         raise HTTPException(status_code=404, detail="任务没有测试点拆解结果")
+    modules = filter_modules(modules, terminal or None)
+    if not modules:
+        raise HTTPException(status_code=404, detail=f"「{label_of(terminal)}」没有测试点")
     links: dict[str, list[str]] = {}
     for c in (record.result or {}).get("cases") or []:
         for tp in c.get("point_ids") or []:
             links.setdefault(str(tp), []).append(str(c.get("case_id") or ""))
     generated = set((record.context or {}).get("generated_tp_ids") or [])
     task_dir = request.app.state.tasks.output_dir / task_id
-    name = ("正式测试点" if scope == "approved" else "测试点") + f".{fmt}"
+    name = ("正式测试点" if scope == "approved" else "测试点") + (f"-{label_of(terminal)}" if terminal else "") + f".{fmt}"
     if fmt == "xmind":
         sources = record.sources or []
         root_title = (record.context or {}).get("requirement_title") or (Path(sources[0]).stem if sources and sources[0] != "text" else "测试点")
+        if terminal:
+            root_title = f"{root_title} · {label_of(terminal)}"
         path = await asyncio.to_thread(export_points_xmind, modules, task_dir / name, root_title, scope == "approved", links)
     else:
         path = await asyncio.to_thread(export_points_excel, modules, task_dir / name, links, generated, scope == "approved")
@@ -8715,20 +8808,27 @@ def _cases_fingerprint(record: TaskRecord) -> str:
 
 
 @router.get("/api/v1/tasks/{task_id}/files/{fmt}")
-async def download_file(request: Request, task_id: str, fmt: str, scope: str = "all", layout: str = "") -> FileResponse:
+async def download_file(request: Request, task_id: str, fmt: str, scope: str = "all", layout: str = "", terminal: str = "") -> FileResponse:
     """下载导出文件：用例内容（含删除 / 修改 / 审核状态）与上次导出不一致时先重新导出，保证文件与页面一致。
 
     scope=approved 只导出审核通过的正式用例（即时生成，不缓存）；
-    layout=compact 仅对 xmind 生效：脑图只到用例一层，步骤与预期放备注（节点数 = 用例数）。
+    layout=compact 仅对 xmind 生效：脑图只到用例一层，步骤与预期放备注（节点数 = 用例数）；
+    terminal=h5 / game_admin / merchant_admin / e2e … 只导该端的用例（按来源测试点归端；即时生成，文件名带端名）。
     """
+    from app.terminals import label_of, valid_key
+
     record = _task(request, task_id, "case.export")
     if fmt not in _MEDIA_TYPES:
         raise HTTPException(status_code=404, detail=f"不支持的导出格式: {fmt}")
-    if scope == "approved" or (fmt == "xmind" and layout == "compact"):
+    terminal = (terminal or "").strip()
+    if terminal and not valid_key(terminal):
+        raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
+    if scope == "approved" or terminal or (fmt == "xmind" and layout == "compact"):
         path = await _export_task_files(request, record, approved_only=(scope == "approved"), fmt=fmt,
-                                        compact=(layout == "compact"))
+                                        compact=(layout == "compact"), terminal=terminal or None)
         if path is None:
-            raise HTTPException(status_code=404, detail="没有审核通过的正式用例可导出")
+            raise HTTPException(status_code=404, detail=(f"「{label_of(terminal)}」没有{'审核通过的正式' if scope == 'approved' else ''}用例可导出"
+                                                        if terminal else "没有审核通过的正式用例可导出"))
         return FileResponse(path, media_type=_MEDIA_TYPES.get(fmt), filename=Path(path).name)
     path = record.files.get(fmt)
     if path is None and not (record.result or {}).get("cases"):
@@ -8742,14 +8842,15 @@ async def download_file(request: Request, task_id: str, fmt: str, scope: str = "
 
 
 async def _export_task_files(request: Request, record: TaskRecord, approved_only: bool = False,
-                             fmt: str | None = None, compact: bool = False) -> Path | None:
+                             fmt: str | None = None, compact: bool = False, terminal: str | None = None) -> Path | None:
     """按需导出三种格式（线程池执行，不阻塞事件循环），完成后记录内容指纹并清除 dirty 标记。
 
-    approved_only=True 只导出正式用例到独立文件（不缓存、不影响全量产物），返回该文件路径。
+    approved_only=True 只导出正式用例到独立文件（不缓存、不影响全量产物），返回该文件路径；terminal 给了只导该端的用例（同样独立文件）。
     """
     import asyncio
 
     from app.agents import GenerationResult
+    from app.terminals import case_terminals, label_of
 
     result = GenerationResult.model_validate(record.result)
     template = request.app.state.templates.get((record.context or {}).get("template_id"))
@@ -8757,12 +8858,18 @@ async def _export_task_files(request: Request, record: TaskRecord, approved_only
     task_dir.mkdir(parents=True, exist_ok=True)
     sources = record.sources or []
     root_title = Path(sources[0]).stem if sources and sources[0] != "text" else "测试用例"
-    if approved_only or compact:
+    if approved_only or compact or terminal:
         cases = [c for c in result.cases if (record.case_reviews.get(c.uid) or {}).get("status") == "approved"] \
             if approved_only else list(result.cases)
+        if terminal:
+            terms = case_terminals(record)
+            cases = [c for c in cases if terms.get(c.uid) == terminal]
+            root_title = f"{root_title} · {label_of(terminal)}"
         if not cases:
             return None
         stem = "正式用例" if approved_only else "测试用例"
+        if terminal:
+            stem += f"-{label_of(terminal)}"
         if compact:
             stem += "-紧凑"
         exporters = {"xlsx": lambda: export_excel(cases, task_dir / f"{stem}.xlsx", template),
