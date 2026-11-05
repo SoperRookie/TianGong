@@ -759,3 +759,64 @@ def test_LibreOffice转换超时_强杀进程组不留残留(tmp_path, monkeypat
     except ProcessLookupError:
         alive = False
     assert not alive, "后台 sleep 子进程应随进程组一起被杀"
+
+
+def _mhtml_bytes(html: str, images: dict[str, bytes]) -> bytes:
+    """按 Confluence「导出为 Word」的样子拼一个 multipart/related：正文 quoted-printable，图片 base64 + Content-Location。"""
+    import base64
+    import quopri
+
+    b = "----=_Part_1"
+    out = [f"Date: Thu, 5 Nov 2026 18:10:48 +0800\r\nSubject: Exported From Confluence\r\nMIME-Version: 1.0\r\n"
+           f"Content-Type: multipart/related; \r\n\tboundary=\"{b}\"\r\n\r\n"]
+    out.append(f"--{b}\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: quoted-printable\r\n"
+               f"Content-Location: file:///C:/exported.html\r\n\r\n{quopri.encodestring(html.encode('utf-8')).decode()}\r\n")
+    for name, data in images.items():
+        out.append(f"--{b}\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\n"
+                   f"Content-Location: file:///C:/{name}\r\n\r\n{base64.encodebytes(data).decode()}\r\n")
+    out.append(f"--{b}--\r\n")
+    return "".join(out).encode("utf-8")
+
+
+def test_MHTML解析_Confluence导出为Word_章节列表表格与内嵌图片(tmp_path, monkeypatch):
+    """Confluence「导出为 Word」给的 .doc 是 MHTML：正文 quoted-printable、截图 base64 内嵌。此前被整个当 HTML 读，
+    出来的是 MIME 头与 base64 乱码；现在解 MIME 后按标题 / 列表 / 表格建章节，截图按位置生成图片占位送 Vision。"""
+    from PIL import Image
+
+    from app.parsers import convert
+
+    monkeypatch.setattr(convert, "soffice_path", lambda: None)
+    png = tmp_path / "shot.png"
+    Image.new("RGB", (200, 120), "white").save(png)
+    html = ("<html><head><title>【扫码枪流程优化需求】</title><style>p{color:red}</style></head><body>"
+            "<h1>【扫码枪流程优化需求】</h1><div class='Section1'>"
+            "<h2><span>一、需求背景</span></h2><p><span>为追踪牌盒完整记录，范围包含：</span></p>"
+            "<ol><li><p>6副牌及8副牌扫码枪流程。</p></li><li><p>2副牌扫码枪流程。</p></li></ol>"
+            "<h3>02 预洗牌</h3><ul><li>配置选项包含：<ul><li>手洗＋机洗。</li><li>仅手洗。</li></ul></li></ul>"
+            "<p><span>→ 启用牌盒</span><br><span>→ 预洗牌</span></p>"
+            "<p><img src='abc123' alt='流程图'></p>"
+            "<table><tbody><tr><th>牌盒号</th><th>纸牌周期ID</th></tr><tr><td>PH888</td><td>PH888-20260929-001</td></tr></tbody></table>"
+            "<p>外链图<img src='http://wiki/x.png' alt='外链截图'></p>"
+            "</div></body></html>")
+    doc_file = tmp_path / "【扫码枪流程优化需求】.doc"
+    doc_file.write_bytes(_mhtml_bytes(html, {"abc123": png.read_bytes()}))
+
+    doc = parse_file(doc_file)
+    assert doc.doc_type == "doc" and doc.source == doc_file.name
+    heads = [(s.level, s.title) for s in doc.sections if s.title]
+    assert heads == [(1, "【扫码枪流程优化需求】"), (2, "一、需求背景"), (3, "02 预洗牌")]
+    text = doc.full_text
+    assert "为追踪牌盒完整记录，范围包含：" in text
+    assert "- 6副牌及8副牌扫码枪流程。\n- 2副牌扫码枪流程。" in text          # li 里套 p 仍是一条列表项
+    assert "- 配置选项包含：\n  - 手洗＋机洗。\n  - 仅手洗。" in text           # 嵌套列表缩进
+    assert "→ 启用牌盒\n→ 预洗牌" in text                                     # <br> 断行，span 之间不加空格
+    assert "color:red" not in text and "Content-Transfer-Encoding" not in text and "base64" not in text
+    assert len(doc.embedded_images) == 1 and doc.embedded_images[0].mime == "image/png"
+    assert doc.embedded_images[0].placeholder == "[[图片:1]]" and "[[图片:1]]" in text
+    assert "[图片：外链截图]" in text                                          # 外链图片只留说明，不去下载
+    assert doc.tables == [[["牌盒号", "纸牌周期ID"], ["PH888", "PH888-20260929-001"]]]
+
+    # .mht 后缀直接走同一解析器
+    mht = tmp_path / "导出.mht"
+    mht.write_bytes(doc_file.read_bytes())
+    assert parse_file(mht).doc_type == "mht" and len(parse_file(mht).embedded_images) == 1
