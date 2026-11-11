@@ -5,12 +5,15 @@
 - 会话：登录签发随机 Bearer Token，固定有效期，入库可跨重启；
 - 角色：系统级 admin（平台管理）与 member（平台使用）；项目级角色见 app.permissions；
 - 用户资料（完整需求 3.1）：姓名/邮箱/手机/头像/状态（正常/禁用）/最后登录时间与 IP，
-  禁用即会话失效、拒绝登录。
+  禁用即会话失效、拒绝登录；
+- 登录 IP 白名单：开启后只有来自白名单（单个 IP 或 CIDR 网段）的请求才能登录，其余在校验口令之前
+  就拒绝并记安全日志；开启或改名单时操作人自己的 IP 必须在名单里，避免把自己锁在外面。
 """
 
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -46,6 +49,40 @@ class AuthError(ValueError):
 class OtpRequired(Exception):
     """口令校验通过但需补充动态验证码（登录二段式流程）。"""
     pass
+
+
+class IpNotAllowed(AuthError):
+    """登录 IP 不在白名单：在校验口令之前拒绝，路由层单独记「登录被拒」安全日志。"""
+    pass
+
+
+IP_NOTE_MAX = 64
+
+
+def parse_ip_rule(value: str) -> str:
+    """白名单条目：单个 IPv4 / IPv6 或 CIDR 网段，返回规范写法；不合法抛 AuthError。"""
+    raw = (value or "").strip()
+    if not raw:
+        raise AuthError("IP 不能为空")
+    try:
+        if "/" in raw:
+            return str(ipaddress.ip_network(raw, strict=False))
+        return str(ipaddress.ip_address(raw))
+    except ValueError:
+        raise AuthError(f"IP 格式不对：{raw}（单个 IP 如 10.1.2.3，网段如 10.1.2.0/24）")
+
+
+def ip_matches(ip: str, rule: str) -> bool:
+    try:
+        addr = ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return False
+    try:
+        if "/" in rule:
+            return addr in ipaddress.ip_network(rule, strict=False)
+        return addr == ipaddress.ip_address(rule)
+    except ValueError:
+        return False
 
 
 def _token_key(token: str) -> str:
@@ -114,6 +151,56 @@ class AuthStore:
             raise AuthError(f"未知访问模式: {mode}")
         self._settings["access_mode"] = mode
         self._persist()
+
+    # ---- 登录 IP 白名单 ----
+
+    def ip_whitelist(self) -> dict:
+        """{"enabled": bool, "entries": [{"ip", "note", "by", "at"}]}。"""
+        entries = [dict(e) for e in self._settings.get("ip_whitelist", []) if isinstance(e, dict) and e.get("ip")]
+        return {"enabled": bool(self._settings.get("ip_whitelist_enabled", False)), "entries": entries}
+
+    def ip_allowed(self, ip: str | None) -> bool:
+        """白名单关闭时放行一切；开启时只放行命中名单的 IP（取不到 IP 视为未命中）。"""
+        if not self._settings.get("ip_whitelist_enabled", False):
+            return True
+        return any(ip_matches(ip or "", e.get("ip", "")) for e in self._settings.get("ip_whitelist", []) if isinstance(e, dict))
+
+    def set_ip_whitelist(
+        self, enabled: bool | None = None, entries: list[dict] | None = None,
+        operator: str | None = None, operator_ip: str | None = None,
+    ) -> dict:
+        """整体保存白名单开关与名单。生效（开启状态）时操作人当前 IP 必须在名单里，否则拒绝保存。"""
+        now = _now().isoformat(timespec="seconds")
+        if entries is not None:
+            cleaned: list[dict] = []
+            seen: set[str] = set()
+            old = {e.get("ip"): e for e in self._settings.get("ip_whitelist", []) if isinstance(e, dict)}
+            for raw in entries:
+                if not isinstance(raw, dict):
+                    continue
+                ip = parse_ip_rule(str(raw.get("ip", "")))
+                if ip in seen:
+                    continue
+                seen.add(ip)
+                note = " ".join(str(raw.get("note") or "").split())[:IP_NOTE_MAX]
+                prev = old.get(ip)
+                cleaned.append({"ip": ip, "note": note,
+                                "by": prev.get("by", operator or "") if prev else (operator or ""),
+                                "at": prev.get("at", now) if prev else now})
+            new_entries = cleaned
+        else:
+            new_entries = [dict(e) for e in self._settings.get("ip_whitelist", []) if isinstance(e, dict)]
+        new_enabled = bool(self._settings.get("ip_whitelist_enabled", False)) if enabled is None else bool(enabled)
+        if new_enabled:
+            if not new_entries:
+                raise AuthError("白名单为空时不能开启：先加入至少一条 IP（建议先加你自己当前的 IP）")
+            if operator_ip is not None and not any(ip_matches(operator_ip, e["ip"]) for e in new_entries):
+                raise AuthError(f"你当前的 IP {operator_ip or '未知'} 不在白名单里，保存后你自己也无法登录；请先把它加入名单")
+        self._settings["ip_whitelist_enabled"] = new_enabled
+        self._settings["ip_whitelist"] = new_entries
+        self._persist()
+        logger.info("登录 IP 白名单：{}，{} 条（操作人 {}）", "开启" if new_enabled else "关闭", len(new_entries), operator or "-")
+        return self.ip_whitelist()
 
     # ---- 用户管理 ----
 
@@ -284,6 +371,9 @@ class AuthStore:
         from app.auth.totp import verify_totp
 
         username = username.strip()
+        if not self.ip_allowed(ip):
+            # 白名单开启且未命中：口令都不校验，直接拒绝（不计失败次数，避免被用来锁别人的号）
+            raise IpNotAllowed(f"当前 IP {ip or '未知'} 不在登录白名单，请联系管理员加白后再登录")
         key = (username, ip or "")
         fail = self._failures.get(key)
         if fail and fail.get("locked_until") and fail["locked_until"] > _now():

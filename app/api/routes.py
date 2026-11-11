@@ -310,7 +310,7 @@ class LoginBody(BaseModel):
 @router.post("/api/v1/auth/login")
 async def auth_login(request: Request, body: LoginBody) -> dict:
     from app.auth import AuthError
-    from app.auth.store import OtpRequired
+    from app.auth.store import IpNotAllowed, OtpRequired
 
     from app.audit import record as audit
 
@@ -325,6 +325,12 @@ async def auth_login(request: Request, body: LoginBody) -> dict:
     except OtpRequired:
         # 口令正确但需动态码：不签发会话，前端展示验证码输入后重新提交
         return {"otp_required": True}
+    except IpNotAllowed as e:
+        # 登录 IP 白名单未命中：口令未校验即拒绝，安全日志单独记「登录被拒」并带 IP
+        audit(user=body.username.strip(), ip=_client_ip(request), ua=ua, kind="auth", action="登录被拒（IP 未加白）",
+              target=body.username.strip(), method="POST", path="/api/v1/auth/login", status=403, detail=str(e))
+        logger.warning("登录被拒：用户 {} IP {} 不在白名单", body.username.strip(), _client_ip(request) or "-")
+        raise HTTPException(status_code=403, detail=str(e))
     except AuthError as e:
         audit(user=body.username.strip(), ip=_client_ip(request), ua=ua, kind="auth", action="登录失败",
               target=body.username.strip(), method="POST", path="/api/v1/auth/login", status=401, detail=str(e))
@@ -342,7 +348,8 @@ async def auth_login(request: Request, body: LoginBody) -> dict:
 async def auth_settings(request: Request) -> dict:
     """系统级开关：两步验证、数据可见范围模式。"""
     """安全设置：两步验证功能总开关状态（登录用户可读，用于界面展隐）。"""
-    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request)}
+    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request),
+            "ip_whitelist_enabled": request.app.state.auth.ip_whitelist()["enabled"]}
 
 
 class AuthSettingsBody(BaseModel):
@@ -366,7 +373,51 @@ async def update_auth_settings(request: Request, body: AuthSettingsBody) -> dict
         except AuthError as e:
             raise HTTPException(status_code=400, detail=str(e))
         logger.info("数据可见范围模式：{}", body.access_mode)
-    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request)}
+    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request),
+            "ip_whitelist_enabled": request.app.state.auth.ip_whitelist()["enabled"]}
+
+
+# ---- 登录 IP 白名单（管理员）----
+
+
+class IpWhitelistEntry(BaseModel):
+    ip: str            # 单个 IP 或 CIDR 网段
+    note: str = ""     # 备注：谁 / 哪里（≤ 64 字）
+
+
+class IpWhitelistBody(BaseModel):
+    enabled: bool | None = None
+    entries: list[IpWhitelistEntry] | None = None   # 不传则名单不变
+
+
+def _ip_whitelist_view(request: Request) -> dict:
+    out = request.app.state.auth.ip_whitelist()
+    out["client_ip"] = _client_ip(request)   # 服务端看到的操作人 IP：加白前先确认这个，而不是本机网卡地址
+    return out
+
+
+@router.get("/api/v1/auth/ip-whitelist")
+async def get_ip_whitelist(request: Request) -> dict:
+    """登录 IP 白名单（管理员）：开关、名单与当前请求的来源 IP。开启后只有名单内 IP 能登录。"""
+    _require_admin(request)
+    return _ip_whitelist_view(request)
+
+
+@router.put("/api/v1/auth/ip-whitelist")
+async def update_ip_whitelist(request: Request, body: IpWhitelistBody) -> dict:
+    """整体保存开关与名单（管理员）。开启状态下操作人当前 IP 必须在名单里，否则 400，避免把自己锁在外面。"""
+    from app.auth import AuthError
+
+    user = _require_admin(request)
+    try:
+        request.app.state.auth.set_ip_whitelist(
+            enabled=body.enabled,
+            entries=[e.model_dump() for e in body.entries] if body.entries is not None else None,
+            operator=user["username"], operator_ip=_client_ip(request),
+        )
+    except AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _ip_whitelist_view(request)
 
 
 # ---- 两步验证（TOTP：Google Authenticator / 海月盾等标准验证器）----

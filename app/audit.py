@@ -56,6 +56,7 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [(m, re.compile(p), k, a) for m
     ("POST", r"^/api/v1/auth/totp/enable$", "auth", "两步验证·绑定"),
     ("POST", r"^/api/v1/auth/totp/disable$", "auth", "两步验证·解绑"),
     ("PUT", r"^/api/v1/auth/settings$", "system", "修改安全设置"),
+    ("PUT", r"^/api/v1/auth/ip-whitelist$", "system", "修改登录 IP 白名单"),
     ("PUT", r"^/api/v1/auth/me$", "user", "修改个人资料"),
     ("POST", r"^/api/v1/auth/users$", "user", "创建用户"),
     ("PUT", r"^/api/v1/auth/users/(?P<target>[^/]+)$", "user", "修改用户"),

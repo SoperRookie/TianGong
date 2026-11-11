@@ -813,6 +813,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
           两步验证功能
           <span class="switch"><input type="checkbox" id="totpPolicySwitch" onchange="saveTotpPolicy(this.checked)"><i></i></span>
         </label>
+        <button class="btn ghost" onclick="openIpWhitelist()" title="开启后只有名单内的 IP 能登录，其余在校验密码前即拒绝并记入登录安全日志" id="ipWlBtn">登录 IP 白名单</button>
         <button class="btn" onclick="openUserDlg()">＋ 添加用户</button>
       </div></div>
     <div class="card-b" id="usersList"></div>
@@ -1400,6 +1401,14 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 </dialog>
 
 <!-- 用户新增 -->
+<dialog id="ipWlDlg" style="width:680px">
+  <div class="dlg-h"><h3>登录 IP 白名单</h3></div>
+  <div class="dlg-b" id="ipWlBody"></div>
+  <div class="dlg-f">
+    <button class="btn ghost" onclick="$('ipWlDlg').close()">取消</button>
+    <button class="btn" onclick="saveIpWhitelist()">保存</button>
+  </div>
+</dialog>
 <dialog id="userDlg">
   <div class="dlg-h"><h3>添加用户</h3></div>
   <div class="dlg-b">
@@ -8302,6 +8311,67 @@ async function testModel(name) {
 }
 
 /* ==================== 用户管理（管理员） ==================== */
+/* ---- 登录 IP 白名单：开启后只有名单内 IP（单个或 CIDR 网段）能登录；开启时操作人自己的 IP 必须在名单里 ---- */
+let _ipWl = {enabled:false, entries:[], client_ip:''};
+async function openIpWhitelist() {
+  try { _ipWl = await api('/api/v1/auth/ip-whitelist'); } catch (e) { toast(e.message, 'err'); return; }
+  renderIpWhitelist(); $('ipWlDlg').showModal();
+}
+function ipWlCollect() {
+  // 从表格行读回备注改动，再合并开关
+  const rows = [...document.querySelectorAll('#ipWlTable tr[data-idx]')];
+  _ipWl.entries = rows.map(tr => ({ip: tr.dataset.ip, note: tr.querySelector('input').value.trim()}));
+  _ipWl.enabled = $('ipWlEnabled').checked;
+}
+function renderIpWhitelist() {
+  const me = _ipWl.client_ip || '';
+  const loop = me === '127.0.0.1' || me === '::1' || !me;
+  const covered = _ipWl.entries.some(e => e.ip === me);
+  const fmt = t => esc(fmtTime(t));
+  $('ipWlBody').innerHTML = `
+    <div class="box accent" style="margin-bottom:10px">开启后只有名单内的 IP 能登录，其余在校验密码前就被拒绝，并记入「操作日志 → 安全日志」（动作「登录被拒（IP 未加白）」，带 IP）。
+      <div style="margin-top:6px">服务端看到的你当前的 IP：<b style="font-family:var(--mono)">${esc(me || '未知')}</b>
+      ${!covered && me ? ` <a onclick="ipWlAdd('${esc(me)}', '${esc(curUser ? curUser.username : '')}')" style="cursor:pointer">加入名单</a>` : covered ? ' <span class="st approved">已在名单</span>' : ''}</div>
+      ${loop ? '<div class="hint" style="margin-top:6px;color:#c0392b">看到的是本机回环地址或为空：说明请求经过了反向代理且未配置 TIANGONG_TRUSTED_PROXIES，此时所有人的 IP 都会被当成代理地址，白名单形同虚设。请先按部署文档配置可信代理再开启。</div>' : ''}
+    </div>
+    <label class="check" style="margin:6px 0 10px">启用登录 IP 白名单 <span class="switch"><input type="checkbox" id="ipWlEnabled" ${_ipWl.enabled ? 'checked' : ''}><i></i></span>
+      <span class="hint">开启状态下保存时，你当前的 IP 必须在名单里，否则会被拒绝保存</span></label>
+    <div class="tbl-wrap" style="margin-top:0;max-height:300px;overflow:auto"><table id="ipWlTable">
+      <tr><th style="width:190px">IP / 网段</th><th>备注（谁 / 哪里）</th><th style="width:150px">加入</th><th style="width:50px"></th></tr>
+      ${_ipWl.entries.length ? _ipWl.entries.map((e, i) => `<tr data-idx="${i}" data-ip="${esc(e.ip)}">
+        <td style="font-family:var(--mono)">${esc(e.ip)}${e.ip === me ? ' <span class="tag">当前</span>' : ''}</td>
+        <td><input type="text" value="${esc(e.note || '')}" maxlength="64" placeholder="如 张三 / 办公室出口" style="width:100%"></td>
+        <td class="hint">${e.by ? esc(e.by) + '<div>' : ''}${e.at ? fmt(e.at) : ''}${e.by ? '</div>' : ''}</td>
+        <td><button class="btn ghost sm" onclick="ipWlRemove(${i})" title="移除">✕</button></td></tr>`).join('')
+        : '<tr><td colspan="4" class="hint" style="text-align:center">名单为空（为空时不能开启）</td></tr>'}
+    </table></div>
+    <div style="display:flex;gap:8px;margin-top:10px;align-items:center">
+      <input type="text" id="ipWlNewIp" placeholder="单个 IP 如 10.1.2.3，网段如 10.1.2.0/24" style="width:260px;font-family:var(--mono)" onkeydown="if(event.key==='Enter'){ipWlAdd()}">
+      <input type="text" id="ipWlNewNote" placeholder="备注：谁 / 哪里" maxlength="64" style="flex:1" onkeydown="if(event.key==='Enter'){ipWlAdd()}">
+      <button class="btn ghost" onclick="ipWlAdd()">＋ 添加</button>
+    </div>`;
+}
+function ipWlAdd(ip, note) {
+  ipWlCollect();
+  ip = (ip !== undefined ? ip : $('ipWlNewIp').value).trim();
+  note = (note !== undefined ? note : $('ipWlNewNote').value).trim();
+  if (!ip) { toast('请填写 IP 或网段', 'err'); return; }
+  if (_ipWl.entries.some(e => e.ip === ip)) { toast('该 IP 已在名单里', 'err'); return; }
+  _ipWl.entries.push({ip, note});
+  renderIpWhitelist();
+}
+function ipWlRemove(i) { ipWlCollect(); _ipWl.entries.splice(i, 1); renderIpWhitelist(); }
+async function saveIpWhitelist() {
+  ipWlCollect();
+  if (_ipWl.enabled && !await uiConfirm('开启登录 IP 白名单？', `保存后只有名单内的 ${_ipWl.entries.length} 条 IP / 网段能登录，其他地址一律拒绝（已登录的会话不受影响）。`)) return;
+  try {
+    _ipWl = await api('/api/v1/auth/ip-whitelist', {method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({enabled: _ipWl.enabled, entries: _ipWl.entries.map(e => ({ip: e.ip, note: e.note || ''}))})});
+    $('ipWlDlg').close();
+    toast(_ipWl.enabled ? `登录 IP 白名单已开启：${_ipWl.entries.length} 条` : '登录 IP 白名单已关闭', 'ok');
+    refreshUsers();
+  } catch (e) { toast(e.message, 'err'); }
+}
 async function saveTotpPolicy(enabled) {
   try {
     window._authSettings = await api('/api/v1/auth/settings', {method:'PUT',
@@ -8328,6 +8398,7 @@ async function _refreshUsers__impl() {
     window._authSettings = await api('/api/v1/auth/settings').catch(()=>window._authSettings);
     if ($('totpPolicySwitch')) $('totpPolicySwitch').checked = (window._authSettings||{}).totp_enabled !== false;
     if ($('accessModeSel')) $('accessModeSel').value = (window._authSettings||{}).access_mode || (openProjects() ? 'open' : 'member');
+    if ($('ipWlBtn')) $('ipWlBtn').innerHTML = `登录 IP 白名单${(window._authSettings||{}).ip_whitelist_enabled ? ' <span class="st approved">已开启</span>' : ''}`;
     const q = new URLSearchParams({page: usersPage, page_size: usersSize});
     if (usersKw.trim()) q.set('keyword', usersKw.trim());
     if (usersRole) q.set('role', usersRole);
