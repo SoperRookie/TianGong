@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 72" width="320" height="72">
+  <defs>
+    <linearGradient id="skin" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#25335e"/><stop offset="1" stop-color="#121b38"/></linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="320" height="72" rx="16" fill="#0b1226"/>
+  <g transform="translate(6 4)">
+    <path d="M13 22 L20 12 L26 20 H38 L44 12 L51 22 V42 A19 19 0 0 1 13 42 Z" fill="url(#skin)" stroke="#5fe3ff" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M20 12 L26 20 M44 12 L38 20" stroke="#b79cff" stroke-width="2" stroke-linecap="round"/>
+    <rect x="15" y="25" width="34" height="14" rx="7" fill="#0b1226" stroke="#5fe3ff" stroke-width="1.6"/>
+    <circle cx="24" cy="32" r="5.2" fill="#0b1226" stroke="#5fe3ff" stroke-width="1.6"/><circle cx="40" cy="32" r="5.2" fill="#0b1226" stroke="#5fe3ff" stroke-width="1.6"/>
+    <circle cx="24" cy="32" r="2.4" fill="#7cf5c2" filter="url(#glow)"/><circle cx="40" cy="32" r="2.4" fill="#7cf5c2" filter="url(#glow)"/>
+    <path d="M29.5 41 L32 46 L34.5 41 Z" fill="#ff7ad9"/>
+    <path d="M22 48 L26 52 L30 48 M34 48 L38 52 L42 48" fill="none" stroke="#5fe3ff" stroke-opacity=".6" stroke-width="1.6" stroke-linecap="round"/>
+  </g>
+  <text x="84" y="42" font-family="'Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif" font-size="30" font-weight="900" fill="#ffffff" letter-spacing="3">天工</text>
+  <text x="86" y="60" font-family="'Inter','Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="600" fill="#8fa0c6" letter-spacing="3.4">TIANGONG · AI TEST DESIGN</text>
+</svg>

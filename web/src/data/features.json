@@ -1,0 +1,1858 @@
+[
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.1",
+"name": "进程模型与单实例锁",
+"entry": "启动 uvicorn app.main:app",
+"desc": "单进程、单事件循环；outputs/.instance.lock 文件锁拒绝第二个实例"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.2",
+"name": "启动流程与关停",
+"entry": "app/main.py:lifespan",
+"desc": "按固定顺序初始化各 Store、执行幂等迁移、启动后台清理；关停等知识沉淀与后台写库完成"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.3",
+"name": "路由、静态页面与健康检查",
+"entry": "GET /、/vendor/*、/brand/*、GET /health",
+"desc": "单文件前端、本地托管脑图内核与品牌资源、版本号探活"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.4",
+"name": "HTTP 中间件",
+"entry": "KeepEncodedSlashMiddleware、auth_middleware",
+"desc": "项目名含「/」的 %2F 保留、安全响应头、静态资源 no-cache、可信代理 IP 采信"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.5",
+"name": "数据库连接与表结构",
+"entry": "app/db.py:get_engine",
+"desc": "TIANGONG_DB_URL 决定 MySQL / SQLite；create_all 建表、ensure_columns 补列；密码特殊字符自动编码"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.6",
+"name": "DocStore 文档表读写",
+"entry": "app/db.py:DocStore",
+"desc": "kv_docs(store, k, payload) 按命名空间读全量、按键写单行、整表替换"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.7",
+"name": "Store 内存态 + 写穿",
+"entry": "各 *Store",
+"desc": "启动把命名空间全部读进内存，读走内存，写同步 / 后台单线程写穿到库"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.8",
+"name": "旧 JSON 迁移与磁盘目录",
+"entry": "app/db.py:load_with_migration",
+"desc": "命名空间为空且旧文件存在时一次性入库并把旧文件改名；data/、outputs/、logs/ 的实际内容"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.9",
+"name": "配置项",
+"entry": "app/config.py:Settings",
+"desc": "全部字段、默认值与环境变量名（前缀 TIANGONG_），.env 载入顺序"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.10",
+"name": "模型配置文件",
+"entry": "_ensure_models_config、PUT /api/v1/models/config",
+"desc": "config/models.yaml 缺失时按样例生成空清单；页面保存原子替换并热重载"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.11",
+"name": "应用日志",
+"entry": "app/logging_setup.py:setup_logging",
+"desc": "控制台 + 按日 / 按大小轮转文件、gzip、保留天数、接管 uvicorn 日志"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.12",
+"name": "数据库日志留存清理",
+"entry": "app/main.py:_purge_logs",
+"desc": "启动与之后每 24 小时清理早于 log_retention_days 的 ai_calls 与 audit_log"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.13",
+"name": "并发闸门",
+"entry": "LLMClient._semaphore、TaskStore._slots、EmbeddingClient._semaphore",
+"desc": "模型调用、测试设计任务、Embedding 三级信号量；任务超限排队 queued"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.14",
+"name": "上传与解析防护",
+"entry": "_read_upload、各 parser",
+"desc": "五个大小 / 页数上限在哪校验、对应报错码与文案"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.15",
+"name": "本地开发启动",
+"entry": "scripts/dev.sh、scripts/mysql_dev.sh",
+"desc": "拉起本地 mysqld（data/mysql）后以 --reload 启动"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.16",
+"name": "服务器源码部署",
+"entry": "scripts/server.sh",
+"desc": "start / stop / restart / status / logs / update；等待 /health 通过"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.17",
+"name": "Docker 部署",
+"entry": "Dockerfile、docker-compose.yml、docker/nginx.conf",
+"desc": "mysql + app + nginx 三容器，nginx 固定 IP 作为可信代理"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.18",
+"name": "反向代理、OpenAPI 开关与版本号",
+"entry": "trusted_proxies、expose_docs、app/__init__.py",
+"desc": "只有来自可信代理的 X-Forwarded-For 才采信；/docs 默认关闭；版本号单一来源"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.19",
+"name": "测试体系",
+"entry": "pyproject.toml、tests/conftest.py、tests/stubs.py",
+"desc": "临时目录 + 每测试一个 SQLite；StubLLM 按顺序回包隔离模型"
+},
+{
+"domain": "01",
+"domain_name": "系统架构与基础设施",
+"no": "1.20",
+"name": "运维脚本",
+"entry": "scripts/*.py、scripts/*.sh",
+"desc": "数据重置、磁盘清理、迁移备份、评审重置、终稿回传、POC 脚本"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.1",
+"name": "登录",
+"entry": "登录页「登 录」；POST /api/v1/auth/login",
+"desc": "口令校验（PBKDF2）、同用户名+IP 连续失败锁定、已绑定两步验证的用户二段式提交动态码，签发 Bearer Token"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.2",
+"name": "会话鉴权中间件",
+"entry": "所有 /api/v1/* 请求",
+"desc": "校验 Bearer Token（下载类路径支持 ?token=）、会话过期、账号禁用、强制改密拦截、安全响应头"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.3",
+"name": "初始管理员与首次登录强制改密",
+"entry": "服务启动；中间件 403 must_change_password",
+"desc": "无任何用户时自动建管理员；未配置口令则随机生成只打印一次并强制改密"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.4",
+"name": "登出",
+"entry": "个人区「退出登录」；POST /api/v1/auth/logout",
+"desc": "删除当前会话"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.5",
+"name": "当前用户信息",
+"entry": "页面启动；GET /api/v1/auth/me",
+"desc": "用户资料 + 可见项目及有效项目角色 + 收藏/最近访问 + 可见范围模式 + 所属产品线"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.6",
+"name": "个人资料维护",
+"entry": "个人区「个人资料」；PUT /api/v1/auth/me",
+"desc": "姓名 / 邮箱 / 手机 / 头像自助修改"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.7",
+"name": "修改密码",
+"entry": "个人区「修改密码」；POST /api/v1/auth/password",
+"desc": "校验原密码，改密后该用户全部会话失效"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.8",
+"name": "两步验证绑定 / 解绑",
+"entry": "个人区「两步验证」；POST /api/v1/auth/totp/setup、/enable、/disable",
+"desc": "标准 TOTP（SHA1 / 30 秒 / 6 位），本地生成二维码，绑定需回填动态码确认，解绑需密码 + 动态码"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.9",
+"name": "安全设置",
+"entry": "用户管理页顶部「数据可见范围」下拉、「两步验证功能」开关；GET/PUT /api/v1/auth/settings",
+"desc": "两步验证总开关、数据可见范围模式（open / line / member），管理员可改"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.10",
+"name": "用户列表",
+"entry": "用户管理页；GET /api/v1/auth/users",
+"desc": "管理员分页查看用户（含资料、状态、所属项目、两步验证、最后登录），支持关键字与多维筛选"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.11",
+"name": "用户名联想",
+"entry": "项目 / 产品线添加成员时；GET /api/v1/auth/users/lookup",
+"desc": "返回正常状态用户的用户名与姓名，供成员录入联想"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.12",
+"name": "新增用户",
+"entry": "用户管理页「＋ 添加用户」；POST /api/v1/auth/users",
+"desc": "管理员创建账号（用户名、初始密码、系统角色、资料）"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.13",
+"name": "编辑用户",
+"entry": "用户管理页行内「编辑」/「禁用 / 启用」；PUT /api/v1/auth/users/{username}",
+"desc": "改角色、启用禁用、重置密码、重置两步验证、改资料；角色变更 / 禁用 / 重置密码均使该用户会话失效"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.14",
+"name": "删除用户",
+"entry": "用户管理页行内「删除」；DELETE /api/v1/auth/users/{username}",
+"desc": "删除账号并清理其项目成员关系；唯一项目管理员 / 最后一个管理员 / 自己 不可删"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.15",
+"name": "权限模型与数据可见范围",
+"entry": "全部业务接口",
+"desc": "系统角色 admin / member；项目角色四级动作矩阵；产品线角色折算；open / line / member 三模式下的可见过滤与写校验；删除权限单独收口"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.16",
+"name": "操作日志采集",
+"entry": "所有写接口（中间件）+ 登录接口",
+"desc": "写接口按 (方法, 路径) 映射为中文动作落 audit_log 表，含操作人、IP、UA、项目、结果、耗时、明细"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.17",
+"name": "操作日志查询",
+"entry": "「操作日志」页；GET /api/v1/audit",
+"desc": "按项目 / 类型 / 操作人 / 关键字 / 时间范围 / 只看失败分页查询；安全日志仅管理员"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.18",
+"name": "日志保留清理",
+"entry": "服务启动及之后每 24 小时",
+"desc": "删除早于 log_retention_days 的操作日志与 AI 调用日志"
+},
+{
+"domain": "02",
+"domain_name": "账号权限与审计",
+"no": "2.19",
+"name": "编辑占用提示",
+"entry": "任务页修改测试点 / 编辑用例；POST /api/v1/tasks/{id}/editing",
+"desc": "「某某正在编辑」登记 / 释放 / 管理员强制解除，5 分钟无动作自动过期，不阻塞保存"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.1",
+"name": "当前项目切换",
+"entry": "顶栏「当前项目」按钮 / 下拉菜单",
+"desc": "选定一个项目后，各列表筛选与新建任务默认项目同步；存浏览器 localStorage"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.2",
+"name": "项目列表",
+"entry": "项目管理页 · GET /api/v1/projects",
+"desc": "项目实体字段 + 任务/用例汇总 + 我的角色/收藏/最近访问；非管理员只见可见项目"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.3",
+"name": "创建项目",
+"entry": "「＋ 新建项目」 · POST /api/v1/projects",
+"desc": "名称为自然键；创建人与负责人自动成为项目管理员"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.4",
+"name": "修改项目",
+"entry": "「编辑项目」/「归档」/「恢复」 · PUT /api/v1/projects/{name}",
+"desc": "改名联动全部引用；状态流转；知识沉淀开关"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.5",
+"name": "删除项目",
+"entry": "列表行删除按钮 · GET /projects/{name}/contents + DELETE /api/v1/projects/{name}",
+"desc": "先预检内容，空项目直删，非空须 cascade=true 连同内容删除"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.6",
+"name": "收藏与最近访问",
+"entry": "星标按钮 · POST /api/v1/projects/{name}/favorite",
+"desc": "收藏置顶；打开项目详情记入最近访问（最多 10 条）"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.7",
+"name": "项目详情",
+"entry": "进入项目工作区 · GET /api/v1/projects/{name}",
+"desc": "实体字段、成员、版本数与模块数；同时记最近访问"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.8",
+"name": "项目成员",
+"entry": "工作区「成员」页签 · GET/PUT /projects/{name}/members、DELETE /projects/{name}/members/{username}",
+"desc": "项目级角色四种；至少保留一名项目管理员"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.9",
+"name": "项目版本",
+"entry": "工作区「版本」页签 · GET/POST /projects/{name}/versions、PUT/DELETE /projects/{name}/versions/{id}",
+"desc": "版本名称/编码/日期/状态；被需求引用不可删"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.10",
+"name": "项目模块树",
+"entry": "工作区「模块」页签 · GET/POST /projects/{name}/modules、PUT/DELETE .../modules/{id}、POST .../modules/reorder、POST .../modules/{id}/restore",
+"desc": "每项目独立，最多 5 级；逻辑删除可恢复，被引用不可物理删除"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.11",
+"name": "项目用例库",
+"entry": "工作区「用例库」页签 · GET /api/v1/projects/cases?project=",
+"desc": "跨任务聚合全部用例，带生命周期阶段与最新执行结果"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.12",
+"name": "产品线管理",
+"entry": "「产品线管理」对话框 · GET/POST /api/v1/business-lines、PUT/DELETE /business-lines/{name}、PUT/DELETE /business-lines/{name}/members/{username}",
+"desc": "产品线实体与成员；项目通过 business_line 字段归属；同产品线共享用例复用"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.13",
+"name": "项目依赖关系图",
+"entry": "知识库页「依赖关系」 · GET /projects/{name}/dependencies",
+"desc": "需求功能依赖图 / 用例依赖链路图：节点、边、拓扑分层、最长链路、成环告警"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.14",
+"name": "依赖边的增删与确认",
+"entry": "「＋ 添加依赖」/「确认」/删除 · POST .../dependencies/edges、POST .../edges/{id}/confirm、DELETE .../edges/{id}",
+"desc": "人工边立即生效，模型识别的边先为草稿；前置关系禁止成环"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.15",
+"name": "模型识别依赖",
+"entry": "「AI 识别依赖」/ 打开视图自动触发 · POST /projects/{name}/dependencies/infer",
+"desc": "Prompt 键 dependency_infer；只在本项目节点间识别，结果入库为 proposed"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.16",
+"name": "覆盖追溯",
+"entry": "工作区「覆盖追溯」页签 · GET /projects/{name}/coverage",
+"desc": "每条需求的测试点 → 用例 → 计划 → 执行覆盖情况与未挂需求的任务"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.17",
+"name": "我的工作台",
+"entry": "我的工作台页 · GET /api/v1/workbench",
+"desc": "我的项目、待评审、待修改、待执行、待确认需求、我的生成任务、最近操作"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.18",
+"name": "全局搜索",
+"entry": "顶栏搜索框回车 · GET /api/v1/search?q=",
+"desc": "需求 / 任务 / 测试点 / 用例 / 测试计划 / 知识文档六组，子串匹配"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.19",
+"name": "报表",
+"entry": "报表页、项目概览 KPI · GET /api/v1/reports/summary",
+"desc": "任务与用例产出、一次通过率、采纳率、审核动作、执行情况、模型质量统计"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.20",
+"name": "遗留任务归属项目",
+"entry": "「（未指定）」项目概览 · PUT /api/v1/tasks/{id}/project",
+"desc": "把无项目的历史任务挂到项目，并自动建需求实体、改挂迁移计划"
+},
+{
+"domain": "03",
+"domain_name": "项目与产品线、工作台、报表",
+"no": "3.21",
+"name": "存量迁移报告与批量归属",
+"entry": "「（未指定）」项目概览 · GET /api/v1/admin/migration、POST /api/v1/admin/migration/assign",
+"desc": "管理员查看迁移完成度、勾选批量归属"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.1",
+"name": "需求列表与筛选",
+"entry": "需求列表页 / GET /api/v1/requirements",
+"desc": "按项目、产品线、状态、模块、版本、来源、创建人、关键词筛选并分页"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.2",
+"name": "新建需求",
+"entry": "「＋ 新建需求」/ POST /api/v1/requirements",
+"desc": "文本 + 文件 + 链接三种来源建需求，附件后台解析"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.3",
+"name": "同文件查重",
+"entry": "新建对话框提交前 / GET /api/v1/requirements/same-files",
+"desc": "同项目里已有同名附件的需求，提示「替换为新版本」还是「仍新建」"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.4",
+"name": "需求详情与追溯",
+"entry": "点开列表行 / GET /api/v1/requirements/{id}",
+"desc": "详情视图 + 需求 → 测试点 → 用例 → 计划 → 执行的覆盖识别"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.5",
+"name": "修改需求",
+"entry": "「编辑」「保存补充」「归档」「标记完成」/ PUT /api/v1/requirements/{id}",
+"desc": "标题、人工补充、版本、模块、状态的人工流转"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.6",
+"name": "删除与恢复",
+"entry": "「删除」「恢复」/ DELETE、POST …/restore",
+"desc": "逻辑删除进回收站，关联任务保留并标记来源已删除"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.7",
+"name": "合并需求",
+"entry": "「合并到…」/ POST /api/v1/requirements/{id}/merge",
+"desc": "重复导入治理：任务 / 附件 / 待确认事项并入目标需求"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.8",
+"name": "需求编写规范",
+"entry": "「需求编写规范」/ GET /api/v1/requirements/writing-guide",
+"desc": "返回 app/web/requirement-guide.md 给产品方"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.9",
+"name": "追加附件 / 链接",
+"entry": "「＋ 上传附件」「＋ 添加链接」/ POST …/attachments",
+"desc": "追加文件或链接，后台解析"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.10",
+"name": "重新解析 / 重新抓取",
+"entry": "附件行「重新解析」/ POST …/attachments/{att}/reparse",
+"desc": "失败或部分解析的附件重跑解析，链接重新下载"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.11",
+"name": "删除附件",
+"entry": "附件行「删除」/ DELETE …/attachments/{att}",
+"desc": "换新版本文档前删旧附件，文件一并删除"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.12",
+"name": "查看解析全文 / 下载",
+"entry": "「查看解析」「文件名」/ GET …/attachments/{att}/text、GET …/attachments/{att}",
+"desc": "按文档格式渲染解析文本；下载原文件"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.13",
+"name": "附件解析调度",
+"entry": "后台任务（上传 / 追加 / 重解析触发）",
+"desc": "请求内落盘，后台逐个解析回写，完成后知识沉淀 + 自动提取"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.14",
+"name": "格式解析器",
+"entry": "app/parsers/",
+"desc": "文本 / Word / PDF / PPT / 表格 / 老 Office / 网页 / 压缩包 / 邮件 / 图片各自的解析规则"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.15",
+"name": "图片理解（Vision）",
+"entry": "app/parsers/image.py、enrich.py",
+"desc": "独立图片与文档内嵌图经 Vision 模型按固定框架转文字，大图切块"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.16",
+"name": "Axure 原型包解析",
+"entry": "app/parsers/axure.py",
+"desc": "按站点地图逐页、按控件带编号提取文字，坐标还原阅读顺序，整页字符自校验"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.17",
+"name": "需求提取（整理稿）",
+"entry": "「提取需求」/ POST …/extract；附件解析完成后自动",
+"desc": "从全部材料逐字摘录需求内容，按页面 › 区块归整；四层流水线 + 底稿双向核验"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.18",
+"name": "整理稿逐条审核",
+"entry": "需求提取页签「逐条审核」/ POST …/extraction/items",
+"desc": "核对通过 / 修改 / 删除单条摘录"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.19",
+"name": "整理稿整篇改写",
+"entry": "「整篇改写」/ PUT …/extraction",
+"desc": "人工整篇改写，逐条结构失效"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.20",
+"name": "底稿核对",
+"entry": "「底稿核对」/ GET、POST …/extraction/ledger",
+"desc": "材料每一句的去向（收录 / 排除 / 待处理），人工收录、排除、确认"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.21",
+"name": "完成审核",
+"entry": "「完成审核」/ POST …/extraction/review-done",
+"desc": "⚠ 条目都处理、底稿无待处理且需复核都看过才允许"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.22",
+"name": "整理稿历史版本",
+"entry": "「历史版本」/ GET …/extraction/history、…/history/{index}、POST …/extraction/restore",
+"desc": "最近 10 版留档、逐行差异、恢复"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.23",
+"name": "删除整理稿",
+"entry": "「删除整理稿」/ DELETE …/extraction",
+"desc": "分析与设计退回原始材料"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.24",
+"name": "AI 需求分析",
+"entry": "「AI 需求分析」/ POST …/analyze",
+"desc": "11 项结构化输出 → 原文核验 → 独立复核 → 推荐答案"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.25",
+"name": "分析条目人工修改",
+"entry": "分析项「改 / 删 / 人工补充 / 采纳改正 / 原条目没问题」/ POST …/analysis/items",
+"desc": "修改留痕，已确认版本变旧"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.26",
+"name": "确认 / 取消确认分析结果",
+"entry": "「确认分析结果并沉淀到知识库」「取消确认」/ POST、DELETE …/analysis/confirm",
+"desc": "快照留存并沉淀知识库；人工改过的自动入评测集"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.27",
+"name": "批量确认分析结果",
+"entry": "列表页「批量确认分析结果」/ GET、POST /api/v1/requirements/analysis/batch-confirm",
+"desc": "项目或全部范围内已分析未确认的一次确认并串行沉淀"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.28",
+"name": "待确认事项",
+"entry": "待确认事项页签 / POST …/questions、POST …/questions/{q}、PUT …/questions/{q}/level、POST …/questions/{q}/adopt",
+"desc": "人工补充、确认 / 重新打开、调整等级、采纳回分析"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.29",
+"name": "待确认事项推荐答案",
+"entry": "「推荐答案」/ POST …/questions/suggest；分析完成后自动",
+"desc": "按原文 › 历史结论 › 行业惯例给每条事项一个答案 + 依据 + 风险"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.30",
+"name": "加入评测集",
+"entry": "「加入评测集」/ POST …/analysis/eval-sample",
+"desc": "当前分析结果作为该需求的标准答案"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.31",
+"name": "评测集维护",
+"entry": "需求分析评测页「评测集」/ GET、PUT、DELETE /api/v1/analysis-eval/samples…",
+"desc": "管理员查看、修订标准答案、删除样本"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.32",
+"name": "回归评测",
+"entry": "「运行回归评测」/ POST、GET /api/v1/analysis-eval/runs…",
+"desc": "重跑分析流水线，裁判对齐标准答案，算准确率 / 捏造率 / 理解错率 / 遗漏率"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.33",
+"name": "发起测试设计",
+"entry": "「开始测试设计」「合并发起测试设计」/ POST …/{id}/design、POST /api/v1/requirements/design",
+"desc": "由一条或多条需求创建测试设计任务并回挂追溯"
+},
+{
+"domain": "04",
+"domain_name": "需求中心",
+"no": "4.34",
+"name": "启动期存量处理",
+"entry": "服务启动",
+"desc": "解析中状态复位、历史任务迁移为需求、标题修复、待确认事项模块回填、评测中断标记"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.1",
+"name": "新建测试设计任务",
+"entry": "任务列表「＋ 新建任务」抽屉 / POST /api/v1/tasks",
+"desc": "上传需求文件或文本，落盘、解析、按「先审核测试点」或「直接生成」两条路径启动流水线"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.2",
+"name": "解析预览",
+"entry": "POST /api/v1/parse（前端无入口）",
+"desc": "只解析不建任务，返回各文档结构化结果、合并文本与预计分片数"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.3",
+"name": "用例模板管理",
+"entry": "新建任务抽屉「用例模板」下拉 / /api/v1/templates 全部接口",
+"desc": "内置默认模板 + 上传 xlsx / docx 自动识别列映射；模板决定生成 Prompt 字段规范、规则校验与导出列"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.4",
+"name": "任务排队与状态机",
+"entry": "TaskStore.submit",
+"desc": "queued → running → completed / failed，拆解确认路径多一个 awaiting_confirmation；同时执行数受 task_max_concurrency 限制"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.5",
+"name": "流水线：需求分析（拆解 + 经验延伸）",
+"entry": "run_analysis / _analyze_and_extend",
+"desc": "整理稿清洗、长需求分片与大纲、测试点拆解（analyst）、经验延伸（point_extend）、分片盲区复核"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.6",
+"name": "流水线：拆解后质量检查",
+"entry": "_run_point_quality_checks",
+"desc": "拆解确认路径在后台自动跑查漏、组合延伸、查重、独立评审，结果挂到任务上"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.7",
+"name": "流水线：用例生成与评审回环",
+"entry": "build_graph",
+"desc": "generate（generator / fix_instruction）↔ review（reviewer + 规则校验）最多 3 轮，超限强制出稿；UI 检查类用例兜底过滤"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.8",
+"name": "按模块并行与章节定位",
+"entry": "_run_from_points / _module_requirements / _merge",
+"desc": "每个模块一个图实例并行，只带本模块所在章节原文；失败模块显式标注，合并去重重编号"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.9",
+"name": "上下文注入与快照",
+"entry": "_gather_knowledge / _gather_memories / _gather_rules / profile_block",
+"desc": "知识（5:3:2 配额）、记忆、规则、项目画像分别注入哪个节点，以及注入内容的留痕"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.10",
+"name": "断点续跑检查点与调用链路留痕",
+"entry": "_save_checkpoint / trace / prompt_versions",
+"desc": "拆解结果与每个模块结果落盘，失败后只补缺失；每个 Agent 调用记入 trace，Prompt 版本记入任务"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.11",
+"name": "结果落库与质量自检",
+"entry": "_finalize_task / _quality_report",
+"desc": "分配 uid、初始化审核状态机、补记版本、算质量摘要、登记导出产物（按需生成）"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.12",
+"name": "测试点确认生成",
+"entry": "测试点审核页「确认生成」/ POST /api/v1/tasks/{id}/confirm",
+"desc": "以已通过测试点为准按模块并行生成；已完成任务上再次确认为增量生成并入现有用例"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.13",
+"name": "对话修订",
+"entry": "概览「修订与终稿留痕 → 对话修订」/ POST /api/v1/tasks/{id}/revise",
+"desc": "修订要求作为定点修正问题进入生成 → 评审回环，只改受影响用例，锁定用例不动，历史指令随 Prompt 注入"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.14",
+"name": "取消任务 / 标记失败",
+"entry": "详情右上「取消任务」「标记失败」/ POST /api/v1/tasks/{id}/cancel",
+"desc": "中断后台执行句柄；没有句柄的孤儿任务用 force 直接标失败"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.15",
+"name": "继续完成 / 补全 / 恢复",
+"entry": "详情错误条「继续完成」等 / POST /api/v1/tasks/{id}/retry",
+"desc": "四种模式：restore / fill / resume / retry，沿用原需求、模型、模板，复用检查点"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.16",
+"name": "人工用例集",
+"entry": "任务列表「＋ 人工用例集」/ POST /api/v1/projects/{name}/manual-task",
+"desc": "不经 AI 的空任务容器，承接人工新增与 Excel 导入"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.17",
+"name": "任务列表",
+"entry": "任务列表页 / GET /api/v1/tasks",
+"desc": "按可见项目过滤，支持状态 / 项目 / 创建人 / 产品线 / 已删除筛选"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.18",
+"name": "任务详情",
+"entry": "打开任务 / GET /api/v1/tasks/{id}",
+"desc": "任务记录全量（排除 checkpoint / quality_cache）加编辑占用、续跑信息、进展摘要、盲区与重复对实体"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.19",
+"name": "删除 / 批量删除 / 恢复",
+"entry": "列表「删除」「批量删除」「已删除 → 恢复」/ DELETE /tasks/{id}、POST /tasks/batch-delete、POST /tasks/{id}/restore",
+"desc": "逻辑删除，仅系统管理员；知识沉淀随删随恢复"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.20",
+"name": "导出用例文件",
+"entry": "概览「导出下载」xlsx / csv / xmind / GET /api/v1/tasks/{id}/files/{fmt}",
+"desc": "内容指纹变了就重新导出；可只导正式用例、XMind 可紧凑布局"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.21",
+"name": "导出测试点",
+"entry": "测试点审核页「导出 xlsx」「导出脑图」/ GET /api/v1/tasks/{id}/points/export",
+"desc": "测试点 Excel（12 列）或 XMind，可只导已通过"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.22",
+"name": "编辑占用提示",
+"entry": "测试点 / 用例编辑时自动调用 / POST /api/v1/tasks/{id}/editing",
+"desc": "「某某正在编辑」登记，内存态 300 秒过期，不阻塞保存"
+},
+{
+"domain": "05",
+"domain_name": "测试设计任务与生成流水线",
+"no": "5.23",
+"name": "需求变更差异分析与应用",
+"entry": "概览「需求变更差异分析」/ POST /tasks/{id}/requirement-diff、.../requirement-diff/apply",
+"desc": "对比新旧需求找受影响资产；应用时只改受影响用例并生成新增，删除类只标记"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.1",
+"name": "测试点数据结构与实体化",
+"entry": "拆解完成时 app/tasks/points.py:assign_entities",
+"desc": "每条测试点带 tp_id、状态机、锁定、来源、版本、审核字段"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.2",
+"name": "拆解后的自动质量闭环",
+"entry": "拆解接口内 routes.py:_run_point_quality_checks",
+"desc": "查漏 → 组合延伸 → 查重 → 独立评审 依次自动跑，故障各自跳过"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.3",
+"name": "测试点页展示",
+"entry": "GET /api/v1/tasks/{task_id}；前端 renderPointWorkbench",
+"desc": "三个子页签、表格 / 脑图、按模块 / 状态筛选分页"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.4",
+"name": "测试点审核",
+"entry": "POST /points/review",
+"desc": "通过（锁定）/ 驳回（结构化）/ 修改 / 删除 / 解锁，批量原子"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.5",
+"name": "AI 修改驳回项",
+"entry": "POST /points/fix + POST /fix/confirm",
+"desc": "只输入被驳回项，产出提案，逐项确认后落地"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.6",
+"name": "新增测试点（手工 / AI 补充）",
+"entry": "POST /points/add",
+"desc": "手工直接加；或按一句话要求让模型只补新增"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.7",
+"name": "人工测试点批量录入",
+"entry": "POST /points/manual-batch",
+"desc": "粘贴多行文本解析为人工测试点，供对比"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.8",
+"name": "查漏补缺",
+"entry": "POST /points/gap-check",
+"desc": "独立查漏 Agent 输出覆盖矩阵，只新增不改存量"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.9",
+"name": "经验延伸",
+"entry": "POST /points/extend",
+"desc": "按测试经验补需求之外的场景，带依据"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.10",
+"name": "组合延伸",
+"entry": "POST /points/combine",
+"desc": "每个模块一次调用，找规则叠加的组合场景"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.11",
+"name": "AI 评审",
+"entry": "POST /points/ai-review",
+"desc": "独立评审 Agent 逐条挑七类硬伤，意见标在条目上"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.12",
+"name": "需求盲区处置",
+"entry": "GET /blind-spots、POST /blind-spots/{bs_id}、POST /blind-spots/batch",
+"desc": "转待确认事项 / 转测试点 / 需求已说明 / 忽略 / 重开"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.13",
+"name": "测试点重复检查",
+"entry": "POST /points/dup-check",
+"desc": "二元组 Jaccard 初筛 + 模型语义复判"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.14",
+"name": "疑似重复对处置",
+"entry": "POST /points/dup-pairs/{key}、POST /points/dup-pairs/batch",
+"desc": "忽略 / 重开留痕；删除其中一条自动变已处置"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.15",
+"name": "人工 vs AI 对比",
+"entry": "POST /points/compare",
+"desc": "人工测试点与 AI 测试点逐条语义匹配，算覆盖率"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.16",
+"name": "测试点导出",
+"entry": "GET /points/export",
+"desc": "xlsx 12 列 / xmind 脑图；可只导已通过"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.17",
+"name": "版本恢复与回收站恢复（测试点部分）",
+"entry": "POST /versions/restore、POST /recycle-bin/restore",
+"desc": "恢复后回到待审核并记 manual 版本"
+},
+{
+"domain": "06",
+"domain_name": "测试点管理",
+"no": "6.18",
+"name": "测试点与用例的关联、知识沉淀触发",
+"entry": "case.point_ids、context.generated_tp_ids、KnowledgeAccumulator.ingest_points",
+"desc": "用例追溯来源测试点；通过的测试点进业务规则库"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.1",
+"name": "用例数据结构与审核状态机",
+"entry": "TaskRecord.result.cases / case_reviews / review_log",
+"desc": "用例字段、稳定标识 uid、审核状态 pending / approved / rejected / draft 与锁定"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.2",
+"name": "任务「用例」标签页",
+"entry": "GET /api/v1/tasks/{task_id}",
+"desc": "列表、按状态 / 模块 / 优先级 / 关键词筛选、分页、脑图视图，行内操作按钮按权限显示"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.3",
+"name": "在线评审",
+"entry": "POST /api/v1/tasks/{task_id}/review",
+"desc": "approve / reject / modify / delete / unlock / submit，批量原子生效"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.4",
+"name": "评审落库、编号重排与质量摘要",
+"entry": "routes _finalize_task / _renumber / _quality_report",
+"desc": "所有改动用例的路径共用的落库流程：uid 补齐、版本补记、审核状态清理、查重缓存"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.5",
+"name": "人工新增用例与人工用例集",
+"entry": "POST /api/v1/tasks/{task_id}/cases；POST /api/v1/projects/{name}/manual-task",
+"desc": "不经模型的用例以草稿进入任务；人工用例集是空的容器任务"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.6",
+"name": "复制用例",
+"entry": "POST /api/v1/tasks/{task_id}/cases/{uid}/copy",
+"desc": "副本为草稿，标题加「（副本）」"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.7",
+"name": "表格导入",
+"entry": "POST …/cases/import/preview、POST …/cases/import/confirm、GET /api/v1/cases/import-template",
+"desc": "Excel / CSV / XMind / 禅道导出解析、逐行校验、确认导入为草稿"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.8",
+"name": "批量维护",
+"entry": "POST /api/v1/tasks/{task_id}/cases/batch",
+"desc": "批量改优先级 / 模块 / 标签、提交评审、删除；逐行乐观锁"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.9",
+"name": "用例查重与处置",
+"entry": "POST …/cases/dup-check、POST …/cases/dup-pairs/{key}",
+"desc": "文字初筛 + 模型语义裁判，人工忽略 / 重开，删除自动变已处置"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.10",
+"name": "驳回用例的模型定点修改",
+"entry": "POST …/cases/fix、POST …/fix/confirm",
+"desc": "只改被驳回用例，产出提案，逐项接受后才落地"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.11",
+"name": "版本历史与恢复",
+"entry": "GET …/versions、POST …/versions/restore",
+"desc": "每条用例的完整版本链；恢复为追加新版，不覆盖历史"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.12",
+"name": "回收站",
+"entry": "GET …/recycle-bin、POST …/recycle-bin/restore、GET /api/v1/recycle-bin、DELETE …/recycle-bin/{item_id}",
+"desc": "逻辑删除快照、恢复回待评审、管理员永久删除"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.13",
+"name": "离线终稿回传",
+"entry": "POST /api/v1/tasks/{task_id}/final",
+"desc": "差异留痕与采纳率；apply=true 以终稿为准覆盖线上用例并整份定稿"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.14",
+"name": "用例库（测试用例页）",
+"entry": "GET /api/v1/cases、GET /api/v1/projects/cases",
+"desc": "跨任务只收录已通过的正式用例，筛选、分页、批量删除"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.15",
+"name": "编辑占用提示",
+"entry": "POST /api/v1/tasks/{task_id}/editing",
+"desc": "「某某正在编辑」登记 / 释放 / 管理员解除，不阻塞保存"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.16",
+"name": "任务级执行记录（旧）",
+"entry": "POST …/executions、…/executions/{run_id}/results、…/finish",
+"desc": "执行迁移到测试计划前的轮次记录，前端已无入口"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.17",
+"name": "评审后的知识沉淀联动",
+"entry": "app/knowledge/accumulate.py",
+"desc": "评审通过用例延迟合并入测试用例库，增量向量化"
+},
+{
+"domain": "07",
+"domain_name": "用例评审与用例库",
+"no": "7.18",
+"name": "命令行辅助脚本",
+"entry": "scripts/upload_final.py、scripts/reset_case_reviews.py",
+"desc": "终稿回传、整任务重置为未审核"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.1",
+"name": "计划列表与筛选",
+"entry": "「测试计划」页 · GET /api/v1/plans",
+"desc": "按项目 / 产品线 / 状态 / 负责人 / 执行进度 / 关键词筛选，分页，附「我的任务」计数"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.2",
+"name": "新建计划",
+"entry": "「＋ 新建计划」 · POST /api/v1/plans",
+"desc": "名称 + 项目 + 负责人 + 周期，初始状态未开始"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.3",
+"name": "计划详情",
+"entry": "点击列表行 · GET /api/v1/plans/{plan_id}",
+"desc": "返回全部用例快照、轮次（带统计）、按执行人统计、挑选草稿"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.4",
+"name": "编辑计划与改状态",
+"entry": "详情页「编辑」/ 状态下拉 · PUT /api/v1/plans/{plan_id}",
+"desc": "改名称 / 负责人 / 周期 / 状态（未开始 / 进行中 / 已完成 / 已归档）"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.5",
+"name": "删除计划",
+"entry": "详情页「删除」 · DELETE /api/v1/plans/{plan_id}",
+"desc": "仅系统管理员；有执行轮次的计划不可删"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.6",
+"name": "候选用例池",
+"entry": "「＋ 加入用例」弹窗 · GET /api/v1/plans/{plan_id}/candidates",
+"desc": "列本项目有已通过用例的任务；带 task_id 列该任务已通过用例（模块 / 优先级 / 关键词筛选）"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.7",
+"name": "加入用例快照",
+"entry": "弹窗「加入选中」/「按筛选全量加入」、用例页批量「加入测试计划」、AI 挑选草稿「加入」 · POST /api/v1/plans/{plan_id}/cases",
+"desc": "只收已通过用例，加入即完整快照并引用版本号"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.8",
+"name": "AI 挑选用例",
+"entry": "详情页「AI 挑选」 · POST /api/v1/plans/{plan_id}/select",
+"desc": "Prompt plan_case_select：按目标 / 预算 / 变更摘要 / 重点模块从本项目正式用例挑草稿，人勾选后走 8.7 加入"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.9",
+"name": "移出用例",
+"entry": "用例行「从计划移除」 · DELETE /api/v1/plans/{plan_id}/cases/{item_id}",
+"desc": "有执行记录的不可移出；受删除权限限制"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.10",
+"name": "执行人候选",
+"entry": "分配 / 新建轮次弹窗 · GET /api/v1/plans/{plan_id}/assignees",
+"desc": "项目正常状态的非只读成员 + 系统管理员，附计划内模块及用例数"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.11",
+"name": "分配 / 改派",
+"entry": "「分配选中」「按模块分配」 · POST /api/v1/plans/{plan_id}/assign",
+"desc": "按用例或按模块分配，留痕原执行人 / 新执行人 / 操作人，条目级乐观锁"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.12",
+"name": "我的执行项",
+"entry": "「执行任务」页 · GET /api/v1/plans/my-items",
+"desc": "跨计划列出分配给我的用例及本轮结果，可就地打结果"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.13",
+"name": "新建执行轮次",
+"entry": "「＋ 新建执行轮次」/ 执行任务页「开始新一轮执行」 · POST /api/v1/plans/{plan_id}/runs",
+"desc": "一个计划同时只能有一轮未结束；可指定本轮执行人并顺带分配"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.14",
+"name": "记录执行结果",
+"entry": "用例行通过 / 失败 / 阻塞 / 跳过 · POST /api/v1/plans/{plan_id}/runs/{run_id}/results",
+"desc": "失败须选分类并填原因，阻塞须填原因；执行人约束、代执行、认领、复测历史"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.15",
+"name": "结束轮次",
+"entry": "「结束本轮」 · POST /api/v1/plans/{plan_id}/runs/{run_id}/finish",
+"desc": "定格记录；本轮全部执行过则计划置已完成"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.16",
+"name": "失败 AI 归因",
+"entry": "行内「AI 归因」/「AI 归因（失败 N）」 · POST /api/v1/plans/{plan_id}/runs/{run_id}/triage",
+"desc": "Prompt exec_triage：用例 + 失败说明 + 截图理解 + 需求原文 → 五类归因 + 缺陷单草稿"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.17",
+"name": "采纳归因",
+"entry": "记录下「采纳为「…」」 · POST /api/v1/plans/{plan_id}/runs/{run_id}/results/{item_id}/triage/adopt",
+"desc": "把失败分类改为建议值或人指定值，记采纳人"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.18",
+"name": "生成测试报告",
+"entry": "「生成报告」/「重新生成报告」 · POST /api/v1/plans/{plan_id}/runs/{run_id}/report",
+"desc": "Prompt test_report：程序统计 + 失败清单 + 待确认事项 → 结论 / 风险 / 遗留 / 建议 / markdown，结论由程序校正"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.19",
+"name": "下载测试报告",
+"entry": "报告弹窗「下载」 · GET /api/v1/plans/{plan_id}/runs/{run_id}/report.md",
+"desc": "以 markdown 附件下载（前端当前用浏览器本地生成文件，接口备用）"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.20",
+"name": "上传执行附件",
+"entry": "行内回形针 / 「＋ 整轮附件」 · POST /api/v1/plans/{plan_id}/runs/{run_id}/attachments",
+"desc": "多文件、不限格式、单文件上限 200MB，可关联用例"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.21",
+"name": "下载执行附件",
+"entry": "附件表文件名 · GET /api/v1/plans/{plan_id}/attachments/{att_id}",
+"desc": "按附件 id 回原文件名下载"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.22",
+"name": "任务级执行（旧接口）",
+"entry": "无前端入口 · POST /api/v1/tasks/{task_id}/executions、.../{run_id}/results、.../{run_id}/finish",
+"desc": "直接挂任务的轮次；服务启动时整体迁移进自动创建的计划，迁移后接口返回 409"
+},
+{
+"domain": "08",
+"domain_name": "测试计划与执行",
+"no": "8.23",
+"name": "执行结果的下游消费",
+"entry": "用例库 / 报表 / 需求追溯 / 学习分析 / AI 挑选",
+"desc": "最近结果与执行次数回标到用例，失败分类进报表，用例问题类失败进学习语料"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.1",
+"name": "知识分类与层级枚举",
+"entry": "GET /api/v1/knowledge/categories",
+"desc": "返回四个分类与三个层级的键值表，供上传对话框下拉"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.2",
+"name": "手工上传知识文档",
+"entry": "知识库页「＋ 上传知识」· 类型「文档」；POST /api/v1/knowledge/docs",
+"desc": "文件或粘贴文本 → 解析 → 切片 → 向量化 → 入库，指定分类与层级"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.3",
+"name": "导入历史用例",
+"entry": "上传对话框 · 类型「历史用例」；POST /api/v1/knowledge/cases",
+"desc": "xlsx / csv / xmind / 禅道 xls 用例表 → 每条用例一个切片进测试用例库"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.4",
+"name": "导入历史缺陷",
+"entry": "上传对话框 · 类型「历史缺陷」；POST /api/v1/knowledge/bugs",
+"desc": "禅道 / Jira / TAPD 缺陷导出表 → 每条缺陷一个切片进历史缺陷库"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.5",
+"name": "知识台账列表",
+"entry": "知识库页列表；GET /api/v1/knowledge/docs",
+"desc": "按空间 / 分类 / 层级过滤，公共层人人可见、项目层按可见项目过滤"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.6",
+"name": "知识文档详情",
+"entry": "列表「查看」/ 检索命中行；GET /api/v1/knowledge/docs/{doc_id}",
+"desc": "元数据 + 向量库里实际保存的全部切片原文"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.7",
+"name": "删除知识文档",
+"entry": "列表 / 详情「删除」；DELETE /api/v1/knowledge/docs/{doc_id}",
+"desc": "删台账与全部切片向量；公共层仅系统管理员，项目层需删除权限"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.8",
+"name": "知识检索",
+"entry": "知识库页检索框；POST /api/v1/knowledge/search",
+"desc": "向量 + 字符二元组 BM25 的 RRF 混合检索，范围 = 指定项目 + 公共层"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.9",
+"name": "切片、向量化与向量库",
+"entry": "内部机制（9.2～9.4、9.13 共用）",
+"desc": "600 字切片、短片合并；text-embedding-3-large 3072 维；Qdrant 本地库；按来源替换与向量复用"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.10",
+"name": "知识管家注入",
+"entry": "任务拆解 / 生成 / 评审 / 修订内部调用",
+"desc": "按阶段检索分类、5:3:2:2 配额装填、渲染为 Prompt 块、知识快照落任务记录"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.11",
+"name": "历史用例复用提示",
+"entry": "任务页「历史用例复用提示」；拆解确认流程内部",
+"desc": "向量相似度 ≥ 0.78 的历史正式用例最多 3 条，提示复用"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.12",
+"name": "需求分析阶段知识注入",
+"entry": "需求中心「AI 分析」内部",
+"desc": "注入需求文档库 + 规则库，排除该需求自身沉淀的文档"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.13",
+"name": "自动沉淀：触发事件与来源",
+"entry": "任务 / 需求各确认动作内部",
+"desc": "需求原文、审核通过测试点、评审通过用例、离线终稿、已确认分析自动入项目知识库，带来源标记"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.14",
+"name": "沉淀调度与开关",
+"entry": "内部机制；项目设置「自动沉淀」开关",
+"desc": "同来源单作业合并、评审延迟 30 秒合并、drain / 关停等待、项目与全局开关"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.15",
+"name": "回溯沉淀",
+"entry": "项目画像页「回溯沉淀历史任务」；知识库页「回溯全部项目」；GET/POST /api/v1/projects/{name}/knowledge/backfill；GET/POST /api/v1/knowledge/backfill",
+"desc": "把存量任务 / 需求按同样规则补进知识库，后台执行、可查进度、可重复"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.16",
+"name": "项目画像查看",
+"entry": "项目工作区「项目画像」页；GET /api/v1/projects/{name}/profile",
+"desc": "生效版本、待确认草稿、历史、注入文本预览"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.17",
+"name": "项目画像提炼",
+"entry": "画像页「AI 提炼画像 / AI 增量提炼 / 重新提炼」；POST /api/v1/projects/{name}/profile/extract；自动提炼",
+"desc": "收集项目素材 → profile_extract Prompt → 草稿；每新增 3 个任务自动出一版草稿"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.18",
+"name": "画像确认 / 编辑 / 丢弃",
+"entry": "画像页「确认生效」「编辑生效版本」「丢弃草稿」；POST …/profile/confirm；DELETE …/profile/draft",
+"desc": "管理员确认后生效，版本 +1 并记历史"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.19",
+"name": "画像注入",
+"entry": "所有 AI 环节内部",
+"desc": "生效画像按 2500 字预算渲染，经 ContextVar 注入拆解 / 延伸 / 生成 / 评审 / 查漏 / 需求分析等 14 处 Prompt"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.20",
+"name": "学习规则注入点",
+"entry": "生成 Agent 内部",
+"desc": "已生效规则按 800 字预算渲染为 rules_block 注入生成节点（规则管理见文档 10）"
+},
+{
+"domain": "09",
+"domain_name": "知识库、自动沉淀与项目画像",
+"no": "9.21",
+"name": "项目改名 / 删除联动",
+"entry": "PUT /api/v1/projects/{name}（改名）；DELETE /api/v1/projects/{name}",
+"desc": "改名同步知识空间与画像；删除清理画像、需求来源的沉淀文档"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.1",
+"name": "记忆列表与默认偏好",
+"entry": "记忆页加载；GET /api/v1/memories",
+"desc": "列出全部记忆（按更新时间倒序），并返回使用频次沉淀出的默认模板 / 默认模型"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.2",
+"name": "新增记忆",
+"entry": "记忆页「新增记忆」；POST /api/v1/memories",
+"desc": "手工添加一条用户偏好或项目记忆"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.3",
+"name": "修改记忆",
+"entry": "记忆行「修改」；PUT /api/v1/memories/{memory_id}",
+"desc": "记忆纠错：直接改写内容"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.4",
+"name": "删除单条记忆",
+"entry": "记忆行「删除」；DELETE /api/v1/memories/{memory_id}",
+"desc": "删除一条记忆"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.5",
+"name": "一键清空",
+"entry": "记忆页「一键清空」；DELETE /api/v1/memories",
+"desc": "清空记忆（可按维度 / 项目过滤），清用户偏好时同步清零使用计数"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.6",
+"name": "使用习惯自动沉淀",
+"entry": "任务创建 / 需求测试设计 / 修订时服务端内部调用",
+"desc": "常用模板、常用模型按使用次数固化为界面默认值；跨任务重复的修订指令固化为注入型偏好"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.7",
+"name": "记忆检索注入与快照",
+"entry": "生成用例 / 增量生成 / 修订时服务端内部调用",
+"desc": "按需求相关度在 memory_budget_chars 预算内挑记忆拼进生成 Prompt，快照写入任务记录"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.8",
+"name": "规则列表",
+"entry": "学习规则页加载；GET /api/v1/learning/rules",
+"desc": "按项目列出候选 / 生效 / 忽略的规则（含全局规则）"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.9",
+"name": "分析修改习惯",
+"entry": "学习规则页「分析修改习惯」；POST /api/v1/learning/analyze",
+"desc": "收集人工修改留痕样本，按项目分组各调一次 learning Prompt 提炼规则候选"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.10",
+"name": "确认规则生效",
+"entry": "候选行「确认生效」；POST /api/v1/learning/rules/{rule_id}/confirm",
+"desc": "指定适用范围（system / team / project / module）后候选转为生效"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.11",
+"name": "忽略候选",
+"entry": "候选行「忽略」；POST /api/v1/learning/rules/{rule_id}/ignore",
+"desc": "候选标为 ignored，页面不再显示"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.12",
+"name": "修改规则内容",
+"entry": "PUT /api/v1/learning/rules/{rule_id}",
+"desc": "改写规则文本（当前页面未提供入口，接口可用）"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.13",
+"name": "删除规则",
+"entry": "生效规则行「删除」；DELETE /api/v1/learning/rules/{rule_id}",
+"desc": "物理删除一条规则"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.14",
+"name": "规则注入与快照",
+"entry": "生成用例 / 增量生成 / 修订时服务端内部调用",
+"desc": "当前项目适用的生效规则在 rules_budget_chars 预算内拼进生成 Prompt，快照写入任务记录"
+},
+{
+"domain": "10",
+"domain_name": "记忆与学习规则",
+"no": "10.15",
+"name": "与项目、报表的联动",
+"entry": "项目改名 / 删除、报表汇总",
+"desc": "项目改名时记忆与规则的 project 字段同步；项目连同内容删除时清掉其项目级 / 模块级规则；报表汇总带规则候选 / 生效计数"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.1",
+"name": "模型清单",
+"entry": "前端初始化、任务创建表单下拉；GET /api/v1/models",
+"desc": "返回不含密钥信息的模型列表、默认模型与需求提取模型"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.2",
+"name": "查看模型配置",
+"entry": "模型配置页加载；GET /api/v1/models/config",
+"desc": "管理员查看完整接入配置（base_url、密钥环境变量名及是否已设、降级链路、单价）"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.3",
+"name": "保存模型配置",
+"entry": "模型配置页任何改动（默认模型 / 失败重试 / 月预算 / 添加、编辑、删除模型）；PUT /api/v1/models/config",
+"desc": "整体校验后原子写回 models.yaml 并热重载注册表与客户端"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.4",
+"name": "连通性测试",
+"entry": "模型行「连通性测试」；POST /api/v1/models/test",
+"desc": "只对该模型发一次 ping，不走降级链路"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.5",
+"name": "模型调用封装",
+"entry": "服务端 LLMClient.chat",
+"desc": "降级链路、重试退避、全局并发信号量、OpenAI 参数适配、推理强度"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.6",
+"name": "JSON 输出解析与节点级重试",
+"entry": "服务端 _chat_json / extract_json",
+"desc": "数据边界守卫、代码块 / 花括号段提取、逐对象抢救、截断判断"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.7",
+"name": "Vision 路由与图片理解",
+"entry": "需求图片、文档内嵌图、执行截图解析",
+"desc": "不支持 Vision 的模型自动改用第一个 supports_vision 模型；大图切块"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.8",
+"name": "Embedding 配置",
+"entry": "models.yaml 的 embeddings 段（页面不管理）",
+"desc": "知识库向量化模型注册、分批、重试"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.9",
+"name": "各功能用哪个模型",
+"entry": "任务创建 / 需求页 / 配置项",
+"desc": "default_model 与各处可指定的 model / reviewer_model / requirement_extract_model 的取值规则与推理强度"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.10",
+"name": "调用日志记录",
+"entry": "每次 LLMClient.chat",
+"desc": "用途、Prompt 版本、模型、token、耗时、输入输出预览落 ai_calls 表"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.11",
+"name": "AI 任务中心 · AI 任务",
+"entry": "AI 任务中心「AI 任务」页签；GET /api/v1/ai/tasks",
+"desc": "全部生成 / 设计任务的状态、类型、失败归类、部分成功、Prompt 版本与「继续完成」"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.12",
+"name": "AI 任务中心 · 调用日志",
+"entry": "「调用日志」页签；GET /api/v1/ai/calls、GET /api/v1/ai/calls/{id}",
+"desc": "分页查询调用记录，详情看输入输出前 3000 字"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.13",
+"name": "AI 任务中心 · 用量统计与预算",
+"entry": "「用量统计」页签；GET /api/v1/ai/stats",
+"desc": "按模型 / 用途汇总调用次数、token、估算费用；管理员看当月预算余额"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.14",
+"name": "日志留存清理",
+"entry": "服务启动与每 24 小时",
+"desc": "删除早于 log_retention_days 的调用日志与操作日志"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.15",
+"name": "Prompt 清单",
+"entry": "Prompt 管理页；GET /api/v1/ai/prompts",
+"desc": "39 个纳管 Prompt 的类型 / 场景 / 占位符 / 生效版本 / 定制状态，支持筛选分页"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.16",
+"name": "Prompt 详情",
+"entry": "点击 Prompt 行；GET /api/v1/ai/prompts/{key}",
+"desc": "版本链、各版本内容、共享片段展开后的全文"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.17",
+"name": "新建 Prompt 版本",
+"entry": "详情页「基于当前查看版本新建」→ 保存为草稿 / 保存并激活；POST /api/v1/ai/prompts/{key}/versions",
+"desc": "占位符校验后追加版本"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.18",
+"name": "激活 / 回滚版本",
+"entry": "版本「激活生效」「回滚到此版本」；POST .../versions/{no}/activate",
+"desc": "指定版本生效，原生效版本归档"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.19",
+"name": "归档草稿",
+"entry": "版本「归档草稿」；POST .../versions/{no}/archive",
+"desc": "非生效版本标为 archived"
+},
+{
+"domain": "11",
+"domain_name": "模型接入、Prompt 管理与 AI 任务中心",
+"no": "11.20",
+"name": "Prompt 取用与共享片段展开",
+"entry": "服务端 prompt_text(key)",
+"desc": "取生效版本、展开「【共享:名称】」、登记版本到调用上下文；内置默认随代码更新"
+}
+]

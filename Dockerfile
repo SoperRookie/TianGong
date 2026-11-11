@@ -1,4 +1,13 @@
 # 天工应用镜像：单进程 uvicorn，代码以可编辑方式安装，保持 BASE_DIR=/app（outputs/ data/ logs/ config/ 相对路径不变）
+
+# 第一阶段：构建 Vue 前端（web/ → web/dist），运行镜像里不带 node
+FROM node:20-alpine AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json* ./
+RUN npm ci --no-audit --no-fund
+COPY web ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -26,6 +35,7 @@ COPY README.md ./
 COPY app ./app
 COPY config ./config
 COPY scripts ./scripts
+COPY --from=web /web/dist ./web/dist
 RUN pip install --no-deps -e . \
     && mkdir -p outputs data/knowledge logs backups \
     && chown -R tiangong:tiangong /app
