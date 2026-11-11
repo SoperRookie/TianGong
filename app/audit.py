@@ -92,6 +92,8 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [(m, re.compile(p), k, a) for m
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/extraction/ledger$", "requirement", "核对需求底稿单元"),
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/extraction/review-done$", "requirement", "需求整理稿审核完成"),
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/extraction/restore$", "requirement", "恢复需求整理稿版本"),
+    ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/extraction/terminals$", "requirement", "修改整理稿章节的端"),
+    ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/extraction/terminals/detect$", "ai", "重新识别整理稿的端"),
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/analyze$", "ai", "AI 需求分析"),
     ("POST", r"^/api/v1/requirements/analysis/batch-confirm$", "requirement", "批量确认需求分析结果"),
     ("POST", r"^/api/v1/requirements/(?P<target>[^/]+)/analysis/confirm$", "requirement", "确认需求分析结果"),

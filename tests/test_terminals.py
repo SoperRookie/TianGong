@@ -1,4 +1,5 @@
-"""按端（H5 / 游戏后台管理 / 商户后台）处理：整理稿三端汇总、测试点归端与按端单独生成、端到端场景、按端导出。"""
+"""按端处理：端由提取时从文档里识别（端清单里的 H5 / 游戏后台管理 / 商户后台，或按文档叫法新建），整理稿按端汇总、
+测试点归端与按端单独生成、端到端场景、按端导出。"""
 
 import json
 from urllib.parse import unquote
@@ -69,8 +70,8 @@ def test_整理稿三端汇总_按顶层章节归端_人工覆盖优先():
     ]
     terms = section_terminals(outline)
     assert terms == {"需求说明": "common", "活动运营后台": "game_admin", "连赢活动统计": "other", "商户管理后台": "merchant_admin"}
-    terms = section_terminals(outline, {"连赢活动统计": "merchant_admin", "需求说明": "bogus"})   # 人工 / 模型给的优先；无效的忽略
-    assert terms["连赢活动统计"] == "merchant_admin" and terms["需求说明"] == "common"
+    terms = section_terminals(outline, {"连赢活动统计": "merchant_admin", "需求说明": "e2e", "活动运营后台": ""})   # 人工 / 模型给的优先；空的、端到端（章节不归它）忽略
+    assert terms["连赢活动统计"] == "merchant_admin" and terms["需求说明"] == "common" and terms["活动运营后台"] == "game_admin"
     s = terminal_summary(outline, {"连赢活动统计": "merchant_admin"})
     assert [t["key"] for t in s["terminals"]] == ["game_admin", "merchant_admin", "common"]
     game = s["terminals"][0]
@@ -232,11 +233,11 @@ CLASSIFY_REPLY = json.dumps({"sections": [
     {"key": "连赢活动统计", "terminal": "merchant_admin", "reason": "按商户维度统计"},
     {"key": "PC", "terminal": "h5", "reason": "会员前台页面"},
     {"key": "活动运营后台", "terminal": "game_admin"},
-    {"key": "不存在的章节", "terminal": "h5"}, {"key": "商户管理后台", "terminal": "bogus"},
+    {"key": "不存在的章节", "terminal": "h5"}, {"key": "商户管理后台", "terminal": "端到端"}, {"key": "需求说明", "terminal": ""},
 ]}, ensure_ascii=False)
 
 
-async def test_章节归端模型判定_只认输入里的章节与端清单():
+async def test_章节归端模型判定_只认输入里的章节_空端与端到端不记():
     from app.agents.quality import run_terminal_classify
 
     llm = StubLLM([CLASSIFY_REPLY])
@@ -282,3 +283,153 @@ async def test_提取完成后三端汇总_模型判定与关键词兜底_人工
     assert t["analysis"]["terminal_rules"]["sections"]["PC"] == "h5"
     terms = {m["module"]: {p["terminal"] for p in m["points"]} for m in t["analysis"]["test_points"]}
     assert terms == {"连赢活动统计-日榜统计": {"game_admin"}, "PC-活动入口-报名": {"h5"}, "商户管理后台-日榜排名-排序": {"merchant_admin"}}
+
+
+# ---- 端从文档里识别：端清单里没有的按文档叫法新建（名称即 key），随整理稿与任务走 ----
+
+SCAN_MODULES = [
+    {"name": "需求背景-背景", "items": [{"text": "优化 6 副牌及 8 副牌扫码枪流程", "sources": ["扫码枪.doc › 需求背景"]}]},
+    {"name": "荷官操作台 / 预洗牌-流程", "items": [{"text": "荷官扫描牌盒条码后进入预洗牌", "sources": ["扫码枪.doc › 荷官操作台 / 预洗牌"]},
+                                         {"text": "预洗牌完成后才可启用牌盒", "sources": ["扫码枪.doc › 荷官操作台 / 预洗牌"]}]},
+    {"name": "荷官操作台 / 启用牌盒-校验", "items": [{"text": "牌盒条码重复时提示已启用", "sources": ["扫码枪.doc › 荷官操作台 / 启用牌盒"]}]},
+    {"name": "现场大屏-牌靴状态", "items": [{"text": "启用牌盒后大屏显示牌靴编号", "sources": ["扫码枪.doc › 现场大屏"]}]},
+    {"name": "游戏后台 / 纸牌管理-周期ID", "items": [{"text": "纸牌周期 ID 按启用时间生成", "sources": ["扫码枪.doc › 游戏后台 / 纸牌管理"]}]},
+    {"name": "权限表-角色权限", "items": [{"text": "主管可作废牌盒", "sources": ["扫码枪.doc › 权限表"]}]},
+]
+SCAN_CLASSIFY_REPLY = json.dumps({
+    "terminals": [{"name": "荷官端", "desc": "荷官在牌桌操作台上用扫码枪操作"}, {"name": "现场大屏", "desc": "牌桌旁展示牌靴状态的屏幕"},
+                  {"name": "没用到的端", "desc": "没有章节归它"}],
+    "sections": [
+        {"key": "荷官操作台", "terminal": "荷官端", "reason": "荷官扫码操作"},
+        {"key": "现场大屏", "terminal": "现场大屏"},
+        {"key": "游戏后台", "terminal": "游戏后台管理", "reason": "运营管理纸牌"},          # 写的是名称：对回端清单的 key
+        {"key": "需求背景", "terminal": "通用"},
+        {"key": "权限表", "terminal": "一个超过十六个字的非常非常长的端名称不该被接受"},   # 不像端名：不记，落关键词兜底
+    ]}, ensure_ascii=False)
+
+
+def test_端名解析_清单里的对回key_其余按文档叫法_名称即key():
+    from app.terminals import is_custom, label_of, order_keys, resolve_key, terminal_options
+
+    assert resolve_key("h5") == "h5" and resolve_key("H5 端") == "h5" and resolve_key("商户后台") == "merchant_admin"
+    assert resolve_key("Game_Admin") == "game_admin" and resolve_key("通用") == "common" and resolve_key("未知") == "other"
+    assert resolve_key("荷官端") == "荷官端" and resolve_key("  PC   客户端 ") == "PC 客户端" and resolve_key("大屏/投屏") == "大屏 投屏"
+    assert resolve_key("") is None and resolve_key(None) is None and resolve_key("字" * 17) is None and resolve_key(["h5"]) is None
+    assert is_custom("荷官端") and not is_custom("h5") and not is_custom("other") and label_of("荷官端") == "荷官端"
+    assert order_keys(["other", "荷官端", "h5", "现场大屏", "common", "merchant_admin", "荷官端"]) == \
+        ["h5", "merchant_admin", "荷官端", "现场大屏", "common", "other"]   # 清单业务端 → 文档自有的端（出现先后）→ 通用 / 其他
+    assert [o["key"] for o in terminal_options(["荷官端"], with_e2e=False)] == ["h5", "game_admin", "merchant_admin", "荷官端", "common", "other"]
+
+
+async def test_提取时从文档识别端_清单没有的新建_说明入库_新建端有上限():
+    from app.agents.quality import run_terminal_classify
+    from app.terminals import MAX_CUSTOM_TERMINALS
+
+    llm = StubLLM([SCAN_CLASSIFY_REPLY])
+    r = await run_terminal_classify(llm, SCAN_MODULES, None)
+    assert r["terminals"] == {"荷官操作台": "荷官端", "现场大屏": "现场大屏", "游戏后台": "game_admin", "需求背景": "common"}
+    assert r["notes"] == {"荷官端": "荷官在牌桌操作台上用扫码枪操作", "现场大屏": "牌桌旁展示牌靴状态的屏幕"}   # 只留用到的端
+    assert r["reasons"]["荷官操作台"] == "荷官扫码操作"
+    system, user = (m["content"] for m in llm.calls[0]["messages"][:2])
+    assert "识别" in system and "新建" in system and "已有的端" in user and "- game_admin：游戏后台管理" in user and "荷官扫描牌盒条码" in user
+    # 模型把每个章节都当成一个端：只认前 MAX_CUSTOM_TERMINALS 个新建的端，其余章节不记
+    names = ["报名", "榜单", "派奖", "风控", "流水", "对账", "公告", "客服", "签到", "兑换", "充值"]
+    assert len(names) == MAX_CUSTOM_TERMINALS + 3
+    mods = [{"name": f"{x}页-规则", "items": [{"text": f"{x}规则", "sources": [f"需求.zip › {x}页"]}]} for x in names]
+    reply = json.dumps({"sections": [{"key": f"{x}页", "terminal": f"{x}端"} for x in names]}, ensure_ascii=False)
+    r = await run_terminal_classify(StubLLM([reply]), mods, None)
+    assert len(r["terminals"]) == MAX_CUSTOM_TERMINALS and set(r["terminals"].values()) == {f"{x}端" for x in names[:MAX_CUSTOM_TERMINALS]}
+
+
+async def test_文档自有的端_按端汇总_人工新建端_重新识别保留人工_进任务按端生成与导出(client, tmp_path):
+    await client.post("/api/v1/projects", json={"name": "P"})
+    rid = (await client.post("/api/v1/requirements", data={"project": "P", "title": "扫码枪", "text": "扫码枪流程优化需求原文"})).json()["req_id"]
+    app.state.requirements.set_extraction(
+        rid, {"text": "x", "modules": SCAN_MODULES, "terminals": {"荷官操作台": "荷官端", "现场大屏": "现场大屏", "游戏后台": "game_admin", "需求背景": "common"},
+              "terminal_notes": {"荷官端": "荷官在牌桌操作台上用扫码枪操作"}}, {"id": "m1", "inputs": [], "chars": 10, "modules": 6})
+    ex = (await client.get(f"/api/v1/requirements/{rid}")).json()["extraction"]
+    s = ex["terminal_summary"]
+    assert [(t["key"], t["label"], t["custom"]) for t in s["terminals"]] == [
+        ("game_admin", "游戏后台管理", False), ("荷官端", "荷官端", True), ("现场大屏", "现场大屏", True), ("common", "通用", False), ("other", "其他", False)]
+    dealer = s["terminals"][1]
+    assert dealer["pages"] == 2 and dealer["items"] == 3 and [p["title"] for p in dealer["sections"][0]["pages"]] == ["预洗牌", "启用牌盒"]
+    assert [o["key"] for o in ex["terminal_options"]] == ["h5", "game_admin", "merchant_admin", "荷官端", "现场大屏", "common", "other"]
+    assert ex["terminal_notes"]["荷官端"].startswith("荷官") and ex["section_terminals"]["权限表"] == "other"
+    # 人工给「权限表」新建一个端（写名称即可）；写清单里端的名称对回 key；太长 / 端到端 400
+    url = f"/api/v1/requirements/{rid}/extraction/terminals"
+    r = await client.post(url, json={"section": "权限表", "terminal": "主管端"})
+    assert r.status_code == 200, r.text
+    ex = r.json()["extraction"]
+    assert ex["section_terminals"]["权限表"] == "主管端" and "主管端" in [o["key"] for o in ex["terminal_options"]] and "权限表" in ex["terminal_edits"]
+    r = await client.post(url, json={"section": "现场大屏", "terminal": "H5 端"})
+    assert r.status_code == 200 and r.json()["extraction"]["section_terminals"]["现场大屏"] == "h5"
+    assert (await client.post(url, json={"section": "现场大屏", "terminal": "字" * 17})).status_code == 400
+    assert (await client.post(url, json={"section": "现场大屏", "terminal": "端到端"})).status_code == 400
+    # 重新识别端（一次模型调用，不重新提取）：模型新判的换掉原来的，人工改过的两个章节保持不动
+    app.state.llm = StubLLM([json.dumps({"terminals": [{"name": "牌桌终端", "desc": "荷官在牌桌上操作的终端"}], "sections": [
+        {"key": "荷官操作台", "terminal": "牌桌终端", "reason": "荷官在牌桌操作"}, {"key": "游戏后台", "terminal": "game_admin"},
+        {"key": "需求背景", "terminal": "common"}, {"key": "权限表", "terminal": "game_admin"}, {"key": "现场大屏", "terminal": "牌桌终端"}]}, ensure_ascii=False)])
+    r = await client.post(f"{url}/detect", json={})
+    assert r.status_code == 200, r.text
+    ex = r.json()["extraction"]
+    assert ex["section_terminals"] == {"需求背景": "common", "荷官操作台": "牌桌终端", "现场大屏": "h5", "游戏后台": "game_admin", "权限表": "主管端"}
+    assert ex["terminal_notes"] == {"牌桌终端": "荷官在牌桌上操作的终端"} and ex["terminal_detected"]["at"] and len(app.state.llm.calls) == 1
+    assert [t["key"] for t in ex["terminal_summary"]["terminals"]] == ["h5", "game_admin", "牌桌终端", "主管端", "common"]
+    # 发起测试设计：文档自有的端进任务，测试点按章节归到它；任务的端清单带上它
+    app.state.llm = StubLLM([json.dumps({"modules": [
+        {"module": "荷官操作台-预洗牌-流程", "points": [{"point": "扫描牌盒条码后进入预洗牌", "dimension": "正常流程", "ref": "a"},
+                                               {"point": "预洗牌未完成不可启用牌盒", "dimension": "状态转换", "ref": "a"}]},
+        {"module": "游戏后台-纸牌管理-周期ID", "points": [{"point": "周期 ID 按启用时间生成", "dimension": "数据", "ref": "b"}]},
+        {"module": "权限表-角色权限", "points": [{"point": "主管可作废牌盒", "dimension": "权限", "ref": "c"}]},
+    ], "blind_spots": []}, ensure_ascii=False), NO_GAP])
+    resp = await client.post(f"/api/v1/requirements/{rid}/design", json={"async_mode": False})
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["task_id"]
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    pts = {p["tp_id"]: p["terminal"] for m in t["analysis"]["test_points"] for p in m["points"]}
+    assert sorted(pts.values()) == ["game_admin", "主管端", "牌桌终端", "牌桌终端"]
+    assert [x["key"] for x in t["point_terminals"]] == ["game_admin", "牌桌终端", "主管端"]
+    assert [(x["key"], x["label"]) for x in t["terminals"]] == [("h5", "H5"), ("game_admin", "游戏后台管理"), ("merchant_admin", "商户后台"),
+                                                               ("牌桌终端", "牌桌终端"), ("主管端", "主管端"), ("common", "通用"), ("e2e", "端到端"), ("other", "其他")]
+    # 按文档自有的端单独生成：任务里没有的端 400
+    dealer_tps = [tp for tp, term in pts.items() if term == "牌桌终端"]
+    assert (await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [{"tp_id": tp, "action": "approve"} for tp in dealer_tps]})).status_code == 200
+    assert (await client.post(f"/api/v1/tasks/{task_id}/confirm", json={"terminal": "荷官端"})).status_code == 400   # 重新识别后已不叫这个
+    app.state.llm = StubLLM([generator_reply(make_case(case_id="TC-预洗牌-001", module="荷官操作台-预洗牌-流程", title="扫码进入预洗牌", point_ids=dealer_tps)), review_reply(True)])
+    resp = await client.post(f"/api/v1/tasks/{task_id}/confirm", json={"terminal": "牌桌终端"})
+    assert resp.status_code == 200, resp.text
+    t = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert t["status"] == "completed" and list(t["case_terminals"].values()) == ["牌桌终端"]
+    # 按端导出：文件名与「端」列都是文档里的端名
+    r = await client.get(f"/api/v1/tasks/{task_id}/points/export", params={"terminal": "牌桌终端"})
+    assert r.status_code == 200 and "测试点-牌桌终端.xlsx" in unquote(r.headers.get("content-disposition", ""))
+    rows = _rows(r.content, tmp_path, "p.xlsx")
+    assert len(rows) == 3 and {row[2] for row in rows[1:]} == {"牌桌终端"}
+    r = await client.get(f"/api/v1/tasks/{task_id}/files/xlsx", params={"terminal": "牌桌终端"})
+    assert r.status_code == 200 and "测试用例-牌桌终端.xlsx" in unquote(r.headers.get("content-disposition", ""))
+    assert (await client.get(f"/api/v1/tasks/{task_id}/files/xlsx", params={"terminal": "主管端"})).status_code == 404    # 这个端还没生成用例
+    assert (await client.get(f"/api/v1/tasks/{task_id}/points/export", params={"terminal": "瞎编端"})).status_code == 400
+    # 人工改端：可以改到任务里文档自有的端；任务里没有的端 400
+    admin_tp = next(tp for tp, term in pts.items() if term == "game_admin")
+    r = await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [
+        {"tp_id": admin_tp, "action": "modify", "point": "周期 ID 按启用时间生成（主管查看）", "terminal": "主管端", "base_version": 1}]})
+    assert r.status_code == 200, r.text
+    r = await client.post(f"/api/v1/tasks/{task_id}/points/review", json={"items": [
+        {"tp_id": admin_tp, "action": "modify", "point": "x", "terminal": "瞎编端", "base_version": 2}]})
+    assert r.status_code == 400
+
+
+async def test_端到端场景_认文档自有的端_模型另起的端名不认():
+    from app.agents.quality import run_e2e_scenarios
+
+    reply = json.dumps({"scenarios": [
+        {"name": "荷官启用牌盒 → 后台生成周期", "terminals": ["荷官端", "game_admin"], "flow": "荷官端：启用牌盒 → 游戏后台：生成周期 ID",
+         "points": [{"point": "启用牌盒后后台出现对应周期 ID", "dimension": "数据", "ref": "a", "basis": "跨端数据流转"}]},
+        {"name": "另起端名的不算", "terminals": ["荷官端", "瞎编端"], "flow": "x", "points": [{"point": "y", "dimension": "数据", "ref": "a", "basis": "b"}]},
+    ]}, ensure_ascii=False)
+    llm = StubLLM([reply])
+    r = await run_e2e_scenarios(llm, "扫码枪流程优化需求原文", None, {"荷官操作台": "荷官端", "游戏后台": "game_admin"})
+    assert [s["name"] for s in r["scenarios"]] == ["荷官启用牌盒 → 后台生成周期"] and r["scenarios"][0]["terminals"] == ["荷官端", "game_admin"]
+    assert len(r["additions"]) == 1 and r["additions"][0]["terminal"] == "e2e"
+    user = llm.calls[0]["messages"][1]["content"]
+    assert "- 荷官端\n" in user and "- game_admin：游戏后台管理" in user and "荷官端（荷官端）：荷官操作台" in user

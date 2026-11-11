@@ -263,11 +263,12 @@ class PointReviewError(ValueError):
     pass
 
 
-def apply_point_review(modules: list[dict], items: list[dict]) -> dict:
+def apply_point_review(modules: list[dict], items: list[dict], terminals: list[str] | None = None) -> dict:
     """执行测试点审核操作（支持批量，需求四十八/四十九/五十）。
 
     action: approve（通过并锁定）/ reject（驳回，须带 comment）/ modify（人工直改）/
             delete（删除）/ unlock（解锁，撤销通过）。
+    terminals：这个任务里文档自有的端（modify 改端时除端清单外还认它们）。
     返回统计与连续驳回提示（需求三十五）。
     """
     counts = {"approve": 0, "reject": 0, "modify": 0, "delete": 0, "unlock": 0}
@@ -309,11 +310,13 @@ def apply_point_review(modules: list[dict], items: list[dict]) -> dict:
             if item.get("ref") is not None:
                 point["ref"] = point_ref(item)
             if item.get("terminal"):
-                from app.terminals import valid_key
+                from app.terminals import point_terminal, valid_key
 
-                if valid_key(str(item["terminal"])) is None:
+                term = str(item["terminal"]).strip()
+                if valid_key(term) is None and term not in (terminals or ()) \
+                        and not any(point_terminal(q) == term for _, q in iter_point_dicts(modules)):
                     raise PointReviewError(f"测试点 {tp_id} 的端无效: {item['terminal']}")
-                point["terminal"] = str(item["terminal"])
+                point["terminal"] = term
             point["status"], point["locked"] = "pending", False
             clear_reject_fields(point)
             point["warnings"] = coarse_warnings(text)

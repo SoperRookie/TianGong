@@ -1941,23 +1941,23 @@ def _quality_report(record: TaskRecord, result) -> dict:
 class ConfirmBody(BaseModel):
     test_points: list[dict] | None = None  # 缺省沿用拆解草稿；传入则以用户修改后的为准
     async_mode: bool = False               # True：后台生成并立即返回（页面轮询），可取消、不受代理超时影响
-    terminal: str | None = None            # 只为这个端（h5 / game_admin / merchant_admin / e2e …）的测试点生成用例：各端审完各自生成、各自评审
+    terminal: str | None = None            # 只为这个端（h5 / game_admin / merchant_admin / e2e / 文档自有的端名称 …）的测试点生成用例：各端审完各自生成、各自评审
 
 
 @router.post("/api/v1/tasks/{task_id}/confirm")
 async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None = None) -> dict:
     """确认（或修改后确认）测试点，继续生成（F-3-3 第二阶段）。多模块按模块并行生成。"""
-    from app.terminals import fill_point_terminals, label_of, valid_key
+    from app.terminals import fill_point_terminals, label_of, task_terminal
 
     store = request.app.state.tasks
     record = _task(request, task_id, "point.review")
     _ai_ctx(request, record)
     async_mode = bool(body and body.async_mode)
     terminal = (body.terminal or "").strip() if body else ""
-    if terminal and not valid_key(terminal):
-        raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
     if fill_point_terminals(record.analysis):
         store.save(record)
+    if terminal and not task_terminal(record.analysis, terminal):   # 端清单里的端，或这个任务里文档自有的端
+        raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
     if record.status == "completed":
         # 分批审核、分批生成：第一批生成后又审核通过了新的测试点 → 只为这些点增量生成，并入现有用例
         pending = _points_pending_generation(record, terminal or None)
@@ -2882,7 +2882,7 @@ class PointReviewItem(BaseModel):
     point: str | None = None       # modify 时的新描述
     dimension: str | None = None
     ref: str | None = None         # modify 时的设计需求页来源（页面或章节 › 需求点），None 表示不改
-    terminal: str | None = None    # modify 时改所属端（h5 / game_admin / merchant_admin / common / e2e / other），None 表示不改
+    terminal: str | None = None    # modify 时改所属端（h5 / game_admin / merchant_admin / common / e2e / other / 任务里文档自有的端），None 表示不改
     comment: str = ""              # reject 时的驳回原因
     # 结构化驳回（完整需求 6.4）
     reject_types: list[str] = []   # 驳回类型，多选必填
@@ -2925,7 +2925,9 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
     if any(i.action == "delete" for i in body.items):
         _require_delete(request)
     try:
-        outcome = apply_point_review(working, [i.model_dump() for i in body.items])
+        from app.terminals import task_terminal_keys
+
+        outcome = apply_point_review(working, [i.model_dump() for i in body.items], terminals=task_terminal_keys(record.analysis))
     except ConcurrencyError as e:  # 乐观锁冲突（需求 11）：不落任何改动
         raise HTTPException(status_code=409, detail=str(e))
     except PointReviewError as e:
@@ -5278,15 +5280,17 @@ async def _run_extraction(app, req_id: str, model: str | None, by: str | None, a
     if (rstore.get(req_id) or {}).get("deleted_at") or rstore.get(req_id) is None:
         raise ValueError("提取进行中需求已被删除，结果未保存")   # 模型已经跑完，但没地方落：明确告诉用户，而不是报「需求不存在」
     if get_settings().requirement_extract_terminals and data.get("modules"):
-        # 顶层章节归端（H5 / 游戏后台管理 / 商户后台 / 通用）：三端汇总与按端拆解据此；故障只按关键词兜底，提取页可人工改
+        # 从文档里识别这份需求有哪些端并把顶层章节归进去（端清单里的端，或按文档叫法新建的端）：按端汇总与按端拆解据此；
+        # 故障只按关键词兜底，提取页可人工改 / 重新识别
         from app.agents.quality import run_terminal_classify
 
         try:
             tc = await run_terminal_classify(app.state.llm, data["modules"], model)
             data["terminals"] = tc["terminals"]
             data["terminal_reasons"] = tc["reasons"]
+            data["terminal_notes"] = tc.get("notes") or {}
         except Exception as e:
-            logger.warning("整理稿章节归端故障，按章节名关键词兜底：{}", e)
+            logger.warning("整理稿识别端故障，按章节名关键词兜底：{}", e)
     meta = {"id": uuid.uuid4().hex[:8], "model": data.get("model_name"), "chunks": data.get("chunks"), "inputs": inputs,
             "by": by, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "auto": auto,
             "source_chars": data.get("source_chars"), "chars": len(data["text"]), "modules": len(data.get("modules") or []),
@@ -5928,21 +5932,22 @@ async def review_requirement_extraction_item(request: Request, req_id: str, body
 
 class ExtractionTerminalBody(BaseModel):
     section: str      # 顶层章节键（文件夹名或页面名，与三端汇总里一致）
-    terminal: str     # 端：h5 / game_admin / merchant_admin / common / other
+    terminal: str     # 端：h5 / game_admin / merchant_admin / common / other，或文档自有的端的名称（没有就新建，≤ 16 字）
 
 
 @router.post("/api/v1/requirements/{req_id}/extraction/terminals")
 async def set_requirement_extraction_terminal(request: Request, req_id: str, body: ExtractionTerminalBody) -> dict:
-    """三端汇总里把某个章节改到别的端（模型判错或没判的）。之后发起的测试设计按改后的端归测试点；已发起的任务不回改。"""
-    from app.terminals import valid_key
+    """按端汇总里把某个章节改到别的端（模型判错或没判的）；端可以是这份文档已有的端，也可以写一个新名称新建。
+    之后发起的测试设计按改后的端归测试点；已发起的任务不回改。"""
+    from app.terminals import CUSTOM_NAME_MAX, resolve_key
 
     item = _req(request, req_id, "requirement.edit")
     ex = item.get("extraction") or {}
     if not ex.get("modules"):
         raise HTTPException(status_code=409, detail="整理稿没有逐条结构，不能按章节归端")
-    term = valid_key(body.terminal)
+    term = resolve_key(body.terminal)
     if term is None or term == "e2e":
-        raise HTTPException(status_code=400, detail=f"未知的端：{body.terminal}")
+        raise HTTPException(status_code=400, detail=f"端无效：{body.terminal}（填端清单里的端，或不超过 {CUSTOM_NAME_MAX} 个字的端名称；章节不能归「端到端」）")
     section = body.section.strip()
     view = _extraction_view(item) or {}
     if section not in (view.get("section_terminals") or {}):
@@ -5950,6 +5955,38 @@ async def set_requirement_extraction_terminal(request: Request, req_id: str, bod
     rstore = request.app.state.requirements
     item = rstore.set_extraction_terminal(req_id, section, term, by=_operator(request))
     request.state.audit_detail = f"章节「{section}」→ {term}"
+    return _req_view(request, item)
+
+
+@router.post("/api/v1/requirements/{req_id}/extraction/terminals/detect")
+async def detect_requirement_extraction_terminals(request: Request, req_id: str, body: ExtractBody | None = None) -> dict:
+    """重新识别端：让模型从现有整理稿里重新识别这份需求有哪些端并归类（一次调用，不重新提取）。人工改过的章节保持不动。
+    用于升级前提取的整理稿（当时只能在固定的端里选），或端识别得不对想换个模型再判。"""
+    from app.agents.quality import run_terminal_classify
+    from app.requirements import RequirementError
+
+    item = _req(request, req_id, "requirement.ai")
+    ex = item.get("extraction") or {}
+    if not ex.get("modules"):
+        raise HTTPException(status_code=409, detail="整理稿没有逐条结构，不能按章节归端")
+    if item.get("extracting"):
+        raise HTTPException(status_code=409, detail="需求提取正在进行中")
+    _ai_ctx(request, project=item["project"], requirement_id=req_id)
+    model = (body.model if body else None) or get_settings().requirement_extract_model or None
+    try:
+        tc = await run_terminal_classify(request.app.state.llm, ex["modules"], model)
+    except UnknownModelError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError, ValueError) as e:
+        raise HTTPException(status_code=502, detail=f"识别端失败：{e}")
+    try:
+        item = request.app.state.requirements.redetect_extraction_terminals(
+            req_id, tc["terminals"], tc["reasons"], tc.get("notes") or {}, by=_operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    view = _extraction_view(item) or {}
+    ends = [t["label"] for t in (view.get("terminal_summary") or {}).get("terminals") or []]
+    request.state.audit_detail = f"重新识别端：{' / '.join(ends) or '无'}（{len(tc['terminals'])} 个章节由模型判定）"
     return _req_view(request, item)
 
 
@@ -5980,17 +6017,18 @@ def _extraction_view(item: dict) -> dict | None:
     led = ex.get("ledger") or {}
     out = {**ex, "ledger": {"stats": led.get("stats"), "image": led.get("image"), "inherited": led.get("inherited")}, "outline": None}
     if ex.get("modules"):
-        from app.terminals import section_terminals, terminal_summary, terminals
+        from app.terminals import section_terminals, terminal_options, terminal_summary
 
         view = copy.deepcopy(item)   # 在副本上按当前规则收口（草稿只认独立区域、流程框不重复），不改库里的数据
         tidy_modules(view)
         mods = view["extraction"]["modules"]
         out["modules"], out["outline"] = mods, outline_view(mods)   # 页面 › 区块 › 条目层级，页面按这个渲染
         out["text"] = extraction_markdown(mods, ex.get("dropped"), head=extraction_head(view))
-        # 三端汇总：顶层章节归端（模型判定 / 人工改 / 关键词兜底），每个端有哪些页面、多少区块与条目
+        # 按端汇总：端由模型从文档里识别（端清单里的端，或按文档叫法新建的），顶层章节归端（模型判定 / 人工改 / 关键词兜底），
+        # 每个端有哪些页面、多少区块与条目；可选的端 = 端清单 + 这份文档自有的端
         out["section_terminals"] = section_terminals(out["outline"], ex.get("terminals") or {})
         out["terminal_summary"] = terminal_summary(out["outline"], ex.get("terminals") or {})
-        out["terminal_options"] = [{"key": t["key"], "label": t["label"]} for t in terminals() if t["key"] != "e2e"]
+        out["terminal_options"] = terminal_options(out["section_terminals"].values(), with_e2e=False)
     return out
 
 
@@ -8666,7 +8704,7 @@ async def get_task(request: Request, task_id: str) -> dict:
     from app.tasks.blind_spots import blind_spot_entities
     from app.tasks.points import dup_pair_entities
 
-    from app.terminals import case_terminals, fill_point_terminals, point_terminal_stats, terminals
+    from app.terminals import case_terminals, fill_point_terminals, point_terminal_stats, task_terminal_keys, terminal_options
 
     record = _task(request, task_id, "case.view")
     if fill_point_terminals(record.analysis):   # 旧任务 / 新增的点按模块补端（幂等）
@@ -8678,7 +8716,7 @@ async def get_task(request: Request, task_id: str) -> dict:
             "blind_spots": blind_spot_entities(record), "dup_pairs": dup_pair_entities(record),
             "case_dup_pairs": dup_pair_entities(record, "cases"),
             "points_pending_generation": [p["tp_id"] for tp in pending for p in tp["points"]],
-            "terminals": [{"key": t["key"], "label": t["label"]} for t in terminals()],
+            "terminals": terminal_options(task_terminal_keys(record.analysis)),   # 端清单 + 这个任务里文档自有的端
             "point_terminals": point_terminal_stats((record.analysis or {}).get("test_points") or [], _generated_tp_ids(record)),
             "case_terminals": case_terminals(record)}
 
@@ -8759,20 +8797,20 @@ _MEDIA_TYPES = {
 async def export_points(request: Request, task_id: str, scope: str = "all", fmt: str = "xlsx", terminal: str = "") -> FileResponse:
     """测试点导出：fmt=xlsx（编号、模块、端、测试点、维度、来源、状态、审核意见、是否已生成用例与覆盖用例编号、延伸依据）
     或 fmt=xmind（思维导图，与页面脑图同结构：需求 → 模块 → 测试点 → 来源 / 依据 / 意见）；scope=approved 只导已通过的；
-    terminal=h5 / game_admin / merchant_admin / e2e … 只导该端的测试点（文件名带端名）。"""
+    terminal=h5 / game_admin / merchant_admin / e2e / 文档自有的端名称 … 只导该端的测试点（文件名带端名）。"""
     import asyncio
 
-    from app.terminals import fill_point_terminals, filter_modules, label_of, valid_key
+    from app.terminals import fill_point_terminals, filter_modules, label_of, task_terminal
 
     if fmt not in ("xlsx", "xmind"):
         raise HTTPException(status_code=400, detail="fmt 仅支持 xlsx / xmind")
     terminal = (terminal or "").strip()
-    if terminal and not valid_key(terminal):
-        raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
 
     record = _task(request, task_id, "case.export")
     if fill_point_terminals(record.analysis):
         request.app.state.tasks.save(record)
+    if terminal and not task_terminal(record.analysis, terminal):   # 端清单里的端，或这个任务里文档自有的端
+        raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
     modules = (record.analysis or {}).get("test_points") or []
     if not modules:
         raise HTTPException(status_code=404, detail="任务没有测试点拆解结果")
@@ -8815,13 +8853,13 @@ async def download_file(request: Request, task_id: str, fmt: str, scope: str = "
     layout=compact 仅对 xmind 生效：脑图只到用例一层，步骤与预期放备注（节点数 = 用例数）；
     terminal=h5 / game_admin / merchant_admin / e2e … 只导该端的用例（按来源测试点归端；即时生成，文件名带端名）。
     """
-    from app.terminals import label_of, valid_key
+    from app.terminals import label_of, task_terminal
 
     record = _task(request, task_id, "case.export")
     if fmt not in _MEDIA_TYPES:
         raise HTTPException(status_code=404, detail=f"不支持的导出格式: {fmt}")
     terminal = (terminal or "").strip()
-    if terminal and not valid_key(terminal):
+    if terminal and not task_terminal(record.analysis, terminal):   # 端清单里的端，或这个任务里文档自有的端
         raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
     if scope == "approved" or terminal or (fmt == "xmind" and layout == "compact"):
         path = await _export_task_files(request, record, approved_only=(scope == "approved"), fmt=fmt,

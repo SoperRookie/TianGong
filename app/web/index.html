@@ -5350,7 +5350,7 @@ function renderOfflineDiff(o) {
 /* ==================== AI 中心（M5）：任务中心 / 调用日志 / Prompt 管理 ==================== */
 const PROMPT_NAMES = {analyst:'需求拆解', requirement_analysis:'需求分析', generator:'用例生成', reviewer:'用例评审', fix_instruction:'定点修正指令',
   gap_check:'覆盖查漏', dup_judge:'语义查重', point_fix:'测试点修改', case_fix:'用例修改', requirement_diff:'需求变更', learning:'修改习惯学习',
-  point_supplement:'测试点补充', point_compare:'人工与 AI 测试点对比', vision_image:'图片理解', e2e_scenarios:'端到端场景', terminal_classify:'章节归端', requirement_analysis_review:'需求分析复核', analysis_judge:'评测裁判', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
+  point_supplement:'测试点补充', point_compare:'人工与 AI 测试点对比', vision_image:'图片理解', e2e_scenarios:'端到端场景', terminal_classify:'识别端并归类', requirement_analysis_review:'需求分析复核', analysis_judge:'评测裁判', knowledge_cases_block:'注入·历史用例', knowledge_refs_block:'注入·需求规则', rules_block:'注入·规则', memory_block:'注入·记忆'};
 let aiTab = 'tasks', aiStatus = '', aiMine = false, aiCallPage = 1, aiCallSize = 50, aiCallPurpose = '', aiCallStatus = '', aiCallModel = '', aiCallBy = '', aiCallProject = '', aiCallKw = '', aiDays = 30;
 function acallSet(name, value) {
   if (name === 'page') aiCallPage = value;
@@ -6105,26 +6105,42 @@ const anModelOpts = () => [...$('modelSel').options].map(o=>`<option value="${es
 let _exEditing = false, _extractDefaultModel = '', _exFilter = 'preview', _exEditItem = null, _exHist = null, _exHistSel = null, _exHistView = null;
 let _exLedger = null, _exLedgerF = null, _exLedgerReasonFor = null, _exLedgerLoading = false;   // 底稿核对：明细按需拉取
 let _exTermOpen = true;
-/* 三端汇总：整理稿顶层章节按端（H5 / 游戏后台管理 / 商户后台 / 通用）归类后的总需求——每个端有哪些页面、多少区块与条目；章节的端可改 */
-function exTerminalSummaryHtml(ex, canEdit) {
+/* 按端汇总：这份需求有哪些端由模型在提取时从文档里识别（端清单里的 H5 / 游戏后台管理 / 商户后台 / 通用，或按文档叫法新建的端），
+   整理稿顶层章节归到端后的总需求——每个端有哪些页面、多少区块与条目；章节的端可改、可新建端、可重新识别 */
+function exTerminalSummaryHtml(ex, canEdit, canAI) {
   const s = ex && ex.terminal_summary;
   if (!s || !s.terminals || !s.terminals.length) return '';
   const opts = ex.terminal_options || [];
-  const sel = sec => canEdit ? `<select style="width:120px;font-size:12px" onchange="exSetTerminal(${jsq(sec.key)}, this.value)" title="改这个章节所属的端（之后发起的测试设计按改后的端归测试点）">${opts.map(o=>`<option value="${esc(o.key)}" ${o.key===sec.terminal?'selected':''}>${esc(o.label)}</option>`).join('')}</select>` : '';
-  const edits = (ex.terminal_edits || {}), reasons = (ex.terminal_reasons || {});
+  const sel = sec => canEdit ? `<select style="width:120px;font-size:12px" onchange="exSetTerminal(${jsq(sec.key)}, this.value, this)" title="改这个章节所属的端（之后发起的测试设计按改后的端归测试点）">${opts.map(o=>`<option value="${esc(o.key)}" ${o.key===sec.terminal?'selected':''}>${esc(o.label)}</option>`).join('')}<option value="__new__">＋ 新的端…</option></select>` : '';
+  const edits = (ex.terminal_edits || {}), reasons = (ex.terminal_reasons || {}), notes = (ex.terminal_notes || {});
   const rows = s.terminals.map(tm => `<tr>
-      <td style="width:120px;white-space:nowrap"><b>${esc(tm.label)}</b></td>
+      <td style="width:130px"><b>${esc(tm.label)}</b>${tm.custom?` <span class="st candidate" title="端清单里没有、按这份文档的叫法识别出来的端">文档</span>`:''}${notes[tm.key]?`<div class="hint">${esc(notes[tm.key])}</div>`:''}</td>
       <td style="width:170px;white-space:nowrap">${tm.pages} 页 · ${tm.blocks} 区块 · <b>${tm.items}</b> 条</td>
       <td>${tm.sections.map(sec => `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0">
           <span title="${esc(reasons[sec.key]?'判定依据：'+reasons[sec.key]:'')}">${esc(sec.no?sec.no+'. ':'')}${esc(sec.key)}${edits[sec.key]?` <span class="st approved" title="${esc(edits[sec.key].by||'')} ${esc(relTime(edits[sec.key].at))}">人工</span>`:''}</span>
           <span class="hint">${sec.group ? sec.pages.map(p=>esc(p.title)+'（'+p.items+'）').join('、') : sec.pages[0] && sec.pages[0].items + ' 条'}</span>${sel(sec)}</div>`).join('')}</td></tr>`).join('');
-  return `<details class="fold" ${_exTermOpen?'open':''} ontoggle="_exTermOpen=this.open" style="margin-bottom:10px"><summary>三端汇总 · 总需求 ${s.total.items} 条（${s.total.sections} 个章节 / ${s.total.pages} 页 / ${s.total.blocks} 区块）：${s.terminals.map(tm=>`${esc(tm.label)} ${tm.items}`).join(' · ')}</summary>
-    <div class="fold-b"><div class="hint" style="margin-bottom:6px">按整理稿顶层章节（文件夹 / 页面）归端：提取完成时模型判一次，拿不准的按章节名关键词兜底；判错的在右侧改。发起测试设计时测试点按这里的端分列表、按端单独生成用例与导出。</div>
+  const det = ex.terminal_detected;
+  return `<details class="fold" ${_exTermOpen?'open':''} ontoggle="_exTermOpen=this.open" style="margin-bottom:10px"><summary>按端汇总 · ${s.terminals.filter(tm=>!['common','other'].includes(tm.key)).length} 个端 · 总需求 ${s.total.items} 条（${s.total.sections} 个章节 / ${s.total.pages} 页 / ${s.total.blocks} 区块）：${s.terminals.map(tm=>`${esc(tm.label)} ${tm.items}`).join(' · ')}</summary>
+    <div class="fold-b"><div class="hint" style="margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span style="flex:1;min-width:260px">这份需求有哪些端由模型在提取完成时从文档里识别（不用配置），再按整理稿顶层章节（文件夹 / 页面）归进去，拿不准的按章节名关键词兜底；判错的在右侧改，也可以选「＋ 新的端…」自己起一个。发起测试设计时测试点按这里的端分列表、按端单独生成用例与导出。${det?`上次重新识别：${esc(det.by||'')} ${esc(relTime(det.at))}`:''}</span>
+      ${canAI?`<button class="btn ghost sm" id="exTermDetectBtn" onclick="exDetectTerminals()" title="让模型按现有整理稿重新识别端并归类（一次调用，不重新提取）；人工改过的章节保持不动">重新识别端</button>`:''}</div>
     <div class="tbl-wrap"><table><tr><th>端</th><th>规模</th><th>章节 › 页面（条目数）</th></tr>${rows}</table></div></div></details>`;
 }
-async function exSetTerminal(section, terminal) {
+async function exSetTerminal(section, terminal, el) {
+  if (terminal === '__new__') {
+    terminal = await askInput('新的端', `「${section}」归到一个新的端：填端的名称（不超过 16 个字，如 荷官端、现场大屏、开放接口）`);
+    if (!terminal) { renderRequirementDetail(); return; }
+  }
   try { await api(`/api/v1/requirements/${curReq}/extraction/terminals`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({section, terminal})}); toast(`「${section}」已归到新的端`, 'ok'); renderRequirementDetail(); }
-  catch (e) { toast('改端失败：' + e.message, 'err'); }
+  catch (e) { toast('改端失败：' + e.message, 'err'); renderRequirementDetail(); }
+}
+async function exDetectTerminals() {
+  const btn = $('exTermDetectBtn'); if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 识别中'; }
+  try {
+    const r = await jpost(`/api/v1/requirements/${curReq}/extraction/terminals/detect`, {model: ($('rqExtractModel')||{}).value || null});
+    const ts = ((r.extraction && r.extraction.terminal_summary) || {}).terminals || [];
+    toast(`已重新识别：${ts.map(t => t.label).join(' / ') || '没有识别出端'}`, 'ok');
+  } catch (e) { toast('识别端失败：' + e.message, 'err'); }
+  renderRequirementDetail();
 }
 function _exItemsOf(r) { return ((r.extraction && r.extraction.modules) || []).flatMap(m => m.items.map(it => ({...it, module: m.name}))); }
 function reqExtractionHtml(r, canAI, canEdit) {
@@ -6164,7 +6180,7 @@ function reqExtractionHtml(r, canAI, canEdit) {
   const filt = `<div class="toolbar" style="margin-bottom:8px;flex-wrap:wrap">
       ${[['preview','预览'],['all',`逐条审核 ${all.length}`],['unverified',`⚠ 待核对 ${nPend}`],['gap',`补漏 ${nGap}`],['forced',`兜底 ${nForced}`],['doubt',`疑点 ${nDoubt}`],['draft',`疑似草稿 ${nDraft}`],['reviewed',`已处理 ${nRev}`],['ledger',`底稿核对${ls&&(ls.todo||ls.review_open)?` <b style="color:${ls.todo?'var(--danger)':'var(--warn)'}">${(ls.todo||0)+(ls.review_open||0)}</b>`:''}`]].map(([k,t])=>`<button class="btn ghost sm ${_exFilter===k?'on':''}" style="${_exFilter===k?'font-weight:600':''}" onclick="_exFilter='${k}';renderRequirementDetail()">${t}</button>`).join('')}
       <span class="hint">${_exFilter==='preview'?'整理稿正文预览（与 docs 文档同一格式：页面 › 区块 › 条目，表格、子标题、缩进；〔补漏〕〔兜底〕〔疑点〕〔疑似草稿〕是标记）；要核对通过 / 修改 / 删除条目切到「逐条审核」':_exFilter==='ledger'?'底稿 = 产品原文的每一句（原型控件行、文档段落、说明备注，重复的只记一次；图片理解的描述不算，截图里转录的文字单列「图中文字」），每句的去向：收录 / 排除（原因与判定方）/ 待处理。要人看的只有「需复核」（模型排除的、像规则的句子）和「待处理」；程序按类排除的折叠起来。待处理为 0、需复核都看过才能完成审核':'⚠ = 没在材料里逐字找到（多半是模型改了写法），请对照原文核对通过、改成原句或删除；〔补漏〕= 模型判定是需求后补进的原句；〔兜底〕= 模型没判定去向、程序按原句收进来的，请核对后留下或在底稿里排除；〔疑点〕= 原文本身的问题（错别字、前后台 / PC 与移动口径不一致、占位符），原句照抄不改，疑点单列供需求澄清；〔疑似草稿〕= 画布上与主体不相连、与正式内容重复却有出入的区块（旧版本），已照抄收录但用例不要照它写'}</span></div>`;
-  bar += exTerminalSummaryHtml(ex, canEdit);
+  bar += exTerminalSummaryHtml(ex, canEdit, canAI);
   if (_exFilter === 'ledger') return intro + toolbar + bar + filt + exLedgerHtml(r, canEdit);
   if (_exFilter === 'preview') return intro + toolbar + bar + filt + exDocHtml(ex.text);
   const keep = it => _exFilter==='all' || (_exFilter==='unverified' && it.verified===false && !it.review) || (_exFilter==='gap' && it.gap && !it.forced) || (_exFilter==='forced' && it.forced) || (_exFilter==='doubt' && it.doubt) || (_exFilter==='draft' && it.draft) || (_exFilter==='reviewed' && it.review);
