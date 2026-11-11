@@ -803,10 +803,10 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
     <div class="card-h"><h3>用户管理</h3>
       <span class="meta">admin 可管理用户与模型配置；member 使用平台功能</span>
       <div class="grow">
-        <label class="check" title="开放：所有登录用户可见并可操作全部项目；按业务线：成员只能看到自己所属业务线下的项目与数据，业务线管理员可建项目与维护成员；按项目成员：只看自己被加入的项目。任何模式下删除都只有系统管理员">
+        <label class="check" title="开放：所有登录用户可见并可操作全部项目；按产品线：成员只能看到自己所属产品线下的项目与数据，产品线管理员可建项目与维护成员；按项目成员：只看自己被加入的项目。任何模式下删除都只有系统管理员">
           数据可见范围
           <select id="accessModeSel" style="width:150px" onchange="saveAccessMode(this.value)">
-            <option value="open">开放（全员可见）</option><option value="line">按业务线成员</option><option value="member">按项目成员</option>
+            <option value="open">开放（全员可见）</option><option value="line">按产品线成员</option><option value="member">按项目成员</option>
           </select>
         </label>
         <label class="check" title="关闭后全平台登录不再校验动态码，也不可新绑定；已绑定密钥保留，重新开启后继续生效">
@@ -1103,10 +1103,10 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
 
 <!-- 项目：新建 / 编辑 -->
 <dialog id="lineDlg" style="width:720px">
-  <div class="dlg-h"><h3>业务线管理</h3><span class="meta hint">一条业务线包含多个项目；同业务线项目共享历史用例复用</span></div>
+  <div class="dlg-h"><h3>产品线管理</h3><span class="meta hint">一条产品线包含多个项目；同产品线项目共享历史用例复用</span></div>
   <div class="dlg-b">
     <div id="lineList"></div>
-    <div class="section-t" id="lineFormTitle" style="margin-top:12px">新建业务线</div>
+    <div class="section-t" id="lineFormTitle" style="margin-top:12px">新建产品线</div>
     <div style="display:flex;gap:10px">
       <div style="flex:2"><label class="f">名称</label><input type="text" id="blName" placeholder="如：真人视讯"></div>
       <div style="flex:1"><label class="f">编码<span class="hint">（可选）</span></label><input type="text" id="blCode" placeholder="如 LIVE"></div>
@@ -1118,8 +1118,8 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div id="lineMemberList"></div>
       <div style="display:flex;gap:8px;align-items:flex-end;margin-top:6px">
         <div style="flex:2"><label class="f">添加成员</label><input type="text" id="lmUser" list="userNames" placeholder="用户名"></div>
-        <div style="flex:1"><label class="f">业务线角色</label>
-          <select id="lmRole"><option value="member">成员（可建需求 / 生成用例 / 管理计划）</option><option value="line_admin">业务线管理员（可建项目、维护成员）</option><option value="viewer">只读</option></select></div>
+        <div style="flex:1"><label class="f">产品线角色</label>
+          <select id="lmRole"><option value="member">成员（可建需求 / 生成用例 / 管理计划）</option><option value="line_admin">产品线管理员（可建项目、维护成员）</option><option value="viewer">只读</option></select></div>
         <button class="btn sm" onclick="addLineMember()">添加</button>
       </div>
     </div>
@@ -1138,7 +1138,7 @@ code { font-family:var(--mono); font-size:12px; background:var(--line-2); border
       <div style="flex:2"><label class="f">项目名</label><input type="text" id="pjName" placeholder="如：斗地主赛季玩法"></div>
       <div style="flex:1"><label class="f">编码<span class="hint">（接口识别，可选）</span></label><input type="text" id="pjCode" placeholder="如 DDZ"></div>
     </div>
-    <label class="f">业务线<span class="hint">（可选；同业务线的项目互相共享历史用例复用与知识检索）</span></label>
+    <label class="f">产品线<span class="hint">（可选；同产品线的项目互相共享历史用例复用与知识检索）</span></label>
     <select id="pjLine" onchange="if(this.value==='__new__')pjNewLine()"></select>
     <div style="display:flex;gap:10px">
       <div style="flex:1"><label class="f">负责人<span class="hint">（登录用户名，自动成为项目管理员）</span></label><input type="text" id="pjOwner" list="userNames" placeholder="用户名"></div>
@@ -2037,7 +2037,7 @@ const ROLE_ACTIONS = {
 const isSysAdmin = () => !!curUser && curUser.role === 'admin';
 const openProjects = () => !!curUser && curUser.open_projects === true;  // 项目开放模式：所有人视同项目管理员
 const accessMode = () => (curUser && curUser.access_mode) || (openProjects() ? 'open' : 'member');  // open / line / member
-const canDelete = () => isSysAdmin() || accessMode() === 'member';  // 开放 / 按业务线模式下项目内数据的删除仅系统管理员
+const canDelete = () => isSysAdmin() || accessMode() === 'member';  // 开放 / 按产品线模式下项目内数据的删除仅系统管理员
 function myRole(project) {
   if (isSysAdmin()) return 'project_admin';
   if (!project || project === '（未指定）') return null;  // 遗留未指定项目：仅系统管理员
@@ -2103,7 +2103,7 @@ function renderProjMenu(q) {
   for (const p of rest) { const k = p.business_line || ''; if (!byLine.has(k)) byLine.set(k, []); byLine.get(k).push(p); }
   const lineKeys = [...byLine.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, 'zh'));
   const restHtml = byLine.size > 1 || (byLine.size === 1 && lineKeys[0])
-    ? lineKeys.map(k => `<div class="grp">${k ? esc(k) : '未分业务线'}</div>${byLine.get(k).map(item).join('')}`).join('')
+    ? lineKeys.map(k => `<div class="grp">${k ? esc(k) : '未分产品线'}</div>${byLine.get(k).map(item).join('')}`).join('')
     : `<div class="grp">${favs.length||recents.length?'其他项目':'项目'}</div>${rest.map(item).join('')}`;
   const listHtml = `<div class="list">
       <div class="it ${!curProjectName?'on':''}" onclick="setCurrentProject('')"><span class="star"></span><span>全部项目</span><span class="role">不限定</span></div>
@@ -2465,7 +2465,7 @@ function renderTaskListPage() {
       <div class="card-h"><h3>任务列表</h3><span class="meta" id="taskTotal"></span>
         <div class="grow">
           <div class="seg" id="listSeg"></div>
-          <select id="lineSel" style="width:120px" onchange="listSet('line', this.value)" title="按业务线筛选"></select>
+          <select id="lineSel" style="width:120px" onchange="listSet('line', this.value)" title="按产品线筛选"></select>
           <select id="projectSel" style="width:140px" onchange="listSet('project', this.value)"></select>
           <select id="creatorSel" style="width:120px" onchange="listSet('creator', this.value)"></select>
           <div class="search" style="width:230px">
@@ -2497,7 +2497,7 @@ function renderTaskListRows() {
     return `<button class="${listStatus===v?'on':''}" onclick="listSet('status','${v}')">${label} ${n}</button>`;
   }).join('');
   // 项目过滤下拉：由当前任务集合聚合（保持已选值，轮询不打断）
-  if ($('lineSel')) $('lineSel').innerHTML = `<option value="">全部业务线</option>` + (_businessLines||[]).map(l => `<option value="${esc(l)}" ${listLine===l?'selected':''}>${esc(l)}</option>`).join('');
+  if ($('lineSel')) $('lineSel').innerHTML = `<option value="">全部产品线</option>` + (_businessLines||[]).map(l => `<option value="${esc(l)}" ${listLine===l?'selected':''}>${esc(l)}</option>`).join('');
   const projects = [...new Set(_tasksCache.filter(t => matchLine(t, listLine)).map(t => t.project).filter(Boolean))].sort();
   const hasNone = !listLine && _tasksCache.some(t => !t.project);
   $('projectSel').innerHTML = `<option value="">全部项目</option>`
@@ -3306,7 +3306,7 @@ function renderCoverage(t) {
 function renderReuseHints(t) {
   if (!t.reuse_hints || !t.reuse_hints.length) return '';
   return `<div class="section-t">历史用例复用提示</div>${t.reuse_hints.map(h=>`
-    <div class="box accent">历史正式用例与当前需求高度相关（相似度 ${h.score} · 来源 ${esc(h.source)}${h.from_project?` · <span class="tag">同业务线项目「${esc(h.from_project)}」</span>`:''}）
+    <div class="box accent">历史正式用例与当前需求高度相关（相似度 ${h.score} · 来源 ${esc(h.source)}${h.from_project?` · <span class="tag">同产品线项目「${esc(h.from_project)}」</span>`:''}）
       <div class="hint" style="white-space:pre-wrap;margin-top:4px">${esc(h.text)}</div></div>`).join('')}`;
 }
 /* 疑似重复测试点：独立列表——AI 不删除，人工删一条 / 忽略（判定不重复）/ 重开；删除后自动变为已处置；状态筛选 + 关键词 + 分页 */
@@ -7173,7 +7173,7 @@ async function drawerNewProject() {
 }
 let curProject = null, projTab = 'overview';
 const projLineOf = name => { const p = _projectsCache.find(x => x.project === name); return p ? (p.business_line || '') : ''; };
-const lineSelectHtml = (cur, setter, width) => `<select style="width:${width||120}px" onchange="${setter}" title="按业务线筛选"><option value="">全部业务线</option>${(_businessLines||[]).map(l=>`<option value="${esc(l)}" ${cur===l?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
+const lineSelectHtml = (cur, setter, width) => `<select style="width:${width||120}px" onchange="${setter}" title="按产品线筛选"><option value="">全部产品线</option>${(_businessLines||[]).map(l=>`<option value="${esc(l)}" ${cur===l?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
 let _projectsCache = [], _businessLines = [], projListLine = '', projGroupByLine = true, _projCases = [], projStage = 'all', projExec = 'all', projModule = '', projQuery = '', projCaseView = 'table';
 const REVIEW_STAGE = {pending:['待审核','pending'], rejected:['已驳回','rejected'], approved:['正式','approved'], draft:['草稿','candidate']};
 let _editingProject = null;
@@ -7184,20 +7184,20 @@ async function fillUserNames() {
     $('userNames').innerHTML = users.map(u => `<option value="${esc(u.username)}">${esc(u.name||'')}</option>`).join('');
   } catch (e) {}
 }
-/* ---- 业务线管理（实体：增删改查；项目通过业务线字段归属） ---- */
+/* ---- 产品线管理（实体：增删改查；项目通过产品线字段归属） ---- */
 let _lineList = [], _editingLine = null;
 async function loadLines() { try { _lineList = (await api('/api/v1/business-lines')).business_lines; } catch (e) { _lineList = []; } return _lineList; }
 function fillLineSelect(cur) {
   const sel = $('pjLine');
-  sel.innerHTML = '<option value="">（不归属业务线）</option>' + _lineList.map(l => `<option value="${esc(l.name)}" ${l.name===cur?'selected':''}>${esc(l.name)}${l.code?` (${esc(l.code)})`:''}</option>`).join('')
-    + (isSysAdmin()||openProjects() ? '<option value="__new__">＋ 新建业务线…</option>' : '');
+  sel.innerHTML = '<option value="">（不归属产品线）</option>' + _lineList.map(l => `<option value="${esc(l.name)}" ${l.name===cur?'selected':''}>${esc(l.name)}${l.code?` (${esc(l.code)})`:''}</option>`).join('')
+    + (isSysAdmin()||openProjects() ? '<option value="__new__">＋ 新建产品线…</option>' : '');
   if (cur && ![..._lineList].some(l => l.name === cur)) { sel.add(new Option(cur, cur)); sel.value = cur; }
 }
 async function pjNewLine() {
   $('pjLine').value = '';
-  const name = await askInput('新建业务线', '业务线名称');
+  const name = await askInput('新建产品线', '产品线名称');
   if (!name) return;
-  try { await jpost('/api/v1/business-lines', {name}); await loadLines(); fillLineSelect(name); toast('业务线已创建', 'ok'); }
+  try { await jpost('/api/v1/business-lines', {name}); await loadLines(); fillLineSelect(name); toast('产品线已创建', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
 }
 async function openLineDlg(editName) {
@@ -7218,21 +7218,21 @@ function renderLineList() {
         <button class="ibtn" title="编辑" onclick="editLine(${jsq(l.name)})">${IC.edit}</button>
         ${canDelete()?`<button class="ibtn bad" title="删除" onclick="deleteLine(${jsq(l.name)}, ${l.projects})">${IC.trash}</button>`:''}
       </div></td></tr>`).join('')}
-  </table></div>` : '<div class="empty">还没有业务线，在下方新建</div>';
+  </table></div>` : '<div class="empty">还没有产品线，在下方新建</div>';
 }
-const LINE_ROLES = {line_admin:'业务线管理员', member:'成员', viewer:'只读'};
+const LINE_ROLES = {line_admin:'产品线管理员', member:'成员', viewer:'只读'};
 function renderLineMembers(l) {
   const members = Object.entries(l.members || {});
   $('lineMembers').style.display = '';
   $('lineMembersHint').textContent = accessMode() === 'line'
-    ? '成员可见并可操作该业务线下全部项目（管理员=项目管理员，成员=测试负责人，只读=只读）'
-    : `当前为「${accessMode()==='open'?'开放':'按项目成员'}」模式，此处设置在系统管理员把数据可见范围切为「按业务线成员」后生效`;
+    ? '成员可见并可操作该产品线下全部项目（管理员=项目管理员，成员=测试负责人，只读=只读）'
+    : `当前为「${accessMode()==='open'?'开放':'按项目成员'}」模式，此处设置在系统管理员把数据可见范围切为「按产品线成员」后生效`;
   $('lineMemberList').innerHTML = members.length ? `<div class="tbl-wrap" style="margin-top:0"><table>
     <tr><th>用户名</th><th style="width:220px">角色</th><th style="width:60px">操作</th></tr>
     ${members.map(([u, r]) => `<tr><td><b>${esc(u)}</b></td>
       <td><select style="width:200px" onchange="setLineMember(${jsq(u)}, this.value)">${Object.entries(LINE_ROLES).map(([k,v]) => `<option value="${k}" ${r===k?'selected':''}>${v}</option>`).join('')}</select></td>
       <td><button class="ibtn bad" title="移除" onclick="removeLineMember(${jsq(u)})">${IC.trash}</button></td></tr>`).join('')}
-  </table></div>` : '<div class="hint">还没有成员；按业务线模式下，未加入的普通用户看不到该业务线的项目</div>';
+  </table></div>` : '<div class="hint">还没有成员；按产品线模式下，未加入的普通用户看不到该产品线的项目</div>';
 }
 async function _lineMemberReq(method, username, body) {
   const url = `/api/v1/business-lines/${encodeURIComponent(_editingLine)}/members/${encodeURIComponent(username)}`;
@@ -7248,44 +7248,44 @@ async function setLineMember(u, role) {
   try { await _lineMemberReq('PUT', u, {role}); toast('角色已更新', 'ok'); } catch (e) { toast(e.message, 'err'); }
 }
 async function removeLineMember(u) {
-  if (!await uiConfirm('移除成员', `把 ${u} 从业务线「${_editingLine}」移除？按业务线模式下该用户将看不到此业务线的项目。`, true)) return;
+  if (!await uiConfirm('移除成员', `把 ${u} 从产品线「${_editingLine}」移除？按产品线模式下该用户将看不到此产品线的项目。`, true)) return;
   try { await _lineMemberReq('DELETE', u); toast('已移除', 'ok'); } catch (e) { toast(e.message, 'err'); }
 }
 function resetLineForm() {
   _editingLine = null;
   $('lineMembers').style.display = 'none';
   for (const id of ['blName','blCode','blOwner','blDesc']) $(id).value = '';
-  $('lineFormTitle').textContent = '新建业务线'; $('blSaveBtn').textContent = '新建'; $('blCancelBtn').style.display = 'none';
+  $('lineFormTitle').textContent = '新建产品线'; $('blSaveBtn').textContent = '新建'; $('blCancelBtn').style.display = 'none';
 }
 function editLine(name) {
   const l = _lineList.find(x => x.name === name); if (!l) return;
   _editingLine = name;
   $('blName').value = l.name; $('blCode').value = l.code || ''; $('blOwner').value = l.owner || ''; $('blDesc').value = l.description || '';
-  $('lineFormTitle').textContent = `编辑业务线「${name}」（改名会同步更新其下 ${l.projects} 个项目）`; $('blSaveBtn').textContent = '保存'; $('blCancelBtn').style.display = '';
+  $('lineFormTitle').textContent = `编辑产品线「${name}」（改名会同步更新其下 ${l.projects} 个项目）`; $('blSaveBtn').textContent = '保存'; $('blCancelBtn').style.display = '';
   renderLineMembers(l);
   $('blName').focus();
 }
 async function saveLineForm() {
   const name = $('blName').value.trim(), code = $('blCode').value.trim(), owner = $('blOwner').value.trim(), description = $('blDesc').value.trim();
-  if (!name) return toast('业务线名称不能为空', 'warn');
+  if (!name) return toast('产品线名称不能为空', 'warn');
   try {
     if (_editingLine) {
       const r = await api('/api/v1/business-lines/' + encodeURIComponent(_editingLine), {method:'PUT', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({new_name: name, code, owner, description})});
       if (projListLine === _editingLine) projListLine = name;
       toast(r.moved_projects ? `已保存，${r.moved_projects} 个项目已更新归属` : '已保存', 'ok');
-    } else { await jpost('/api/v1/business-lines', {name, code, owner, description}); toast('业务线已创建', 'ok'); }
+    } else { await jpost('/api/v1/business-lines', {name, code, owner, description}); toast('产品线已创建', 'ok'); }
     await loadLines(); renderLineList(); resetLineForm();
     await getProjects(true); if (currentView === 'projects') renderProjects();
   } catch (e) { toast(e.message, 'err'); }
 }
 async function deleteLine(name, count) {
-  const msg = count ? `该业务线下有 ${count} 个项目。删除后这些项目将不再归属任何业务线（项目本身保留）。` : '删除后可重新创建。';
-  if (!await uiConfirm(`删除业务线「${name}」？`, msg, true)) return;
+  const msg = count ? `该产品线下有 ${count} 个项目。删除后这些项目将不再归属任何产品线（项目本身保留）。` : '删除后可重新创建。';
+  if (!await uiConfirm(`删除产品线「${name}」？`, msg, true)) return;
   try {
     await api('/api/v1/business-lines/' + encodeURIComponent(name) + (count ? '?detach=true' : ''), {method:'DELETE'});
     if (projListLine === name) projListLine = '';
-    toast('业务线已删除', 'ok'); await loadLines(); renderLineList(); await getProjects(true); if (currentView === 'projects') renderProjects();
+    toast('产品线已删除', 'ok'); await loadLines(); renderLineList(); await getProjects(true); if (currentView === 'projects') renderProjects();
   } catch (e) { toast(e.message, 'err'); }
 }
 async function openProjDlg(name) {
@@ -7419,7 +7419,7 @@ async function renderProjects() {
     return `<tr class="rowlink" onclick="openProject(${jsq(p.project)})">
       <td onclick="event.stopPropagation()" style="width:26px;padding-right:0">${p.builtin?'':`<button class="star-btn ${p.favorite?'on':''}" title="${p.favorite?'取消收藏':'收藏'}" onclick="toggleFavorite(${jsq(p.project)})">${p.favorite?'★':'☆'}</button>`}</td>
       <td><b>${esc(p.project)}</b>${p.code?` <code class="hint">${esc(p.code)}</code>`:''}${p.description?`<div class="hint">${esc(p.description)}</div>`:''}</td>
-      <td>${p.business_line?`<span class="tag" title="同业务线项目共享历史用例复用">${esc(p.business_line)}</span>`:'<span class="hint">—</span>'}</td>
+      <td>${p.business_line?`<span class="tag" title="同产品线项目共享历史用例复用">${esc(p.business_line)}</span>`:'<span class="hint">—</span>'}</td>
       <td>${p.owner?`<span class="tag">${esc(p.owner)}</span>`:'<span class="hint">—</span>'}</td>
       <td><span class="st ${STATUS_CLS[p.status]||'pending'}">${esc(p.status_label||'')}</span></td>
       <td>${p.my_role?`<span class="role-tag">${esc(PROJECT_ROLES[p.my_role]||p.my_role)}</span>`:'<span class="hint">—</span>'}<div class="hint">${p.member_count||0} 名成员</div></td>
@@ -7441,7 +7441,7 @@ async function renderProjects() {
   };
   let rows;
   if (projGroupByLine) {
-    // 业务线维度：同一业务线的项目归在一起，未分业务线的排最后；组头显示项目数与任务 / 用例合计
+    // 产品线维度：同一产品线的项目归在一起，未分产品线的排最后；组头显示项目数与任务 / 用例合计
     const groups = new Map();
     for (const p of pageItems) { const k = p.builtin ? '' : (p.business_line || ''); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); }
     const keys = [...groups.keys()].sort((a, b) => (a === '') - (b === '') || a.localeCompare(b, 'zh'));
@@ -7449,10 +7449,10 @@ async function renderProjects() {
     rows = keys.map(k => {
       const ps = groups.get(k);
       const tasks = ps.reduce((a, p) => a + (p.tasks || 0), 0), cases = ps.reduce((a, p) => a + (p.cases || 0), 0);
-      const head = `<tr class="module-head"><td colspan="12"><span style="font-weight:600">${k ? esc(k) : '未分业务线'}</span>
+      const head = `<tr class="module-head"><td colspan="12"><span style="font-weight:600">${k ? esc(k) : '未分产品线'}</span>
         <span class="hint" style="margin-left:8px">${ps.length} 个项目 · ${tasks} 个任务 · ${cases} 条用例</span>
         ${k && canRename ? `<button class="btn ghost sm" style="margin-left:10px" onclick="event.stopPropagation();openLineDlg(${jsq(k)})">编辑</button>` : ''}
-        ${!k && canRename && ps.some(p=>!p.builtin) ? '<span class="hint" style="margin-left:10px">在「编辑项目」里填写业务线即可归入</span>' : ''}</td></tr>`;
+        ${!k && canRename && ps.some(p=>!p.builtin) ? '<span class="hint" style="margin-left:10px">在「编辑项目」里填写产品线即可归入</span>' : ''}</td></tr>`;
       return head + ps.map(rowOf).join('');
     }).join('');
   } else rows = pageItems.map(rowOf).join('');
@@ -7461,20 +7461,20 @@ async function renderProjects() {
   $('projArea').innerHTML = `<div class="card">
     <div class="card-h"><h3>项目管理 <span class="hint" style="font-weight:normal">${real.length} 个</span></h3><span class="meta">收藏置顶 · 用例生命周期：生成 → 审核 → 正式 → 执行 → 反哺</span>
       <div class="grow" style="flex-wrap:wrap">
-        <input type="search" placeholder="搜索名称 / 编码 / 描述 / 负责人 / 业务线" value="${esc(projListKw)}" style="width:220px" onchange="projListSet('kw', this.value)" onkeydown="if(event.key==='Enter'){projListSet('kw', this.value)}">
-        <label class="check" title="按业务线分组展示"><input type="checkbox" ${projGroupByLine?'checked':''} onchange="projListSet('group', this.checked)"> 按业务线分组</label>
-        <select style="width:130px" onchange="projListSet('line', this.value)" title="按业务线筛选"><option value="">全部业务线</option>
+        <input type="search" placeholder="搜索名称 / 编码 / 描述 / 负责人 / 产品线" value="${esc(projListKw)}" style="width:220px" onchange="projListSet('kw', this.value)" onkeydown="if(event.key==='Enter'){projListSet('kw', this.value)}">
+        <label class="check" title="按产品线分组展示"><input type="checkbox" ${projGroupByLine?'checked':''} onchange="projListSet('group', this.checked)"> 按产品线分组</label>
+        <select style="width:130px" onchange="projListSet('line', this.value)" title="按产品线筛选"><option value="">全部产品线</option>
           ${lines.map(l=>opt(l, `${l}（${lineCounts[l]||0}）`, projListLine)).join('')}</select>
         <select style="width:120px" onchange="projListSet('status', this.value)"><option value="">全部状态</option>
           ${[['active','进行中'],['paused','暂停'],['archived','已归档']].map(([v,l])=>opt(v, `${l}（${statusCounts[v]||0}）`, projListStatus)).join('')}</select>
         ${owners.length>1||projListOwner?`<select style="width:110px" onchange="projListSet('owner', this.value)"><option value="">负责人</option>${[...new Set([...owners, ...(projListOwner?[projListOwner]:[])])].map(o=>opt(o, o, projListOwner)).join('')}</select>`:''}
         ${Object.keys(roleCounts).filter(Boolean).length>1||projListRole?`<select style="width:120px" onchange="projListSet('role', this.value)"><option value="">我的角色</option>${Object.entries(PROJECT_ROLES).filter(([k])=>roleCounts[k]||projListRole===k).map(([k,l])=>opt(k, `${l}（${roleCounts[k]||0}）`, projListRole)).join('')}</select>`:''}
         ${filtering?`<span class="hint">筛选出 ${shown.filter(p=>!p.builtin).length} 个</span><button class="btn ghost sm" onclick="projListSet('reset')">清除筛选</button>`:''}
-        ${isSysAdmin()||openProjects()?`<button class="btn ghost sm" onclick="openLineDlg()">业务线管理</button><button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>`:''}
+        ${isSysAdmin()||openProjects()?`<button class="btn ghost sm" onclick="openLineDlg()">产品线管理</button><button class="btn ghost sm" onclick="openProjDlg()">＋ 新建项目</button>`:''}
         <button class="btn" onclick="openDrawer()">＋ 新建任务</button></div></div>
     <div class="card-b">
       <div class="tbl-wrap" style="margin-top:0;max-height:calc(100vh - 210px)"><table>
-        <thead><tr><th style="width:26px"></th><th>项目</th><th style="width:90px">业务线</th><th style="width:90px">负责人</th><th style="width:70px">状态</th><th style="width:110px">我的角色</th>
+        <thead><tr><th style="width:26px"></th><th>项目</th><th style="width:90px">产品线</th><th style="width:90px">负责人</th><th style="width:70px">状态</th><th style="width:110px">我的角色</th>
         <th style="width:56px">任务</th><th style="width:80px">用例</th>
         <th>用例生命周期</th><th style="width:110px">执行</th><th style="width:90px">最近活动</th><th style="width:90px">操作</th></tr></thead>
         <tbody>${rows || `<tr><td colspan="12"><div class="empty">${filtering?'没有符合筛选条件的项目':(isSysAdmin()||openProjects()?'暂无项目，点击「新建项目」创建':'你尚未加入任何项目，请联系管理员添加为项目成员')}</div></td></tr>`}</tbody>
@@ -8381,8 +8381,8 @@ async function saveTotpPolicy(enabled) {
   } catch (e) { toast(e.message, 'err'); refreshUsers(); }
 }
 async function saveAccessMode(mode) {
-  const label = {open:'开放（全员可见）', line:'按业务线成员', member:'按项目成员'}[mode] || mode;
-  const tip = mode === 'line' ? '切换后普通用户只能看到自己所属业务线下的项目，请先在「项目 → 业务线管理」里为各业务线添加成员。'
+  const label = {open:'开放（全员可见）', line:'按产品线成员', member:'按项目成员'}[mode] || mode;
+  const tip = mode === 'line' ? '切换后普通用户只能看到自己所属产品线下的项目，请先在「项目 → 产品线管理」里为各产品线添加成员。'
     : mode === 'member' ? '切换后普通用户只能看到被加入为成员的项目。' : '切换后所有登录用户可见并可操作全部项目。';
   if (!await uiConfirm(`切换为「${label}」？`, tip + ' 删除权限在任何模式下都只有系统管理员。')) { refreshUsers(); return; }
   try {

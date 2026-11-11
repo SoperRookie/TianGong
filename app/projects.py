@@ -75,7 +75,7 @@ class ProjectStore:
     def _normalize(p: dict) -> dict:
         """老数据补默认字段（项目实体化之前只有名称/描述/创建人）。"""
         p.setdefault("code", "")
-        p.setdefault("business_line", "")  # 业务线：一条业务线包含多个项目，同业务线项目共享历史用例复用
+        p.setdefault("business_line", "")  # 产品线：一条产品线包含多个项目，同产品线项目共享历史用例复用
         p.setdefault("description", "")
         p.setdefault("owner", p.get("created_by") or "")
         p.setdefault("status", "active")
@@ -114,14 +114,14 @@ class ProjectStore:
         return p["members"].get(username)
 
     def business_lines(self) -> list[str]:
-        """已出现过的业务线名称（去重排序），供筛选与录入联想。"""
+        """已出现过的产品线名称（去重排序），供筛选与录入联想。"""
         return sorted({p.get("business_line", "") for p in self._projects.values() if p.get("business_line")})
 
     def rename_business_line(self, old: str, new: str) -> int:
-        """业务线重命名：批量改写该业务线下所有项目，返回受影响项目数。new 为空表示解散业务线。"""
+        """产品线重命名：批量改写该产品线下所有项目，返回受影响项目数。new 为空表示解散产品线。"""
         old, new = (old or "").strip(), (new or "").strip()[:100]
         if not old:
-            raise ProjectError("业务线名称不能为空")
+            raise ProjectError("产品线名称不能为空")
         names = [p["name"] for p in self._projects.values() if p.get("business_line") == old]
         for n in names:
             self._projects[n]["business_line"] = new
@@ -130,7 +130,7 @@ class ProjectStore:
         return len(names)
 
     def siblings(self, name: str, include_archived: bool = False) -> list[str]:
-        """同业务线的其他项目名（用例复用范围）；项目无业务线时为空。"""
+        """同产品线的其他项目名（用例复用范围）；项目无产品线时为空。"""
         p = self._projects.get(name)
         line = (p or {}).get("business_line") or ""
         if not line:
@@ -284,7 +284,7 @@ class ProjectStore:
 
 
 class BusinessLineStore:
-    """业务线实体（一条业务线包含多个项目）：名称为自然键，项目通过 business_line 字段归属。"""
+    """产品线实体（一条产品线包含多个项目）：名称为自然键，项目通过 business_line 字段归属。"""
 
     def __init__(self):
         from app.db import DocStore
@@ -299,7 +299,7 @@ class BusinessLineStore:
         return self._lines.get((name or "").strip())
 
     def ensure(self, name: str, created_by: str | None = None) -> dict | None:
-        """项目上出现了未登记的业务线名（历史数据 / 直接填写）：自动登记。"""
+        """项目上出现了未登记的产品线名（历史数据 / 直接填写）：自动登记。"""
         name = (name or "").strip()
         if not name:
             return None
@@ -311,9 +311,9 @@ class BusinessLineStore:
 
     def create(self, name: str, description: str = "", owner: str = "", code: str = "",
                created_by: str | None = None) -> dict:
-        name = check_name(name, "业务线名称")
+        name = check_name(name, "产品线名称")
         if name in self._lines:
-            raise ProjectError(f"业务线已存在: {name}")
+            raise ProjectError(f"产品线已存在: {name}")
         line = {"name": name, "code": (code or "").strip()[:50], "description": (description or "").strip(),
                 "owner": (owner or "").strip(), "created_by": created_by, "created_at": _now(),
                 "updated_by": created_by, "updated_at": _now()}
@@ -325,11 +325,11 @@ class BusinessLineStore:
                owner: str | None = None, code: str | None = None, operator: str | None = None) -> dict:
         line = self._lines.get(name)
         if line is None:
-            raise ProjectError(f"业务线不存在: {name}")
+            raise ProjectError(f"产品线不存在: {name}")
         if new_name is not None and (new_name := new_name.strip()) and new_name != name:
-            new_name = check_name(new_name, "业务线名称")
+            new_name = check_name(new_name, "产品线名称")
             if new_name in self._lines:
-                raise ProjectError(f"业务线已存在: {new_name}")
+                raise ProjectError(f"产品线已存在: {new_name}")
             self._lines.pop(name)
             self._doc.remove(name)
             line["name"] = new_name
@@ -346,19 +346,19 @@ class BusinessLineStore:
 
     def delete(self, name: str) -> None:
         if name not in self._lines:
-            raise ProjectError(f"业务线不存在: {name}")
+            raise ProjectError(f"产品线不存在: {name}")
         self._lines.pop(name)
         self._doc.remove(name)
 
-    # ---- 业务线成员（按产品线管理数据可见范围）----
-    LINE_ROLES = {"line_admin": "业务线管理员", "member": "成员", "viewer": "只读"}
+    # ---- 产品线成员（按产品线管理数据可见范围）----
+    LINE_ROLES = {"line_admin": "产品线管理员", "member": "成员", "viewer": "只读"}
 
     def set_member(self, name: str, username: str, role: str) -> dict:
         if role not in self.LINE_ROLES:
-            raise ProjectError(f"未知业务线角色: {role}（可用 {'/'.join(self.LINE_ROLES)}）")
+            raise ProjectError(f"未知产品线角色: {role}（可用 {'/'.join(self.LINE_ROLES)}）")
         line = self._lines.get(name)
         if line is None:
-            raise ProjectError(f"业务线不存在: {name}")
+            raise ProjectError(f"产品线不存在: {name}")
         username = (username or "").strip()
         if not username:
             raise ProjectError("用户名不能为空")
@@ -370,9 +370,9 @@ class BusinessLineStore:
     def remove_member(self, name: str, username: str) -> dict:
         line = self._lines.get(name)
         if line is None:
-            raise ProjectError(f"业务线不存在: {name}")
+            raise ProjectError(f"产品线不存在: {name}")
         if username not in (line.get("members") or {}):
-            raise ProjectError(f"{username} 不是该业务线成员")
+            raise ProjectError(f"{username} 不是该产品线成员")
         line["members"].pop(username)
         line["updated_at"] = _now()
         self._doc.put(name, line)

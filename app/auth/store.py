@@ -142,7 +142,7 @@ class AuthStore:
     ACCESS_MODES = ("open", "line", "member")
 
     def access_mode(self) -> str | None:
-        """数据可见范围模式：open 全员可见 / line 按业务线成员 / member 按项目成员；None 表示沿用环境变量默认。"""
+        """数据可见范围模式：open 全员可见 / line 按产品线成员 / member 按项目成员；None 表示沿用环境变量默认。"""
         mode = self._settings.get("access_mode")
         return mode if mode in self.ACCESS_MODES else None
 

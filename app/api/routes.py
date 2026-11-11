@@ -109,13 +109,13 @@ def _is_admin(request: Request) -> bool:
     return _current_user(request)["role"] == "admin"
 
 
-# 业务线角色 → 项目角色：业务线管理员视同项目管理员，成员视同测试负责人，只读视同只读
+# 产品线角色 → 项目角色：产品线管理员视同项目管理员，成员视同测试负责人，只读视同只读
 _LINE_ROLE_TO_PROJECT = {"line_admin": "project_admin", "member": "test_lead", "viewer": "viewer"}
 _ROLE_RANK = {"viewer": 0, "tester": 1, "test_lead": 2, "project_admin": 3}
 
 
 def _access_mode(request: Request) -> str:
-    """数据可见范围：open 全员可见 / line 按业务线成员 / member 按项目成员。页面设置优先，否则沿用环境变量。"""
+    """数据可见范围：open 全员可见 / line 按产品线成员 / member 按项目成员。页面设置优先，否则沿用环境变量。"""
     mode = request.app.state.auth.access_mode()
     if mode:
         return mode
@@ -123,7 +123,7 @@ def _access_mode(request: Request) -> str:
 
 
 def _line_role_for_project(request: Request, project: str | None) -> str | None:
-    """按业务线模式：用户在项目所属业务线中的角色折算成项目角色。"""
+    """按产品线模式：用户在项目所属产品线中的角色折算成项目角色。"""
     entity = request.app.state.projects.get(project) if project else None
     line = (entity or {}).get("business_line") or ""
     if not line:
@@ -204,7 +204,7 @@ def _visible_projects(request: Request) -> set[str] | None:
 
 
 def _line_projects(request: Request, business_line: str | None) -> set[str] | None:
-    """业务线筛选：返回该业务线下的项目名集合；未指定业务线返回 None（不过滤）。"""
+    """产品线筛选：返回该产品线下的项目名集合；未指定产品线返回 None（不过滤）。"""
     if not business_line:
         return None
     return {p["name"] for p in request.app.state.projects.list() if p.get("business_line") == business_line}
@@ -487,7 +487,7 @@ def _with_memberships(request: Request, user: dict) -> dict:
         projects = [{"project": p["name"], "role": "project_admin", "status": p["status"]}
                     for p in request.app.state.projects.list()]
     else:
-        # 有效角色：项目成员角色与业务线角色折算后取高者（前端显隐与后端 _project_role 同口径）
+        # 有效角色：项目成员角色与产品线角色折算后取高者（前端显隐与后端 _project_role 同口径）
         visible = _visible_projects(request)
         projects = []
         for p in request.app.state.projects.list():
@@ -1036,7 +1036,7 @@ async def set_default_template(request: Request, template_id: str) -> dict:
 
 
 def _knowledge_spaces(app, space: str | None) -> str | list[str] | None:
-    """检索范围：本项目 + 同业务线的其他项目（历史用例复用）+ 公共层（公共层由存储层自动并入）。"""
+    """检索范围：本项目 + 同产品线的其他项目（历史用例复用）+ 公共层（公共层由存储层自动并入）。"""
     if not space:
         return space
     try:
@@ -4227,7 +4227,7 @@ async def list_plans(
     查询条件：keyword（名称 / 项目 / 负责人 / 创建人 / 轮次名模糊）、status（计划状态）、owner（负责人精确）、
     run_state（最近执行：none 未执行 / running 执行中 / finished 已结束）。
     分页：page ≥ 1 时返回该页并附 total / pages，page=0（默认）返回全部（任务概览、项目概览等内部调用）。
-    status_counts 按筛选前范围（项目 / 业务线 / mine）统计供下拉。
+    status_counts 按筛选前范围（项目 / 产品线 / mine）统计供下拉。
     """
     from app.plans import PLAN_STATUSES, plan_summary
 
@@ -5424,7 +5424,7 @@ def _eval_sample_of(app, req_id: str) -> dict | None:
 
 
 async def _analysis_knowledge(app, text: str, project: str | None, req_id: str | None) -> tuple[str | None, int]:
-    """需求分析阶段的知识注入：本项目（含同业务线 / 公共层）的需求文档库与业务规则库，只用于理解术语与背景；
+    """需求分析阶段的知识注入：本项目（含同产品线 / 公共层）的需求文档库与业务规则库，只用于理解术语与背景；
     排除该需求自己沉淀的文档（否则上一版分析会"自证"）。任何故障降级为无知识注入。"""
     try:
         service = _knowledge_service(app)
@@ -5547,7 +5547,7 @@ async def list_requirements(
 
     关键词匹配标题、原文、人工补充、附件文件名与解析文本、待确认事项、模块路径；
     page_size=0（默认）不分页返回全部（对话框等内部调用），列表页传 20 / 50 / 100 / 200；
-    status_counts / creators / source_types 按筛选前范围（项目 / 业务线 / 是否含已删除）统计供下拉。"""
+    status_counts / creators / source_types 按筛选前范围（项目 / 产品线 / 是否含已删除）统计供下拉。"""
     from app.requirements import REQ_STATUSES, SOURCE_TYPES
 
     if page_size and page_size not in CASE_PAGE_SIZES:
@@ -6812,7 +6812,7 @@ def _line_view(request: Request, line: dict) -> dict:
 
 
 def _require_line_manage(request: Request, name: str | None = None) -> None:
-    """业务线的增改：系统管理员；开放模式下任何登录用户；按业务线模式下该业务线的管理员可改自己的业务线。"""
+    """产品线的增改：系统管理员；开放模式下任何登录用户；按产品线模式下该产品线的管理员可改自己的产品线。"""
     if _is_admin(request):
         return
     mode = _access_mode(request)
@@ -6820,12 +6820,12 @@ def _require_line_manage(request: Request, name: str | None = None) -> None:
         return
     if mode == "line" and name and request.app.state.business_lines.role_in_line(name, _operator(request)) == "line_admin":
         return
-    raise HTTPException(status_code=403, detail="仅系统管理员或该业务线管理员可维护业务线")
+    raise HTTPException(status_code=403, detail="仅系统管理员或该产品线管理员可维护产品线")
 
 
 @router.get("/api/v1/business-lines")
 async def list_business_lines(request: Request) -> dict:
-    """业务线清单（实体 + 项目数与项目名）：项目上出现过但未登记的业务线名自动登记。"""
+    """产品线清单（实体 + 项目数与项目名）：项目上出现过但未登记的产品线名自动登记。"""
     lstore = request.app.state.business_lines
     for p in request.app.state.projects.list():
         lstore.ensure(p.get("business_line") or "", created_by=p.get("created_by"))
@@ -6847,17 +6847,17 @@ async def create_business_line(request: Request, body: BusinessLineBody) -> dict
 
 @router.put("/api/v1/business-lines/{name}")
 async def update_business_line(request: Request, name: str, body: BusinessLineUpdateBody) -> dict:
-    """业务线编辑：改名会联动更新该业务线下所有项目。"""
+    """产品线编辑：改名会联动更新该产品线下所有项目。"""
     from app.projects import ProjectError
 
     _require_line_manage(request, name)
     lstore = request.app.state.business_lines
     if lstore.get(name) is None:
-        # 只存在于项目字段上的历史业务线：先登记再改；完全不存在的 404
+        # 只存在于项目字段上的历史产品线：先登记再改；完全不存在的 404
         if any(p.get("business_line") == name for p in request.app.state.projects.list()):
             lstore.ensure(name)
         else:
-            raise HTTPException(status_code=404, detail=f"业务线不存在: {name}")
+            raise HTTPException(status_code=404, detail=f"产品线不存在: {name}")
     try:
         line = lstore.update(name, new_name=body.new_name, description=body.description, owner=body.owner,
                              code=body.code, operator=_operator(request))
@@ -6866,7 +6866,7 @@ async def update_business_line(request: Request, name: str, body: BusinessLineUp
     moved = 0
     if body.new_name and body.new_name.strip() and body.new_name.strip() != name:
         moved = request.app.state.projects.rename_business_line(name, line["name"])
-        logger.info("业务线「{}」→「{}」：{} 个项目已更新", name, line["name"], moved)
+        logger.info("产品线「{}」→「{}」：{} 个项目已更新", name, line["name"], moved)
     return {**_line_view(request, line), "moved_projects": moved}
 
 
@@ -6876,7 +6876,7 @@ class LineMemberBody(BaseModel):
 
 @router.put("/api/v1/business-lines/{name}/members/{username}")
 async def set_line_member(request: Request, name: str, username: str, body: LineMemberBody) -> dict:
-    """业务线成员与角色：按业务线模式下，成员可见并可操作该业务线全部项目（管理员=项目管理员，成员=测试负责人，只读=只读）。"""
+    """产品线成员与角色：按产品线模式下，成员可见并可操作该产品线全部项目（管理员=项目管理员，成员=测试负责人，只读=只读）。"""
     from app.projects import ProjectError
 
     _require_line_manage(request, name)
@@ -6903,14 +6903,14 @@ async def remove_line_member(request: Request, name: str, username: str) -> dict
 
 @router.delete("/api/v1/business-lines/{name}")
 async def delete_business_line(request: Request, name: str, detach: bool = False) -> dict:
-    """删除业务线（仅系统管理员）：仍有项目归属时拒绝；detach=true 则先把项目解除归属再删。"""
+    """删除产品线（仅系统管理员）：仍有项目归属时拒绝；detach=true 则先把项目解除归属再删。"""
     from app.projects import ProjectError
 
     _require_admin(request)
     pstore, lstore = request.app.state.projects, request.app.state.business_lines
     attached = [p["name"] for p in pstore.list() if p.get("business_line") == name]
     if attached and not detach:
-        raise HTTPException(status_code=400, detail=f"业务线下仍有 {len(attached)} 个项目（{'、'.join(attached[:3])}），请先改归属或勾选「解除归属后删除」")
+        raise HTTPException(status_code=400, detail=f"产品线下仍有 {len(attached)} 个项目（{'、'.join(attached[:3])}），请先改归属或勾选「解除归属后删除」")
     if attached:
         pstore.rename_business_line(name, "")
     try:
@@ -6930,14 +6930,14 @@ class ProjectBody(BaseModel):
 
 @router.post("/api/v1/projects")
 async def create_project(request: Request, body: ProjectBody) -> dict:
-    """创建项目：开放模式任何登录用户；按业务线模式该业务线的管理员；否则仅系统管理员。创建人与负责人自动成为项目管理员。"""
+    """创建项目：开放模式任何登录用户；按产品线模式该产品线的管理员；否则仅系统管理员。创建人与负责人自动成为项目管理员。"""
     from app.projects import ProjectError
 
     mode = _access_mode(request)
     if not _is_admin(request) and mode != "open":
         if not (mode == "line" and body.business_line
                 and request.app.state.business_lines.role_in_line(body.business_line, _operator(request)) == "line_admin"):
-            raise HTTPException(status_code=403, detail="按业务线模式下，只有该业务线的管理员或系统管理员可创建项目")
+            raise HTTPException(status_code=403, detail="按产品线模式下，只有该产品线的管理员或系统管理员可创建项目")
     auth = request.app.state.auth
     if body.owner.strip() and not auth.exists(body.owner.strip()) and get_settings().auth_enabled:
         raise HTTPException(status_code=400, detail=f"负责人不存在: {body.owner}")
@@ -8152,7 +8152,7 @@ async def list_tasks(
     created_by: str | None = None, limit: int = 50, business_line: str = "",
     include_deleted: bool = False,
 ) -> dict:
-    """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人/业务线过滤。
+    """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人/产品线过滤。
 
     include_deleted=true 连已删除的任务一起返回（带 deleted_at / deleted_by，供「已删除」筛选与恢复），仅有删除权限者可用。
     """
