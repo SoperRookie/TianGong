@@ -305,7 +305,15 @@ async def auth_middleware(request: Request, call_next):
     return response
 
 
+# Vue 前端（web/，v2.3 改造）：构建产物 web/dist 存在时优先托管；否则回退到旧的单文件页面 app/web/index.html
+_WEB_DIST = BASE_DIR / "web" / "dist"
+if (_WEB_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=_WEB_DIST / "assets"), name="assets")
+
+
 @app.get("/", include_in_schema=False)
 async def web_index() -> FileResponse:
-    """Web 界面（M4-W2）：单页静态实现，后续可平移 Vue3 工程化前端。"""
+    """Web 界面：web/dist/index.html（Vue 3 + Vite 构建，哈希路由）；未构建时回退旧单页。"""
+    if (_WEB_DIST / "index.html").is_file():
+        return FileResponse(_WEB_DIST / "index.html")
     return FileResponse(BASE_DIR / "app" / "web" / "index.html")

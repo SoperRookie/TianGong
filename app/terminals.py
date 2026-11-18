@@ -1,16 +1,23 @@
 """端（终端 / 系统面）的定义与判定：H5 / 游戏后台管理 / 商户后台 / 通用 / 端到端 / 其他。
 
 一份需求通常同时写了几个端（H5 用户侧、活动运营的游戏后台、商户管理后台），提取完要按端汇总看总需求，拆解出的测试点要按端
-分列表审核、按端单独生成用例、按端单独导出。端的判定分三层：
-1. 需求提取时模型按整理稿的顶层章节（文件夹 / 页面）判一次（Prompt `terminal_classify`），人可在提取页改；
+分列表审核、按端单独生成用例、按端单独导出。
+
+**有哪些端由需求提取时从文档里识别**：模型先看这份整理稿涉及哪几个端，再把顶层章节归进去。文档里的端就是端清单里的某一个时
+用清单的 key（h5 / game_admin / merchant_admin，跨需求口径一致、关键词兜底也认）；清单里没有的（荷官端、大屏、开放接口……）
+按文档里的叫法新建——**文档自有的端，名称即 key**，随整理稿的「章节 → 端」存、随任务的测试点走，不需要任何配置。
+
+端的判定分三层：
+1. 需求提取时模型识别端并按整理稿的顶层章节（文件夹 / 页面）归端（Prompt `terminal_classify`），人可在提取页改、也可新建端；
 2. 任务拆解时模块名按整理稿章节对回章节的端（模块名就是「文件夹-页面-区块」）；
-3. 都对不上的按名字关键词兜底，再兜不住的记「其他」。
-端的清单可用 config/terminals.yaml 覆盖（key / label / keywords），没有就用内置三端。
+3. 都对不上的按名字关键词兜底（只认端清单里的端），再兜不住的记「其他」。
+端清单（已知的端）可用 config/terminals.yaml 覆盖（key / label / keywords），没有就用内置三端；它只是识别时的参考与兜底，不是上限。
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
 
@@ -36,6 +43,12 @@ _FIXED: list[dict] = [
 ]
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "terminals.yaml"
+
+CUSTOM_NAME_MAX = 16             # 文档自有的端：名称上限（名称即 key，会进筛选按钮、导出文件名与 URL 参数）
+MAX_CUSTOM_TERMINALS = 8         # 一份整理稿最多认几个文档自有的端（端是系统面不是功能模块，再多就是模型把页面当端了）
+_FIXED_KEYS = (COMMON, E2E, OTHER)
+_BAD_NAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+_UNKNOWN_NAMES = {"未知", "不确定", "不明", "无", "暂无", "其它", "none", "null", "unknown", "n/a", "-", "—"}
 
 
 @lru_cache(maxsize=1)
@@ -79,8 +92,70 @@ def label_of(key: str | None) -> str:
 
 
 def valid_key(key: str | None) -> str | None:
+    """端清单里的 key（不含文档自有的端）。"""
     key = (key or "").strip()
     return key if key in terminal_keys() else None
+
+
+def _label_norm(text: str) -> str:
+    """名称比对口径：不分大小写、忽略空白与末尾的「端」字（「H5 端」= H5）。"""
+    s = re.sub(r"\s+", "", str(text or "")).lower()
+    return s[:-1] if len(s) > 1 and s.endswith("端") else s
+
+
+def resolve_key(value) -> str | None:
+    """模型 / 人写的端 → 端 key。端清单里的 key 或名称对回清单；「未知」之类记其他；其余当文档自有的端——名称即 key
+    （去掉不能进文件名的字符，超过 CUSTOM_NAME_MAX 个字的不认）。空值返回 None。"""
+    if not isinstance(value, (str, int, float)):
+        return None
+    raw = " ".join(str(value).split())
+    if not raw:
+        return None
+    allt = terminals()
+    for t in allt:
+        if raw.lower() == t["key"].lower():
+            return t["key"]
+    norm = _label_norm(raw)
+    for t in allt:
+        if norm == _label_norm(t["label"]):
+            return t["key"]
+    if raw.lower() in _UNKNOWN_NAMES:
+        return OTHER
+    name = " ".join(_BAD_NAME_CHARS.sub(" ", raw).split())
+    if not name or len(name) > CUSTOM_NAME_MAX:
+        return None
+    return name
+
+
+def is_custom(key: str | None) -> bool:
+    """文档自有的端（不在端清单里）。"""
+    return bool(key) and key not in terminal_keys()
+
+
+def _stored(value) -> str | None:
+    """库里存的端：非空字符串原样认（文档自有的端名称即 key，写入时已经过 resolve_key）。"""
+    return value.strip() or None if isinstance(value, str) else None
+
+
+def order_keys(keys: Iterable[str]) -> list[str]:
+    """端的展示顺序：端清单里的业务端 → 文档自有的端（按出现先后）→ 通用 / 端到端 / 其他。"""
+    seen = list(dict.fromkeys(k for k in keys if k))
+    known = terminal_keys()
+    return ([k for k in known if k in seen and k not in _FIXED_KEYS] + [k for k in seen if k not in known]
+            + [k for k in _FIXED_KEYS if k in seen])
+
+
+def _rank(key: str) -> int:
+    """票数相同时谁优先：业务端按清单顺序，文档自有的端次之，通用 / 端到端 / 其他最后。"""
+    known = terminal_keys()
+    if key in _FIXED_KEYS:
+        return len(known) + 1 + _FIXED_KEYS.index(key)
+    return known.index(key) if key in known else len(known)
+
+
+def terminal_options(extra: Iterable[str] = (), with_e2e: bool = True) -> list[dict]:
+    """可选的端 [{key, label}]：端清单 + extra 里文档自有的端（插在业务端之后）。"""
+    return [{"key": k, "label": label_of(k)} for k in order_keys([*terminal_keys(), *extra]) if with_e2e or k != E2E]
 
 
 _PRIORITY = ("merchant_admin", "game_admin")   # 「商户管理后台」含「管理后台」、「游戏后台-大厅配置」含「大厅」：后台类先判
@@ -157,12 +232,14 @@ def _block_items(block: dict) -> int:
 
 
 def section_terminals(outline: list[dict], overrides: dict | None = None) -> dict[str, str]:
-    """每个顶层章节的端：先看模型 / 人工给的 overrides（章节键 → 端），没有的按关键词判，再没有的记「其他」。"""
+    """每个顶层章节的端：先看模型 / 人工给的 overrides（章节键 → 端，含文档自有的端），没有的按关键词判，再没有的记「其他」。"""
     overrides = overrides or {}
     out: dict[str, str] = {}
     for top in top_sections(outline):
         key = top["key"]
-        t = valid_key(overrides.get(key))
+        t = _stored(overrides.get(key))
+        if t == E2E:   # 端到端是跨端场景点的归属，章节不归它
+            t = None
         if t is None:
             t = classify_name(key) or next((classify_name(p["title"]) for p in top["pages"] if classify_name(p["title"])), None) or OTHER
         out[key] = t
@@ -170,18 +247,16 @@ def section_terminals(outline: list[dict], overrides: dict | None = None) -> dic
 
 
 def terminal_summary(outline: list[dict], overrides: dict | None = None) -> dict:
-    """三端汇总：每个端有哪些章节 / 页面、多少区块与条目，以及总计。只列有内容的端，顺序按端清单。"""
+    """按端汇总：每个端有哪些章节 / 页面、多少区块与条目，以及总计。只列有内容的端，顺序见 order_keys。"""
     tops = top_sections(outline)
     terms = section_terminals(outline, overrides)
     groups: dict[str, list[dict]] = {}
     for top in tops:
         groups.setdefault(terms.get(top["key"], OTHER), []).append(top)
     rows = []
-    for t in terminals():
-        secs = groups.get(t["key"]) or []
-        if not secs:
-            continue
-        rows.append({"key": t["key"], "label": t["label"], "sections": [dict(s, terminal=t["key"]) for s in secs],
+    for k in order_keys(groups):
+        secs = groups[k]
+        rows.append({"key": k, "label": label_of(k), "custom": is_custom(k), "sections": [dict(s, terminal=k) for s in secs],
                      "pages": sum(len(s["pages"]) for s in secs), "blocks": sum(s["blocks"] for s in secs),
                      "items": sum(s["items"] for s in secs)})
     total = {"sections": len(tops), "pages": sum(len(s["pages"]) for s in tops),
@@ -243,7 +318,7 @@ def fill_point_terminals(analysis: dict | None, force: bool = False) -> int:
                 if mod_term is None:
                     mod_term = terminal_of_module(module, sections, titles)
                 want = mod_term
-            if force or not valid_key(p.get("terminal")):
+            if force or not _stored(p.get("terminal")):
                 if p.get("terminal") != want:
                     n += 1
                 p["terminal"] = want
@@ -251,7 +326,26 @@ def fill_point_terminals(analysis: dict | None, force: bool = False) -> int:
 
 
 def point_terminal(p: dict) -> str:
-    return valid_key(p.get("terminal")) or (E2E if p.get("source") == E2E else OTHER)
+    return _stored(p.get("terminal")) or (E2E if p.get("source") == E2E else OTHER)
+
+
+def task_terminal_keys(analysis: dict | None) -> list[str]:
+    """这个任务用到的端（整理稿章节的端 + 测试点上的端），含文档自有的端；顺序见 order_keys。"""
+    analysis = analysis or {}
+    keys = [t for t in ((analysis.get("terminal_rules") or {}).get("sections") or {}).values() if isinstance(t, str)]
+    for entry in analysis.get("test_points") or []:
+        for p in entry.get("points") or []:
+            if isinstance(p, dict) and _stored(p.get("terminal")):
+                keys.append(p["terminal"].strip())
+    return order_keys(keys)
+
+
+def task_terminal(analysis: dict | None, key: str | None) -> str | None:
+    """接口传来的端在这个任务里认不认：端清单里的 key，或任务用到的文档自有的端。"""
+    key = (key or "").strip()
+    if not key:
+        return None
+    return key if key in terminal_keys() or key in task_terminal_keys(analysis) else None
 
 
 def module_terminals(modules: list[dict]) -> dict[str, str]:
@@ -264,7 +358,7 @@ def module_terminals(modules: list[dict]) -> dict[str, str]:
                 t = point_terminal(p)
                 counts[t] = counts.get(t, 0) + 1
         if counts:
-            out[str(entry.get("module") or "")] = max(counts, key=lambda k: (counts[k], -terminal_keys().index(k)))
+            out[str(entry.get("module") or "")] = max(counts, key=lambda k: (counts[k], -_rank(k)))
     return out
 
 
@@ -304,7 +398,7 @@ def point_terminal_stats(modules: list[dict], generated: set[str] | None = None)
         for t in seen:
             if t in stats:
                 stats[t]["modules"] += 1
-    return [stats[k] for k in terminal_keys() if k in stats]
+    return [stats[k] for k in order_keys(stats)]
 
 
 def case_terminal(case: dict, point_terms: dict[str, str], module_terms: dict[str, str]) -> str:
@@ -315,7 +409,7 @@ def case_terminal(case: dict, point_terms: dict[str, str], module_terms: dict[st
         if t:
             counts[t] = counts.get(t, 0) + 1
     if counts:
-        return max(counts, key=lambda k: (counts[k], -terminal_keys().index(k)))
+        return max(counts, key=lambda k: (counts[k], -_rank(k)))
     module = str(case.get("module") or "")
     if module in module_terms:
         return module_terms[module]

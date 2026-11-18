@@ -196,7 +196,7 @@ def gather_material(app, project: str, budget_chars: int) -> tuple[str, dict]:
     p = app.state.projects.get(project) or {}
     head = [f"项目：{project}"]
     if p.get("business_line"):
-        head.append(f"业务线：{p['business_line']}")
+        head.append(f"产品线：{p['business_line']}")
     if p.get("description"):
         head.append(f"项目描述：{p['description']}")
     try:

@@ -24,7 +24,7 @@ docs/xq/
 uploads/
 outputs/
 logs/
-data/
+/data/
 *.log
 
 # macOS

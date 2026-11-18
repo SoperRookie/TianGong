@@ -34,7 +34,7 @@ class KnowledgeBundle(BaseModel):
 
     hits: dict[str, list[SearchHit]] = Field(default_factory=dict)
     snapshot: list[dict] = Field(default_factory=list, description="知识快照（F-7-13）")
-    current_space: str | None = Field(default=None, description="当前项目；来自同业务线其他项目的切片在渲染时标注来源项目")
+    current_space: str | None = Field(default=None, description="当前项目；来自同产品线其他项目的切片在渲染时标注来源项目")
 
     @property
     def empty(self) -> bool:
@@ -48,7 +48,7 @@ class KnowledgeBundle(BaseModel):
                 continue
             parts.append(f"### {CATEGORIES[category]}")
             parts.extend(
-                f"[{'同业务线项目「' + h.space + '」· ' if self._cross(h) else ''}{h.source} 第{h.chunk_index + 1}片] {h.text}"
+                f"[{'同产品线项目「' + h.space + '」· ' if self._cross(h) else ''}{h.source} 第{h.chunk_index + 1}片] {h.text}"
                 for h in hits
             )
         return "\n\n".join(parts)
