@@ -126,8 +126,8 @@ class KnowledgeStore:
     @staticmethod
     def _scope_filter(category: str | None, space: str | list[str] | None):
         """检索范围（16 章三层）：space 指定项目时 = 该项目（含模块层）+ 公共层（public / 历史 default）；
-        传列表时 = 这些项目（同业务线用例复用）+ 公共层；space 为 None 时不限（仅管理员全局检索用）。
-        除显式列出的同业务线项目外，项目知识绝不跨项目命中。"""
+        传列表时 = 这些项目（同产品线用例复用）+ 公共层；space 为 None 时不限（仅管理员全局检索用）。
+        除显式列出的同产品线项目外，项目知识绝不跨项目命中。"""
         from app.knowledge.schemas import DEFAULT_SPACE, PUBLIC_SPACE
 
         must = []

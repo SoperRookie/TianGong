@@ -109,13 +109,13 @@ def _is_admin(request: Request) -> bool:
     return _current_user(request)["role"] == "admin"
 
 
-# 业务线角色 → 项目角色：业务线管理员视同项目管理员，成员视同测试负责人，只读视同只读
+# 产品线角色 → 项目角色：产品线管理员视同项目管理员，成员视同测试负责人，只读视同只读
 _LINE_ROLE_TO_PROJECT = {"line_admin": "project_admin", "member": "test_lead", "viewer": "viewer"}
 _ROLE_RANK = {"viewer": 0, "tester": 1, "test_lead": 2, "project_admin": 3}
 
 
 def _access_mode(request: Request) -> str:
-    """数据可见范围：open 全员可见 / line 按业务线成员 / member 按项目成员。页面设置优先，否则沿用环境变量。"""
+    """数据可见范围：open 全员可见 / line 按产品线成员 / member 按项目成员。页面设置优先，否则沿用环境变量。"""
     mode = request.app.state.auth.access_mode()
     if mode:
         return mode
@@ -123,7 +123,7 @@ def _access_mode(request: Request) -> str:
 
 
 def _line_role_for_project(request: Request, project: str | None) -> str | None:
-    """按业务线模式：用户在项目所属业务线中的角色折算成项目角色。"""
+    """按产品线模式：用户在项目所属产品线中的角色折算成项目角色。"""
     entity = request.app.state.projects.get(project) if project else None
     line = (entity or {}).get("business_line") or ""
     if not line:
@@ -204,7 +204,7 @@ def _visible_projects(request: Request) -> set[str] | None:
 
 
 def _line_projects(request: Request, business_line: str | None) -> set[str] | None:
-    """业务线筛选：返回该业务线下的项目名集合；未指定业务线返回 None（不过滤）。"""
+    """产品线筛选：返回该产品线下的项目名集合；未指定产品线返回 None（不过滤）。"""
     if not business_line:
         return None
     return {p["name"] for p in request.app.state.projects.list() if p.get("business_line") == business_line}
@@ -310,7 +310,7 @@ class LoginBody(BaseModel):
 @router.post("/api/v1/auth/login")
 async def auth_login(request: Request, body: LoginBody) -> dict:
     from app.auth import AuthError
-    from app.auth.store import OtpRequired
+    from app.auth.store import IpNotAllowed, OtpRequired
 
     from app.audit import record as audit
 
@@ -325,6 +325,12 @@ async def auth_login(request: Request, body: LoginBody) -> dict:
     except OtpRequired:
         # 口令正确但需动态码：不签发会话，前端展示验证码输入后重新提交
         return {"otp_required": True}
+    except IpNotAllowed as e:
+        # 登录 IP 白名单未命中：口令未校验即拒绝，安全日志单独记「登录被拒」并带 IP
+        audit(user=body.username.strip(), ip=_client_ip(request), ua=ua, kind="auth", action="登录被拒（IP 未加白）",
+              target=body.username.strip(), method="POST", path="/api/v1/auth/login", status=403, detail=str(e))
+        logger.warning("登录被拒：用户 {} IP {} 不在白名单", body.username.strip(), _client_ip(request) or "-")
+        raise HTTPException(status_code=403, detail=str(e))
     except AuthError as e:
         audit(user=body.username.strip(), ip=_client_ip(request), ua=ua, kind="auth", action="登录失败",
               target=body.username.strip(), method="POST", path="/api/v1/auth/login", status=401, detail=str(e))
@@ -342,7 +348,8 @@ async def auth_login(request: Request, body: LoginBody) -> dict:
 async def auth_settings(request: Request) -> dict:
     """系统级开关：两步验证、数据可见范围模式。"""
     """安全设置：两步验证功能总开关状态（登录用户可读，用于界面展隐）。"""
-    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request)}
+    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request),
+            "ip_whitelist_enabled": request.app.state.auth.ip_whitelist()["enabled"]}
 
 
 class AuthSettingsBody(BaseModel):
@@ -366,7 +373,51 @@ async def update_auth_settings(request: Request, body: AuthSettingsBody) -> dict
         except AuthError as e:
             raise HTTPException(status_code=400, detail=str(e))
         logger.info("数据可见范围模式：{}", body.access_mode)
-    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request)}
+    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request),
+            "ip_whitelist_enabled": request.app.state.auth.ip_whitelist()["enabled"]}
+
+
+# ---- 登录 IP 白名单（管理员）----
+
+
+class IpWhitelistEntry(BaseModel):
+    ip: str            # 单个 IP 或 CIDR 网段
+    note: str = ""     # 备注：谁 / 哪里（≤ 64 字）
+
+
+class IpWhitelistBody(BaseModel):
+    enabled: bool | None = None
+    entries: list[IpWhitelistEntry] | None = None   # 不传则名单不变
+
+
+def _ip_whitelist_view(request: Request) -> dict:
+    out = request.app.state.auth.ip_whitelist()
+    out["client_ip"] = _client_ip(request)   # 服务端看到的操作人 IP：加白前先确认这个，而不是本机网卡地址
+    return out
+
+
+@router.get("/api/v1/auth/ip-whitelist")
+async def get_ip_whitelist(request: Request) -> dict:
+    """登录 IP 白名单（管理员）：开关、名单与当前请求的来源 IP。开启后只有名单内 IP 能登录。"""
+    _require_admin(request)
+    return _ip_whitelist_view(request)
+
+
+@router.put("/api/v1/auth/ip-whitelist")
+async def update_ip_whitelist(request: Request, body: IpWhitelistBody) -> dict:
+    """整体保存开关与名单（管理员）。开启状态下操作人当前 IP 必须在名单里，否则 400，避免把自己锁在外面。"""
+    from app.auth import AuthError
+
+    user = _require_admin(request)
+    try:
+        request.app.state.auth.set_ip_whitelist(
+            enabled=body.enabled,
+            entries=[e.model_dump() for e in body.entries] if body.entries is not None else None,
+            operator=user["username"], operator_ip=_client_ip(request),
+        )
+    except AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _ip_whitelist_view(request)
 
 
 # ---- 两步验证（TOTP：Google Authenticator / 海月盾等标准验证器）----
@@ -436,7 +487,7 @@ def _with_memberships(request: Request, user: dict) -> dict:
         projects = [{"project": p["name"], "role": "project_admin", "status": p["status"]}
                     for p in request.app.state.projects.list()]
     else:
-        # 有效角色：项目成员角色与业务线角色折算后取高者（前端显隐与后端 _project_role 同口径）
+        # 有效角色：项目成员角色与产品线角色折算后取高者（前端显隐与后端 _project_role 同口径）
         visible = _visible_projects(request)
         projects = []
         for p in request.app.state.projects.list():
@@ -985,7 +1036,7 @@ async def set_default_template(request: Request, template_id: str) -> dict:
 
 
 def _knowledge_spaces(app, space: str | None) -> str | list[str] | None:
-    """检索范围：本项目 + 同业务线的其他项目（历史用例复用）+ 公共层（公共层由存储层自动并入）。"""
+    """检索范围：本项目 + 同产品线的其他项目（历史用例复用）+ 公共层（公共层由存储层自动并入）。"""
     if not space:
         return space
     try:
@@ -1941,23 +1992,23 @@ def _quality_report(record: TaskRecord, result) -> dict:
 class ConfirmBody(BaseModel):
     test_points: list[dict] | None = None  # 缺省沿用拆解草稿；传入则以用户修改后的为准
     async_mode: bool = False               # True：后台生成并立即返回（页面轮询），可取消、不受代理超时影响
-    terminal: str | None = None            # 只为这个端（h5 / game_admin / merchant_admin / e2e …）的测试点生成用例：各端审完各自生成、各自评审
+    terminal: str | None = None            # 只为这个端（h5 / game_admin / merchant_admin / e2e / 文档自有的端名称 …）的测试点生成用例：各端审完各自生成、各自评审
 
 
 @router.post("/api/v1/tasks/{task_id}/confirm")
 async def confirm_task(request: Request, task_id: str, body: ConfirmBody | None = None) -> dict:
     """确认（或修改后确认）测试点，继续生成（F-3-3 第二阶段）。多模块按模块并行生成。"""
-    from app.terminals import fill_point_terminals, label_of, valid_key
+    from app.terminals import fill_point_terminals, label_of, task_terminal
 
     store = request.app.state.tasks
     record = _task(request, task_id, "point.review")
     _ai_ctx(request, record)
     async_mode = bool(body and body.async_mode)
     terminal = (body.terminal or "").strip() if body else ""
-    if terminal and not valid_key(terminal):
-        raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
     if fill_point_terminals(record.analysis):
         store.save(record)
+    if terminal and not task_terminal(record.analysis, terminal):   # 端清单里的端，或这个任务里文档自有的端
+        raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
     if record.status == "completed":
         # 分批审核、分批生成：第一批生成后又审核通过了新的测试点 → 只为这些点增量生成，并入现有用例
         pending = _points_pending_generation(record, terminal or None)
@@ -2882,7 +2933,7 @@ class PointReviewItem(BaseModel):
     point: str | None = None       # modify 时的新描述
     dimension: str | None = None
     ref: str | None = None         # modify 时的设计需求页来源（页面或章节 › 需求点），None 表示不改
-    terminal: str | None = None    # modify 时改所属端（h5 / game_admin / merchant_admin / common / e2e / other），None 表示不改
+    terminal: str | None = None    # modify 时改所属端（h5 / game_admin / merchant_admin / common / e2e / other / 任务里文档自有的端），None 表示不改
     comment: str = ""              # reject 时的驳回原因
     # 结构化驳回（完整需求 6.4）
     reject_types: list[str] = []   # 驳回类型，多选必填
@@ -2925,7 +2976,9 @@ async def review_points(request: Request, task_id: str, body: PointReviewBody) -
     if any(i.action == "delete" for i in body.items):
         _require_delete(request)
     try:
-        outcome = apply_point_review(working, [i.model_dump() for i in body.items])
+        from app.terminals import task_terminal_keys
+
+        outcome = apply_point_review(working, [i.model_dump() for i in body.items], terminals=task_terminal_keys(record.analysis))
     except ConcurrencyError as e:  # 乐观锁冲突（需求 11）：不落任何改动
         raise HTTPException(status_code=409, detail=str(e))
     except PointReviewError as e:
@@ -4174,7 +4227,7 @@ async def list_plans(
     查询条件：keyword（名称 / 项目 / 负责人 / 创建人 / 轮次名模糊）、status（计划状态）、owner（负责人精确）、
     run_state（最近执行：none 未执行 / running 执行中 / finished 已结束）。
     分页：page ≥ 1 时返回该页并附 total / pages，page=0（默认）返回全部（任务概览、项目概览等内部调用）。
-    status_counts 按筛选前范围（项目 / 业务线 / mine）统计供下拉。
+    status_counts 按筛选前范围（项目 / 产品线 / mine）统计供下拉。
     """
     from app.plans import PLAN_STATUSES, plan_summary
 
@@ -5278,15 +5331,17 @@ async def _run_extraction(app, req_id: str, model: str | None, by: str | None, a
     if (rstore.get(req_id) or {}).get("deleted_at") or rstore.get(req_id) is None:
         raise ValueError("提取进行中需求已被删除，结果未保存")   # 模型已经跑完，但没地方落：明确告诉用户，而不是报「需求不存在」
     if get_settings().requirement_extract_terminals and data.get("modules"):
-        # 顶层章节归端（H5 / 游戏后台管理 / 商户后台 / 通用）：三端汇总与按端拆解据此；故障只按关键词兜底，提取页可人工改
+        # 从文档里识别这份需求有哪些端并把顶层章节归进去（端清单里的端，或按文档叫法新建的端）：按端汇总与按端拆解据此；
+        # 故障只按关键词兜底，提取页可人工改 / 重新识别
         from app.agents.quality import run_terminal_classify
 
         try:
             tc = await run_terminal_classify(app.state.llm, data["modules"], model)
             data["terminals"] = tc["terminals"]
             data["terminal_reasons"] = tc["reasons"]
+            data["terminal_notes"] = tc.get("notes") or {}
         except Exception as e:
-            logger.warning("整理稿章节归端故障，按章节名关键词兜底：{}", e)
+            logger.warning("整理稿识别端故障，按章节名关键词兜底：{}", e)
     meta = {"id": uuid.uuid4().hex[:8], "model": data.get("model_name"), "chunks": data.get("chunks"), "inputs": inputs,
             "by": by, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "auto": auto,
             "source_chars": data.get("source_chars"), "chars": len(data["text"]), "modules": len(data.get("modules") or []),
@@ -5369,7 +5424,7 @@ def _eval_sample_of(app, req_id: str) -> dict | None:
 
 
 async def _analysis_knowledge(app, text: str, project: str | None, req_id: str | None) -> tuple[str | None, int]:
-    """需求分析阶段的知识注入：本项目（含同业务线 / 公共层）的需求文档库与业务规则库，只用于理解术语与背景；
+    """需求分析阶段的知识注入：本项目（含同产品线 / 公共层）的需求文档库与业务规则库，只用于理解术语与背景；
     排除该需求自己沉淀的文档（否则上一版分析会"自证"）。任何故障降级为无知识注入。"""
     try:
         service = _knowledge_service(app)
@@ -5492,7 +5547,7 @@ async def list_requirements(
 
     关键词匹配标题、原文、人工补充、附件文件名与解析文本、待确认事项、模块路径；
     page_size=0（默认）不分页返回全部（对话框等内部调用），列表页传 20 / 50 / 100 / 200；
-    status_counts / creators / source_types 按筛选前范围（项目 / 业务线 / 是否含已删除）统计供下拉。"""
+    status_counts / creators / source_types 按筛选前范围（项目 / 产品线 / 是否含已删除）统计供下拉。"""
     from app.requirements import REQ_STATUSES, SOURCE_TYPES
 
     if page_size and page_size not in CASE_PAGE_SIZES:
@@ -5928,21 +5983,22 @@ async def review_requirement_extraction_item(request: Request, req_id: str, body
 
 class ExtractionTerminalBody(BaseModel):
     section: str      # 顶层章节键（文件夹名或页面名，与三端汇总里一致）
-    terminal: str     # 端：h5 / game_admin / merchant_admin / common / other
+    terminal: str     # 端：h5 / game_admin / merchant_admin / common / other，或文档自有的端的名称（没有就新建，≤ 16 字）
 
 
 @router.post("/api/v1/requirements/{req_id}/extraction/terminals")
 async def set_requirement_extraction_terminal(request: Request, req_id: str, body: ExtractionTerminalBody) -> dict:
-    """三端汇总里把某个章节改到别的端（模型判错或没判的）。之后发起的测试设计按改后的端归测试点；已发起的任务不回改。"""
-    from app.terminals import valid_key
+    """按端汇总里把某个章节改到别的端（模型判错或没判的）；端可以是这份文档已有的端，也可以写一个新名称新建。
+    之后发起的测试设计按改后的端归测试点；已发起的任务不回改。"""
+    from app.terminals import CUSTOM_NAME_MAX, resolve_key
 
     item = _req(request, req_id, "requirement.edit")
     ex = item.get("extraction") or {}
     if not ex.get("modules"):
         raise HTTPException(status_code=409, detail="整理稿没有逐条结构，不能按章节归端")
-    term = valid_key(body.terminal)
+    term = resolve_key(body.terminal)
     if term is None or term == "e2e":
-        raise HTTPException(status_code=400, detail=f"未知的端：{body.terminal}")
+        raise HTTPException(status_code=400, detail=f"端无效：{body.terminal}（填端清单里的端，或不超过 {CUSTOM_NAME_MAX} 个字的端名称；章节不能归「端到端」）")
     section = body.section.strip()
     view = _extraction_view(item) or {}
     if section not in (view.get("section_terminals") or {}):
@@ -5950,6 +6006,38 @@ async def set_requirement_extraction_terminal(request: Request, req_id: str, bod
     rstore = request.app.state.requirements
     item = rstore.set_extraction_terminal(req_id, section, term, by=_operator(request))
     request.state.audit_detail = f"章节「{section}」→ {term}"
+    return _req_view(request, item)
+
+
+@router.post("/api/v1/requirements/{req_id}/extraction/terminals/detect")
+async def detect_requirement_extraction_terminals(request: Request, req_id: str, body: ExtractBody | None = None) -> dict:
+    """重新识别端：让模型从现有整理稿里重新识别这份需求有哪些端并归类（一次调用，不重新提取）。人工改过的章节保持不动。
+    用于升级前提取的整理稿（当时只能在固定的端里选），或端识别得不对想换个模型再判。"""
+    from app.agents.quality import run_terminal_classify
+    from app.requirements import RequirementError
+
+    item = _req(request, req_id, "requirement.ai")
+    ex = item.get("extraction") or {}
+    if not ex.get("modules"):
+        raise HTTPException(status_code=409, detail="整理稿没有逐条结构，不能按章节归端")
+    if item.get("extracting"):
+        raise HTTPException(status_code=409, detail="需求提取正在进行中")
+    _ai_ctx(request, project=item["project"], requirement_id=req_id)
+    model = (body.model if body else None) or get_settings().requirement_extract_model or None
+    try:
+        tc = await run_terminal_classify(request.app.state.llm, ex["modules"], model)
+    except UnknownModelError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (MissingAPIKeyError, LLMOutputError, AllModelsFailedError, ValueError) as e:
+        raise HTTPException(status_code=502, detail=f"识别端失败：{e}")
+    try:
+        item = request.app.state.requirements.redetect_extraction_terminals(
+            req_id, tc["terminals"], tc["reasons"], tc.get("notes") or {}, by=_operator(request))
+    except RequirementError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    view = _extraction_view(item) or {}
+    ends = [t["label"] for t in (view.get("terminal_summary") or {}).get("terminals") or []]
+    request.state.audit_detail = f"重新识别端：{' / '.join(ends) or '无'}（{len(tc['terminals'])} 个章节由模型判定）"
     return _req_view(request, item)
 
 
@@ -5980,17 +6068,18 @@ def _extraction_view(item: dict) -> dict | None:
     led = ex.get("ledger") or {}
     out = {**ex, "ledger": {"stats": led.get("stats"), "image": led.get("image"), "inherited": led.get("inherited")}, "outline": None}
     if ex.get("modules"):
-        from app.terminals import section_terminals, terminal_summary, terminals
+        from app.terminals import section_terminals, terminal_options, terminal_summary
 
         view = copy.deepcopy(item)   # 在副本上按当前规则收口（草稿只认独立区域、流程框不重复），不改库里的数据
         tidy_modules(view)
         mods = view["extraction"]["modules"]
         out["modules"], out["outline"] = mods, outline_view(mods)   # 页面 › 区块 › 条目层级，页面按这个渲染
         out["text"] = extraction_markdown(mods, ex.get("dropped"), head=extraction_head(view))
-        # 三端汇总：顶层章节归端（模型判定 / 人工改 / 关键词兜底），每个端有哪些页面、多少区块与条目
+        # 按端汇总：端由模型从文档里识别（端清单里的端，或按文档叫法新建的），顶层章节归端（模型判定 / 人工改 / 关键词兜底），
+        # 每个端有哪些页面、多少区块与条目；可选的端 = 端清单 + 这份文档自有的端
         out["section_terminals"] = section_terminals(out["outline"], ex.get("terminals") or {})
         out["terminal_summary"] = terminal_summary(out["outline"], ex.get("terminals") or {})
-        out["terminal_options"] = [{"key": t["key"], "label": t["label"]} for t in terminals() if t["key"] != "e2e"]
+        out["terminal_options"] = terminal_options(out["section_terminals"].values(), with_e2e=False)
     return out
 
 
@@ -6723,7 +6812,7 @@ def _line_view(request: Request, line: dict) -> dict:
 
 
 def _require_line_manage(request: Request, name: str | None = None) -> None:
-    """业务线的增改：系统管理员；开放模式下任何登录用户；按业务线模式下该业务线的管理员可改自己的业务线。"""
+    """产品线的增改：系统管理员；开放模式下任何登录用户；按产品线模式下该产品线的管理员可改自己的产品线。"""
     if _is_admin(request):
         return
     mode = _access_mode(request)
@@ -6731,12 +6820,12 @@ def _require_line_manage(request: Request, name: str | None = None) -> None:
         return
     if mode == "line" and name and request.app.state.business_lines.role_in_line(name, _operator(request)) == "line_admin":
         return
-    raise HTTPException(status_code=403, detail="仅系统管理员或该业务线管理员可维护业务线")
+    raise HTTPException(status_code=403, detail="仅系统管理员或该产品线管理员可维护产品线")
 
 
 @router.get("/api/v1/business-lines")
 async def list_business_lines(request: Request) -> dict:
-    """业务线清单（实体 + 项目数与项目名）：项目上出现过但未登记的业务线名自动登记。"""
+    """产品线清单（实体 + 项目数与项目名）：项目上出现过但未登记的产品线名自动登记。"""
     lstore = request.app.state.business_lines
     for p in request.app.state.projects.list():
         lstore.ensure(p.get("business_line") or "", created_by=p.get("created_by"))
@@ -6758,17 +6847,17 @@ async def create_business_line(request: Request, body: BusinessLineBody) -> dict
 
 @router.put("/api/v1/business-lines/{name}")
 async def update_business_line(request: Request, name: str, body: BusinessLineUpdateBody) -> dict:
-    """业务线编辑：改名会联动更新该业务线下所有项目。"""
+    """产品线编辑：改名会联动更新该产品线下所有项目。"""
     from app.projects import ProjectError
 
     _require_line_manage(request, name)
     lstore = request.app.state.business_lines
     if lstore.get(name) is None:
-        # 只存在于项目字段上的历史业务线：先登记再改；完全不存在的 404
+        # 只存在于项目字段上的历史产品线：先登记再改；完全不存在的 404
         if any(p.get("business_line") == name for p in request.app.state.projects.list()):
             lstore.ensure(name)
         else:
-            raise HTTPException(status_code=404, detail=f"业务线不存在: {name}")
+            raise HTTPException(status_code=404, detail=f"产品线不存在: {name}")
     try:
         line = lstore.update(name, new_name=body.new_name, description=body.description, owner=body.owner,
                              code=body.code, operator=_operator(request))
@@ -6777,7 +6866,7 @@ async def update_business_line(request: Request, name: str, body: BusinessLineUp
     moved = 0
     if body.new_name and body.new_name.strip() and body.new_name.strip() != name:
         moved = request.app.state.projects.rename_business_line(name, line["name"])
-        logger.info("业务线「{}」→「{}」：{} 个项目已更新", name, line["name"], moved)
+        logger.info("产品线「{}」→「{}」：{} 个项目已更新", name, line["name"], moved)
     return {**_line_view(request, line), "moved_projects": moved}
 
 
@@ -6787,7 +6876,7 @@ class LineMemberBody(BaseModel):
 
 @router.put("/api/v1/business-lines/{name}/members/{username}")
 async def set_line_member(request: Request, name: str, username: str, body: LineMemberBody) -> dict:
-    """业务线成员与角色：按业务线模式下，成员可见并可操作该业务线全部项目（管理员=项目管理员，成员=测试负责人，只读=只读）。"""
+    """产品线成员与角色：按产品线模式下，成员可见并可操作该产品线全部项目（管理员=项目管理员，成员=测试负责人，只读=只读）。"""
     from app.projects import ProjectError
 
     _require_line_manage(request, name)
@@ -6814,14 +6903,14 @@ async def remove_line_member(request: Request, name: str, username: str) -> dict
 
 @router.delete("/api/v1/business-lines/{name}")
 async def delete_business_line(request: Request, name: str, detach: bool = False) -> dict:
-    """删除业务线（仅系统管理员）：仍有项目归属时拒绝；detach=true 则先把项目解除归属再删。"""
+    """删除产品线（仅系统管理员）：仍有项目归属时拒绝；detach=true 则先把项目解除归属再删。"""
     from app.projects import ProjectError
 
     _require_admin(request)
     pstore, lstore = request.app.state.projects, request.app.state.business_lines
     attached = [p["name"] for p in pstore.list() if p.get("business_line") == name]
     if attached and not detach:
-        raise HTTPException(status_code=400, detail=f"业务线下仍有 {len(attached)} 个项目（{'、'.join(attached[:3])}），请先改归属或勾选「解除归属后删除」")
+        raise HTTPException(status_code=400, detail=f"产品线下仍有 {len(attached)} 个项目（{'、'.join(attached[:3])}），请先改归属或勾选「解除归属后删除」")
     if attached:
         pstore.rename_business_line(name, "")
     try:
@@ -6841,14 +6930,14 @@ class ProjectBody(BaseModel):
 
 @router.post("/api/v1/projects")
 async def create_project(request: Request, body: ProjectBody) -> dict:
-    """创建项目：开放模式任何登录用户；按业务线模式该业务线的管理员；否则仅系统管理员。创建人与负责人自动成为项目管理员。"""
+    """创建项目：开放模式任何登录用户；按产品线模式该产品线的管理员；否则仅系统管理员。创建人与负责人自动成为项目管理员。"""
     from app.projects import ProjectError
 
     mode = _access_mode(request)
     if not _is_admin(request) and mode != "open":
         if not (mode == "line" and body.business_line
                 and request.app.state.business_lines.role_in_line(body.business_line, _operator(request)) == "line_admin"):
-            raise HTTPException(status_code=403, detail="按业务线模式下，只有该业务线的管理员或系统管理员可创建项目")
+            raise HTTPException(status_code=403, detail="按产品线模式下，只有该产品线的管理员或系统管理员可创建项目")
     auth = request.app.state.auth
     if body.owner.strip() and not auth.exists(body.owner.strip()) and get_settings().auth_enabled:
         raise HTTPException(status_code=400, detail=f"负责人不存在: {body.owner}")
@@ -8063,7 +8152,7 @@ async def list_tasks(
     created_by: str | None = None, limit: int = 50, business_line: str = "",
     include_deleted: bool = False,
 ) -> dict:
-    """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人/业务线过滤。
+    """任务列表（F-6-1）：倒序返回任务概要（含项目名与创建人），支持按状态/项目/创建人/产品线过滤。
 
     include_deleted=true 连已删除的任务一起返回（带 deleted_at / deleted_by，供「已删除」筛选与恢复），仅有删除权限者可用。
     """
@@ -8666,7 +8755,7 @@ async def get_task(request: Request, task_id: str) -> dict:
     from app.tasks.blind_spots import blind_spot_entities
     from app.tasks.points import dup_pair_entities
 
-    from app.terminals import case_terminals, fill_point_terminals, point_terminal_stats, terminals
+    from app.terminals import case_terminals, fill_point_terminals, point_terminal_stats, task_terminal_keys, terminal_options
 
     record = _task(request, task_id, "case.view")
     if fill_point_terminals(record.analysis):   # 旧任务 / 新增的点按模块补端（幂等）
@@ -8678,7 +8767,7 @@ async def get_task(request: Request, task_id: str) -> dict:
             "blind_spots": blind_spot_entities(record), "dup_pairs": dup_pair_entities(record),
             "case_dup_pairs": dup_pair_entities(record, "cases"),
             "points_pending_generation": [p["tp_id"] for tp in pending for p in tp["points"]],
-            "terminals": [{"key": t["key"], "label": t["label"]} for t in terminals()],
+            "terminals": terminal_options(task_terminal_keys(record.analysis)),   # 端清单 + 这个任务里文档自有的端
             "point_terminals": point_terminal_stats((record.analysis or {}).get("test_points") or [], _generated_tp_ids(record)),
             "case_terminals": case_terminals(record)}
 
@@ -8759,20 +8848,20 @@ _MEDIA_TYPES = {
 async def export_points(request: Request, task_id: str, scope: str = "all", fmt: str = "xlsx", terminal: str = "") -> FileResponse:
     """测试点导出：fmt=xlsx（编号、模块、端、测试点、维度、来源、状态、审核意见、是否已生成用例与覆盖用例编号、延伸依据）
     或 fmt=xmind（思维导图，与页面脑图同结构：需求 → 模块 → 测试点 → 来源 / 依据 / 意见）；scope=approved 只导已通过的；
-    terminal=h5 / game_admin / merchant_admin / e2e … 只导该端的测试点（文件名带端名）。"""
+    terminal=h5 / game_admin / merchant_admin / e2e / 文档自有的端名称 … 只导该端的测试点（文件名带端名）。"""
     import asyncio
 
-    from app.terminals import fill_point_terminals, filter_modules, label_of, valid_key
+    from app.terminals import fill_point_terminals, filter_modules, label_of, task_terminal
 
     if fmt not in ("xlsx", "xmind"):
         raise HTTPException(status_code=400, detail="fmt 仅支持 xlsx / xmind")
     terminal = (terminal or "").strip()
-    if terminal and not valid_key(terminal):
-        raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
 
     record = _task(request, task_id, "case.export")
     if fill_point_terminals(record.analysis):
         request.app.state.tasks.save(record)
+    if terminal and not task_terminal(record.analysis, terminal):   # 端清单里的端，或这个任务里文档自有的端
+        raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
     modules = (record.analysis or {}).get("test_points") or []
     if not modules:
         raise HTTPException(status_code=404, detail="任务没有测试点拆解结果")
@@ -8815,13 +8904,13 @@ async def download_file(request: Request, task_id: str, fmt: str, scope: str = "
     layout=compact 仅对 xmind 生效：脑图只到用例一层，步骤与预期放备注（节点数 = 用例数）；
     terminal=h5 / game_admin / merchant_admin / e2e … 只导该端的用例（按来源测试点归端；即时生成，文件名带端名）。
     """
-    from app.terminals import label_of, valid_key
+    from app.terminals import label_of, task_terminal
 
     record = _task(request, task_id, "case.export")
     if fmt not in _MEDIA_TYPES:
         raise HTTPException(status_code=404, detail=f"不支持的导出格式: {fmt}")
     terminal = (terminal or "").strip()
-    if terminal and not valid_key(terminal):
+    if terminal and not task_terminal(record.analysis, terminal):   # 端清单里的端，或这个任务里文档自有的端
         raise HTTPException(status_code=400, detail=f"未知的端：{terminal}")
     if scope == "approved" or terminal or (fmt == "xmind" and layout == "compact"):
         path = await _export_task_files(request, record, approved_only=(scope == "approved"), fmt=fmt,

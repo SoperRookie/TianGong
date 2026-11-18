@@ -114,8 +114,28 @@ do_update() {
     echo "依赖声明有变化，重新安装…"
     "${DIR}/.venv/bin/pip" install -q -e .
   fi
+  build_web "${before}" "${after}"
   do_stop
   do_start
+}
+
+# 前端（web/，Vue 3 + Vite）：web/ 有改动或还没有构建产物时重新构建到 web/dist，应用启动时自动托管；
+# 没有 node / npm 的机器跳过并提示（应用会回退旧单文件页面；可在能出网的机器上构建后把 web/dist 拷到同路径）
+build_web() {
+  local before="$1" after="$2"
+  [ -f "${DIR}/web/package.json" ] || return 0
+  if [ -f "${DIR}/web/dist/index.html" ] && git diff --quiet "${before}" "${after}" -- web 2>/dev/null; then
+    echo "前端无改动，沿用 web/dist"; return 0
+  fi
+  if ! command -v npm >/dev/null; then
+    echo "提示：未安装 node / npm，跳过前端构建；$( [ -f "${DIR}/web/dist/index.html" ] && echo '沿用已有的 web/dist' || echo '应用将回退旧单文件页面' )。"
+    echo "      安装 Node.js 18+ 后执行 cd web && npm ci && npm run build，或在能出网的机器上构建后把 web/dist 拷到同路径。"
+    return 0
+  fi
+  echo "构建前端 web/ → web/dist…"
+  ( cd "${DIR}/web" && npm ci --no-audit --no-fund --silent && npm run build --silent ) \
+    || { echo "前端构建失败，应用将$( [ -f "${DIR}/web/dist/index.html" ] && echo '沿用已有的 web/dist' || echo '回退旧单文件页面' )；修复后执行 cd web && npm run build"; return 0; }
+  echo "前端构建完成"
 }
 
 case "${1:-}" in

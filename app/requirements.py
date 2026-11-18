@@ -190,9 +190,10 @@ class RequirementStore:
         item["extraction"] = {"text": data["text"], "meta": meta, "edited": None,
                               "modules": data.get("modules"), "dropped": data.get("dropped") or [], "reviewed": None,
                               "ledger": data.get("ledger") or {"stats": None, "decisions": {}},
-                              # 顶层章节 → 端（提取时模型判定；人工改的记 terminal_edits）；没判的按关键词兜底（terminals.section_terminals）
+                              # 顶层章节 → 端（提取时模型从文档里识别端并归类；文档自有的端名称即 key，说明记 terminal_notes；
+                              # 人工改的记 terminal_edits）；没判的按关键词兜底（terminals.section_terminals）
                               "terminals": dict(data.get("terminals") or {}), "terminal_reasons": dict(data.get("terminal_reasons") or {}),
-                              "terminal_edits": {}}
+                              "terminal_notes": dict(data.get("terminal_notes") or {}), "terminal_edits": {}}
         item["extracting"], item["extraction_error"] = False, None
         self._inherit_ledger(item, previous)
         self._render_text(item)
@@ -200,13 +201,28 @@ class RequirementStore:
         return item
 
     def set_extraction_terminal(self, req_id: str, section: str, terminal: str, by: str | None = None) -> dict:
-        """三端汇总：把某个顶层章节改到别的端（人工判定优先于模型）。不动整理稿正文与 rev。"""
+        """按端汇总：把某个顶层章节改到别的端（人工判定优先于模型；端可以是新起的名称）。不动整理稿正文与 rev。"""
         item = self._get_alive(req_id)
         ex = item.get("extraction") or {}
         if not ex.get("modules"):
             raise RequirementError("整理稿没有逐条结构，不能按章节归端")
         ex.setdefault("terminals", {})[section] = terminal
         ex.setdefault("terminal_edits", {})[section] = {"by": by, "at": _now()}
+        self._persist(item)
+        return item
+
+    def redetect_extraction_terminals(self, req_id: str, terminals: dict, reasons: dict, notes: dict, by: str | None = None) -> dict:
+        """重新识别端：用模型新判的「章节 → 端」换掉原来的，人工改过的章节保持不动。不动整理稿正文与 rev。"""
+        item = self._get_alive(req_id)
+        ex = item.get("extraction") or {}
+        if not ex.get("modules"):
+            raise RequirementError("整理稿没有逐条结构，不能按章节归端")
+        edits = ex.get("terminal_edits") or {}
+        old = ex.get("terminals") or {}
+        ex["terminals"] = {**{k: v for k, v in terminals.items() if k not in edits}, **{k: old[k] for k in edits if k in old}}
+        ex["terminal_reasons"] = {k: v for k, v in reasons.items() if k not in edits}
+        ex["terminal_notes"] = dict(notes)
+        ex["terminal_detected"] = {"by": by, "at": _now()}
         self._persist(item)
         return item
 
