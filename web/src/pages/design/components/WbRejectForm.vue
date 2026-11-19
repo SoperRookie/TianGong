@@ -52,7 +52,7 @@ onMounted(() => reasonEl.value?.focus())
     <div v-if="err" class="tiny rj-err">{{ err }}</div>
     <div class="row rj-foot">
       <button type="button" class="btn small" @click="emit('cancel')">取消 <kbd>Esc</kbd></button>
-      <button type="button" class="btn danger small" :disabled="busy" @click="submit">确认驳回 <kbd>⌘⏎</kbd></button>
+      <button type="button" class="btn danger small" :disabled="busy" @click="submit">确认驳回 <kbd>{{ $mod }}⏎</kbd></button>
     </div>
   </div>
 </template>

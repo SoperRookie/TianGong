@@ -58,7 +58,7 @@ const lastReviewer = computed(() => { for (let i = props.log.length - 1; i >= 0;
       </div>
       <div class="row pd-edit-foot">
         <button type="button" class="btn small" @click="emit('cancel')">取消 <kbd>Esc</kbd></button>
-        <button type="button" class="btn primary small" :disabled="busy || !form.point.trim()" @click="save">保存（版本 +1，回到待审核）<kbd>⌘⏎</kbd></button>
+        <button type="button" class="btn primary small" :disabled="busy || !form.point.trim()" @click="save">保存（版本 +1，回到待审核）<kbd>{{ $mod }}⏎</kbd></button>
         <span class="tiny muted">基于 v{{ p.version || 1 }}；他人已改过则保存被拒（409），需重新加载</span>
       </div>
     </div>

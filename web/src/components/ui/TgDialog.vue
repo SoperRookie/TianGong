@@ -26,7 +26,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         <div v-if="!noFoot" class="dialog-foot">
           <slot name="foot-left" />
           <button type="button" class="btn" @click="close">{{ cancel }} <kbd>Esc</kbd></button>
-          <button type="button" class="btn" :class="danger ? 'danger' : 'primary'" :disabled="busy || okDisabled" @click="$emit('ok')">{{ busy ? '处理中…' : ok }} <kbd>⌘⏎</kbd></button>
+          <button type="button" class="btn" :class="danger ? 'danger' : 'primary'" :disabled="busy || okDisabled" @click="$emit('ok')">{{ busy ? '处理中…' : ok }} <kbd>{{ $mod }}⏎</kbd></button>
         </div>
       </div>
     </div>

@@ -39,7 +39,7 @@ async function submit() {
       <TgEmpty v-else title="尚无修订指令" hint="例：所有涉及金额的用例补充币种；步骤里不要出现「点击」以外的动词" />
       <div v-if="!ready" class="attention mt"><TgIcon name="alert" :size="13" /> 任务状态为 {{ task.status }}{{ cs.total ? '' : '，且没有用例' }}，只有已完成且有用例的任务才能修订。</div>
       <template v-else-if="canAi">
-        <textarea v-model="instruction" class="field mt" rows="4" style="width:100%" placeholder="输入修订要求…（⌘⏎ 提交）" @keydown.meta.enter="submit" @keydown.ctrl.enter="submit"></textarea>
+        <textarea v-model="instruction" class="field mt" rows="4" style="width:100%" :placeholder="`输入修订要求…（${$mod}⏎ 提交）`" @keydown.meta.enter="submit" @keydown.ctrl.enter="submit"></textarea>
         <div class="row" style="margin-top:8px">
           <select v-model="model" class="select small"><option value="">生成模型：沿用任务（{{ (task.context || {}).model || '默认' }}）</option><option v-for="m in models" :key="m.name" :value="m.name">{{ m.name }}</option></select>
           <select v-model="reviewer" class="select small"><option value="">评审模型：沿用任务</option><option v-for="m in models" :key="m.name" :value="m.name">{{ m.name }}</option></select>
