@@ -2,12 +2,20 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<!-- 360 / QQ / 搜狗等双核浏览器强制用极速（Chromium）内核，不落到 IE 兼容模式 -->
+<meta name="renderer" content="webkit">
+<meta name="force-rendering" content="webkit">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>天工 · AI 测试用例平台</title>
 <link rel="icon" type="image/svg+xml" href="/brand/owl.svg">
 </head>
 <body>
 <div id="app"></div>
+<!-- 不支持 ES 模块的旧浏览器（IE、很老的国产浏览器兼容模式）只会执行这段，给出明确提示而不是白屏 -->
+<script nomodule>
+document.getElementById('app').innerHTML='<div style="max-width:520px;margin:120px auto;padding:24px;font:14px/1.8 sans-serif;color:#202941;border:1px solid #e1e6ed;border-radius:6px;background:#fff"><b style="font-size:16px">当前浏览器版本过低，无法打开天工</b><br>请使用 Chrome / Edge 88+、Firefox 78+、Safari 14.1+；360、QQ、搜狗等浏览器请切换到「极速模式」。</div>';
+</script>
 <script type="module" src="/src/main.js"></script>
 </body>
 </html>

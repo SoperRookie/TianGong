@@ -32,7 +32,7 @@ onBeforeUnmount(() => clearInterval(timer))
       </button>
     </nav>
     <div class="global-actions">
-      <div class="search-top" @click="ui.search = true"><TgIcon name="search" :size="14" /> 搜索需求 / 任务 / 用例 / 计划 / 知识… <kbd>⌘K</kbd></div>
+      <div class="search-top" role="button" tabindex="0" title="全局搜索：需求 / 任务 / 测试点 / 用例 / 测试计划 / 知识文档" @keydown.enter="ui.search = true" @click="ui.search = true"><TgIcon name="search" :size="14" /><span class="search-top-text">搜索需求 / 任务 / 用例 / 计划 / 知识…</span><kbd>{{ $mod }}K</kbd></div>
       <div class="notify-wrap">
         <button type="button" class="icon-btn" title="通知：待审核 / 待修改 / 分配给我 / 待确认需求 / AI 任务" @click="notifyOpen = !notifyOpen"><TgIcon name="bell" :size="17" /><span v-if="badge.total" class="dot">{{ badge.total > 99 ? '99+' : badge.total }}</span></button>
         <div v-if="notifyOpen" class="notify-menu" @click="notifyOpen = false">

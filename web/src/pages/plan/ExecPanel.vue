@@ -194,11 +194,11 @@ const rCls = s => ({ pass: 'pass', fail: 'fail', blocked: 'block', skipped: 'ski
               <label style="cursor:pointer"><TgIcon name="upload" :size="14" /> 拖放或选择截图 · 记录失败后自动上传并关联本条 · AI 归因会读取截图 <input type="file" multiple hidden accept="image/*,.log,.txt,.mp4,.zip" @change="fail.files = [...fail.files, ...$event.target.files]" /></label>
               <div v-if="fail.files.length" class="tiny" style="margin-top:4px">{{ fail.files.map(f => f.name).join('、') }} <span class="link" @click.stop="fail.files = []">清空</span></div>
             </div>
-            <div class="full row" style="justify-content:flex-end"><button type="button" class="btn small" @click="failOpen = false">取消 <kbd>Esc</kbd></button><button type="button" class="btn danger small" :disabled="submitting" @click="confirmFail">记录失败 <kbd>⌘⏎</kbd></button></div>
+            <div class="full row" style="justify-content:flex-end"><button type="button" class="btn small" @click="failOpen = false">取消 <kbd>Esc</kbd></button><button type="button" class="btn danger small" :disabled="submitting" @click="confirmFail">记录失败 <kbd>{{ $mod }}⏎</kbd></button></div>
           </div>
           <div v-if="blockOpen" class="fail-form" style="border-color:#ffe6c3;background:#fff9f1">
             <div class="full"><div class="tiny" style="font-weight:700;margin-bottom:5px">阻塞原因（必填）</div><textarea id="block-note" v-model="block.note" class="field" rows="2" placeholder="环境 / 依赖 / 数据等阻塞原因，或缺陷号" /></div>
-            <div class="full row" style="justify-content:flex-end"><button type="button" class="btn small" @click="blockOpen = false">取消 <kbd>Esc</kbd></button><button type="button" class="btn small primary" :disabled="submitting" @click="confirmBlock">记录阻塞并跳下一条 <kbd>⌘⏎</kbd></button></div>
+            <div class="full row" style="justify-content:flex-end"><button type="button" class="btn small" @click="blockOpen = false">取消 <kbd>Esc</kbd></button><button type="button" class="btn small primary" :disabled="submitting" @click="confirmBlock">记录阻塞并跳下一条 <kbd>{{ $mod }}⏎</kbd></button></div>
           </div>
           <TriageBox v-if="triageOpen && selResult?.status === 'fail'" :plan-id="id" :run-id="rid" :item="sel" :result="selResult" :active="active" :can-run="canRun" @updated="onTriaged" @close="triageOpen = false" />
           <div v-if="selAtts.length" class="mt"><div class="tiny" style="font-weight:700;margin-bottom:4px">本条附件</div><div class="row"><span v-for="a in selAtts" :key="a.att_id" class="tag link" @click="download(a)">{{ a.filename }} · {{ fmtSize(a.size) }}</span></div></div>
@@ -210,7 +210,7 @@ const rCls = s => ({ pass: 'pass', fail: 'fail', blocked: 'block', skipped: 'ski
     <div class="statusbar">
       <span>已执行 <b>{{ done }}</b> / {{ total }}</span><span>通过率 <b>{{ passRate }}</b></span><span>用时 {{ elapsed }}</span>
       <span v-if="lastMsg" class="ok">{{ lastMsg }}</span>
-      <span class="kbd-hint"><kbd>j</kbd><kbd>k</kbd> 移动 · <kbd>P</kbd><kbd>F</kbd><kbd>B</kbd><kbd>S</kbd> 结果 · <kbd>⌘⏎</kbd> 提交失败 / 阻塞 · <kbd>Esc</kbd> 收起</span>
+      <span class="kbd-hint"><kbd>j</kbd><kbd>k</kbd> 移动 · <kbd>P</kbd><kbd>F</kbd><kbd>B</kbd><kbd>S</kbd> 结果 · <kbd>{{ $mod }}⏎</kbd> 提交失败 / 阻塞 · <kbd>Esc</kbd> 收起</span>
       <span class="undo" @click="nextTodo">跳到下一条待执行</span>
     </div>
   </template>
