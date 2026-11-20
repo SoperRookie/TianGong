@@ -77,7 +77,7 @@ const ACTS = { approve: '通过', reject: '驳回', modify: '修改', delete: '�
       <input v-model="feedback" class="field" placeholder="修改说明 / 一键反馈（可选，作为学习语料与版本原因）" />
       <div class="row cd-row">
         <button type="button" class="btn small" @click="emit('cancel')">取消 <kbd>Esc</kbd></button>
-        <button type="button" class="btn primary small" :disabled="busy || !form.title.trim() || !form.module.trim() || !form.steps.some(s => s.action.trim())" @click="save">保存（人工定稿：版本 +1 并通过锁定）<kbd>⌘⏎</kbd></button>
+        <button type="button" class="btn primary small" :disabled="busy || !form.title.trim() || !form.module.trim() || !form.steps.some(s => s.action.trim())" @click="save">保存（人工定稿：版本 +1 并通过锁定）<kbd>{{ $mod }}⏎</kbd></button>
         <span class="tiny muted">基于 v{{ c.version || 1 }}；他人已改过则保存被拒（409）</span>
       </div>
     </div>

@@ -39,6 +39,10 @@ export async function request(path, { method = 'GET', body, query, headers = {},
     auth.requirePasswordChange()
     throw new ApiError(data.detail || '须先修改初始口令', 403, data)
   }
+  if (resp.status === 403 && data.must_bind_totp) {
+    auth.requireTotpBind()
+    throw new ApiError(data.detail || '须先绑定两步验证', 403, data)
+  }
   if (!resp.ok) throw new ApiError(data.detail || resp.statusText || `HTTP ${resp.status}`, resp.status, data)
   return data
 }

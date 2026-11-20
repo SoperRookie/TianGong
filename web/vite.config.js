@@ -17,5 +17,12 @@ export default defineConfig({
       '/vendor': { target: BACKEND, changeOrigin: true },
     },
   },
-  build: { outDir: 'dist', emptyOutDir: true, chunkSizeWarningLimit: 1500 },
+  // 浏览器基线：Chrome / Edge 88+、Firefox 78+、Safari 14.1+（及同内核的 360 / QQ / 搜狗极速模式）。
+  // target 让 esbuild 把更新的 JS 语法降级；cssTarget 让 CSS 自动补 -webkit- 前缀、把 inset / #rrggbbaa 等新写法展开成老写法。
+  // 样式里大量用到 flex gap，这是基线定在上述版本的原因，再低的版本布局间距会丢。
+  build: {
+    outDir: 'dist', emptyOutDir: true, chunkSizeWarningLimit: 1500,
+    target: ['es2019', 'chrome80', 'edge80', 'firefox78', 'safari13.1'],
+    cssTarget: ['chrome80', 'edge80', 'firefox78', 'safari13.1'],
+  },
 })
