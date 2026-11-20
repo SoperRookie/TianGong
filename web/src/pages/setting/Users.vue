@@ -75,7 +75,7 @@ const menu = u => [
     <div class="stat-grid">
       <TgStat label="账号" :value="(rc.admin || 0) + (rc.member || 0)" :foot="`管理员 ${rc.admin || 0} · 成员 ${rc.member || 0}`" icon="user" color="blue" />
       <TgStat label="已禁用" :value="sc.disabled || 0" foot="禁用即会话失效" icon="lock" color="orange" />
-      <TgStat label="两步验证" :value="auth.settings?.totp_enabled ? '已开启' : '已关闭'" foot="总开关在访问控制页" icon="shield" color="green" />
+      <TgStat label="两步验证" :value="!auth.settings?.totp_enabled ? '已关闭' : auth.settings.totp_required ? '强制全员绑定' : '自愿绑定'" foot="在访问控制页设置" icon="shield" color="green" />
       <TgStat label="数据可见范围" :value="{ open: '开放', line: '按产品线', member: '按项目成员' }[auth.settings?.access_mode] || '—'" foot="访问控制页切换" icon="eye" color="purple" />
     </div>
     <TgPanel :pad="false">

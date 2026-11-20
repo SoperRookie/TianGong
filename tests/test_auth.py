@@ -478,3 +478,58 @@ async def test_成员制下计划删除也仅系统管理员(client, auth_on):
     assert (await client.put(f"/api/v1/plans/{pid}", headers=lead, json={"name": "改名"})).status_code == 200
     assert (await client.delete(f"/api/v1/plans/{pid}", headers=lead)).status_code == 403   # 创建人 + 项目管理员仍不能删
     assert (await client.delete(f"/api/v1/plans/{pid}", headers=admin)).status_code == 200
+
+
+async def test_两步验证强制全员绑定(client, auth_on):
+    """强制全员绑定：未绑定的账号登录后只放行绑定相关接口，绑完恢复；总开关关闭时强制不生效；管理员解绑后须重新绑定。"""
+    from app.auth.totp import totp_now
+
+    token = await _login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    s = (await client.get("/api/v1/auth/settings", headers=headers)).json()
+    assert (s["totp_enabled"], s["totp_required"]) == (True, False)   # 默认自愿绑定
+    await client.post("/api/v1/auth/users", headers=headers,
+                      json={"username": "bob", "password": "bob12345", "role": "member"})
+    bob = {"Authorization": f"Bearer {await _login(client, 'bob', 'bob12345')}"}
+    assert (await client.get("/api/v1/projects", headers=bob)).status_code == 200
+
+    # 开启强制：已登录的未绑定账号（含操作人自己）下一次请求起被拦，只放行绑定 / 看自己 / 读设置 / 退出
+    resp = await client.put("/api/v1/auth/settings", headers=headers, json={"totp_required": True})
+    assert resp.status_code == 200 and resp.json()["totp_required"] is True
+    for h in (headers, bob):
+        blocked = await client.get("/api/v1/projects", headers=h)
+        assert blocked.status_code == 403 and blocked.json()["must_bind_totp"] is True
+        assert (await client.get("/api/v1/auth/me", headers=h)).json()["must_bind_totp"] is True
+        assert (await client.get("/api/v1/auth/settings", headers=h)).status_code == 200
+    # 未绑定的管理员也不能借改设置绕过
+    assert (await client.put("/api/v1/auth/settings", headers=headers, json={"totp_required": False})).status_code == 403
+
+    # 未绑定账号仍可凭口令登录拿到会话（否则无从绑定），登录返回里带 must_bind_totp
+    resp = await client.post("/api/v1/auth/login", json={"username": "bob", "password": "bob12345"})
+    assert resp.status_code == 200 and resp.json()["user"]["must_bind_totp"] is True
+
+    # 绑定后放行
+    secrets_ = {}
+    for name, h in (("admin", headers), ("bob", bob)):
+        secrets_[name] = (await client.post("/api/v1/auth/totp/setup", headers=h)).json()["secret"]
+        assert (await client.post("/api/v1/auth/totp/enable", headers=h,
+                                  json={"code": totp_now(secrets_[name])})).status_code == 200
+        assert (await client.get("/api/v1/auth/me", headers=h)).json()["must_bind_totp"] is False
+        assert (await client.get("/api/v1/projects", headers=h)).status_code == 200
+
+    # 管理员解绑 bob：强制模式下 bob 须重新绑定
+    assert (await client.put("/api/v1/auth/users/bob", headers=headers, json={"reset_totp": True})).status_code == 200
+    assert (await client.get("/api/v1/projects", headers=bob)).status_code == 403
+
+    # 关闭总开关：强制不生效（设置值保留）；重新开启总开关后恢复强制
+    resp = await client.put("/api/v1/auth/settings", headers=headers, json={"totp_enabled": False})
+    assert (resp.json()["totp_enabled"], resp.json()["totp_required"]) == (False, True)
+    assert (await client.get("/api/v1/projects", headers=bob)).status_code == 200
+    await client.put("/api/v1/auth/settings", headers=headers, json={"totp_enabled": True})
+    assert (await client.get("/api/v1/projects", headers=bob)).status_code == 403
+
+    # 改回自愿绑定：未绑定账号恢复正常使用
+    await client.put("/api/v1/auth/settings", headers=headers, json={"totp_required": False})
+    assert (await client.get("/api/v1/projects", headers=bob)).status_code == 200
+    await client.put("/api/v1/auth/users/admin", headers=headers, json={"reset_totp": True})
+    await client.delete("/api/v1/auth/users/bob", headers=headers)

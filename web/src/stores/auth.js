@@ -5,10 +5,11 @@ import { roleAllows } from '@/utils/permissions'
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: localStorage.getItem('tg_token') || '',
-    user: null,              // GET /api/v1/auth/me：{username,name,role,email,phone,avatar,totp_bound,must_change_password,projects[{project,role,status}],prefs,access_mode,business_lines}
-    settings: null,          // GET /api/v1/auth/settings：{totp_enabled, access_mode}
+    user: null,              // GET /api/v1/auth/me：{username,name,role,email,phone,avatar,totp_enabled（本人是否已绑定）,must_change_password,must_bind_totp,projects[{project,role,status}],prefs,access_mode,business_lines}
+    settings: null,          // GET /api/v1/auth/settings：{totp_enabled（总开关）, totp_required（强制全员绑定）, access_mode}
     ready: false,
     mustChangePassword: false,
+    mustBindTotp: false,     // 管理员开了「强制全员绑定」而本人还没绑：弹强制绑定框，绑完才能用
     expired: false,
     version: '',
   }),
@@ -38,6 +39,7 @@ export const useAuthStore = defineStore('auth', {
       this.user = r.user
       this.expired = false
       this.mustChangePassword = !!r.user?.must_change_password
+      this.mustBindTotp = !!r.user?.must_bind_totp
       this.loadSettings()
       return { ok: true }
     },
@@ -46,6 +48,7 @@ export const useAuthStore = defineStore('auth', {
       try {
         this.user = await api.get('/api/v1/auth/me')
         this.mustChangePassword = !!this.user?.must_change_password
+        this.mustBindTotp = !!this.user?.must_bind_totp
         this.loadSettings()
       } catch (e) {
         if (e.status === 401) this.sessionExpired()
@@ -63,7 +66,7 @@ export const useAuthStore = defineStore('auth', {
       this.clear()
     },
     clear() {
-      this.token = ''; this.user = null; this.mustChangePassword = false
+      this.token = ''; this.user = null; this.mustChangePassword = false; this.mustBindTotp = false
       localStorage.removeItem('tg_token')
     },
     sessionExpired() {
@@ -71,6 +74,7 @@ export const useAuthStore = defineStore('auth', {
       this.clear(); this.expired = hadToken
     },
     requirePasswordChange() { this.mustChangePassword = true },
+    requireTotpBind() { this.mustBindTotp = true },
     async changePassword(old_password, new_password) {
       await api.post('/api/v1/auth/password', { old_password, new_password })
       this.mustChangePassword = false

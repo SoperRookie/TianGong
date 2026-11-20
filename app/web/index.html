@@ -1606,6 +1606,7 @@ async function api(path, opts) {
   const data = await resp.json().catch(() => ({}));
   if (resp.status === 401 && path !== '/api/v1/auth/login') { authToken = ''; localStorage.removeItem('tg_token'); showLogin(); throw new Error(data.detail || '请先登录'); }
   if (resp.status === 403 && data.must_change_password) { forcePasswordChange(); throw new Error(data.detail); }
+  if (resp.status === 403 && data.must_bind_totp) { forceTotpBind(); throw new Error(data.detail); }
   if (!resp.ok) throw new Error(data.detail || resp.statusText);
   return data;
 }
@@ -1623,6 +1624,13 @@ function forcePasswordChange() {
   if ($('pwdDlg').open) return;
   toast('初始口令须先修改后才能使用系统', 'warn');
   $('pwOld').value = ''; $('pwNew').value = ''; $('pwdDlg').showModal();
+}
+// 管理员开启「强制全员绑定两步验证」而本人未绑定：弹出绑定框，绑完整页重载
+function forceTotpBind() {
+  if (!curUser || $('totpDlg').open) return;
+  curUser.must_bind_totp = true; curUser.totp_enabled = false;
+  toast('系统已要求全员开启两步验证，须先绑定验证器后才能使用系统', 'warn');
+  openTotpDlg(); totpSetup();
 }
 const jpost = (p, b) => api(p, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b)});
 const jput = (p, b) => api(p, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b)});
@@ -8512,8 +8520,10 @@ async function totpBind() {
     const data = await api('/api/v1/auth/totp/enable', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({code: $('tdBindCode').value.trim()})});
     $('totpDlg').close();
-    curUser.totp_enabled = true; renderUserBox(); if (currentView==='users') refreshUsers();
+    const forced = curUser.must_bind_totp; curUser.totp_enabled = true; curUser.must_bind_totp = false;
     toast(data.message || '两步验证已启用', 'ok');
+    if (forced) { setTimeout(() => location.reload(), 600); return; }
+    renderUserBox(); if (currentView==='users') refreshUsers();
   } catch (e) { toast(e.message, 'err'); }
 }
 async function totpUnbind() {

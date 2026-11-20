@@ -243,6 +243,8 @@ def _client_ip(request: Request) -> str:
 _QUERY_TOKEN_PATHS = ("/files/", "/attachments/")
 # 强制改密期间仍允许访问的接口
 _MUST_CHANGE_ALLOW = {"/api/v1/auth/password", "/api/v1/auth/me", "/api/v1/auth/logout"}
+# 强制绑定两步验证期间放行的接口：绑定本身、看自己 / 退出、改密；读安全设置只放行 GET（见中间件）
+_MUST_BIND_TOTP_ALLOW = _MUST_CHANGE_ALLOW | {"/api/v1/auth/totp/setup", "/api/v1/auth/totp/enable"}
 _SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -280,6 +282,11 @@ async def auth_middleware(request: Request, call_next):
             return JSONResponse({"detail": "未登录、会话已过期或账号已禁用，请重新登录"}, status_code=401)
         if user.get("must_change_password") and path not in _MUST_CHANGE_ALLOW:
             return JSONResponse({"detail": "初始口令须先修改后才能使用系统", "must_change_password": True}, status_code=403)
+        if (
+            user.get("must_bind_totp") and path not in _MUST_BIND_TOTP_ALLOW
+            and not (path == "/api/v1/auth/settings" and request.method == "GET")
+        ):
+            return JSONResponse({"detail": "系统已要求全员开启两步验证，须先绑定验证器后才能使用系统", "must_bind_totp": True}, status_code=403)
         request.state.user = user
     described = describe(request.method, path)
     started = time.monotonic()
