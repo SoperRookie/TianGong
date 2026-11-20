@@ -65,7 +65,8 @@ router.beforeEach(async (to) => {
   if (!auth.isLogged) return { name: 'login', query: to.fullPath !== '/' ? { redirect: to.fullPath } : {} }
   return true
 })
-router.afterEach((to) => {
+router.afterEach((to, from, failure) => {
+  if (failure) return   // 导航被守卫取消（如访问控制页未保存时点了留下）：标题保持当前页
   const info = PAGE_INFO[sectionOf(to.name)]
   document.title = (info ? `${info.title} · ${info.group.name} · ` : '') + '天工'
 })

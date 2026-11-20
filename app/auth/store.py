@@ -139,6 +139,19 @@ class AuthStore:
         self._settings["totp_enabled"] = bool(enabled)
         self._persist()
 
+    def totp_required(self) -> bool:
+        """强制全员绑定：开启后未绑定的账号登录进来只能先绑定验证器，绑定前其余接口一律拒绝。
+        总开关关闭时不生效（设置保留，重新开启总开关后恢复）。"""
+        return self.totp_policy() and bool(self._settings.get("totp_required", False))
+
+    def totp_required_setting(self) -> bool:
+        """存储的设置值（不看总开关），供设置页回显。"""
+        return bool(self._settings.get("totp_required", False))
+
+    def set_totp_required(self, required: bool) -> None:
+        self._settings["totp_required"] = bool(required)
+        self._persist()
+
     ACCESS_MODES = ("open", "line", "member")
 
     def access_mode(self) -> str | None:
@@ -361,6 +374,8 @@ class AuthStore:
             "updated_at": u.get("updated_at", u["created_at"]),
             "last_login_at": u.get("last_login_at"), "last_login_ip": u.get("last_login_ip"),
             "must_change_password": bool(u.get("must_change_password")),
+            # 强制全员绑定开启且本人还没绑：中间件据此只放行绑定相关接口，前端据此弹出强制绑定框
+            "must_bind_totp": self.totp_required() and not u.get("totp_enabled"),
         }
 
     # ---- 登录会话 ----

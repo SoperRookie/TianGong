@@ -344,27 +344,37 @@ async def auth_login(request: Request, body: LoginBody) -> dict:
 # ---- 安全设置（系统级开关）----
 
 
+def _auth_settings_view(request: Request) -> dict:
+    auth = request.app.state.auth
+    # totp_required 返回的是存储值（总开关关闭时保留但不生效），页面据此回显三态：关闭 / 自愿绑定 / 强制全员绑定
+    return {"totp_enabled": auth.totp_policy(), "totp_required": auth.totp_required_setting(),
+            "access_mode": _access_mode(request), "ip_whitelist_enabled": auth.ip_whitelist()["enabled"]}
+
+
 @router.get("/api/v1/auth/settings")
 async def auth_settings(request: Request) -> dict:
-    """系统级开关：两步验证、数据可见范围模式。"""
-    """安全设置：两步验证功能总开关状态（登录用户可读，用于界面展隐）。"""
-    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request),
-            "ip_whitelist_enabled": request.app.state.auth.ip_whitelist()["enabled"]}
+    """系统级开关：两步验证（总开关 + 是否强制全员绑定）、数据可见范围模式（登录用户可读，用于界面展隐）。"""
+    return _auth_settings_view(request)
 
 
 class AuthSettingsBody(BaseModel):
     totp_enabled: bool | None = None
+    totp_required: bool | None = None   # 强制全员绑定：未绑定的账号登录后只能先绑定验证器（总开关关闭时不生效）
     access_mode: str | None = None   # open / line / member
 
 
 @router.put("/api/v1/auth/settings")
 async def update_auth_settings(request: Request, body: AuthSettingsBody) -> dict:
     """更新安全设置（管理员）：关闭两步验证后全平台登录不再校验动态码，也不可新绑定；
-    已绑定用户的密钥保留，重新开启后继续生效。"""
+    已绑定用户的密钥保留，重新开启后继续生效。totp_required=true 为强制全员绑定：未绑定的账号
+    （包括操作人自己）下一次请求起只能先绑定验证器，绑定前其余接口返回 403 must_bind_totp。"""
     _require_admin(request)
     if body.totp_enabled is not None:
         request.app.state.auth.set_totp_policy(body.totp_enabled)
         logger.info("两步验证功能总开关：{}", "开启" if body.totp_enabled else "关闭")
+    if body.totp_required is not None:
+        request.app.state.auth.set_totp_required(body.totp_required)
+        logger.info("两步验证强制全员绑定：{}", "开启" if body.totp_required else "关闭")
     if body.access_mode is not None:
         from app.auth import AuthError
 
@@ -373,8 +383,7 @@ async def update_auth_settings(request: Request, body: AuthSettingsBody) -> dict
         except AuthError as e:
             raise HTTPException(status_code=400, detail=str(e))
         logger.info("数据可见范围模式：{}", body.access_mode)
-    return {"totp_enabled": request.app.state.auth.totp_policy(), "access_mode": _access_mode(request),
-            "ip_whitelist_enabled": request.app.state.auth.ip_whitelist()["enabled"]}
+    return _auth_settings_view(request)
 
 
 # ---- 登录 IP 白名单（管理员）----

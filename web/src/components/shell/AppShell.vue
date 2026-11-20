@@ -14,6 +14,7 @@ import ToastHost from './ToastHost.vue'
 import DialogHost from './DialogHost.vue'
 import ProfileMenu from './ProfileMenu.vue'
 import PasswordDialog from './PasswordDialog.vue'
+import TotpBindDialog from './TotpBindDialog.vue'
 import { TgIcon } from '@/components/ui'
 
 const route = useRoute(), router = useRouter()
@@ -54,6 +55,7 @@ useKeys({
   <SearchOverlay />
   <ProfileMenu />
   <PasswordDialog />
+  <TotpBindDialog />
   <DialogHost />
   <ToastHost />
 </template>

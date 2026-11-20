@@ -7,7 +7,7 @@ import { api } from '@/api/client'
 import { TgDrawer, TgField, TgBadge } from '@/components/ui'
 const ui = useUiStore(), auth = useAuthStore(), router = useRouter()
 const form = reactive({ name: '', email: '', phone: '', avatar: '' })
-const saving = ref(false), pwd = reactive({ old: '', n1: '', n2: '' }), totp = reactive({ step: 0, uri: '', secret: '', code: '', password: '' })
+const saving = ref(false), pwd = reactive({ old: '', n1: '', n2: '' }), totp = reactive({ step: 0, uri: '', secret: '', qr: '', code: '', password: '' })
 watch(() => ui.profile, v => { if (v && auth.user) Object.assign(form, { name: auth.user.name || '', email: auth.user.email || '', phone: auth.user.phone || '', avatar: auth.user.avatar || '' }) })
 async function save() {
   saving.value = true
@@ -23,7 +23,7 @@ async function changePwd() {
   if (pwd.n1 !== pwd.n2) return ui.toast('两次输入的新口令不一致', 'warn')
   try { await auth.changePassword(pwd.old, pwd.n1); ui.toast('口令已修改'); Object.assign(pwd, { old: '', n1: '', n2: '' }) } catch (e) { ui.error(e) }
 }
-async function totpSetup() { try { const r = await api.post('/api/v1/auth/totp/setup', {}); Object.assign(totp, { step: 1, uri: r.otpauth_uri || r.uri || '', secret: r.secret || '', code: '' }) } catch (e) { ui.error(e) } }
+async function totpSetup() { try { const r = await api.post('/api/v1/auth/totp/setup', {}); Object.assign(totp, { step: 1, uri: r.otpauth_uri || r.uri || '', secret: r.secret || '', qr: r.qr_svg || '', code: '' }) } catch (e) { ui.error(e) } }
 async function totpEnable() { try { await api.post('/api/v1/auth/totp/enable', { code: totp.code }); ui.toast('两步验证已开启'); totp.step = 0; await auth.fetchMe() } catch (e) { ui.error(e) } }
 async function totpDisable() { try { await api.post('/api/v1/auth/totp/disable', { password: totp.password, code: totp.code }); ui.toast('两步验证已关闭'); totp.step = 0; totp.password = ''; totp.code = ''; await auth.fetchMe() } catch (e) { ui.error(e) } }
 async function logout() { ui.profile = false; await auth.logout(); router.push({ name: 'login' }) }
@@ -41,14 +41,15 @@ async function logout() { ui.profile = false; await auth.logout(); router.push({
       <TgField label="新口令" hint="至少 8 位，含字母与数字"><input v-model="pwd.n1" class="field" type="password" autocomplete="new-password" /></TgField>
       <TgField label="再输一次"><input v-model="pwd.n2" class="field" type="password" autocomplete="new-password" /></TgField>
       <div class="row right" style="margin:8px 0 18px"><button type="button" class="btn" @click="changePwd">修改口令</button></div>
-      <h4>两步验证 <TgBadge v-if="auth.user.totp_bound" status="enabled" text="已绑定" /><TgBadge v-else status="disabled" text="未绑定" /></h4>
+      <h4>两步验证 <TgBadge v-if="auth.user.totp_enabled" status="enabled" text="已绑定" /><TgBadge v-else status="disabled" text="未绑定" /></h4>
       <div v-if="auth.settings && !auth.settings.totp_enabled" class="information">系统未开启两步验证功能（设置 › 访问控制）。</div>
-      <template v-else-if="!auth.user.totp_bound">
+      <template v-else-if="!auth.user.totp_enabled">
         <button v-if="totp.step === 0" type="button" class="btn" @click="totpSetup">绑定验证器</button>
         <div v-else class="information" style="display:block">
-          <div>用验证器 App 扫描或手动输入密钥：</div>
+          <div>用验证器 App（Google Authenticator / Microsoft Authenticator 等）扫描二维码，或手动输入密钥：</div>
+          <div v-if="totp.qr" class="totp-qr" v-html="totp.qr"></div>
           <div class="mono pre" style="margin:8px 0">{{ totp.secret || totp.uri }}</div>
-          <div class="row"><input v-model="totp.code" class="field" style="width:140px" placeholder="6 位动态码" /><button type="button" class="btn primary" @click="totpEnable">确认开启</button><button type="button" class="btn ghost" @click="totp.step = 0">取消</button></div>
+          <div class="row"><input v-model="totp.code" class="field" style="width:140px" placeholder="6 位动态码" inputmode="numeric" autocomplete="one-time-code" maxlength="6" @keydown.enter="totpEnable" /><button type="button" class="btn primary" @click="totpEnable">确认开启</button><button type="button" class="btn ghost" @click="totp.step = 0">取消</button></div>
         </div>
       </template>
       <div v-else class="row"><input v-model="totp.password" class="field" type="password" style="width:160px" placeholder="当前口令" /><input v-model="totp.code" class="field" style="width:120px" placeholder="动态码" /><button type="button" class="btn danger" @click="totpDisable">关闭两步验证</button></div>
