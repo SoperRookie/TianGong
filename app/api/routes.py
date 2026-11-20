@@ -4981,6 +4981,25 @@ def _report_inputs(app, plan: dict, run: dict) -> tuple[dict, dict, list[dict], 
     return scope, stats, failures, questions
 
 
+def _failure_breakdown(failures: list[dict]) -> dict:
+    """失败与阻塞清单的分布（报告页图表用，随报告存快照）：按失败分类、按缺陷严重程度、按 AI 归因类别，各项拆失败 / 阻塞两个数。"""
+    def tally(key) -> list[dict]:
+        acc: dict[str, dict] = {}
+        for f in failures:
+            name = key(f)
+            if name is None:
+                continue
+            b = acc.setdefault(name, {"name": name, "fail": 0, "blocked": 0})
+            b["fail" if f.get("status") == "fail" else "blocked"] += 1
+        return sorted(acc.values(), key=lambda b: -(b["fail"] + b["blocked"]))
+
+    return {
+        "by_reason": tally(lambda f: f.get("reason") or "未填分类"),
+        "by_severity": tally(lambda f: (f.get("bug") or {}).get("severity") or None),
+        "by_category": tally(lambda f: (f.get("triage") or {}).get("category") or None),
+    }
+
+
 @router.post("/api/v1/plans/{plan_id}/runs/{run_id}/report")
 async def plan_run_report(request: Request, plan_id: str, run_id: str, body: ReportBody | None = None) -> dict:
     """测试报告总结（Prompt test_report）：范围 + 程序统计的执行数据 + 失败与阻塞清单（带归因 / 缺陷单）+ 未关闭待确认事项 → 结论
@@ -4999,6 +5018,7 @@ async def plan_run_report(request: Request, plan_id: str, run_id: str, body: Rep
     except (MissingAPIKeyError, AllModelsFailedError, LLMOutputError) as e:
         raise HTTPException(status_code=502, detail=str(e))
     report = {**out, "model": out.pop("model_name", None), "stats": stats, "failures": len(failures), "open_questions": len(questions),
+              "failure_breakdown": _failure_breakdown(failures),
               "interim": not run.get("finished_at"), "by": _operator(request), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     run["report"] = report
     request.app.state.plans.save(plan)
