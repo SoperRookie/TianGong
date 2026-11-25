@@ -34,6 +34,11 @@ async function generate() {
   try { await api.post(`${base.value}/runs/${rid.value}/report`, {}); ui.toast('报告已生成'); emit('reload') } catch (e) { ui.error(e) } finally { generating.value = false }
 }
 async function copy() { await copyText(md.value || report.value?.markdown || ''); ui.toast('报告 Markdown 已复制') }
+const pdfBusy = ref(false)
+async function downloadPdf() {
+  pdfBusy.value = true
+  try { await api.download(`${base.value}/runs/${rid.value}/report.pdf`); ui.toast('PDF 已导出') } catch (e) { ui.error(e) } finally { pdfBusy.value = false }
+}
 async function download() { try { await api.download(`${base.value}/runs/${rid.value}/report.md`) } catch (e) { ui.error(e) } }
 const color = c => c === '可发布' ? 'green' : c === '不可发布' ? 'red' : 'orange'
 const total = computed(() => props.plan.items.length)
@@ -48,7 +53,7 @@ const byMod = computed(() => stats.value ? [{ module: '总体', ...stats.value }
       <select v-model="rid" class="select"><option v-for="r in runs" :key="r.run_id" :value="r.run_id">{{ r.name }} · {{ r.finished_at ? '已结束' : '进行中' }} · 已执行 {{ r.summary?.executed || 0 }} / {{ total }}{{ r.report ? ' · 已有报告' : '' }}</option></select>
       <RunBar v-if="run" :summary="run.summary" :total="total" mini />
       <span class="right" />
-      <template v-if="report"><button type="button" class="btn small" @click="copy">复制 Markdown</button><button type="button" class="btn small" @click="download">下载 .md</button></template>
+      <template v-if="report"><button type="button" class="btn small" @click="copy">复制 Markdown</button><button type="button" class="btn small" @click="download">下载 .md</button><button type="button" class="btn small" :disabled="pdfBusy" title="带图表的 PDF：结论、指标、各项分布图、风险 / 遗留 / 建议、失败与阻塞用例清单" @click="downloadPdf"><span v-if="pdfBusy" class="spinner" /> {{ pdfBusy ? '导出中…' : '导出 PDF' }}</button></template>
       <button v-if="canRun" type="button" class="btn primary small" :disabled="generating || !run?.summary?.executed" @click="generate"><span v-if="generating" class="spinner" /> {{ generating ? '生成中…' : (report ? '重新生成' : '生成报告') }}</button>
     </div>
     <TgEmpty v-if="!report" title="本轮还没有报告" :hint="run?.summary?.executed ? '点「生成报告」：范围 + 程序统计 + 失败清单（带归因 / 缺陷单）+ 未关闭待确认事项 → 结论 / 风险 / 遗留 / 建议。' : '本轮还没有执行记录，无从总结。'" />
