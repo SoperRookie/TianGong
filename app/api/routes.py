@@ -5043,6 +5043,33 @@ async def plan_run_report_md(request: Request, plan_id: str, run_id: str):
                     headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
 
 
+@router.get("/api/v1/plans/{plan_id}/runs/{run_id}/report.pdf")
+async def plan_run_report_pdf(request: Request, plan_id: str, run_id: str):
+    """下载本轮测试报告 PDF（带图表）：结论 / 指标 / 执行结果构成 / 按优先级与模块分布 / 失败与阻塞分类 / 各轮次通过率 /
+    风险 · 遗留 · 建议 / 失败与阻塞用例清单。结论与统计取报告快照（run.report），用例清单取导出时的当前结果。"""
+    import asyncio
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    from app.plans import run_summary
+    from app.report_pdf import build_report_pdf
+
+    plan = _plan(request, plan_id, "exec.view")
+    run = _plan_run(plan, run_id)
+    rep = run.get("report")
+    if not rep:
+        raise HTTPException(status_code=404, detail="本轮还没有生成测试报告")
+    scope, _stats, failures, _questions = _report_inputs(request.app, plan, run)
+    rounds = [{"name": r.get("name", ""), "current": r["run_id"] == run["run_id"], **run_summary(plan, r)} for r in plan["runs"]]
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    # 画图是纯 CPU 活，上千条用例的计划也只要几十毫秒到几百毫秒，放线程里不占事件循环
+    data = await asyncio.to_thread(build_report_pdf, scope, rep, rounds, failures, now)
+    name = f"测试报告_{plan.get('name', '')}_{run.get('name', '')}.pdf"
+    return Response(content=data, media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
+
+
 @router.post("/api/v1/plans/{plan_id}/runs/{run_id}/attachments")
 async def upload_plan_attachment(
     request: Request, plan_id: str, run_id: str,
