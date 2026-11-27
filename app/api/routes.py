@@ -5271,6 +5271,29 @@ def _schedule_link_fetch(request: Request, req_id: str, atts: list[dict]) -> Non
     task.add_done_callback(jobs.discard)
 
 
+def _require_known_models(app, *names: str | None) -> None:
+    """后台任务开始前先验模型名：写错当场 400，不等后台跑起来才落到错误里。"""
+    registry = getattr(app.state.llm, "registry", None)
+    for name in names:
+        if name and registry is not None:
+            try:
+                registry.get(name)
+            except UnknownModelError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+
+def _spawn_bg(app, coro) -> None:
+    """起一个后台协程并持有引用（不持有会被垃圾回收掐断）；调用方的 AI 调用上下文（contextvars）随任务复制过去。"""
+    import asyncio
+
+    jobs = getattr(app.state, "bg_jobs", None)
+    if jobs is None:
+        jobs = app.state.bg_jobs = set()
+    task = asyncio.create_task(coro)
+    jobs.add(task)
+    task.add_done_callback(jobs.discard)
+
+
 def _schedule_requirement_ingest(app, req_id: str, by: str | None = None) -> None:
     """知识沉淀：需求原文与已解析附件 / 链接进项目需求文档库（按来源替换，可重复调用）。"""
     acc = _accumulator(app)
@@ -5534,6 +5557,7 @@ def _req_view(request: Request, item: dict, with_trace: bool = False) -> dict:
         "content_warnings": _content_warnings(item),
         "analysis_outdated": _analysis_outdated(item),
         "extraction_status": extraction_status(item),
+        "analysis_status": "running" if item.get("analyzing") else "failed" if item.get("analysis_error") else "done" if item.get("analysis") else "none",
         "extraction_wanted": extraction_wanted(item),
         "extraction_history_count": len(item.get("extraction_history") or []),
     }
@@ -5970,6 +5994,7 @@ async def download_requirement_attachment(request: Request, req_id: str, att_id:
 class ExtractBody(BaseModel):
     model: str | None = None
     ignore_warnings: bool = False
+    background: bool = False   # 立即返回、后台提取，页面轮询 extraction_status（提取要几分钟，同步等会被网关 / 负载均衡的空闲超时掐断）
 
 
 class ExtractionTextBody(BaseModel):
@@ -5987,6 +6012,20 @@ async def extract_requirement(request: Request, req_id: str, body: ExtractBody |
     if item.get("extracting"):
         raise HTTPException(status_code=409, detail="需求提取正在进行中")
     _ai_ctx(request, project=item["project"], requirement_id=req_id)
+    if body.background:
+        app, by = request.app, _operator(request)
+        _require_known_models(app, body.model)
+        item = app.state.requirements.set_extracting(req_id, True)
+
+        async def _job() -> None:
+            try:
+                await _run_extraction(app, req_id, body.model, by)
+            except Exception as e:   # 失败原因已由 _run_extraction 落到 extraction_error，页面轮询可见
+                logger.warning("需求 {} 后台提取失败：{}", req_id, e)
+
+        _spawn_bg(app, _job())
+        request.state.audit_detail = "后台提取已开始"
+        return _req_view(request, item)
     try:
         item = await _run_extraction(request.app, req_id, body.model, _operator(request))
     except UnknownModelError as e:
@@ -6241,19 +6280,68 @@ class AnalyzeBody(BaseModel):
     reviewer_model: str | None = None   # 独立复核用的模型；空则与分析模型相同
     review: bool | None = None          # 空则按系统设置（TIANGONG_ANALYSIS_REVIEW）
     ignore_warnings: bool = False       # 附件内容疑似非需求文本时，人工确认后仍继续
+    background: bool = False            # 立即返回、后台分析，页面轮询 analysis_status（分析要几分钟，同步等会被网关 / 负载均衡的空闲超时掐断）
 
 
 @router.post("/api/v1/requirements/{req_id}/analyze")
 async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBody | None = None) -> dict:
-    """AI 需求分析（5.5）：11 项结构化输出，独立于原文保存；待确认事项进入确认流。"""
-    from app.agents import run_requirement_analysis
-    from app.requirements import design_brief
+    """AI 需求分析（5.5）：11 项结构化输出，独立于原文保存；待确认事项进入确认流。
+    `background` 为真时立即返回（analysis_status = running），后台跑完落库，失败原因记 analysis_error，页面轮询需求详情即可。"""
+    from app.requirements import RequirementError
 
     item = _req(request, req_id, "requirement.ai")
     _require_attachments_ready(item)
     body = body or AnalyzeBody()
     _require_content_ok(item, body.ignore_warnings)
+    if item.get("analyzing"):
+        raise HTTPException(status_code=409, detail="AI 分析正在进行中，完成后再操作")
+    app, rstore = request.app, request.app.state.requirements
     _ai_ctx(request, project=item["project"], requirement_id=req_id)
+    if not body.background:
+        rstore.set_analyzing(req_id, True, by=_operator(request))
+        try:
+            item = await _run_analysis(request, item, body)
+        except BaseException as e:   # 含请求被取消：标记必须清掉，否则这份需求再也点不了分析
+            try:
+                rstore.set_analyzing(req_id, False, error=None if isinstance(e, HTTPException) and e.status_code < 500 else _analysis_error(e))
+            except RequirementError:
+                pass
+            raise
+        return _req_view(request, item)
+    from app.requirements import extraction_current, extraction_wanted
+
+    if get_settings().requirement_extract and extraction_wanted(item) and not extraction_current(item) and item.get("extracting"):
+        raise HTTPException(status_code=409, detail="需求提取正在进行中，完成后再操作")
+    _require_known_models(app, body.model, body.reviewer_model)
+    item = rstore.set_analyzing(req_id, True, by=_operator(request))
+
+    async def _job() -> None:
+        try:
+            await _run_analysis(request, rstore.get(req_id) or item, body)
+        except BaseException as e:
+            logger.warning("需求 {} 后台 AI 分析失败：{}", req_id, _analysis_error(e))
+            try:
+                rstore.set_analyzing(req_id, False, error=_analysis_error(e))
+            except RequirementError:
+                pass   # 需求已被删除
+            if not isinstance(e, Exception):
+                raise
+
+    _spawn_bg(app, _job())
+    request.state.audit_detail = "后台分析已开始"
+    return _req_view(request, item)
+
+
+def _analysis_error(e: BaseException) -> str:
+    return (str(e.detail) if isinstance(e, HTTPException) else str(e) or type(e).__name__)[:300]
+
+
+async def _run_analysis(request: Request, item: dict, body: AnalyzeBody) -> dict:
+    """AI 分析本体：需要时先提取整理稿 → 分析 → 落库 → 推荐答案。同步与后台两种调用共用；失败抛 HTTPException。"""
+    from app.agents import run_requirement_analysis
+    from app.requirements import design_brief
+
+    req_id = item["req_id"]
     item = await _ensure_extraction(request, item, body.model)
     text = design_brief({**item, "analysis": None, "questions": []})
     if not text.strip():
@@ -6280,7 +6368,7 @@ async def analyze_requirement_ai(request: Request, req_id: str, body: AnalyzeBod
             item, _ = await _suggest_question_answers(request, item, body.model)
         except Exception as e:
             logger.warning("需求 {} 待确认事项推荐答案故障，跳过：{}", req_id, e)
-    return _req_view(request, item)
+    return item
 
 
 async def _suggest_question_answers(request: Request, item: dict, model: str | None) -> tuple[dict, int]:

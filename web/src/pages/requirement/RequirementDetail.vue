@@ -40,7 +40,7 @@ async function load(silent = false) {
     ui.setCrumb(d.title)
     if (d.tasks?.length) loadTasks(d.project)
     clearTimeout(timer)
-    if (d.parsing || d.extraction_status === 'running') timer = setTimeout(() => load(true), 3000)
+    if (d.parsing || d.extraction_status === 'running' || d.analysis_status === 'running') timer = setTimeout(() => load(true), 3000)
   } catch (e) { if (my === seq) error.value = e } finally { if (my === seq) loading.value = false }
 }
 async function loadTasks(project) {
