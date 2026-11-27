@@ -64,6 +64,9 @@ class RequirementStore:
             if item.get("extracting"):
                 item["extracting"] = False
                 dirty = True
+            if item.get("analyzing"):   # 后台 AI 分析遇服务重启：同样不能永远停在「分析中」
+                item["analyzing"], item["analysis_error"] = None, "服务重启导致分析中断，请重新分析"
+                dirty = True
             if dirty:
                 self._persist(item)
 
@@ -567,9 +570,18 @@ class RequirementStore:
         self._persist(item)
         return item
 
+    def set_analyzing(self, req_id: str, flag: bool, error: str | None = None, by: str | None = None) -> dict:
+        """AI 分析进行中标记（同一需求不并发分析；后台分析时页面据此轮询）；结束时清掉，失败原因记 analysis_error。"""
+        item = self._get_alive(req_id)
+        item["analyzing"] = {"by": by, "at": _now()} if flag else None
+        item["analysis_error"] = error
+        self._persist(item)
+        return item
+
     def set_analysis(self, req_id: str, analysis: dict, meta: dict) -> dict:
         """写入 AI 分析结果（不触碰原文）；待确认事项合并：已确认的保留，新问题追加。"""
         item = self._get_alive(req_id)
+        item["analyzing"], item["analysis_error"] = None, None
         if item.get("analysis"):  # 历次分析留档（最近 10 次），页面可回看对比
             hist = item.setdefault("analysis_history", [])
             hist.append({"analysis": item["analysis"], "meta": item.get("analysis_meta")})

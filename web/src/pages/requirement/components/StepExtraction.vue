@@ -34,15 +34,23 @@ const bizTermCount = computed(() => (ts.value?.terminals || []).filter(t => !['c
 const newTermFor = ref(''), newTermName = ref(''), detecting = ref(false)
 watch(() => props.r.req_id, () => { view.value = 'preview'; editing.value = false; histOpen.value = false })
 
+// 提取要几分钟：后台跑、立即返回，详情页轮询 extraction_status；这里盯着状态从 running 变回来再报结果
+const started = ref(false)
 async function extract() {
   extracting.value = true
   try {
-    const x = await withContentWarning(ignore => api.post(`/api/v1/requirements/${props.r.req_id}/extract`, { model: model.value || null, ignore_warnings: ignore }))
-    const mm = x.extraction?.meta || {}, g = mm.gap || {}, l = mm.ledger || {}
-    ui.toast(`提取完成：${mm.modules || 0} 个模块 ${mm.checked || 0} 条${g.added ? `，补漏 +${g.added}` : ''}${g.forced ? `，兜底 ${g.forced}` : ''}${l.total ? `；底稿 ${l.total} 句全部有去向` : ''}${mm.unverified ? `，${mm.unverified} 条未逐字找到请核对` : ''}`, { kind: mm.unverified || g.forced ? 'warn' : 'ok' })
-    view.value = 'preview'; editing.value = false; emit('reload')
+    await withContentWarning(ignore => api.post(`/api/v1/requirements/${props.r.req_id}/extract`, { model: model.value || null, ignore_warnings: ignore, background: true }))
+    started.value = true; ui.toast('已开始提取，可离开页面，完成后自动刷新'); emit('reload')
   } catch (e) { if (e.message !== '已取消') ui.error(e); emit('reload') } finally { extracting.value = false }
 }
+watch(st, (now, was) => {
+  if (was !== 'running' || now === 'running' || !started.value) return
+  started.value = false
+  if (props.r.extraction_error) { ui.toast('提取失败：' + props.r.extraction_error, { kind: 'err', duration: 6000 }); return }
+  const mm = ex.value?.meta || {}, g = mm.gap || {}, l = mm.ledger || {}
+  ui.toast(`提取完成：${mm.modules || 0} 个模块 ${mm.checked || 0} 条${g.added ? `，补漏 +${g.added}` : ''}${g.forced ? `，兜底 ${g.forced}` : ''}${l.total ? `；底稿 ${l.total} 句全部有去向` : ''}${mm.unverified ? `，${mm.unverified} 条未逐字找到请核对` : ''}`, { kind: mm.unverified || g.forced ? 'warn' : 'ok' })
+  view.value = 'preview'; editing.value = false
+})
 async function review({ item_id, action, text }) {
   if (action === 'delete' && !await ui.confirm('删除这条摘录？', '删除后整理稿正文同步更新，已有分析结果会标为基于旧输入。', { ok: '删除', danger: true })) return
   try {
