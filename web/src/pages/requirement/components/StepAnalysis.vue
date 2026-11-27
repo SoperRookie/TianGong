@@ -34,14 +34,23 @@ watch(group, g => { const keys = GROUPS.find(x => x[0] === g)?.[2]; if (keys && 
 const editable = computed(() => props.canEdit && !viewingOld.value)
 const items = computed(() => (an.value?.[key.value] || []).map((x, i) => ({ i, n: i + 1, ...anItem(x) })).filter(x => !kw.value.trim() || x.text.toLowerCase().includes(kw.value.trim().toLowerCase()) || x.quote.toLowerCase().includes(kw.value.trim().toLowerCase())))
 
+// 分析要几分钟：后台跑、立即返回，详情页轮询 analysis_status；这里盯着状态从 running 变回来再报结果
+const running = computed(() => props.r.analysis_status === 'running'), started = ref(false)
 async function analyze() {
   analyzing.value = true
   try {
-    const x = await withContentWarning(ignore => api.post(`/api/v1/requirements/${props.r.req_id}/analyze`, { model: model.value || null, reviewer_model: reviewer.value || null, review: review.value, ignore_warnings: ignore }))
-    ui.toast(x.open_questions ? `分析完成，${x.open_questions} 项待确认事项需要确认` : '分析完成，无待确认事项', { kind: x.open_questions ? 'warn' : 'ok' })
-    hist.value = -1; emit('reload'); if (x.blocking_questions) emit('go', 4)
-  } catch (e) { if (e.message !== '已取消') ui.error(e) } finally { analyzing.value = false }
+    await withContentWarning(ignore => api.post(`/api/v1/requirements/${props.r.req_id}/analyze`, { model: model.value || null, reviewer_model: reviewer.value || null, review: review.value, ignore_warnings: ignore, background: true }))
+    started.value = true; ui.toast('已开始分析，可离开页面，完成后自动刷新'); emit('reload')
+  } catch (e) { if (e.message !== '已取消') ui.error(e); emit('reload') } finally { analyzing.value = false }
 }
+watch(running, (now, was) => {
+  if (!was || now || !started.value) return
+  started.value = false
+  if (props.r.analysis_error) { ui.toast('分析失败：' + props.r.analysis_error, { kind: 'err', duration: 6000 }); return }
+  const n = props.r.open_questions
+  ui.toast(n ? `分析完成，${n} 项待确认事项需要确认` : '分析完成，无待确认事项', { kind: n ? 'warn' : 'ok' })
+  hist.value = -1; if (props.r.blocking_questions) emit('go', 4)
+})
 async function op(body) {
   try { await api.post(`/api/v1/requirements/${props.r.req_id}/analysis/items`, body); editing.value = null; adding.value = false; addText.value = ''; emit('reload') } catch (e) { ui.error(e) }
 }
@@ -68,7 +77,7 @@ async function evalSample() {
         <select v-model="model" class="select small" style="width:140px" title="分析模型"><option value="">默认（{{ models?.default_model || '未配置' }}）</option><option v-for="x in models?.models || []" :key="x.name" :value="x.name">{{ x.name }}</option></select>
         <select v-model="reviewer" class="select small" style="width:150px" title="独立复核模型：建议与分析不同"><option value="">复核：同分析模型</option><option v-for="x in models?.models || []" :key="x.name" :value="x.name">{{ x.name }}</option></select>
         <label class="row tiny"><input type="checkbox" v-model="review" /> 独立复核</label>
-        <button type="button" class="btn small" :class="{ primary: !r.analysis }" :disabled="analyzing || r.parsing || r.extraction_status === 'running'" @click="analyze"><span v-if="analyzing" class="spinner" /> {{ analyzing ? (r.extraction_wanted && r.extraction_status !== 'current' ? '先提取再分析' : '分析中') : r.analysis ? '重新分析' : 'AI 需求分析' }}</button>
+        <button type="button" class="btn small" :class="{ primary: !r.analysis }" :disabled="analyzing || running || r.parsing || r.extraction_status === 'running'" @click="analyze"><span v-if="analyzing || running" class="spinner" /> {{ analyzing || running ? (r.extraction_wanted && r.extraction_status !== 'current' ? '先提取再分析' : '分析中') : r.analysis ? '重新分析' : 'AI 需求分析' }}</button>
       </template>
       <template v-if="r.analysis && !viewingOld && canEdit">
         <button type="button" class="btn small" :disabled="!!pending" @click="evalSample" title="把当前分析结果作为这份需求的标准答案存入评测集">{{ r.eval_sample ? '更新评测集' : '加入评测集' }}</button>
@@ -82,6 +91,8 @@ async function evalSample() {
     <template v-else-if="r.extraction_wanted"><b>分析输入：原始材料</b>（原文 + 附件解析文本）。{{ r.extraction_status === 'running' ? '需求提取进行中，完成后分析将以整理稿为准。' : r.extraction_status === 'outdated' ? '整理稿已过期，点分析时会先重新提取。' : '点分析时会先自动提取需求整理稿。' }}</template>
     <template v-else><b>分析输入：需求原文</b> + 人工补充。</template>
   </div>
+  <div v-if="running" class="information" style="margin-bottom:10px"><span class="spinner" /> AI 正在分析（{{ r.extraction_wanted && r.extraction_status !== 'current' ? '先提取整理稿 → ' : '' }}结构化输出 → 原文核验 → 独立复核 → 推荐答案），通常需要几分钟，可离开页面，完成后自动刷新</div>
+  <div v-else-if="r.analysis_error" class="err-box" style="margin-bottom:10px">上次分析失败：{{ r.analysis_error }}</div>
   <TgEmpty v-if="!an" title="还没有分析结果" :hint="canAi ? '整理稿确认后点击「AI 需求分析」：11 项结构化输出 → 原文核验 → 独立复核 → 推荐答案' : 'AI 只整理需求已写明的内容，每条带原文依据并逐条程序核验'" />
   <template v-else>
     <div class="row" style="margin-bottom:10px">
